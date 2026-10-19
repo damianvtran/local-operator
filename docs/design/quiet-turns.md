@@ -71,6 +71,13 @@ Consolidation, not duplication:
 
 ## 4. Recommendation: a dedicated `no_reply` tool, no turn-end text signal
 
+A nested `eval(tool('no_reply'))` emits a typed child outcome, but is **not**
+a global loop-end signal: the outer eval result and existing batch-last-result
+rule remain authoritative. A separate display-only peer-exchange proof may seal
+at the successful enclosing root end while a later genuine answer is still
+pending. That proof never enriches model messages, changes notification policy,
+or suppresses the later answer; its durable custom record is renderer metadata.
+
 Why a tool and not a sentinel or "empty reply = silent": the model must perform an affirmative act; an empty reply is indistinguishable from the provider glitches measured above (68 `error`+empty). Treating those as intentional would hide real failures. A text sentinel streams and persists.
 
 **Tool**

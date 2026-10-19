@@ -1307,6 +1307,8 @@ class RemoteSessionClient(AttachClient):
             # forbids.
             if "display-history-entry-times-v1" in capabilities:
                 auth["display_history_entry_times"] = True
+            if "display-history-peer-cycle-records-v1" in capabilities:
+                auth["display_history_peer_cycle_records"] = True
         if self._slash_consumers is not None:
             auth["slash_consumers"] = list(self._slash_consumers)
         # The remote dial's half of the ``supplements-v1`` gate, mirrored here

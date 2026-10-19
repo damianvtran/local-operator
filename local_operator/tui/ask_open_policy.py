@@ -145,6 +145,7 @@ def read_queue(
     outstanding_created_ms: Sequence[int],
     tally: int | None,
     opened_at_ms: int,
+    lapsed: int = 0,
 ) -> QueueReading:
     """Classify a snapshot's ask fields against the instant the view began.
 
@@ -152,6 +153,16 @@ def read_queue(
     the ``created_at`` of each of them that can still be answered; ``tally`` the
     wire's own ``asks_open`` — ``None`` when the runtime does not publish it,
     ``0`` for a live queue with nothing to fold, ``N`` for N outstanding asks.
+    ``lapsed`` is how many of the published rows are LAPSED (``timed_out``).
+
+    A LAPSED ROW IS NOT PENDING AND NEVER OPENS A SURFACE (decision D12): no
+    surface offers an answer to it (D10), so there is nothing to put in front of
+    the user. A current runtime's tally leaves it out (#2388: ``asks_open`` counts
+    open asks only), but a runtime from before #2388 still COUNTS it, so the
+    dropped-row test below has to compare the tally with every outstanding row the
+    frame NAMES, answerable and lapsed alike. Comparing it with the answerable rows
+    alone read a lapsed-only queue from such a runtime as "a pending ask the bound
+    dropped" and waited instead of settling.
 
     The rows decide whenever they name an outstanding ask. With none, only an explicit
     ``0`` tally is an answer ("nothing is queued"); ``None`` (unsupported) and
@@ -176,7 +187,7 @@ def read_queue(
             # spend the view's one decision on a claim the frame contradicts (clause 5:
             # not on a guess), so it waits like any frame that cannot say. A runtime that
             # publishes no tally cannot contradict its own rows.
-            if tally is not None and tally > 0:
+            if tally is not None and tally > lapsed:
                 return QueueReading.UNRESOLVED
             return QueueReading.SETTLED
         cutoff = opened_at_ms + ARRIVAL_SKEW_MS
@@ -216,8 +227,9 @@ def names_every_outstanding(*, tally: int | None, named_outstanding: int) -> boo
 
     ONE RESIDUAL LIMIT, and it is not closable on the client. The runtime projects at
     most ``PROJECTION_CAP`` (20) rows BEFORE it computes the tally, so past 20
-    outstanding asks (reachable only by timed-out asks piling up: the open cap is 8)
-    the surplus is on neither field and no client can name it. The residue is one
+    asks the surplus is on neither field and no client can name it. A current runtime
+    cannot reach it (the open cap is 8 and a lapsed ask is not in the tally); a
+    runtime from before #2388 could, by timed-out asks piling up. The residue is one
     extra auto-open — the ids the user waved off were all visible to them, so they
     leave the queue, the dismissal is forgotten and the surplus reads as a fresh
     batch — which is harmless: it is the surface the feature exists to show.

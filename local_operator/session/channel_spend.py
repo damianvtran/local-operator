@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from local_operator.decision_models import canonical_model_id
+
 logger = logging.getLogger(__name__)
 
 #: Transcript custom type carrying one channel record per row (plus a one-time
@@ -146,6 +148,11 @@ CHANNELS = frozenset(
     {
         CHANNEL_INFERENCE,
         "image",
+        # Generated audio (voiceover / sound effects): the tool-side family
+        # whose rows ride both funding classes — a Radient figure is the
+        # platform's own, a BYOK figure is an estimate from the one central
+        # audio rate table and keeps its ``estimated`` label.
+        "audio",
         "tts",
         "stt",
         "search",
@@ -164,6 +171,7 @@ CHANNELS = frozenset(
 CHANNEL_LABELS: Mapping[str, str] = {
     CHANNEL_INFERENCE: "Inference",
     "image": "Image",
+    "audio": "Generated audio",
     "tts": "TTS",
     "stt": "STT",
     "search": "Search",
@@ -347,6 +355,52 @@ def map_image_cost_labels(
     return basis, source, price_version
 
 
+def map_audio_cost_labels(
+    route: str,
+    cost_source: Any,
+    billing_basis: Any,
+    price_version: Any,
+    *,
+    has_amount: bool,
+) -> tuple[str, str, str]:
+    """``(billing_basis, cost_source, price_version)`` for one audio result.
+
+    The audio twin of :func:`map_image_cost_labels`, and the same discipline:
+    ONE mapping from the audio lane's labels (``audiogen``'s outcome
+    ``cost_source``/``billing_basis``/``cost_provenance``) to the ledger's
+    vocabulary, so the live emission and the transcript backfill cannot
+    disagree about what a row means.
+
+    The label sets differ from the image lane's on purpose (the frozen audio
+    contract's own words):
+
+    - Radient states the figure itself — only ``cost.amount_usd`` is
+      authoritative, and the server's labels travel as
+      ``server_reported`` with the basis the contract named (``quote`` reads
+      ``estimated``, ``billed`` reads ``billed``).
+    - A BYOK estimate is ``rate_table`` at ``catalogue`` source and ALWAYS
+      ``estimated``; it is never written as a charge.
+    - No amount at all => ``not_tracked`` — never a fabricated zero.
+    """
+    source_label = str(cost_source).strip() if isinstance(cost_source, str) else ""
+    basis = normalise_basis(billing_basis)
+    if basis is None:
+        # The audio lane labels every figure it emits; the fallback is the
+        # safety net the image twin states — a rate-table label is an
+        # estimate, nothing with an amount is ever read as a charge here.
+        basis = BASIS_NOT_TRACKED if not has_amount else BASIS_ESTIMATED
+    if route == "radient":
+        source = COST_SOURCE_SERVER
+    elif source_label == "rate_table":
+        source = COST_SOURCE_CATALOGUE
+    elif source_label == "reported":
+        source = COST_SOURCE_PROVIDER
+    else:
+        source = COST_SOURCE_NONE
+    price = str(price_version).strip() if isinstance(price_version, str) else ""
+    return basis, source, price
+
+
 def new_record_id(channel: str, correlation: str = "") -> str:
     """``"<channel>:<correlation-or-uuid4>"`` — the ledger's idempotency key.
 
@@ -478,6 +532,8 @@ class ChannelSpendRecord:
     #: shows what was originally claimed (design §3.1).
     quote_micro: int | None = None
     request_id: str = ""
+    #: Server receipt correlation survives artifact/storage failures in journal revisions.
+    usage_record_id: str = ""
     #: Free text, used by ``channel="other"`` and by rows whose knowledge
     #: presumption needs a word (a failed-unbilled job, a cancel awaiting
     #: settlement).
@@ -554,6 +610,8 @@ class ChannelSpendRecord:
             details["quote_micro"] = self.quote_micro
         if self.request_id:
             details["request_id"] = self.request_id
+        if self.usage_record_id:
+            details["usage_record_id"] = self.usage_record_id
         if self.detail:
             details["detail"] = self.detail
         return details
@@ -638,6 +696,7 @@ class ChannelSpendRecord:
             status=status,
             quote_micro=quote,
             request_id=str(details.get("request_id", "") or ""),
+            usage_record_id=str(details.get("usage_record_id", "") or ""),
             detail=str(details.get("detail", "") or ""),
         )
 
@@ -840,12 +899,15 @@ def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
 
 
 #: Display order of channels: the hierarchy the design note states
-#: (inference → image → tts → stt → search → read → classification → other).
-#: The panel sorts wire rows by this; keeping it here means every surface
-#: that groups by channel ages its rows the same way (design round 1, D9).
+#: (inference → image → audio → tts → stt → search → read → classification →
+#: other). The panel sorts wire rows by this; keeping it here means every
+#: surface that groups by channel ages its rows the same way (design round 1,
+#: D9). ``audio`` was inserted before ``other`` in the change that registered
+#: the channel, so the pre-existing ids keep their relative order.
 CHANNEL_ORDER = (
     CHANNEL_INFERENCE,
     "image",
+    "audio",
     "tts",
     "stt",
     "search",
@@ -863,21 +925,60 @@ def _channel_rank(channel: str) -> int:
         return len(CHANNEL_ORDER)
 
 
+#: Why a row's money is not fully stated. ADDITIVE per-row wire vocabulary:
+#: the key is present only on rows that carry the condition, and each value
+#: names the ONE fact a surface must state instead of a generic "price not
+#: stated". ``failed_not_billed`` is the ledger's documented presumption (an
+#: unreported failure was not charged); ``cancelled_outcome_unknown`` is the
+#: opposite (an abandoned request may have been billed); ``not_stated`` is a
+#: 200 that carried no amount; ``partial`` is a row mixing stated money with
+#: an unstated 200.
+UNPRICED_FAILED_NOT_BILLED = "failed_not_billed"
+UNPRICED_CANCELLED_OUTCOME_UNKNOWN = "cancelled_outcome_unknown"
+UNPRICED_NOT_STATED = "not_stated"
+UNPRICED_PARTIAL = "partial"
+
+
+def _row_unpriced_reason(*, stated: int, failed: int, cancelled: int, ok: int) -> str | None:
+    """The one reason a group's money cannot be read as a complete figure.
+
+    Precedence, and why: a CANCELLED attempt outranks everything because it
+    may already have been billed (a more consequential statement than
+    "partial"); a 200-with-no-amount is ``not_stated`` on its own and
+    ``partial`` beside stated money; failed-only attempts are
+    ``failed_not_billed`` — their absence of a figure is the ledger's
+    presumption, not an unknown. A group whose every record stated an amount
+    has no reason at all.
+    """
+    if cancelled:
+        return UNPRICED_CANCELLED_OUTCOME_UNKNOWN
+    if ok:
+        return UNPRICED_PARTIAL if stated else UNPRICED_NOT_STATED
+    if failed:
+        return UNPRICED_FAILED_NOT_BILLED
+    return None
+
+
 def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]:
-    """One wire row per ``(channel, provider, model, unit)`` group.
+    """One wire row per ``(channel, provider, canonical model, unit)`` group.
 
     Grouping happens HERE rather than in the UI so every surface groups
     identically and the micro-USD sums are computed once, in exact integers.
+    The model key is CANONICAL (:func:`local_operator.decision_models.canonical_model_id`):
+    a historical row stored under a vendor echo (``jev-1.13.0``) or a dated
+    echo is the same billable model as ``jev-1.13`` and must not draw a second
+    row — or a second, unexplained price.
     """
     groups: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for record in records:
-        key = (record.channel, record.provider, record.model, record.unit)
+        model = canonical_model_id(record.model)
+        key = (record.channel, record.provider, model, record.unit)
         group = groups.setdefault(
             key,
             {
                 "channel": record.channel,
                 "provider": record.provider,
-                "model": record.model,
+                "model": model,
                 "label": "",
                 "units": 0.0,
                 "unit": record.unit,
@@ -887,6 +988,13 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
                 "price_versions": set(),
                 "has_amount": False,
                 "has_unstated": False,
+                # Status counts behind ``unpriced_reason``. They are NOT
+                # published: the reason is the statement a surface needs, and
+                # the counts are only how this function decides which one fits.
+                "stated": 0,
+                "unstated_failed": 0,
+                "unstated_cancelled": 0,
+                "unstated_ok": 0,
                 #: False until some record states a unit count. A legacy row
                 #: recovered without one writes 0 units, and 0 beside a real
                 #: dollar figure is the fabricated-zero defect this module
@@ -902,10 +1010,19 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
         if record.amount_micro is not None:
             group["amount_micro"] = int(group["amount_micro"]) + int(record.amount_micro)
             group["has_amount"] = True
-        elif record.status != STATUS_FAILED:
-            # A failed job with no figure is the documented presumption of no
-            # charge; anything else with no figure is money we cannot state.
-            group["has_unstated"] = True
+            group["stated"] += 1
+        else:
+            if record.status == STATUS_FAILED:
+                group["unstated_failed"] += 1
+            elif record.status == STATUS_CANCELLED:
+                group["unstated_cancelled"] += 1
+            else:
+                group["unstated_ok"] += 1
+            if record.status != STATUS_FAILED:
+                # A failed job with no figure is the documented presumption of
+                # no charge; anything else with no figure is money we cannot
+                # state.
+                group["has_unstated"] = True
         group["basis"].add(record.billing_basis)
         if record.price_version:
             group["price_versions"].add(record.price_version)
@@ -915,25 +1032,34 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
             group["knowledge"] = "partial" if group["has_amount"] else "unknown"
         else:
             group["knowledge"] = "exact"
-        rows.append(
-            {
-                "channel": group["channel"],
-                "provider": group["provider"],
-                "model": group["model"],
-                "label": group["label"],
-                # None when no contributing record carried a count: "units
-                # unknown" and "zero units" are as different as the money rule
-                # that made this module refuse fabricated zeros.
-                "units": group["units"] if group["has_units"] else None,
-                "unit": group["unit"],
-                # None, never 0, when nothing in the group was sized: on the wire
-                # an unknown amount and a free call are different facts.
-                "amount_micro": group["amount_micro"] if group["has_amount"] else None,
-                "knowledge": group["knowledge"],
-                "basis": sorted(group["basis"]),
-                "price_versions": sorted(group["price_versions"]),
-            }
+        row = {
+            "channel": group["channel"],
+            "provider": group["provider"],
+            "model": group["model"],
+            "label": group["label"],
+            # None when no contributing record carried a count: "units
+            # unknown" and "zero units" are as different as the money rule
+            # that made this module refuse fabricated zeros.
+            "units": group["units"] if group["has_units"] else None,
+            "unit": group["unit"],
+            # None, never 0, when nothing in the group was sized: on the wire
+            # an unknown amount and a free call are different facts.
+            "amount_micro": group["amount_micro"] if group["has_amount"] else None,
+            "knowledge": group["knowledge"],
+            "basis": sorted(group["basis"]),
+            "price_versions": sorted(group["price_versions"]),
+        }
+        reason = _row_unpriced_reason(
+            stated=group["stated"],
+            failed=group["unstated_failed"],
+            cancelled=group["unstated_cancelled"],
+            ok=group["unstated_ok"],
         )
+        if reason:
+            # ADDITIVE: present only when the row has an unpriced component, so
+            # a priced row keeps the exact key set every older reader knows.
+            row["unpriced_reason"] = reason
+        rows.append(row)
     rows.sort(
         key=lambda row: (
             _channel_rank(str(row["channel"])),

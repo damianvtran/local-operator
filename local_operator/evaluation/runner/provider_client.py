@@ -157,6 +157,27 @@ UNCHANGED_FRAMES_NOTE = (
     "target, a different action kind, or wait for the surface to settle."
 )
 
+
+def unchanged_frames_note(streak: int) -> str:
+    """Escalate evidence, not enforcement: legitimate loading may stay static.
+
+    Preserve the normal-case prefix and add only bounded guidance, never a
+    growing list of warnings. Counts describe observations, not action identity:
+    different attempted actions can leave the same screen unchanged.
+    """
+    if streak <= 1:
+        return UNCHANGED_FRAMES_NOTE
+    counted = f" The screenshot has stayed identical for {streak} consecutive steps."
+    if streak == 2:
+        return UNCHANGED_FRAMES_NOTE + counted
+    return (
+        UNCHANGED_FRAMES_NOTE
+        + counted
+        + " If the surface is still loading, keep waiting; otherwise change the target, "
+        "action kind, or application."
+    )
+
+
 # The batch wire version this harness speaks; pinned here rather than taken
 # from a model reply.
 PROTOCOL_VERSION = "1.0"
@@ -2085,6 +2106,9 @@ class _ContextBuilder:
         self._rendered_turns = 0
         self._closed_turns: set[int] = set()
         self._previous_text: str | None = None
+        # Rendering owns this episode-local state so retries and compaction do
+        # not count an already-appended observation as another failed attempt.
+        self._no_change_streak = 0
 
     @property
     def messages(self) -> list[Message]:
@@ -2186,11 +2210,14 @@ class _ContextBuilder:
                 lines.append(note)
         lines.append(f"Frames: {_frames_line(observation)}")
         if previous is not None and _frames_identical(previous.observation, observation):
+            self._no_change_streak += 1
             # Stated on the observation itself rather than left for the model
             # to infer by diffing two base64 image blocks, which no model does
             # reliably. Digests are compared, not pixels: the frames are
             # content-addressed already, so this costs nothing.
-            lines.append(UNCHANGED_FRAMES_NOTE)
+            lines.append(unchanged_frames_note(self._no_change_streak))
+        else:
+            self._no_change_streak = 0
         lines.extend(["", rendered_text])
         content: list[Any] = [TextContent(text="\n".join(lines))]
         content.extend(self._frame_content(observation))

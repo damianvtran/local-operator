@@ -64,13 +64,16 @@ import json
 import logging
 import os
 import sqlite3
+import stat
+import sys
 import threading
 import time
 import uuid
 import zlib
+from _thread import LockType
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -82,9 +85,17 @@ from local_operator.providers.registry import (
     get_provider_definition,
     provider_env_key,
 )
+from local_operator.wakes.lock import _try_lock, _unlock
 
 if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
-    from local_operator.providers.usage import QuotaHealth
+    from local_operator.harness.types import ChatRequest
+    from local_operator.providers.account_affinity import (
+        AccountAffinityStore,
+        AccountRequestBoundary,
+        CacheAffinityHint,
+        EndpointModeResolver,
+    )
+    from local_operator.providers.usage import QuotaHealth, UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
@@ -373,6 +384,216 @@ class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
 
 
+# Bootstrap exclusion is private to AuthStore, not a new general locking API.
+# SQLite serializes our BEGIN/ALTER, but WAL initialization happens BEFORE that
+# transaction and two direct constructors can conflict there (SQLITE_BUSY5).
+_AUTH_BOOTSTRAP_TIMEOUT_S = 5.0
+_bootstrap_clock = time.monotonic
+
+
+@dataclasses.dataclass
+class _BootstrapEntry:
+    mutex: LockType = dataclasses.field(default_factory=threading.Lock)
+    users: int = 0  # holders AND waiters; never remove a live waiter's identity
+    owner: int | None = None
+
+
+_BOOTSTRAP_REGISTRY_LOCK = threading.Lock()
+_BOOTSTRAP_ENTRIES: dict[str, _BootstrapEntry] = {}
+_BOOTSTRAP_FDS: set[int] = set()
+
+
+def _bootstrap_before_fork() -> None:
+    # Opening/registering and closing/removing descriptors share this lock, so
+    # a child cannot inherit an unregistered descriptor through a fork gap.
+    _BOOTSTRAP_REGISTRY_LOCK.acquire()
+
+
+def _bootstrap_parent_after_fork() -> None:
+    _BOOTSTRAP_REGISTRY_LOCK.release()
+
+
+def _bootstrap_child_after_fork() -> None:
+    global _BOOTSTRAP_REGISTRY_LOCK, _BOOTSTRAP_ENTRIES, _BOOTSTRAP_FDS
+    for fd in _BOOTSTRAP_FDS:
+        # NEVER LOCK_UN: inherited descriptors share the parent's open-file
+        # description. Closing only the child's copy leaves its exclusion live.
+        with suppress(OSError):
+            os.close(fd)
+    _BOOTSTRAP_REGISTRY_LOCK = threading.Lock()
+    _BOOTSTRAP_ENTRIES = {}
+    _BOOTSTRAP_FDS = set()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_bootstrap_before_fork,
+        after_in_parent=_bootstrap_parent_after_fork,
+        after_in_child=_bootstrap_child_after_fork,
+    )
+
+
+def _verify_bootstrap_file(
+    path: Path, fd: int, owner: int | None, *, require_mode: bool = True
+) -> None:
+    opened = os.fstat(fd)
+    named = path.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or opened.st_nlink != 1
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        raise AuthStoreError("AuthStore bootstrap lock is not the original regular file")
+    if os.name != "nt" and (
+        opened.st_uid != owner or (require_mode and stat.S_IMODE(opened.st_mode) != 0o600)
+    ):
+        raise AuthStoreError("AuthStore bootstrap lock must have the database owner and mode0600")
+
+
+def _open_bootstrap_file(path: Path, database: Path) -> int:
+    # Keep the capability guard explicit: the portability audit recognizes
+    # statement guards, and non-POSIX hosts must never call an absent API.
+    uid: int | None = None
+    if hasattr(os, "geteuid"):
+        uid = os.geteuid()
+    database_stat = database.stat() if database.exists() else None
+    owner = database_stat.st_uid if database_stat is not None and uid is not None else uid
+    if owner != uid and uid != 0:
+        raise AuthStoreError("AuthStore bootstrap requires the database owner")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    # No chmod/chown of pre-existing files. In particular, do not follow a
+    # sidecar symlink or 'repair' somebody else's lock into a credential lock.
+    with _BOOTSTRAP_REGISTRY_LOCK:
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            prior = path.lstat()
+            if not stat.S_ISREG(prior.st_mode):
+                raise AuthStoreError("AuthStore bootstrap lock must not be a symlink")
+            fd = os.open(path, flags)
+            created = False
+        _BOOTSTRAP_FDS.add(fd)
+    try:
+        if created:
+            _verify_bootstrap_file(path, fd, uid, require_mode=False)
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            if owner != uid:
+                # Root opening an EXISTING user-owned DB must not strand a
+                # root-owned sidecar. Only our fresh verified file may change
+                # owner; an existing foreign/misowned sidecar is never changed.
+                # A transfer still requires root and a real database owner;
+                # the optional-UID platform path must fail closed, not supply
+                # an invented owner merely to satisfy the integer-only API.
+                if owner is None or uid != 0 or database_stat is None or not hasattr(os, "fchown"):
+                    raise AuthStoreError("Cannot create a bootstrap lock for this database owner")
+                os.fchown(fd, owner, database_stat.st_gid)
+        _verify_bootstrap_file(path, fd, owner)
+        return fd
+    except BaseException:
+        with _BOOTSTRAP_REGISTRY_LOCK:
+            _BOOTSTRAP_FDS.discard(fd)
+            os.close(fd)
+        raise
+
+
+@contextmanager
+def _auth_bootstrap_guard(database: Path) -> Iterator[None]:
+    """Serialize the WHOLE writable bootstrap on one canonical filesystem DB.
+
+    A single5s deadline covers thread and nonblocking process-lock acquisition;
+    SQLite's own5s timeout is unchanged, and no SQL BUSY retry is introduced.
+    Persistent0600 sidecars are never unlinked (unlink splits lock identities).
+    This coordinates cooperating upgraded writers in the existing trusted
+    private-store directory, not hostile same-UID directory replacement or
+    hardlink aliases, which do not share a supported SQLite WAL filename.
+    """
+    if str(database) == ":memory:":
+        yield
+        return
+    database = database.resolve()
+    key = str(database)
+    pid = os.getpid()
+    ident = threading.get_ident()
+    deadline = _bootstrap_clock() + _AUTH_BOOTSTRAP_TIMEOUT_S
+    with _BOOTSTRAP_REGISTRY_LOCK:
+        entry = _BOOTSTRAP_ENTRIES.setdefault(key, _BootstrapEntry())
+        if entry.owner == ident:
+            raise AuthStoreError("Recursive AuthStore bootstrap on the same database")
+        entry.users += 1
+    held = False
+    locked = False
+    fd: int | None = None
+    try:
+        remaining = deadline - _bootstrap_clock()
+        if remaining <= 0 or not entry.mutex.acquire(timeout=remaining):
+            raise AuthStoreError("Timed out acquiring AuthStore bootstrap thread guard")
+        held = True
+        with _BOOTSTRAP_REGISTRY_LOCK:
+            entry.owner = ident
+        # The sidecar needs its parent first; mkdir is idempotent and no DB or
+        # credential byte is opened until both exclusion layers have succeeded.
+        database.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = database.with_name(database.name + ".bootstrap.lock")
+        fd = _open_bootstrap_file(lock_path, database)
+        while True:
+            if _bootstrap_clock() >= deadline:
+                raise AuthStoreError("Timed out acquiring AuthStore bootstrap process guard")
+            if _try_lock(fd):
+                locked = True
+                break
+            # Nonblocking OS lock only; this wait spends the SAME deadline.
+            threading.Event().wait(min(0.025, max(0.0, deadline - _bootstrap_clock())))
+        _verify_bootstrap_file(
+            lock_path,
+            fd,
+            (
+                database.stat().st_uid
+                if database.exists()
+                else (os.geteuid() if hasattr(os, "geteuid") else None)
+            ),
+        )
+        yield
+    finally:
+        # A child at fork already closed copied fds and reset the registry.
+        # Touching an old fd number there could unlock/close a NEW child's file.
+        if os.getpid() == pid:
+            original_error = sys.exc_info()[1]
+            cleanup_error: BaseException | None = None
+            try:
+                if fd is not None:
+                    try:
+                        if locked:
+                            _unlock(fd)
+                    except BaseException as error:
+                        cleanup_error = error
+                    finally:
+                        with _BOOTSTRAP_REGISTRY_LOCK:
+                            _BOOTSTRAP_FDS.discard(fd)
+                            try:
+                                os.close(fd)
+                            except BaseException as error:
+                                if cleanup_error is None:
+                                    cleanup_error = error
+            finally:
+                # Even an unlock/close failure must not strand thread waiters
+                # or keep a dead path entry alive in this process forever.
+                with _BOOTSTRAP_REGISTRY_LOCK:
+                    if held:
+                        entry.owner = None
+                        entry.mutex.release()
+                    entry.users -= 1
+                    if entry.users == 0:
+                        _BOOTSTRAP_ENTRIES.pop(key, None)
+            if cleanup_error is not None:
+                if original_error is not None:
+                    original_error.add_note(f"AuthStore guard cleanup: {cleanup_error!r}")
+                else:
+                    raise cleanup_error
+
+
 class CredentialInvalidError(AuthStoreError):
     """The row's grant is dead; retrying cannot revive it, only a re-login can.
 
@@ -516,6 +737,9 @@ class OAuthAccess:
     #: from the usage fetch and the panel reported stale numbers forever.
     #: ``access_token`` is empty whenever this is set.
     credential_invalid: bool = False
+    # Captured from the selected stored row, never inferred from a mutable
+    # current-account pointer when a slower request eventually completes.
+    account_created_at: int = 0
 
 
 def default_db_path() -> Path:
@@ -1297,59 +1521,87 @@ class AuthStore:
     # -- connection ----------------------------------------------------------
 
     def _connect(self) -> _SerializedConnection:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Create the file 0600 BEFORE sqlite opens it: the plain
-        # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
-        if not self._db_path.exists():
-            fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        # `check_same_thread=False` + an explicit mutex, rather than sqlite's
-        # default thread affinity. The store is built once on whatever thread
-        # first asks for it (for the desktop routes, the event loop) and is then
-        # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
-        # hop, a thread-pool executor, a background scheduler -- raised
-        # `ProgrammingError`. That is how a credential-free machine came to
-        # report every model as connected (D18): the raise was swallowed by a
-        # broad catch and reported as "the store is unreadable", which the model
-        # catalogue deliberately degrades to "show everything".
-        #
-        # Removing the one bad hop fixed that route; this fixes the CLASS, so
-        # the next caller to touch the store from another thread gets correct
-        # serialized access instead of a plausible-looking wrong answer. The
-        # lock is required because sqlite connection objects are not internally
-        # synchronised: `check_same_thread=False` alone would trade a loud error
-        # for silent interleaving.
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.executescript(_SCHEMA)
-        # Local metadata, never credential payload: old rows remain unknown until
-        # a real login write attests an incarnation. Refresh cannot create one.
-        # Concurrent process startup must serialize the check and ALTER, not
-        # swallow duplicate-column errors (which can conceal real corruption).
-        conn.execute("BEGIN IMMEDIATE")
+        memory = str(self._db_path) == ":memory:"
+        if not memory:
+            self._db_path = self._db_path.resolve()
+        # A return expression inside `with` is evaluated BEFORE guard exit.
+        # Keep raw ownership until exit succeeds: a release error must close
+        # the connection even when WAL/schema initialization already succeeded.
+        conn: sqlite3.Connection | None = None
         try:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")}
-            if "login_incarnation" not in columns:
-                conn.execute(
-                    "ALTER TABLE auth_credentials ADD COLUMN login_incarnation TEXT DEFAULT NULL"
-                )
-            conn.commit()
+            with _auth_bootstrap_guard(self._db_path):
+                if not memory:
+                    self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                # Create the file 0600 BEFORE sqlite opens it: the plain
+                # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
+                if not memory and not self._db_path.exists():
+                    fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
+                    os.close(fd)
+                # `check_same_thread=False` + an explicit mutex, rather than sqlite's
+                # default thread affinity. The store is built once on whatever thread
+                # first asks for it (for the desktop routes, the event loop) and is then
+                # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
+                # hop, a thread-pool executor, a background scheduler -- raised
+                # `ProgrammingError`. That is how a credential-free machine came to
+                # report every model as connected (D18): the raise was swallowed by a
+                # broad catch and reported as "the store is unreadable", which the model
+                # catalogue deliberately degrades to "show everything".
+                #
+                # Removing the one bad hop fixed that route; this fixes the CLASS, so
+                # the next caller to touch the store from another thread gets correct
+                # serialized access instead of a plausible-looking wrong answer. The
+                # lock is required because sqlite connection objects are not internally
+                # synchronised: `check_same_thread=False` alone would trade a loud error
+                # for silent interleaving.
+                conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.executescript(_SCHEMA)
+                # Local metadata, never credential payload: old rows remain unknown until
+                # a real login write attests an incarnation. Refresh cannot create one.
+                # Concurrent process startup must serialize the check and ALTER, not
+                # swallow duplicate-column errors (which can conceal real corruption).
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    columns = {
+                        row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")
+                    }
+                    if "login_incarnation" not in columns:
+                        conn.execute(
+                            "ALTER TABLE auth_credentials ADD COLUMN "
+                            "login_incarnation TEXT DEFAULT NULL"
+                        )
+                    conn.commit()
+                except BaseException:
+                    with suppress(Exception):
+                        conn.rollback()
+                    raise
+                for path in (
+                    ()
+                    if memory
+                    else (
+                        self._db_path,
+                        self._db_path.with_suffix(self._db_path.suffix + "-wal"),
+                        self._db_path.with_suffix(self._db_path.suffix + "-shm"),
+                    )
+                ):
+                    # WAL sidecars hold the same plaintext; keep them 0600 too.
+                    try:
+                        os.chmod(path, 0o600)
+                    except OSError:
+                        pass
+            assert conn is not None, "bootstrap completed without a SQLite connection"
+            return _SerializedConnection(conn)
         except BaseException:
-            conn.rollback()
+            # A partially opened constructor has no AuthStore.close yet.
+            # Rollback/close must not obscure the genuine bootstrap error.
+            if conn is not None:
+                with suppress(Exception):
+                    conn.rollback()
+                with suppress(Exception):
+                    conn.close()
             raise
-        for path in (
-            self._db_path,
-            self._db_path.with_suffix(self._db_path.suffix + "-wal"),
-            self._db_path.with_suffix(self._db_path.suffix + "-shm"),
-        ):
-            # WAL sidecars hold the same plaintext; keep them 0600 too.
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        return _SerializedConnection(conn)
 
     def close(self) -> None:
         # The flag is set FIRST so a reader that races this close sees either a
@@ -1443,6 +1695,7 @@ class AuthStore:
         constants) that a per-user knob would only let people get wrong.
         """
         self._usage_aware_pick = bool(enabled)
+        self._account_selection_policy = "headroom" if enabled else "fair"
         if tolerance is not None:
             self._usage_pick_tolerance = max(0.0, min(1.0, float(tolerance)))
         if max_report_age_ms is not None:
@@ -1621,7 +1874,14 @@ class AuthStore:
         # reuses the stored account/org fields) would otherwise carry a dead
         # grant's tombstone, or another token's unconfirmed-send marker, onto
         # the credential the user just proved is alive.
-        payload.pop(GRANT_DEAD_AT_KEY, None)
+        # Native provider upserts are new logins; MCP also uses this entrypoint
+        # for continuation/marker writes. Its TokenStorage owns that distinction
+        # and explicitly clears the tombstone in set_tokens for a NEW grant.
+        # Clearing here would erase a just-written MCP tombstone, permitting a
+        # later process to replay a rejected token. MCP's send marker uses its
+        # own distinct key, so the provider send-marker reset stays unchanged.
+        if provider != "mcp-oauth":
+            payload.pop(GRANT_DEAD_AT_KEY, None)
         payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
         # Unlike updated_at this is a login event, not a refresh timestamp.
         # MCP refresh also uses upsert, so it cannot attest an incarnation yet.
@@ -3279,9 +3539,193 @@ class AuthStore:
         # and never a reason to move a session off the account it is
         # transacting on. ``_base_selection_order`` already put it first, and
         # the partition is stable, so exempting it keeps it there.
-        movable = demoted - {self.session_credential_id(provider, session_id)}
+        movable = demoted - {
+            self._affinity_credential_id(ordered, provider, session_id, model_id),
+            self._tentative_credential_id(ordered, provider, session_id),
+        }
         preferred = [r for r in ordered if r.id not in movable]
         return preferred + [r for r in ordered if r.id in movable]
+
+    def configure_account_selection_policy(self, policy: str) -> None:
+        from local_operator.providers.account_policy import ACCOUNT_SELECTION_POLICIES
+
+        self._account_selection_policy = (
+            policy if policy in ACCOUNT_SELECTION_POLICIES else "reset-soonest"
+        )
+        self._usage_aware_pick = self._account_selection_policy == "headroom"
+
+    def begin_account_request(
+        self, session_id: str | None, request: "ChatRequest"
+    ) -> "AccountRequestBoundary | None":
+        """Own tentative resolve coherence for one non-isolated request only."""
+        if not session_id or request.isolated:
+            return None
+        from local_operator.providers.account_affinity import (
+            AccountRequestBoundary,
+            request_compatibility,
+        )
+
+        if not hasattr(self, "_account_request_boundaries"):
+            self._account_request_boundaries: dict[str, AccountRequestBoundary] = {}
+        boundary = AccountRequestBoundary(
+            self._storage_id(request.model.provider),
+            request.model.model_id,
+            request_compatibility(request),
+        )
+        self._account_request_boundaries[session_id] = boundary
+        return boundary
+
+    def update_account_request(
+        self,
+        session_id: str | None,
+        boundary: "AccountRequestBoundary | None",
+        request: "ChatRequest",
+        *,
+        endpoint_mode: "EndpointModeResolver | None" = None,
+    ) -> None:
+        current = getattr(self, "_account_request_boundaries", {}).get(session_id)
+        if current is not None and current is boundary:
+            from local_operator.providers.account_affinity import request_compatibility
+
+            # Auto effort, cache lineage and cache-host hints are fitted BEFORE
+            # preflight. Never compare its receipt against the earlier draft.
+            current.provider = self._storage_id(request.model.provider)
+            current.model_id = request.model.model_id
+            current.compatibility = request_compatibility(request)
+            current.endpoint_mode = endpoint_mode
+
+    def end_account_request(
+        self, session_id: str | None, boundary: "AccountRequestBoundary | None"
+    ) -> None:
+        boundaries = getattr(self, "_account_request_boundaries", {})
+        if session_id and boundaries.get(session_id) is boundary:
+            boundaries.pop(session_id, None)
+
+    @staticmethod
+    def _selection_identity(row: StoredCredential) -> OAuthAccess:
+        # Mode decisions need only credential metadata, never a bearer refresh.
+        # These are the same kind/org fields get_oauth_access passes to clients.
+        return OAuthAccess(
+            access_token="",
+            credential_id=row.id,
+            kind="oauth" if row.credential_type == "oauth" else "api_key",
+            org_id=row.data.get("org_id"),
+            api_endpoint=row.data.get("api_endpoint"),
+        )
+
+    def _tentative_credential_id(
+        self, rows: list[StoredCredential], provider: str, session_id: str | None
+    ) -> int | None:
+        from local_operator.providers.account_affinity import (
+            current_request_isolated,
+            current_selection_endpoint,
+        )
+
+        boundary = getattr(self, "_account_request_boundaries", {}).get(session_id)
+        selected = boundary.picks.get(self._storage_id(provider)) if boundary is not None else None
+        if selected is None and current_request_isolated():
+            # Decorative helpers borrow the main pointer read-only; they cannot
+            # turn it into evidence for a later MAIN request or move it.
+            selected = self.session_credential_id(provider, session_id)
+        chosen = next((row for row in rows if row.id == selected), None)
+        if chosen is not None and boundary is not None and boundary.endpoint_mode is not None:
+            current_mode = current_selection_endpoint()
+            if current_mode is not None:
+                identity = self._selection_identity(chosen)
+                if current_mode(identity) != boundary.endpoint_mode(identity):
+                    # A hot API-mode change between preflight and dispatch may
+                    # not carry the old endpoint's tentative selection forward.
+                    return None
+        return selected if chosen is not None else None
+
+    def _account_affinity_store(self) -> "AccountAffinityStore":
+        from local_operator.providers.account_affinity import AccountAffinityStore
+
+        store = getattr(self, "_account_affinity", None)
+        if store is None:
+            # Lazy and rooted in THIS store, without touching auth bootstrap or
+            # changing its SQLite schema/locking/credential lifetime.
+            store = AccountAffinityStore(self._db_path)
+            self._account_affinity = store
+        return store
+
+    def _affinity_credential_id(
+        self, rows: list[StoredCredential], provider: str, session_id: str | None, model_id: str
+    ) -> int | None:
+        from local_operator.providers.account_affinity import (
+            current_selection_endpoint,
+            current_selection_signature,
+        )
+
+        signature = current_selection_signature()
+        boundary = getattr(self, "_account_request_boundaries", {}).get(session_id)
+        if (
+            signature is None
+            and boundary is not None
+            and boundary.provider == self._storage_id(provider)
+            and boundary.model_id == model_id
+        ):
+            signature = boundary.compatibility
+        if not session_id or signature is None:
+            return None
+        receipt = self._account_affinity_store().get(
+            session_id, self._storage_id(provider), model_id, signature
+        )
+        if receipt is not None:
+            chosen = next(
+                (
+                    row
+                    for row in rows
+                    if row.id == receipt.account_id and row.created_at == receipt.account_created_at
+                ),
+                None,
+            )
+            if chosen is None:
+                return None
+            endpoint = current_selection_endpoint() or (
+                boundary.endpoint_mode if boundary is not None else None
+            )
+            if (
+                endpoint is not None
+                and endpoint(self._selection_identity(chosen)) != receipt.endpoint_mode
+            ):
+                return None
+            return receipt.account_id
+        return None
+
+    def record_account_failure(
+        self, provider: str, session_id: str | None, access: OAuthAccess | None, sent_at_ms: int
+    ) -> None:
+        if session_id and access is not None and access.credential_id > 0:
+            self._account_affinity_store().invalidate(
+                session_id,
+                self._storage_id(provider),
+                account_id=access.credential_id,
+                sent_at_ms=sent_at_ms,
+            )
+
+    def record_account_success(
+        self,
+        provider: str,
+        session_id: str | None,
+        access: OAuthAccess | None,
+        request: "ChatRequest",
+        hint: "CacheAffinityHint",
+        sent_at_ms: int,
+        sent_monotonic: float,
+    ) -> None:
+        if not session_id or access is None or access.account_created_at <= 0:
+            return
+        self._account_affinity_store().record(
+            session_id,
+            self._storage_id(provider),
+            access.credential_id,
+            access.account_created_at,
+            request.model.model_id,
+            hint,
+            sent_at_ms=sent_at_ms,
+            sent_monotonic=sent_monotonic,
+        )
 
     def _base_selection_order(
         self,
@@ -3297,23 +3741,84 @@ class AuthStore:
         its only caller. ``model_id`` names the model the request will run so
         the usage ranking can ignore tier caps that do not gate it.
         """
-        if session_id:
-            sticky_id = self.session_credential_id(provider, session_id)
-            sticky = next((r for r in rows if r.id == sticky_id), None)
-            if sticky is not None:
-                rest = [r for r in rows if r.id != sticky.id]
-                return [sticky, *rest]
-            # No sticky yet: this is the session's FIRST pick for the provider
-            # (or its re-pick after a demotion cleared the sticky), the one
-            # moment the choice is free. Rank by cached usage so it lands on
-            # the account with the most headroom; the hash rotation is what
-            # remains when usage says nothing, and what breaks ties.
-            return self._usage_ranked_order(rows, provider, session_id, model_id)
-        # No session: round-robin across calls.
-        provider_key = f"{provider}:any"
-        start = self._round_robin.get(provider_key, 0) % len(rows)
-        self._round_robin[provider_key] = start + 1
-        return rows[start:] + rows[:start]
+        if not rows:
+            return []
+        from local_operator.providers.account_policy import (
+            reset_candidate,
+            reset_ranked_ids,
+        )
+
+        try:
+            now_ms = self._now_ms()
+            candidates = [
+                reset_candidate(
+                    row.id,
+                    self._cached_usage_report(row, provider),
+                    model_id,
+                    now_ms,
+                    max_age_ms=self._usage_pick_max_age_ms,
+                )
+                for row in rows
+            ]
+        except Exception:
+            # Cache failure is unknown evidence, not an account outage.
+            # Keep the existing fail-open contract for optional readers.
+            logger.debug("account pick: cached evidence unavailable", exc_info=True)
+            from local_operator.providers.account_policy import ResetCandidate
+
+            candidates = [ResetCandidate(row.id) for row in rows]
+        finally:
+            if self._usage_cache is not None:
+                self._usage_cache.close()
+        by_id = {row.id: row for row in rows}
+        allowed = {
+            candidate.account_id for candidate in candidates if candidate.state != "depleted"
+        }
+        rows = [row for row in rows if row.id in allowed]
+        if not rows:
+            return []
+        tie_order = None
+        if not session_id:
+            # Non-session callers retain round-robin among eligible siblings;
+            # a conversation policy cannot repeatedly bind an anonymous caller.
+            provider_key = f"{provider}:any"
+            start = self._round_robin.get(provider_key, 0) % len(rows)
+            self._round_robin[provider_key] = start + 1
+            return rows[start:] + rows[:start]
+        eligible_ids = reset_ranked_ids(candidates, session_id, tie_order=tie_order)
+        anchored_id = self._affinity_credential_id(rows, provider, session_id, model_id)
+        if anchored_id is not None:
+            return [by_id[anchored_id], *(row for row in rows if row.id != anchored_id)]
+        tentative = self._tentative_credential_id(rows, provider, session_id)
+        if tentative is not None:
+            return [by_id[tentative], *(row for row in rows if row.id != tentative)]
+        # Outside the one-request boundary, a pointer is not successful
+        # inference and cannot turn expiry into indefinite account binding.
+        from local_operator.providers.account_affinity import current_selection_policy
+
+        policy = current_selection_policy() or getattr(
+            self, "_account_selection_policy", "reset-soonest"
+        )
+        if policy == "reset-soonest":
+            return [by_id[cid] for cid in eligible_ids]
+        # Eligibility precedes EVERY preference, including fair spread.
+        # Preserve reserve as last resort rather than inventing a hard ban.
+        ordered = []
+        for states in (("healthy", "unknown"), ("reserve",)):
+            ids = {candidate.account_id for candidate in candidates if candidate.state in states}
+            group = [row for row in rows if row.id in ids]
+            if not group:
+                continue
+            ordered.extend(
+                self._usage_ranked_order(group, provider, session_id, model_id, tie_order=tie_order)
+                if policy == "headroom"
+                else (
+                    sorted(group, key=lambda row: tie_order[row.id])
+                    if tie_order is not None
+                    else self._hash_order(sorted(group, key=lambda row: row.id), session_id or "")
+                )
+            )
+        return ordered
 
     @staticmethod
     def _hash_order(rows: list[StoredCredential], session_id: str) -> list[StoredCredential]:
@@ -3344,7 +3849,17 @@ class AuthStore:
             try:
                 from local_operator.providers.usage_cache import UsageCacheStore
 
-                self._usage_cache = UsageCacheStore()
+                # Selection reads cached evidence only. Bind the optional reader
+                # to THIS credential root, never an ambient machine's cache, and
+                # do not create a DB while merely resolving/inspecting an account.
+                # The default auth/cache files are siblings; explicit roots keep
+                # the same relationship. A supplied warmer handle remains reused.
+                # Immutable display snapshots skip committed WAL and can rank
+                # a spent account as healthy. SQL-ro routing must see committed
+                # frames; SQLite coordination sidecars remain possible here.
+                self._usage_cache = UsageCacheStore(
+                    self._db_path.parent / "usage_cache.db", read_only=True, wal_aware=True
+                )
             except Exception:  # noqa: BLE001 -- no cache = hash order, never fatal
                 logger.debug("usage pick: cache unavailable", exc_info=True)
                 self._usage_cache = None
@@ -3357,9 +3872,7 @@ class AuthStore:
         health = self._cached_quota_health(row, provider, model_id, now_ms)
         return health.remaining_fraction if health is not None else None
 
-    def _cached_quota_health(
-        self, row: StoredCredential, provider: str, model_id: str, now_ms: int
-    ) -> "QuotaHealth | None":
+    def _cached_usage_report(self, row: StoredCredential, provider: str) -> "UsageReport | None":
         """Cached quota verdict, preserving definite usability without a fraction.
 
         ``None`` is UNKNOWN, not zero: no report, an unparseable one, one
@@ -3394,7 +3907,7 @@ class AuthStore:
         cache = self._usage_cache_store()
         if cache is None:
             return None
-        from local_operator.providers.usage import UsageReport, usage_health
+        from local_operator.providers.usage import UsageReport
         from local_operator.providers.usage_cache import account_preflight_key
 
         data = row.data
@@ -3431,6 +3944,16 @@ class AuthStore:
         report = max(candidates, key=lambda r: r.fetched_at)
         if report.fetched_at <= 0:
             return None
+        return report
+
+    def _cached_quota_health(
+        self, row: StoredCredential, provider: str, model_id: str, now_ms: int
+    ) -> "QuotaHealth | None":
+        from local_operator.providers.usage import usage_health
+
+        report = self._cached_usage_report(row, provider)
+        if report is None or report.fetched_at > now_ms:
+            return None
         if now_ms - report.fetched_at > self._usage_pick_max_age_ms:
             # Past the age cutoff a report is still a lower bound on usage as
             # long as none of its measured windows has rolled over since it
@@ -3454,8 +3977,10 @@ class AuthStore:
         self,
         rows: list[StoredCredential],
         provider: str,
-        session_id: str,
+        session_id: str | None,
         model_id: str,
+        *,
+        tie_order: Mapping[int, int] | None = None,
     ) -> list[StoredCredential]:
         """Least-loaded first, ties broken by the per-session hash.
 
@@ -3499,8 +4024,17 @@ class AuthStore:
         stores per worker and does not always close them, hit ``EMFILE``
         under the default 256-descriptor limit the first time it did.
         """
-        fallback = self._hash_order(rows, session_id)
-        if not self._usage_aware_pick or len(rows) < 2:
+        from local_operator.providers.account_affinity import current_selection_policy
+
+        def spread(group: list[StoredCredential]) -> list[StoredCredential]:
+            if tie_order is not None:
+                ranks = tie_order
+                return sorted(group, key=lambda row: ranks[row.id])
+            return self._hash_order(group, session_id or "")
+
+        fallback = spread(rows)
+        enabled = current_selection_policy() == "headroom" or self._usage_aware_pick
+        if not enabled or len(rows) < 2:
             return fallback
         try:
             now_ms = self._now_ms()
@@ -3539,7 +4073,7 @@ class AuthStore:
             # Stable sort: rows with equal remaining keep the store's row
             # order, which is the order the hash fallback also assumes.
             rest.sort(key=lambda r: -(remaining[r.id] or 0.0))
-            ordered = self._hash_order(bucket, session_id) + rest
+            ordered = spread(bucket) + rest
             logger.debug(
                 "usage pick: %s session=%s model=%s remaining=%s -> %s",
                 provider,
@@ -3563,6 +4097,12 @@ class AuthStore:
         if not session_id:
             return
         provider = self._storage_id(provider)
+        boundary = getattr(self, "_account_request_boundaries", {}).get(session_id)
+        if boundary is not None:
+            if credential_id is None:
+                boundary.picks.pop(provider, None)
+            else:
+                boundary.picks[provider] = credential_id
         if credential_id is None:
             self._sticky.pop((provider, session_id), None)
         else:
@@ -3583,7 +4123,7 @@ class AuthStore:
         return self._sticky.get((self._storage_id(provider), session_id))
 
     def release_session_credential(self, provider: str, session_id: str | None) -> None:
-        """Forget a session's sticky selection so its next resolve picks afresh.
+        """Release a tentative selection, never invalidate a successful lease.
 
         The public clear beside :meth:`pin_session_credential`. Needed by the
         quota preflight when it demotes a row the session was only just pinned
@@ -3593,6 +4133,8 @@ class AuthStore:
         hand back the very row the walk is trying to move off. A no-op without
         a session id, like the write it mirrors.
         """
+        # This is the preflight's tentative-pointer seam, not proof that a
+        # previously successful compatible cache lease became invalid.
         self._set_sticky(provider, session_id, None)
 
     def pin_session_credential(
@@ -3601,9 +4143,11 @@ class AuthStore:
         """Point a session's sticky selection at ``credential_id``.
 
         The public half of :meth:`_set_sticky`, for callers that have just
-        PROBED a specific account and must route the session to the account
-        the quota verdict was about. Quota-aware preflight re-checks blocked
-        siblings one by one; without pinning, the cascade's round-robin /
+        PROBED an account inside the active request boundary. The boundary
+        keeps that request coherent with its quota verdict; an unscoped
+        diagnostic pointer is neither a future request plan nor a cache lease.
+        Quota-aware preflight re-checks blocked siblings one by one; without
+        pinning, the cascade's round-robin /
         stickiness could hand the request to a different row than the one
         whose usage was just read, and the session would keep failing on an
         account the recovery walk had already judged. A no-op without a
@@ -3726,13 +4270,11 @@ class AuthStore:
             # (``rotate_sibling``: "sticky preserved" on a usage 429); this is
             # the same rule applied to the preference marks.
             #
-            # The exemption is keyed on stickiness alone, not on whether the
-            # session has actually sent a request yet — the store cannot tell.
-            # A caller that demotes a row the session was pinned to by a
-            # resolve moments ago (a fresh pick) and wants the next resolve to
-            # move must release the pin first (``release_session_credential``).
-            sticky_id = self.session_credential_id(provider, session_id)
-            return [r for r in rows if r.id not in demoted or r.id == sticky_id]
+            # Only a compatible, success-derived lease earns this exemption;
+            # a tentative preflight pointer cannot preserve an account forever.
+            sticky_id = self._affinity_credential_id(rows, provider, session_id, model_id)
+            tentative_id = self._tentative_credential_id(rows, provider, session_id)
+            return [r for r in rows if r.id not in demoted or r.id in {sticky_id, tentative_id}]
         return rows
 
     # -- the cascade ---------------------------------------------------------
@@ -3818,6 +4360,7 @@ class AuthStore:
                 api_endpoint=data.get("api_endpoint"),
                 kind="oauth",
                 raw=data,
+                account_created_at=row.created_at,
             )
         from local_operator.providers.local import LOCAL_PROVIDER_IDS
 
@@ -3831,6 +4374,7 @@ class AuthStore:
             credential_id=row.id if row is not None else 0,
             kind="api_key",
             api_endpoint=endpoint if isinstance(endpoint, str) else None,
+            account_created_at=row.created_at if row is not None else 0,
         )
 
     async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:
@@ -4421,6 +4965,10 @@ class AuthStore:
         else:
             failing = None
 
+        if session_id and failing is not None:
+            # Own failure ends the successful lease. Another session's advisory
+            # demotion alone must not discard this conversation's warm account.
+            self._account_affinity_store().invalidate(session_id, self._storage_id(provider))
         usage_limited = is_usage_limit_error(error)
         # A provider-wide fault (5xx/529 overload, timeout) is not evidence
         # against the CREDENTIAL. Blocking it would take a healthy account out

@@ -135,6 +135,15 @@ _AMBIENT_VARS = (
     # deliberately, per test, which is the visible opt-in). Scrub it for every test
     # at once rather than trusting each cell to remember.
     "LOCAL_OPERATOR_SUBAGENT_LANE_BOUND_S",
+    # The episode boot's secret-resolution bound override
+    # (``evaluation/runner/host_secrets.RESOLUTION_TIMEOUT_ENV``, read by the
+    # evaluation host resolvers). The same ESCAPE-HATCH class as the lane bound
+    # above: ``0`` WAIVES the bound and every other inherited value MOVES it, so
+    # an operator's exported knob would silently change what every cell using
+    # the resolvers exercises -- the budget cells would go green while asserting
+    # a bound nobody runs (CI round 1 on PR #2575, 2026-10-17). Cells that mean
+    # to exercise a bound set it through ``monkeypatch`` explicitly.
+    "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
@@ -357,6 +366,10 @@ _AMBIENT_VARS = (
     "SERPAPI_API_KEY",
     "TAVILY_API_KEY",
     "FAL_API_KEY",
+    # The audio rungs' BYOK probes fall back to an exported key (the image
+    # lane's FAL/OpenAI rule), so an inherited one would light the ElevenLabs
+    # rung in every cell that asserts which rungs exist.
+    "ELEVENLABS_API_KEY",
     "ZAI_API_KEY",
     "HF_TOKEN",
     # The anchor's directory on Windows (`PROGRAMDATA`): an inherited value would
@@ -392,6 +405,12 @@ _AMBIENT_VARS = (
     # feature, and the zero-footprint cells would pass for the wrong reason.
     # The aida conftest clears it for its own package; this scrubs it everywhere.
     "LOCAL_OPERATOR_NO_AIDA",
+    # The Librarian's kill switch (``librarian.state.ENV_DISABLE``) — the same
+    # escape-hatch class as Aida's above, with the same failure mode: every cell
+    # asserting her state, pause or organized count would silently drive a
+    # disabled install and pass for the wrong reason. Tests that exercise the
+    # disabled path set it deliberately with ``monkeypatch.setenv``.
+    "LOCAL_OPERATOR_NO_LIBRARIAN",
     # The startup shortcut's inheritance marker (``helpers.PATH_PRIMED_ENV``,
     # the bulk-resume lane's C1 cut): set by
     # ``setup_cross_platform_environment`` once a lineage has captured the
@@ -402,6 +421,16 @@ _AMBIENT_VARS = (
     # the skip arm while looking like it tested the prime. Cells that want a
     # primed lineage set it explicitly (the helpers tests do).
     "LOCAL_OPERATOR_PATH_PRIMED",
+    # Foreign-harness stores: these name the operator's real Claude/Codex/omp
+    # roots. Inherited, an import test would read (and could import FROM) the
+    # live stores rather than its fixture. The harness-import fixtures set the
+    # roots they use explicitly.
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "PI_CODING_AGENT_DIR",
+    "PI_CONFIG_DIR",
+    "OMP_PROFILE",
+    "PI_PROFILE",
     # The brokered GitHub bearer's env names, read by the git credential helper
     # (``network/credentials/github.py``) and written into every bash child by the
     # session's injection (``tools/builtin.py``). They name a CREDENTIAL: an

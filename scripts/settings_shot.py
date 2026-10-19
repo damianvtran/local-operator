@@ -392,6 +392,15 @@ async def main() -> None:
                 view.action_pane(1)
             await pilot.pause()
             save_capture(app, out)
+        elif state == "scratchpad":
+            # The row introduced by the scratchpad-hygiene slice. Captured at
+            # 80x24 and 100x40 because the label grew to carry its unit
+            # ("Scratchpad size cap (bytes)", design D1); the frame is the only
+            # thing that can show it still fits beside the value column.
+            _select(view, "session.scratchpad.max_bytes")
+            await pilot.pause()
+            save_capture(app, out)
+            geometry = _geometry(app, view, state, size)
         elif state == "subagents":
             _select_section(view, "subagents")
             await pilot.pause()

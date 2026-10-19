@@ -13,9 +13,17 @@ desktop at all (see ``/mobile``).
 
 from typing import Any, Mapping, Sequence
 
-from local_operator.i18n.keys import wire_memory, wire_slash
+from local_operator.i18n.keys import (
+    tui_import,
+    tui_review,
+    tui_schedule,
+    wire_memory,
+    wire_slash,
+    wire_slash_library,
+)
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
+from local_operator.tui.librarian_control import VERBS as LIBRARIAN_VERBS
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
 #: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
@@ -272,10 +280,12 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
 
 
-AGENT_SUBCOMMANDS: tuple[str, ...] = ("class",)
+AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit")
 
 AGENT_SUBCOMMAND_HELP: dict[str, str] = {
     "class": "Show or switch an agent's class (proactive|reactive)",
+    "new": "Create an agent role or specialist",
+    "edit": "Edit an installed agent profile",
 }
 
 
@@ -1506,6 +1516,74 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.WORD,
         desktop_destination="settings",
     ),
+    # The import page is a MODE over this terminal's own source stores and
+    # config root, so it is deliberately TUI-only: no desktop_destination means
+    # no command-palette row, and `_FRONTEND_LOCAL_SLASHES` keeps a follower
+    # from running it against another machine. The trailing text is this
+    # command's own vocabulary (`list`, `preview <source> [id]`, `run …`,
+    # `status`, `cancel`), not prose, so ANY is the shape the desktop would
+    # forward if this command ever grows a destination.
+    SlashCommand(
+        "import",
+        _tr(tui_import.slash_help()),
+        aliases=("migrate",),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.ANY,
+    ),
+    # The review page is a MODE over THIS machine's derived code-request
+    # index (`<config>/code_requests/<session_id>.json`) and fetch cache, so it
+    # is deliberately TUI-only: no `desktop_destination` means no
+    # command-palette row, and `_FRONTEND_LOCAL_SLASHES` keeps a follower from
+    # reading another machine's ledger while the user is looking at this one.
+    # The desktop already owns a Code review pane of its own; a destination
+    # here would open that pane for a command this terminal paints itself.
+    SlashCommand(
+        "review",
+        _tr(tui_review.slash_help()),
+    ),
+    # The schedule page is a MODE over THIS conversation's LIVE scheduler
+    # (`session.wake_scheduler.schedules`) and writes through the session's own
+    # `set_wake_schedules`. It is deliberately TUI-only: no
+    # `desktop_destination` means no palette row, and the desktop already owns
+    # a machine-wide schedules page reading the wake index — a destination here
+    # would offer that page for a command whose subject is one conversation and
+    # whose writer is this process. `_FRONTEND_LOCAL_SLASHES` keeps a follower
+    # from listing and rewriting the runtime host's wakes instead.
+    #
+    # No `wakes` alias: the machine-wide index is what "wakes" means on the
+    # desktop and CLI, and an alias would teach the narrower meaning first.
+    SlashCommand(
+        "schedule",
+        _tr(tui_schedule.slash_help()),
+    ),
+    # The Library page is a MODE over THIS machine's global asset catalog: the
+    # index is derived from this terminal's session journals and the metadata
+    # database lives under this config root. TUI-only on purpose — no
+    # `desktop_destination`, because the desktop already owns a Library pane
+    # reading its own view of the same catalog, and a destination here would
+    # offer that pane for a command this terminal paints itself. The owner
+    # argument is `/settings`' and `/import`'s: routing it would read another
+    # machine's files while the user looks at this one.
+    SlashCommand(
+        "library",
+        _tr(wire_slash_library.help()),
+    ),
+    # The Librarian's door, beside `/aida`'s shape: bare reports status, the
+    # verbs are the package's own hooks, and `open` is the pinned conversation.
+    # The module belongs to another work package; `librarian_control` keeps the
+    # import lazy and the absence a clear sentence. TUI-only for the same
+    # wrong-machine reason as `/library`, with `open` a session transition like
+    # `/resume` (which is frontend-local too).
+    SlashCommand(
+        "librarian",
+        _tr(wire_slash_library.librarian_help()),
+        arguments=ArgumentMode.OPTIONAL,
+        # `<verb>`, over this command's own vocabulary; the handler reads it and
+        # refuses anything else with the list. SUBCOMMAND, not ANY: a sentence
+        # after the verb is a message, not an organizing request.
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=LIBRARIAN_VERBS,
+    ),
     SlashCommand(
         "sidebar",
         # `focus` is named because it is the only way into the list's keyboard
@@ -2062,7 +2140,22 @@ SLASH_COMMANDS: list[SlashCommand] = [
         _tr(wire_memory.command()),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.SUBCOMMAND,
-        subcommands=("list", "show", "search", "edit", "forget", "status"),
+        # This vocabulary is what the desktop planner and the command route
+        # admit, and it must equal ``memory_cli.OPERATIONS``: the terminal path
+        # parses with that tuple, so a verb missing here is a verb the desktop
+        # spends as a model message (or 422s) while the TUI runs it.
+        # tests/unit/test_memory_inspect.py pins the two lists together.
+        subcommands=(
+            "list",
+            "show",
+            "search",
+            "move",
+            "edit",
+            "forget",
+            "status",
+            "inspect",
+            "consolidate",
+        ),
     ),
     SlashCommand(
         "project",

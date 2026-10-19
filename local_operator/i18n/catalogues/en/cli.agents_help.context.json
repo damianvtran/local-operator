@@ -1,0 +1,107 @@
+{
+  "cli.agents_help.agents": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the `agents` command's one-liner"
+  },
+  "cli.agents_help.list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.list_page": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list_page' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.list_perpage": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list_perpage' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.create": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.create_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.delete": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'delete' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.delete_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'delete_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.delete_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'delete_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.delete_org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the org-sharing sentence shared with teams' push; `lop login radient` in situ"
+  },
+  "cli.agents_help.push": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "exit codes and the preview/confirm flow are documented in the text; tokens in situ"
+  },
+  "cli.agents_help.push_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'push_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.push_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'push_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.push_org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'push_org' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.push_hub_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "flag references and the local-id distinction in situ"
+  },
+  "cli.agents_help.pull": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pull' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.pull_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pull_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.pull_org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pull_org' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.sync": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "starter/hub-pulled product terms stay"
+  },
+  "cli.agents_help.sync_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'sync_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.agents_help.sync_all": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'sync_all' argument; flag/command tokens stay in situ"
+  }
+}

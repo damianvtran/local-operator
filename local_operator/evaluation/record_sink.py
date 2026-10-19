@@ -75,7 +75,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
+from local_operator.evaluation.record_frames import RecordFrames
 from local_operator.session.store_failures import SPACE_ERRNOS
+
+# Annotation threshold, NOT an enforced size limit. Evidence (including an
+# unpublishable inline image) is never discarded just to fit a journal line.
+MAX_RECORD_LINE_BYTES = 256 * 1024
 
 #: The seal's reserved margin, pre-allocated at open and kept until the seal
 #: needs it. Derived, not chosen: the seal artifacts measured 322-328 B
@@ -209,8 +214,10 @@ class RecordSink:
         expected_bytes: int = RECORD_EXPECTED_BYTES,
         reserve_bytes: int = SEAL_RESERVE_BYTES,
         calls: _SinkCalls | None = None,
+        artifact_root: Path | None = None,
     ) -> None:
         self._path = Path(path)
+        self._frames = RecordFrames(self._path, artifact_root)
         self._expected_bytes = int(expected_bytes)
         self._reserve_bytes = int(reserve_bytes)
         # A negative budget would make the pre-flight accept LESS room than the
@@ -353,6 +360,12 @@ class RecordSink:
         failure sentence NAMES -- so a reader gets either a clean cut or a
         stated torn tail, never a silent one: the property that makes a
         partial record analyzable instead of a void.
+
+        MAX_RECORD_LINE_BYTES is only a size-annotation threshold, not an
+        enforced limit. Oversized text, other media and image blocks retained
+        inline after projection failures are written intact with an explicit
+        record_oversized annotation; image fallback reasons are recorded beside
+        the event rather than changing its original content.
         """
 
         if self._closed:
@@ -363,12 +376,38 @@ class RecordSink:
                 bytes_written=self._offset,
             )
         try:
-            line = (
-                json.dumps({"kind": kind, **payload}, ensure_ascii=False, default=str).encode(
-                    "utf-8"
+            self._frames.fallbacks.clear()
+            original = {"kind": kind, **payload}
+            try:
+                document = self._frames.project(original)
+            except (
+                Exception
+            ) as error:  # noqa: BLE001 - projection is never a recording prerequisite
+                # A future projector bug must not recreate whole-line loss.
+                # The encoder, not this optional optimization, decides whether
+                # the original event is serializable.
+                document = original
+                self._frames.fallbacks.append(
+                    {
+                        "path": "$",
+                        "reason": (
+                            "projection failed; original event kept inline: "
+                            f"{type(error).__name__}"
+                        ),
+                    }
                 )
-                + b"\n"
-            )
+            if self._frames.fallbacks:
+                document["record_image_fallbacks"] = list(self._frames.fallbacks)
+            line = json.dumps(document, ensure_ascii=False, default=str).encode("utf-8") + b"\n"
+            if len(line) > MAX_RECORD_LINE_BYTES:
+                # This is a size annotation, not a guard or cap: inline image
+                # fallbacks, other media, text and arguments remain lossless.
+                document["record_oversized"] = {
+                    "reason": "projected_record_exceeds_annotation_threshold",
+                    "limit_bytes": MAX_RECORD_LINE_BYTES,
+                    "unflagged_bytes": len(line),
+                }
+                line = json.dumps(document, ensure_ascii=False, default=str).encode("utf-8") + b"\n"
         except Exception as error:  # noqa: BLE001 - a record write must never break the run
             self._note_failure(error, last_complete=self._offset)
             return

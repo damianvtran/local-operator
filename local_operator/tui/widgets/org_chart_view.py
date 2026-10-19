@@ -40,6 +40,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Static
 
+# i18n: this page's title and legend copy is user-facing, extracted so a
+# locale can carry it; `_t` is bound BELOW the whole import block so no
+# later import reads as not-at-top (E402, the earlier slice's CI failure).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.org_chart import OrgNode, resolve_org
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.org_render import RenderResult, Tier, render_org
@@ -48,6 +53,8 @@ from local_operator.tui.org_render import RenderResult, Tier, render_org
 # Textual's app handler must agree on one dismissal message after first use.
 from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
+
+_t = tr("tui.small")
 
 #: Tier index → the word shown in the title. The title always states the tier
 #: so "why is this collapsed?" is answered on screen (a small terminal
@@ -283,11 +290,11 @@ class OrgChartView(Vertical):
         charted = self._root.label if self._root is not None else self._team_name
         title = Text(no_wrap=True, overflow="ellipsis")
         head = Style(color=theme_mod.semantic_color("fg"), bold=True)
-        title.append(f"team {charted}", style=head)
-        title.append(" · org chart", style=muted)
-        title.append(f" · zoom: {_TIER_NAME[self._tier]}", style=dim)
+        title.append(_t(_x.org_chart_view_team_heading(charted=charted)), style=head)
+        title.append(_t(_x.org_chart_view_chart_suffix()), style=muted)
+        title.append(_t(_x.org_chart_view_zoom_clause(tier=_TIER_NAME[self._tier])), style=dim)
         if self._expand_all:
-            title.append(" · expanded", style=dim)
+            title.append(_t(_x.org_chart_view_expanded_suffix()), style=dim)
         # No team-boundary tag. This page used to append " · (declared)" and
         # gloss it as "shown org, not yet an executable delegation", because a
         # nested team was not runnable. It is: ``task(agent="team:<name>")``
@@ -309,7 +316,10 @@ class OrgChartView(Vertical):
             # (D7); the gloss is gone with the tag it explained, and the glyph
             # vocabulary alone is 70 cells — under a standard 100-col terminal.
             legend = Text(no_wrap=True, overflow="ellipsis")
-            legend.append("◆ manager", style=Style(color=theme_mod.semantic_color("accent")))
+            legend.append(
+                _t(_x.org_chart_view_manager_legend()),
+                style=Style(color=theme_mod.semantic_color("accent")),
+            )
             for glyph, meaning in (
                 ("? unresolved", "ghost"),
                 ("↩ cycle", "marker"),

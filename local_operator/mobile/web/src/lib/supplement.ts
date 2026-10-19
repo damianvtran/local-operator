@@ -124,6 +124,12 @@ export type SupplementBeat = {
 	more: string[];
 	components: SupplementComponent[];
 	error: string;
+	/**
+	 * The typed cause of a provider-terminal failure (`provider_<kind>`, the
+	 * core's allowlisted vocabulary — never provider prose). Empty when the run
+	 * did not end on the provider's own failure.
+	 */
+	cause: string;
 	dismissed: boolean;
 };
 
@@ -223,6 +229,7 @@ export function beatFromWire(value: unknown): SupplementBeat | null {
 		more,
 		components: componentsFrom(raw.components),
 		error: typeof raw.error === "string" ? raw.error.slice(0, ERROR_MSG_MAX_CHARS) : "",
+		cause: typeof raw.cause === "string" ? raw.cause.slice(0, CAUSE_MAX_CHARS) : "",
 		dismissed: raw.dismissed === true,
 	};
 }
@@ -369,6 +376,30 @@ export function supplementDisposition(
 export const COPY_PREPARING = "Preparing highlights…";
 export const COPY_CANCELLED = "Highlights cancelled";
 export const COPY_FAILED = "Couldn't prepare highlights";
+
+/**
+ * The failed line's typed-cause phrases, the SAME words the TUI paints
+ * (`local_operator/tui/supplements.py`'s `_CAUSE_PHRASES`; memo §2.8 lists the
+ * set — "the ONE word list every surface transcribes"). `provider_quota`
+ * says "limit reached", never "exhausted" (the kind covers rate limits too;
+ * design round 1, D1). `provider_unknown` — and any token this build does not
+ * know — renders NO phrase: the catch-all folds `aborted` in, and inventing a
+ * failure mode for it is worse than the bare sentence (D2).
+ */
+const CAUSE_PHRASES: Record<string, string> = {
+	provider_quota: "provider limit reached",
+	provider_auth: "provider sign-in needed",
+	provider_transient: "provider temporarily unavailable",
+	provider_timeout: "provider timed out",
+	provider_request: "provider refused the request",
+	provider_content: "provider blocked the content",
+	provider_context: "provider context limit",
+};
+
+/** The muted phrase for a failed row's typed `cause`; `""` when absent/unknown. */
+export function causePhrase(cause: unknown): string {
+	return typeof cause === "string" && cause ? (CAUSE_PHRASES[cause] ?? "") : "";
+}
 /** The frame-level fallback (§2.8): shown in place of a frame that died or hung. */
 export const COPY_FRAME_FALLBACK = "Couldn't render this graphic";
 /** The two control labels of the pointer-surface action pair (D10). */
@@ -545,6 +576,13 @@ export const NONCE_REQUIRED_TYPES: readonly FrameMessageType[] = ["resize", "err
 export const NONCE_MAX_CHARS = 64;
 /** The longest `msg` an `error` may carry (`contract.ERROR_MSG_MAX_CHARS`). */
 export const ERROR_MSG_MAX_CHARS = 300;
+
+/**
+ * The longest `cause` this reader keeps. The vocabulary is short allowlisted
+ * tokens (`provider_quota` ≤ ~24 chars); the bound exists so a malformed wire
+ * cannot paint an unbounded string into the failed line.
+ */
+export const CAUSE_MAX_CHARS = 64;
 /** The watchdog bound (`contract.WATCHDOG_S`), in ms. */
 export const WATCHDOG_MS = 5000;
 /** How often the host pings a ready frame (`PING_INTERVAL_MS`), in ms. */

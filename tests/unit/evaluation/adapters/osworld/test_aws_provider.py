@@ -142,12 +142,14 @@ class _Stubs:
         self.ec2_stub = Stubber(self.ec2)
         self.sched_stub = Stubber(self.scheduler)
         self.http_calls: list[str] = []
+        self.http_timeouts: list[float] = []
         self._http_codes = list(http_codes or [200])
         self.slept: list[float] = []
         self.now = 0.0
 
         def http_get(url: str, timeout: float) -> int:
             self.http_calls.append(url)
+            self.http_timeouts.append(timeout)
             return self._http_codes.pop(0) if len(self._http_codes) > 1 else self._http_codes[0]
 
         self.guest_posts: list[dict[str, Any]] = []
@@ -936,6 +938,73 @@ async def test_readiness_timeout_raises_after_deadline(
     # is past the deadline, so it raises instead of sleeping again.
     assert len(stubs.http_calls) == 4
     assert stubs.slept == [5.0, 5.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_probe_asks_the_readiness_endpoint_and_200_is_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ambiguous-delivery probe is the allocation readiness GET, again.
+
+    Same endpoint, same meaning: whatever answered 200 at admission answers
+    this, and the answer is the boolean the session's gate acts on. The
+    caller's ``timeout`` reaches the transport unchanged -- the bound is the
+    caller's, so the short probe deadline stays the harness's decision.
+    """
+
+    with _Stubs(http_codes=[200]) as stubs:
+        provider = _provider(stubs, monkeypatch)
+        provider._public_ip = "203.0.113.5"
+        assert await provider.probe_control_server(5.0) is True
+    assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+    assert stubs.http_timeouts == [5.0]
+
+
+@pytest.mark.asyncio
+async def test_probe_collapses_every_not_answering_mode_to_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """False for a non-200 and for a transport refusal alike.
+
+    The gate that reads this is fail-closed, and its caller re-raises the
+    ORIGINAL ambiguous failure -- so the probe contributes one boolean and no
+    diagnostic of its own. A refusal must not surface the transport text
+    either (it can echo the URL that names the guest's address).
+    """
+
+    with _Stubs(http_codes=[503]) as stubs:
+        provider = _provider(stubs, monkeypatch)
+        provider._public_ip = "203.0.113.5"
+        assert await provider.probe_control_server(5.0) is False
+    assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+
+    def refused(url: str, timeout: float) -> int:
+        del url, timeout
+        raise ConnectionRefusedError("connection refused")
+
+    with _Stubs() as stubs:
+        stubs.clients.http_get = refused
+        provider = _provider(stubs, monkeypatch)
+        provider._public_ip = "203.0.113.5"
+        assert await provider.probe_control_server(5.0) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_before_allocation_answers_false_without_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No address, no question: before allocate there is no guest to ask.
+
+    The adapter's own state gate refuses a probe before ``reset_start`` on the
+    wire, and this is the second layer: even if one arrived, an unallocated
+    provider cannot leak a request anywhere (the address is the thing allocate
+    produces).
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider(stubs, monkeypatch)
+        assert await provider.probe_control_server(5.0) is False
+    assert stubs.http_calls == [] and stubs.http_timeouts == []
 
 
 @pytest.mark.asyncio

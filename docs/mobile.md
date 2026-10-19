@@ -29,6 +29,34 @@ differences:
 3. **Model/effort/slash commands are in the control vocabulary from day one**,
    along with subagent drill-down and resume.
 
+## Computer account-routing settings
+
+The web session list opens **settings → Computer settings** for the relay's
+computer. `GET /api/settings/account-routing` returns capability
+`account-routing-v1` plus the canonical `retry.accountSelectionPolicy` row,
+its effective value, default, labels/help and enum choices from the shared
+settings registry. `PATCH` on the same endpoint accepts **only**
+`{"value":"reset-soonest"}`, `{"value":"headroom"}` or `{"value":"fair"}`.
+This is not an arbitrary configuration editor: caller-supplied key/path fields
+and other settings are rejected. Both phone clients use this same projection;
+the policy is never stored as a phone-local preference.
+
+The existing relay authentication and origin gate applies before config reads
+or writes. Invalid requests return `422` without saving; unreadable config
+returns `409` without quarantining or replacing its bytes. Responses are
+`Cache-Control: no-store`. A missing endpoint or unknown capability means the
+relay cannot edit this setting: clients show unavailable instead of pretending
+a save succeeded. Native clients must bind responses to the selected computer,
+ignore stale reads/saves after switching computers, and disable edits while
+disconnected or saving. Real backend persistence/routing proof is separate from
+a native UI test running against a mock relay.
+
+All three policies preserve an eligible, compatible, unexpired success-derived
+local account lease before ranking. Changing policy does not reset provider,
+model or effort pins. See the [failover guide](../local_operator/guides/failover/GUIDE.md)
+for reset freshness/tolerance, legacy boolean compatibility and bounded cache
+lifetime heuristics; no future cache hit is guaranteed.
+
 ## Security invariants
 
 - **Every listener binds `127.0.0.1` only.** Radient supplies a tunnel and
@@ -364,13 +392,7 @@ so the relay forwards it (the entry-times declaration once shipped inert for wan
 exactly this line). A viewer that does not declare receives no event and no projected
 row and paints no unknown kind; the row is journaled either way.
 
-The phone renders none of this yet, and that is the revision's honest state: the
-projection's `supplement` arm and `mobile/web`'s frame belong to the relay lane. Both
-relay routes are live today (`GET /api/sessions/{id}/supplements/{digest}/document` and
-`GET /api/sessions/{id}/supplements/{job}/file?i=<n>`): `gate()` authenticates the
-caller first, the document's digest is reference-checked against the session's journal,
-and a 404 means only a missing supplement or file -- what a phone still lacks is the
-renderer, so it paints nothing until `mobile/web`'s supplement frame lands (PR #2222).
+The phone renders it, under the same gate: `mobile/web`'s supplement frame (`supplement-block.tsx` + `supplement-frame.tsx`) paints the block — the file callouts, the `N more files` disclosure, the state line and its controls, and components in a sandboxed frame — and the projection's `supplement` arm and `durable.py`'s journal collection feed it the rows. Both relay routes are live: `gate()` authenticates the caller first, the document's digest is reference-checked against the session's journal, and a 404 means only a missing supplement or file. The one lane still pending is the phone app's own WebView frame (below), not the web surface.
 
 Row and event shapes (newest version per anchor; the stale-row rule; the live-only
 `running`/`cancelling` states): `docs/DESKTOP_API.md`, §"Turn supplements". Not in this
@@ -455,6 +477,67 @@ JSON file under the config root (`mobile-transfer-receipts.json`); an
 unreadable journal refuses with a named 503 rather than resetting, because a
 reset would silently re-open every recorded id.
 
+### Conversation tags — central registry, rendered on the phone
+
+Tags are a CROSS-SURFACE contract, not a phone feature: the categories and the
+per-conversation assignment live in `local_operator/session/session_tags.py`,
+beside the desktop app, the TUI and agent callers (including auto-tagging), and
+this relay is one more reader of that store. Three additive pieces:
+
+* **Every local row carries `tags: [{id, name}]` and `primary: id | null` —
+  always present, on `GET /api/sessions`, on the `sessions` SSE frame and on
+  `GET /api/sessions/past` and `/api/sessions/search`.** Untagged is `[]` and
+  `null`; a client never needs a presence check to tell "no tags" from "this
+  relay is too old to send them". Assignment order is preserved (it is the
+  store's record, and the primary fallback), names come from ONE registry
+  snapshot per listing, and unknown/deleted category ids are pruned on read —
+  a deleted category never surfaces as an error.
+* **`GET /api/tags`** → `{tags: [{id, name, order, conversations}]}`, read only.
+  `conversations` is the store's own count of distinct EXISTING session
+  directories (archived/hidden included, deleted excluded). There is
+  deliberately no `PUT /api/tags`: identity (create/rename) stays where it
+  already lives — desktop and agent callers — because a second implementation
+  of category identity is how the two surfaces start disagreeing.
+* **`PUT /api/sessions/{id}/tags`**, body `{tags: [ids], primary: id | null}`
+  → `{session_id, tags: [{id, name}], primary}`. Desired state, applied
+  atomically: empty list plus `null` clears, and a retried request lands on
+  the same state. Exactly those two keys are required: a body without
+  `primary` (or with an unknown/extra key) is 422, never a silent re-primary.
+  Refusals are the desktop route's: 422 with the store's own
+  sentence (unknown id, duplicate ids, more than 8, primary outside `tags`)
+  and no file change; 404 `{"error": "unknown session"}` for an unknown,
+  badly shaped or REMOTE id, and for a live entry with no durable
+  `sessions/<id>/` directory (the desktop route's own rule — the tag store
+  prunes no orphans, so admitting one would store an assignment no surface
+  lists). Auth and the same-origin mutation gate are the pin route's. On
+  success the route invalidates the summaries cache and wakes the list
+  stream, so the writer sees the canonical read-back immediately and every
+  other client repaints.
+
+Remote/mesh rows (`?include_peers`) carry `tags: []` and `primary: null`
+explicitly: their assignment lives in the other device's store, and this relay
+has no local directory to write, hence a remote id earns the 404 rather than
+a special flag.
+
+The phone learns the routes exist from `capabilities.session_tags =
+{"available": true}` on the list frame — a RELAY capability, like `i18n`, and
+deliberately not `features.session_tags`, which is core's build fact and is
+`1` on released relays that have none of these routes (so it cannot gate a
+client). An older relay omits the key; absence means "no controls".
+
+Writes from the desktop, the TUI, an agent or auto-tagging reach an open phone
+within one scan tick (~2 s) without the tick walking the assignment directory:
+`session_tags` publishes an additive equality marker (`tags/revision`, bumped
+only by a REAL mutation — an identical re-write does not move it), and the
+scan pass reads that one small file, rebuilding the projection and waking the
+list only when it moved. The marker also carries cheap stats of the two write
+sites, compared even when the token exists: an older-build writer that
+replaces an assignment without bumping the token is still detected, and a
+no-op write moves neither the token nor the stats. No path scans on an
+unchanged tick. A read that repaints the list does not consume the change for
+other clients: the wake compares against what the daemon last published, not
+the list's own cache token.
+
 ## Failure modes and rules
 
 - **Daemon down, TUI up**: the TUI is unaffected; the record sits unpublished
@@ -537,6 +620,7 @@ never re-derived per surface.
 | Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
 | Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
+| Conversation tags | — | chat sidebar tag chips + `/v1/desktop/tags` | partial — the relay serves the catalogue, the per-row fields and desired-state assignment (S0); phone create/rename is deliberately absent and the chip render is next (S2) |
 | Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
 | Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |

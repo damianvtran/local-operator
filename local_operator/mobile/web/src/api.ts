@@ -19,6 +19,10 @@ import type {
 	ProjectLinkedSession,
 	ProjectSummary,
 	ProjectView,
+	LibraryAsset,
+	LibraryChatLink,
+	LibraryListing,
+	LibraryTag,
 	SessionSummary,
 	SlashCommand,
 	SubagentDetail,
@@ -94,6 +98,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		throw new HttpError(res.status, detail, code);
 	}
 	return (await res.json()) as T;
+}
+
+export type AccountRoutingPayload = {
+	capability: "account-routing-v1";
+	setting: {
+		key: "retry.accountSelectionPolicy";
+		label: string;
+		help: string;
+		kind: "enum";
+		value: string;
+		default: string;
+		is_default: boolean;
+		choices: { value: string; label: string; description: string }[];
+	};
+};
+
+export function isAccountRoutingPayload(payload: unknown): payload is AccountRoutingPayload {
+	if (!payload || typeof payload !== "object") return false;
+	const result = payload as Partial<AccountRoutingPayload>;
+	const row = result.setting;
+	return result.capability === "account-routing-v1" && row?.key === "retry.accountSelectionPolicy" && row.kind === "enum"
+		&& typeof row.label === "string" && typeof row.help === "string" && typeof row.value === "string"
+		&& Array.isArray(row.choices) && row.choices.length > 0
+		&& row.choices.every(choice => typeof choice?.value === "string" && typeof choice.label === "string" && typeof choice.description === "string")
+		&& row.choices.some(choice => choice.value === row.value);
+}
+
+export function getAccountRouting(): Promise<AccountRoutingPayload> {
+	return request("/api/settings/account-routing");
+}
+
+export function setAccountRouting(value: string): Promise<AccountRoutingPayload> {
+	return request("/api/settings/account-routing", {
+		method: "PATCH",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ value }),
+	});
 }
 
 export function getSessions(): Promise<{
@@ -365,6 +406,12 @@ export function transcribeAudio(
 }> {
 	const form = new FormData();
 	form.append("audio", blob, recordingFilename(blob));
+	// The daemon normalises this to an ISO-639-1 code before it reaches Radient
+	// or the client rules; an unmapped tag (e.g. fil-PH -> fil) is omitted, not
+	// guessed. English-only cleanup on a Tagalog take is the failure direction
+	// the cleanup design refuses.
+	const language = typeof navigator !== "undefined" ? navigator.language : "";
+	if (language) form.append("language", language);
 	return fetch("/api/transcribe", { method: "POST", body: form, signal }).then(async (res) => {
 		if (res.status === 401) {
 			handleUnauthorized();
@@ -792,4 +839,134 @@ export function removeProjectMilestone(
 		`/api/projects/${encodeURIComponent(key)}/milestones/${encodeURIComponent(name)}`,
 		{ method: "DELETE" },
 	);
+}
+
+/* ---------------------------------------------------------------------------
+ * Library
+ *
+ * Every call is the relay's own `/api/library*`; ids are opaque `la_` values and
+ * no caller can name a path. `bytes`/`thumb` are URLs rather than fetch wrappers
+ * because the media elements and a download anchor need the URL itself.
+ * ------------------------------------------------------------------------- */
+
+export type LibraryQuery = {
+	q?: string;
+	categories?: string[];
+	kinds?: string[];
+	origin_groups?: string[];
+	origins?: string[];
+	tag?: string;
+	tag_mode?: "all" | "any";
+	highlighted?: boolean;
+	organized?: boolean;
+	favorite?: boolean;
+	session?: string;
+	sort?: "recent" | "name" | "kind" | "size" | "created" | "modified" | "organized";
+	order?: "asc" | "desc";
+	limit?: number;
+	cursor?: string;
+};
+
+function libraryParams(query: LibraryQuery): string {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(query)) {
+		if (value === undefined || value === null || value === "") continue;
+		if (Array.isArray(value)) {
+			if (value.length) params.set(key, value.join(","));
+			continue;
+		}
+		params.set(key, String(value));
+	}
+	return params.toString();
+}
+
+export function getLibrary(query: LibraryQuery = {}): Promise<LibraryListing> {
+	const encoded = libraryParams(query);
+	return request(`/api/library/assets${encoded ? `?${encoded}` : ""}`);
+}
+
+export function getLibraryAsset(assetId: string): Promise<LibraryAsset> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}`);
+}
+
+export function patchLibraryAsset(
+	assetId: string,
+	fields: Partial<Pick<LibraryAsset, "name" | "description" | "favorite" | "locked" | "archived">>,
+): Promise<LibraryAsset> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(fields),
+	});
+}
+
+export function getLibraryTags(): Promise<{ tags: LibraryTag[] }> {
+	return request("/api/library/tags");
+}
+
+export function createLibraryTag(
+	name: string,
+	category = "custom",
+): Promise<{ tag: LibraryTag }> {
+	return request("/api/library/tags", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name, category }),
+	});
+}
+
+export function renameLibraryTag(tagId: string, name: string): Promise<{ tag: LibraryTag }> {
+	return request(`/api/library/tags/${encodeURIComponent(tagId)}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name }),
+	});
+}
+
+export function mergeLibraryTag(tagId: string, into: string): Promise<{ tag: LibraryTag }> {
+	return request(`/api/library/tags/${encodeURIComponent(tagId)}/merge`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ into }),
+	});
+}
+
+export function setLibraryTags(
+	assetId: string,
+	tagIds: string[],
+	primary?: string | null,
+): Promise<LibraryAsset> {
+	/* `primary` is OMITTED unless the caller states one. The relay (like the
+	   desktop store) reads a present null as "clear the primary", so a metadata
+	   save that only renamed a file must not send one — it silently dropped the
+	   tag the reader had chosen elsewhere (review R-3). Passing an explicit
+	   null still clears, for a caller that means it. */
+	const body: { tags: string[]; primary?: string | null } = { tags: tagIds };
+	if (primary !== undefined) body.primary = primary;
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/tags`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+}
+
+export function linkLibraryChat(
+	assetId: string,
+	sessionId: string,
+): Promise<{ chat: LibraryChatLink }> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/chat`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ session_id: sessionId }),
+	});
+}
+
+/** The preview URL for one asset. `download` flips the relay's disposition. */
+export function libraryBytesUrl(assetId: string, download = false): string {
+	const suffix = download ? "?download=1" : "";
+	return `/api/library/assets/${encodeURIComponent(assetId)}/content${suffix}`;
+}
+
+export function libraryThumbUrl(assetId: string, width = 480): string {
+	return `/api/library/assets/${encodeURIComponent(assetId)}/thumbnail?w=${width}`;
 }

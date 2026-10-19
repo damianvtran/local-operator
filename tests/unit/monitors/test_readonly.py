@@ -731,3 +731,155 @@ def test_kubectl_global_flag_before_the_subcommand_is_refused() -> None:
     # And no separator form exists either: the ``--`` rule is the bash layer's.
     reason = readonly._bash_verdict("kubectl get pods -- :")
     assert reason is not None
+
+
+@pytest.fixture
+def closed_bash_monitor_tool() -> tuple[AgentTool, list[str]]:
+    """A public-gate fixture, never the registry/ToolContext construction path."""
+    executions: list[str] = []
+
+    def execute_poison(*_args: Any, **_kwargs: Any) -> Any:
+        executions.append("execute called")
+        raise AssertionError("classification must not execute its target")
+
+    tool = AgentTool(
+        name="bash",
+        approval_tier="exec",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        execute=execute_poison,
+    )
+    return tool, executions
+
+
+@pytest.mark.parametrize("verb", ["view", "list", "diff"])
+def test_glab_mr_public_gate_accepts_plain_reads(closed_bash_monitor_tool, verb: str) -> None:
+    tool, executions = closed_bash_monitor_tool
+    command = f"glab mr {verb}" + (" 123" if verb != "list" else "")
+    assert readonly.monitor_call_verdict(tool, {"command": command}) is None
+    assert executions == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "glab mr view 123 --comments --output json --repo group/project",
+        "glab mr view feature-branch --output=text",
+        "glab mr view --resolved",
+        "glab mr view --unresolved --system-logs",
+        "glab mr list --all --output=json",
+        "glab mr list --closed --repo group/project",
+        "glab mr list --merged",
+        "glab mr list --draft",
+        "glab mr list --not-draft",
+        "glab mr diff 123 --raw --color=never",
+        "glab mr diff feature-branch --color auto",
+        "glab mr diff --color=always",
+        "glab mr view 123 --output json | jq .",
+        "gh pr view 123 --json state",
+    ],
+)
+def test_glab_mr_public_gate_accepts_fixed_read_options(
+    closed_bash_monitor_tool, command: str
+) -> None:
+    tool, executions = closed_bash_monitor_tool
+    assert readonly.monitor_call_verdict(tool, {"command": command}) is None
+    assert executions == []
+
+
+@pytest.mark.parametrize(
+    "command, phrase",
+    [
+        ("glab mr view -", "lone"),
+        ("glab mr list -", "lone"),
+        ("glab mr diff -", "lone"),
+        ("glab mr merge 123", "permits only"),
+        ("glab mr approve 123", "permits only"),
+        ("glab mr create 123", "permits only"),
+        ("glab mr update 123", "permits only"),
+        ("glab mr close 123", "permits only"),
+        ("glab mr reopen 123", "permits only"),
+        ("glab mr delete 123", "permits only"),
+        ("glab mr checkout 123", "permits only"),
+        ("glab mr view 123 --web", "launches a browser"),
+        ("glab mr view 123 -w", "launches a browser"),
+        ("glab mr view 123 --browser", "not an allowed flag"),
+        ("glab mr view 123 --watch", "waits for events"),
+        ("glab mr view 123 --output-file=result.json", "not an allowed flag"),
+        ("glab mr view 123 --json state", "not an allowed flag"),
+        ("glab mr view 123 --output /file", "text/json"),
+        ("glab mr view 123 --output=", "explicit non-option value"),
+        ("glab mr view 123 --output", "expects a value"),
+        ("glab mr view 123 --repo", "expects a value"),
+        ("glab mr view 123 --repo --web", "explicit non-option value"),
+        ("glab mr diff 123 --color rainbow", "always/never/auto"),
+        ("glab mr list extra", "too many positional"),
+        ("glab mr view 1 2", "too many positional"),
+        ("glab mr diff 1 2", "too many positional"),
+        ("glab mr show 123", "permits only"),
+        ("glab mr ls", "permits only"),
+        ("glab --repo group/project mr view 123", "not a read-only"),
+        ("glab mr view -- 123", "separator"),
+        ("glab mr view 123 -F json", "not an allowed flag"),
+        ("gh mr view 123", "not a read-only"),
+        ("glab api projects/1", "method-flippable api"),
+        ("glab api projects/1 -X POST", "method-flippable api"),
+        ("glab api projects/1 --method PATCH", "method-flippable api"),
+        ("glab api projects/1 -X DELETE", "method-flippable api"),
+        ("glab api projects/1 -X PUT", "method-flippable api"),
+        ("glab api projects/1 -F key=value", "method-flippable api"),
+        ("glab api projects/1 -f key=value", "method-flippable api"),
+        ("glab api projects/1 --form key=value", "method-flippable api"),
+        ("glab api projects/1 --input body.json", "method-flippable api"),
+        ("glab api projects/1 -X GET --input body.json", "method-flippable api"),
+        ("glab api projects/1 --method GET -F key=value", "method-flippable api"),
+        ("glab api projects/1 --method GET", "method-flippable api"),
+        ("glab api graphql", "method-flippable api"),
+    ],
+)
+def test_glab_mr_public_gate_rejects_unsafe_grammar(
+    closed_bash_monitor_tool, command: str, phrase: str
+) -> None:
+    tool, executions = closed_bash_monitor_tool
+    reason = readonly.monitor_call_verdict(tool, {"command": command})
+    assert reason is not None and phrase in reason, reason
+    assert executions == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "glab mr view 123; touch x",
+        "glab mr view 123 && touch x",
+        "glab mr view 123 || true",
+        "glab mr view 123 > out",
+        "glab mr view $(echo 123)",
+        "glab mr view `echo 123`",
+        "/usr/bin/glab mr view 123",
+        "env glab mr view 123",
+        "aliasname mr view 123",
+        "glab mr view 123 --output json | touch x",
+    ],
+)
+def test_glab_mr_public_gate_retains_shell_safety(closed_bash_monitor_tool, command: str) -> None:
+    tool, executions = closed_bash_monitor_tool
+    assert readonly.monitor_call_verdict(tool, {"command": command}) is not None
+    assert executions == []
+
+
+def test_glab_mr_public_gate_keeps_shape_and_safety_order(closed_bash_monitor_tool) -> None:
+    tool, executions = closed_bash_monitor_tool
+    # Closed-schema validation must remain real; a read verdict alone is insufficient.
+    safe_bad_shape = {"command": "glab mr view 123", "unexpected": True}
+    shape_reason = readonly.monitor_call_verdict(tool, safe_bad_shape)
+    assert shape_reason is not None and 'unknown argument(s) "unexpected"' in shape_reason
+    unsafe = {"command": "glab mr merge 123"}
+    unsafe_bad_shape = {**unsafe, "unexpected": True}
+    safety_reason = readonly.monitor_call_verdict(tool, unsafe)
+    assert safety_reason is not None and "permits only" in safety_reason
+    assert readonly.monitor_call_verdict(tool, unsafe_bad_shape) == safety_reason
+    assert executions == []

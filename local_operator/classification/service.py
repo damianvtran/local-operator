@@ -771,8 +771,9 @@ class ClassificationService:
 
         WHAT RECORDS, AND WHAT DOES NOT (each case has a test):
 
-        * answered -> ``ok`` with the vendor's ``usage.cost`` (unknown, not zero, when it
-          sent none);
+        * answered -> ``ok`` with the amount the leg stated — its inline ``usage.cost``,
+          else the server-reported top-level ``cost`` object Radient's decision route
+          sends instead, else unknown (never zero);
         * refused / unusable -> ``failed``, ``ok``-unknown or ``cancelled``-unknown per
           :func:`~local_operator.classification.accounting.failed_record`;
         * cancelled mid-request (the call's ``timeoutMs`` deadline, a dispose, a caller
@@ -813,7 +814,16 @@ class ClassificationService:
             raise
         else:
             if meter.posts:
-                self._emit(lambda: accounting.answered_record(response, posts=meter.posts))
+                self._emit(
+                    lambda: accounting.answered_record(
+                        response,
+                        # The leg model is the fallback when the server stated
+                        # no cost object: the id we ASKED for is the identity
+                        # the row was billed under, not the vendor's echo.
+                        requested_model=accounting.model_of(vendor),
+                        posts=meter.posts,
+                    )
+                )
             return response
         finally:
             accounting.end_attempt(token)

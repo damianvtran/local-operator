@@ -1,0 +1,11 @@
+{
+  "cli.config_help.config": "Manage configuration settings",
+  "cli.config_help.open": "Open the configuration file in the default editor",
+  "cli.config_help.edit": "Edit a specific configuration value in the config file",
+  "cli.config_help.edit_key": "Configuration key to update (e.g., hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)",
+  "cli.config_help.edit_value": "New value for the configuration key (type is automatically converted based on the key)",
+  "cli.config_help.list": "List available configuration options and their descriptions",
+  "cli.config_help.create": "Create a new configuration file",
+  "cli.config_help.instructions": "Show which custom-instruction files a session assembles, in order (paths and sizes only, never their contents)",
+  "cli.config_help.instructions_description": "Show which custom-instruction files a session assembles, in order, with the size each contributed and whether it was collapsed as a duplicate, truncated, or overlaps an earlier source. Paths and sizes only, never the contents."
+}

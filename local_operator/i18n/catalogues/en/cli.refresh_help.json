@@ -1,0 +1,9 @@
+{
+  "cli.refresh_help.refresh": "Ask running sessions to move to the build on disk at their next boundary (no signals)",
+  "cli.refresh_help.target": "conversation-name / session-id / pid / cwd substring (case-insensitive)",
+  "cli.refresh_help.pid": "target by exact pid",
+  "cli.refresh_help.session": "target by exact session id",
+  "cli.refresh_help.all": "ask every live session on this machine (no confirmation: nothing is ended)",
+  "cli.refresh_help.json": "machine-readable outcome per target",
+  "cli.refresh_help.timeout": "wait per session for its answer (default 10)"
+}

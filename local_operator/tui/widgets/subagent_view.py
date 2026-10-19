@@ -79,6 +79,12 @@ from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_K
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
+
+# i18n: the title row's surface name and swept-job phrase are user-facing
+# copy, extracted so a locale can carry them; `_t` is bound BELOW the whole
+# import block so no later import reads as not-at-top (E402).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.transcript import (
@@ -110,6 +116,15 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
     WorkingBlock,
 )
+
+_t = tr("tui.small")
+
+#: The ledger key of the delegated-instruction entry in ``_known``/``_order``.
+#: A machine identifier, never copy: it is spelled once here because the
+#: scanner counts any `.append("...")` argument as prose, and the one sink
+#: this key flows through (`_order.append`) would otherwise register a false
+#: literal that no catalogue should ever carry.
+_PROMPT_KEY = "__prompt__"
 
 #: Events read per fold. The engine caps the retained list at the same number
 #: (``subagent.TRAJECTORY_CAP``), so this is the TUI's half of one shared
@@ -1679,10 +1694,23 @@ class HintButton(Static):
     :meth:`set_actionable`.
     """
 
-    def __init__(self, key: str, action: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        key: str,
+        action: Callable[[], None] | None = None,
+        *,
+        ink: tuple[str, str] = ("dim", "faint"),
+        lifted_ink: tuple[str, str] = ("fg", "muted"),
+    ) -> None:
         super().__init__(classes="subagent-view-hint")
         self._key = key
         self._action = action
+        #: ``(key, label)`` semantic tokens at rest and while hovered. The
+        #: defaults preserve every existing page; a page whose own surface
+        #: lifts the ``dim``/``faint`` pair below AA passes a readable pair
+        #: (``/review``: muted/muted resting, fg/fg hovered — design D1).
+        self._ink = ink
+        self._lifted_ink = lifted_ink
         self._label = ""
         self._lead = False
         self._hovered = False
@@ -1748,15 +1776,15 @@ class HintButton(Static):
         return self._build(self._label, lead=self._lead, hovered=self._hovered)
 
     def _build(self, label: str, *, lead: bool, hovered: bool) -> Text:
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        faint = Style(color=theme_mod.semantic_color("faint"))
+        key_token, label_token = self._ink
         # Hover lifts each tone one step, so the whole hint answers the pointer
         # rather than only its key — a half-lit hint reads as a rendering
-        # glitch. The lifted tones are the SAME two tokens one rung brighter,
-        # so no colour is introduced and the accent is not spent.
+        # glitch. The lifted pair is the SAME two tokens one rung brighter, so
+        # no colour is introduced and the accent is not spent.
         if hovered and self._actionable:
-            dim = Style(color=theme_mod.semantic_color("fg"))
-            faint = Style(color=theme_mod.semantic_color("muted"))
+            key_token, label_token = self._lifted_ink
+        dim = Style(color=theme_mod.semantic_color(key_token))
+        faint = Style(color=theme_mod.semantic_color(label_token))
         row = Text(no_wrap=True, overflow="ellipsis")
         if lead:
             # The seam belongs to the ROW, not to the hint that follows it, so
@@ -2227,7 +2255,7 @@ class SubagentView(Vertical):
         if self._launch_message_id and self._instruction:
             resolved_prompts[self._launch_message_id] = self._instruction
         self._launch_prompts = resolved_prompts
-        if self._instruction and "__prompt__" not in self._known:
+        if self._instruction and _PROMPT_KEY not in self._known:
             # HEAD position, and it is safe only because `AsyncJob.prompt` is
             # assigned at REGISTRATION (harness/subagent.py) — before a runner
             # exists, so before any trajectory entry can fold. `_order` is
@@ -2236,12 +2264,12 @@ class SubagentView(Vertical):
             # list and `_sync_body` would rebuild the whole page under a reader
             # mid-scroll, so the fallback appends rather than doing that.
             if self._order:
-                self._order.append("__prompt__")
+                self._order.append(_PROMPT_KEY)
             else:
-                self._order.insert(0, "__prompt__")
+                self._order.insert(0, _PROMPT_KEY)
         if self._instruction:
-            self._known["__prompt__"] = SubagentEntry(
-                key="__prompt__", kind="prompt", text=self._instruction
+            self._known[_PROMPT_KEY] = SubagentEntry(
+                key=_PROMPT_KEY, kind="prompt", text=self._instruction
             )
         head: SubagentEntry | None = None
         for entry in fold_trajectory(events, settled=not self._running and not queued):
@@ -2836,7 +2864,7 @@ class SubagentView(Vertical):
         live = [self._known[key] for key in self._order]
         durable_keys = {entry.key for entry in self._history_entries}
         history = list(self._history_entries)
-        prompt_entry = self._known.get("__prompt__")
+        prompt_entry = self._known.get(_PROMPT_KEY)
         # The synthetic head is the fallback for the CURRENT launch only, so its
         # suppression tracks that row specifically: a paged window holding a
         # prior attempt's launch but not the current one still needs the head.
@@ -2856,7 +2884,7 @@ class SubagentView(Vertical):
             *(
                 entry
                 for entry in live
-                if entry.key != "__prompt__" and entry.key not in durable_keys
+                if entry.key != _PROMPT_KEY and entry.key not in durable_keys
             ),
         ]
         return self._without_new_cross_session_rows(entries)
@@ -3081,7 +3109,7 @@ class SubagentView(Vertical):
         # the prompt counted, a settled job that recorded no activity showed
         # the instruction and then nothing — no row admitting the run left
         # nothing behind, which is the state this slot exists to name.
-        activity = bool(self._history_entries) or any(key != "__prompt__" for key in self._order)
+        activity = bool(self._history_entries) or any(key != _PROMPT_KEY for key in self._order)
         # A follower's rows arrive over the socket after the page opens, so
         # "nothing yet" here is a fetch in flight rather than a child that did
         # nothing. Only claimed while the page is genuinely still empty: once
@@ -3601,11 +3629,11 @@ class SubagentView(Vertical):
             # was ✓, the app's own mark for "this succeeded", over a run whose
             # outcome is no longer knowable.
             row = Text(no_wrap=True, overflow="ellipsis")
-            row.append("Subagent", style=dim)
+            row.append(_t(_x.subagent_view_row_name()), style=dim)
             row.append(" · ", style=faint)
             row.append(truncate_cells(self._label, max(8, width - 26)), style=fg)
             row.append("  ", style=dim)
-            row.append("no longer on the ledger", style=dim)
+            row.append(_t(_x.subagent_view_no_longer_on_ledger()), style=dim)
             row.truncate(width, overflow="ellipsis")
             return row
 
@@ -3718,7 +3746,9 @@ class SubagentView(Vertical):
                         )
                         label = truncate_cells(self._label, max(8, width - spend))
                         row = Text(no_wrap=True, overflow="ellipsis")
-                        row.append("Subagent", style=dim)
+                        # Same key as the swept-job row above: one surface
+                        # name, so the two rows cannot drift apart.
+                        row.append(_t(_x.subagent_view_row_name()), style=dim)
                         row.append(" · ", style=faint)
                         if keep_role:
                             row.append(role_seg, style=dim)

@@ -185,6 +185,165 @@ def test_credential_store_resolver_never_falls_back_to_the_environment(
 
 
 # ---------------------------------------------------------------------------
+# resolution scope and budget (2026-10-17: the silent-boot storm)
+# ---------------------------------------------------------------------------
+
+
+def test_store_resolution_reads_only_the_requested_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K refs cost K reads, not a full-store scan -- the boot-storm property.
+
+    MEASURED WHY. On 2026-10-17 the resolver read every non-provider row (130
+    on the campaign's scratch stores) through the broker before serving ~18
+    refs, and an episode boot resolves twice (infra refs, then secret refs);
+    four concurrent session-arm runs spend ~11 minutes of boot SILENCE with
+    stacks in ``retrieve_secret -> fetch_master_key -> recv_frame``. This pins
+    the scope: the fetch count equals the asked-for names, a repeated name is
+    fetched once, and a big store is never walked.
+    """
+    import local_operator.secrets.access as access
+    from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
+
+    store = _isolated_store(tmp_path, monkeypatch)
+    for index in range(8):
+        store.set(f"BULK_{index}", f"bulk-value-{index}".encode())
+    store.set("WANTED", b"wanted-value")
+
+    fetched: list[str] = []
+    real_retrieve = access.retrieve_secret
+
+    def watching(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
+        fetched.append(name)
+        return real_retrieve(name, base, role=role)
+
+    monkeypatch.setattr(access, "retrieve_secret", watching)
+    resolver = CredentialStoreResolver(tmp_path / "config")
+    resolved = resolver.resolve(["WANTED", "WANTED"])
+    assert [(secret.name, secret.value) for secret in resolved] == [
+        ("WANTED", "wanted-value"),
+        ("WANTED", "wanted-value"),
+    ]
+    # One fetch for the repeated ref; none for the eight bulk rows.
+    assert fetched == ["WANTED"]
+
+
+def test_a_stalled_store_fails_the_resolution_budget_by_name_not_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget converts a silent storm into a named preflight failure.
+
+    A per-call bound is not enough: each row's broker call is bounded
+    (``REQUEST_TIMEOUT_S``), but a storm of slow answers costs that bound PER
+    ROW, and the old code swallowed each per-row failure -- so the aggregate
+    was unbounded and the boot emitted nothing. The failure must name the ref
+    and the budget, must NOT be ``MissingSecret`` (a different problem with a
+    different fix), and must never carry a value.
+    """
+    import time
+
+    import local_operator.secrets.access as access
+    from local_operator.evaluation.runner.host_secrets import (
+        CredentialStoreResolver,
+        SecretResolutionTimeout,
+    )
+
+    store = _isolated_store(tmp_path, monkeypatch)
+    slow_names = ("SLOW_ONE", "SLOW_TWO", "SLOW_THREE")
+    for name in slow_names:
+        store.set(name, CANARY.encode())
+
+    real_retrieve = access.retrieve_secret
+
+    def slow(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
+        time.sleep(0.03)
+        return real_retrieve(name, base, role=role)
+
+    monkeypatch.setattr(access, "retrieve_secret", slow)
+    monkeypatch.setenv("LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS", "50")
+
+    resolver = CredentialStoreResolver(tmp_path / "config")
+    started = time.monotonic()
+    with pytest.raises(SecretResolutionTimeout) as raised:
+        resolver.resolve(list(slow_names))
+    elapsed = time.monotonic() - started
+    # The property is "bounded": far below any hang, above the budget itself.
+    assert 0.05 <= elapsed < 5.0
+    error = raised.value
+    assert not isinstance(error, MissingSecret)
+    message = str(error)
+    assert error.name in slow_names
+    # The check runs BETWEEN fetches: under normal scheduling the third fetch's
+    # re-check fires; a stalled host fires at the second. Both are correct.
+    assert error.position in (2, 3) and error.total == 3
+    assert f"{error.budget_s:g}s budget" in message
+    assert "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS" in message
+    assert CANARY not in message
+
+
+def test_a_zero_budget_disables_the_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``0`` restores the unbudgeted behaviour (the documented off-switch)."""
+    import time
+
+    import local_operator.secrets.access as access
+    from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
+
+    store = _isolated_store(tmp_path, monkeypatch)
+    store.set("SLOW_OK", CANARY.encode())
+
+    real_retrieve = access.retrieve_secret
+
+    def slow(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
+        time.sleep(0.02)
+        return real_retrieve(name, base, role=role)
+
+    monkeypatch.setattr(access, "retrieve_secret", slow)
+    monkeypatch.setenv("LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS", "0")
+
+    resolver = CredentialStoreResolver(tmp_path / "config")
+    assert resolver.resolve(["SLOW_OK"])[0].value == CANARY
+
+
+def test_a_malformed_budget_is_announced_and_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo'd override must say so -- and must not read as the off-switch.
+
+    On the change that exists to end silent fallbacks, an unusable knob value
+    being ignored in silence (or a NEGATIVE one silently disabling the bound)
+    would be the same defect one level up (review NIT-1, 2026-10-17).
+    """
+    import logging
+
+    from local_operator.evaluation.runner import host_secrets
+
+    for malformed in ("not-a-number", "-5", ""):
+        monkeypatch.setenv(host_secrets.RESOLUTION_TIMEOUT_ENV, malformed)
+        with caplog.at_level(logging.WARNING, logger=host_secrets.__name__):
+            budget = host_secrets._resolution_timeout_s()
+        assert budget == host_secrets.DEFAULT_RESOLUTION_TIMEOUT_MS / 1000.0, malformed
+        assert any(
+            host_secrets.RESOLUTION_TIMEOUT_ENV in record.getMessage() for record in caplog.records
+        ), malformed
+        caplog.clear()
+
+
+def test_the_unset_budget_is_the_default_and_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Absent knob: the default, no announcement (nothing was overridden)."""
+    import logging
+
+    from local_operator.evaluation.runner import host_secrets
+
+    monkeypatch.delenv(host_secrets.RESOLUTION_TIMEOUT_ENV, raising=False)
+    with caplog.at_level(logging.WARNING, logger=host_secrets.__name__):
+        budget = host_secrets._resolution_timeout_s()
+    assert budget == host_secrets.DEFAULT_RESOLUTION_TIMEOUT_MS / 1000.0
+    assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
 # MAJOR-1: an over-long value never reaches a message
 # ---------------------------------------------------------------------------
 

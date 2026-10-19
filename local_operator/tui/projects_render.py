@@ -45,12 +45,15 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
+from local_operator.i18n.keys import tui_projects as _x
+from local_operator.i18n.text import tr
 from local_operator.projects import PROJECT_ROW_CAP, PROJECT_STATUSES
 from local_operator.projects import age_text as derived_age_text
 from local_operator.projects import display_name, file_size_text, is_session_id
 from local_operator.projects import milestone_state as derived_milestone_state
 from local_operator.projects import refreshed_age_text, refreshed_note, truncate_row
 
+_t = tr("tui.projects")
 #: Cap on projects a single canvas renders. Past it the canvas names the
 #: overflow in one truncation row; the cap exists so one runaway store cannot
 #: make a keystroke path paint unbounded text (the settings list's discipline).
@@ -581,7 +584,7 @@ def render_project_list(
     if len(views) > PROJECTS_MAX:
         lines.append(
             Text(
-                f"  … +{len(views) - PROJECTS_MAX} more not shown",
+                _t(_x.render_more_not_shown_indent(count=str(len(views) - PROJECTS_MAX))),
                 style=resolver("dim"),
             )
         )
@@ -679,11 +682,14 @@ def _card_lines(
     # An absent chip is OMITTED, not painted as "none": a column of "no
     # estimate" cells is noise, and the card's third line already carries the
     # honest absence ("no progress"). A card with nothing at all says so once.
-    facts.append(" · ".join(bits) if bits else "no estimate or dates", style=style_for("dim"))
+    facts.append(
+        " · ".join(bits) if bits else _t(_x.render_no_estimate_or_dates()),
+        style=style_for("dim"),
+    )
     fresh = Text(no_wrap=True)
     age = progress_age_text(view, now=now)
     if age is None:
-        fresh.append("no progress", style=style_for("dim"))
+        fresh.append(_t(_x.render_no_progress()), style=style_for("dim"))
     else:
         stale = " (stale)" if view.get("progress_stale") else ""
         stale_style = style_for("stale") if stale else style_for("dim")
@@ -693,11 +699,11 @@ def _card_lines(
         # capture frames). §4.3's contract puts the board's copy in the
         # tooltip; on the TUI board the two facts live on the list row and the
         # detail page instead.
-        fresh.append(f"reported {age} ago{stale}", style=stale_style)
+        fresh.append(_t(_x.render_reported_ago(age=str(age), suffix=stale)), style=stale_style)
     live = live_count(view)
     if live:
         fresh.append(" · ", style=style_for("dim"))
-        fresh.append(f"{live} live", style=style_for("live"))
+        fresh.append(_t(_x.render_live_count(count=str(live))), style=style_for("live"))
     return [name, facts, fresh]
 
 
@@ -888,7 +894,10 @@ def render_project_board(
         if len(views) > PROJECTS_MAX:
             blocks[0].append(Text(""))
             blocks[0].append(
-                Text(f"… +{len(views) - PROJECTS_MAX} more not shown", style=resolver("dim"))
+                Text(
+                    _t(_x.render_more_not_shown(count=str(len(views) - PROJECTS_MAX))),
+                    style=resolver("dim"),
+                )
             )
         lines = _stack_board_blocks(blocks)
         width = max(cell_len(line.plain) for line in lines)
@@ -1240,7 +1249,9 @@ def render_project_timeline(
             # aim at a row with no visible selection at all (agent review
             # round 1, F1).
             tail = Text()
-            tail.append(f"no dates ({len(undated)}): ", style=resolver("dim"))
+            tail.append(
+                _t(_x.render_no_dates_count(count=str(len(undated)))), style=resolver("dim")
+            )
             entries, _ranges = _tail_entries(
                 undated, selected_id=selected_id, mine=mine, resolver=resolver
             )
@@ -1258,7 +1269,10 @@ def render_project_timeline(
                     continue
                 start = len(lines)
                 tail = Text()
-                tail.append(f"no dates ({label}, {len(section_undated)}): ", style=resolver("dim"))
+                tail.append(
+                    _t(_x.render_no_dates_label(label=label, count=str(len(section_undated)))),
+                    style=resolver("dim"),
+                )
                 entries, _ranges = _tail_entries(
                     section_undated, selected_id=selected_id, mine=mine, resolver=resolver
                 )
@@ -1997,7 +2011,7 @@ def detail_footer(
     progress = Text(no_wrap=True)
     age = progress_age_text(view, now=now)
     if age is None:
-        progress.append("progress: none recorded", style=resolver("dim"))
+        progress.append(_t(_x.render_progress_none()), style=resolver("dim"))
     else:
         stale = " · stale" if view.get("progress_stale") else ""
         by = str(project.get("progress_reported_by") or "")
@@ -2008,7 +2022,8 @@ def detail_footer(
         note = refreshed_note(project, now=now)
         checked = f" · {note}" if note is not None else ""
         progress.append(
-            f"progress reported {age} ago{reporter}{stale}{checked}: ", style=resolver("dim")
+            _t(_x.render_progress_reported(age=str(age), suffix=f"{reporter}{stale}{checked}")),
+            style=resolver("dim"),
         )
         progress.append(str(project.get("progress") or ""))
     clauses["progress"] = progress
@@ -2031,7 +2046,7 @@ def detail_footer(
     rows_value = view.get("sessions")
     rows: list[Any] = rows_value if isinstance(rows_value, list) else []
     if not rows:
-        sessions.append("no linked sessions", style=resolver("dim"))
+        sessions.append(_t(_x.render_no_linked_sessions()), style=resolver("dim"))
     else:
         # Work links and filings are distinct clauses: the working list is
         # what the runtime words describe; a filing says `filed by <id>` and
@@ -2043,7 +2058,7 @@ def detail_footer(
             row for row in rows if isinstance(row, dict) and row.get("role") == "coordination"
         ]
         if working_rows:
-            sessions.append("working: ", style=resolver("dim"))
+            sessions.append(_t(_x.render_working_prefix()), style=resolver("dim"))
             bits: list[str] = []
             for row in working_rows[:4]:
                 if not isinstance(row, dict):
@@ -2054,7 +2069,7 @@ def detail_footer(
                     # The link is stale — say so rather than "stopped", which
                     # would be a wrong statement about a session that is gone
                     # (agent review round 1, F5; GUIDE.md's `missing` promise).
-                    bits.append(f"{session_id} [missing]")
+                    bits.append(_t(_x.render_session_missing(session=str(session_id))))
                     continue
                 runtime_value = session_row.get("runtime")
                 runtime: dict[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
@@ -2079,13 +2094,16 @@ def detail_footer(
                 bits.append(bit)
             sessions.append(" · ".join(bits))
             if len(working_rows) > 4:
-                sessions.append(f" · +{len(working_rows) - 4} more", style=resolver("dim"))
+                sessions.append(
+                    _t(_x.render_more_working(count=str(len(working_rows) - 4))),
+                    style=resolver("dim"),
+                )
         if filed_rows:
             if working_rows:
                 sessions.append(" · ", style=resolver("dim"))
             filed_ids = ", ".join(str(row.get("session_id") or "") for row in filed_rows[:3])
             more = f" +{len(filed_rows) - 3} more" if len(filed_rows) > 3 else ""
-            sessions.append(f"filed by {filed_ids}{more}", style=resolver("dim"))
+            sessions.append(_t(_x.render_filed_by(ids=filed_ids, more=more)), style=resolver("dim"))
     clauses["sessions"] = sessions
 
     # An EMPTY clause is not a clause: a milestone-less project must not paint
@@ -2246,7 +2264,7 @@ def detail_meta_line(
         return line
 
     if not clauses:
-        return Text("no estimate or dates", style=resolver("dim"), no_wrap=True)
+        return Text(_t(_x.render_no_estimate_or_dates()), style=resolver("dim"), no_wrap=True)
     kept = list(clauses)
     while True:
         line = compose(kept)
@@ -2272,7 +2290,7 @@ def detail_progress_line(
     project = _row(view)
     age = progress_age_text(view)
     if age is None:
-        return Text("no progress recorded", style=resolver("dim"), no_wrap=True)
+        return Text(_t(_x.render_no_progress_recorded()), style=resolver("dim"), no_wrap=True)
     reporter = str(project.get("progress_reported_by") or "")
     attribution = ""
     if reporter and reporter != "operator":
@@ -2384,13 +2402,19 @@ def detail_session_row_text(
         running = subagents.get("running")
         settled = subagents.get("settled")
         if isinstance(running, int) and isinstance(settled, int):
-            line.append(f" · {running} running/{settled} settled", style=resolver("dim"))
+            line.append(
+                _t(_x.render_running_settled(running=str(running), settled=str(settled))),
+                style=resolver("dim"),
+            )
     todos = row.get("todos")
     if isinstance(todos, dict):
         open_count = todos.get("open")
         total = todos.get("total")
         if isinstance(open_count, int) and isinstance(total, int):
-            line.append(f" · todos {open_count}/{total}", style=resolver("dim"))
+            line.append(
+                _t(_x.render_todos_counts(open=str(open_count), total=str(total))),
+                style=resolver("dim"),
+            )
     return line
 
 
@@ -2416,16 +2440,19 @@ def detail_todo_lines(
         session_id = str(row.get("session_id") or "")
         own = bool(own_session) and session_id == own_session
         line = Text(no_wrap=True)
-        line.append("own session" if own else session_id, style=resolver("name"))
+        line.append(_t(_x.render_own_session()) if own else session_id, style=resolver("name"))
         line.append(": ", style=resolver("dim"))
-        line.append(f"{open_count} open / {total}", style=resolver("dim"))
+        line.append(
+            _t(_x.render_open_over_total(open=str(open_count), total=str(total))),
+            style=resolver("dim"),
+        )
         next_items = todos.get("next")
         if own and isinstance(next_items, list) and next_items:
             joined = ", ".join(f'"{str(item)}"' for item in next_items[:3])
-            line.append(f" — next: {joined}", style=resolver("dim"))
+            line.append(_t(_x.render_next_clause(joined=joined)), style=resolver("dim"))
         lines.append(line)
     if not lines:
-        lines.append(Text("todo snapshots: none yet", style=resolver("dim"), no_wrap=True))
+        lines.append(Text(_t(_x.render_todo_snapshots_none()), style=resolver("dim"), no_wrap=True))
     return lines
 
 
@@ -2571,7 +2598,11 @@ def update_more_lines_text(
     resolver = _styles(style_for)
     verb = "collapse" if expanded else "expand"
     noun = "line" if count == 1 else "lines"
-    return Text(f"[{count} more {noun} — ↵ {verb}]", style=resolver("muted"), no_wrap=True)
+    return Text(
+        _t(_x.render_more_lines_hint(count=str(count), noun=noun, verb=verb)),
+        style=resolver("muted"),
+        no_wrap=True,
+    )
 
 
 def attachment_row_text(
@@ -2720,7 +2751,7 @@ def attachment_path_text(
 def older_updates_text(count: int, *, style_for: StyleFor | None = None) -> Text:
     """``… N older updates`` — the trailing row for the render cap (spec §7.3)."""
     resolver = _styles(style_for)
-    return Text(f"… {count} older updates", style=resolver("dim"), no_wrap=True)
+    return Text(_t(_x.render_older_updates(count=str(count))), style=resolver("dim"), no_wrap=True)
 
 
 def aggregate_footer(

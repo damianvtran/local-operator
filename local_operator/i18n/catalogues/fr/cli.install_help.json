@@ -1,0 +1,7 @@
+{
+  "cli.install_help.install": "Gérer les générations d’installation locales (arborescence du runtime `lop` stable)",
+  "cli.install_help.prune": "Supprimer les générations d’installation depuis lesquelles rien ne tourne",
+  "cli.install_help.keep": "Combien de générations non référencées conserver (par défaut : %(default)s ; 0 ou plus). Une génération nommée par une session active ou enregistrée, et celle vers laquelle pointe `current`, ne sont jamais supprimées",
+  "cli.install_help.migrate": "Copier cette installation dans l’arborescence des générations et y faire pointer `current`",
+  "cli.install_help.status": "Afficher l’arborescence d’installation : pointeur, générations et ce qu’un nouveau `lop` chargerait"
+}

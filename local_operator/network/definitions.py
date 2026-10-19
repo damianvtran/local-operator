@@ -2318,6 +2318,11 @@ POLICY_REFUSAL_CODES: frozenset[str] = frozenset(
         "not_a_member",
         "policy",
         "no_network_secret",
+        # A peer's memory handler refused the batch itself (a move whose source
+        # tombstone would erase an unseen local revision, or an invalid payload).
+        # It answers the same way until the named conflict is resolved, so the
+        # 15 s floor would only flood both audit logs; 30 min still re-attempts.
+        "bad_memory",
     }
 )
 

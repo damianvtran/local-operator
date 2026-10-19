@@ -254,7 +254,7 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
     replaces, chosen wide enough that a loaded CI runner cannot trip it.
     """
     import pty
-    import select
+    import selectors
     import signal as signal_module
     import time
 
@@ -278,17 +278,29 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
 
     def drain(seconds: float) -> None:
         deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([fd], [], [], 0.1)
-            if not ready:
-                continue
-            try:
-                chunk = os.read(fd, 65536)
-            except OSError:
-                return
-            if not chunk:
-                return
-            output.extend(chunk)
+        # A SELECTOR, NOT ``select.select`` — the fd NUMBER is the trap.
+        # ``select.select`` indexes a bit set by the raw fd number, so an fd at
+        # or above ``FD_SETSIZE`` (1024) makes it raise ``ValueError:
+        # filedescriptor out of range in select()`` before it waits at all, and
+        # a loaded worker's ``pty.fork()`` hands back the next free
+        # descriptor — which on a long-lived shard sits above that ceiling
+        # (measured red on CI main, both provider cells: runs 38165502284 and
+        # 38196014852; reproduced deterministically by holding 1100 fds before
+        # this helper). ``selectors.DefaultSelector`` is epoll on Linux and
+        # kqueue on macOS, neither of which has the limit, and it watches the
+        # same bytes on the same pty with the same 0.1 s budget.
+        with selectors.DefaultSelector() as reader:
+            reader.register(fd, selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                if not reader.select(0.1):
+                    continue
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                output.extend(chunk)
 
     try:
         # THE PRECONDITION, ASSERTED. "Cancelled in 40 ms" is worthless if the

@@ -87,6 +87,14 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+
+# i18n: this picker's notices, placeholder and counter copy is user-facing,
+# extracted so a locale can carry it; `_t` is bound BELOW the whole import
+# block so no later import reads as not-at-top (E402, the earlier slice's
+# CI failure). The counter's ` of ` reuses the existing picker separator
+# key rather than minting a second spelling of the same bytes.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.paths import config_dir
 
 # The row's searchable text (``fork_haystack``) and the search itself both live
@@ -108,6 +116,8 @@ from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.terminal_title import SPINNER_FRAMES, SPINNER_INTERVAL_S
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 logger = logging.getLogger(__name__)
 
@@ -3400,7 +3410,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
             out = Text()
             out.append_text(toggle)
             out.append("\n")
-            out.append(f"all {self._archived_total} conversation(s) are archived", style=dim)
+            out.append(
+                _t(_x.session_picker_all_archived(total=str(self._archived_total))),
+                style=dim,
+            )
             return out
         if not rows:
             # The filter row already echoes the query; repeating it here said
@@ -3410,7 +3423,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             if toggle_drawn:
                 out.append_text(toggle)
                 out.append("\n")
-            out.append("no session matches that filter", style=dim)
+            out.append(_t(_x.session_picker_no_match_filter()), style=dim)
             return out
 
         budget = self._drawable_rows()
@@ -3521,7 +3534,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # avoid, in the one state that ever shows it (design round 5, D4).
             query = self._query.strip()
             if not query:
-                return Text("no session", style=dim)
+                return Text(_t(_x.session_picker_no_session()), style=dim)
             return Text(truncate_cells(f"no match for “{query}”", self._pane_width()), style=dim)
 
         # THE READ IS RESOLVED FIRST: the header's size is a function of it. The
@@ -3730,7 +3743,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         if self._query:
             out.append(self._query, style=label)
         else:
-            out.append("type to filter", style=dim)
+            out.append(_t(_x.session_picker_type_to_filter()), style=dim)
 
         counter: tuple[int, int, int] | None = None
         if rows and len(rows) > drawn:
@@ -3768,9 +3781,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
             )
         if counter is not None:
             first, last, total = counter
-            tail.append("   showing ", style=dim)
+            tail.append(_t(_x.session_picker_showing_prefix()), style=dim)
             tail.append(f"{first:,}–{last:,}", style=dim)
-            tail.append(" of ", style=dim)
+            tail.append(_t(_x.picker_of_separator()), style=dim)
             tail.append(f"{total:,}", style=dim)
         else:
             # THE FILTERED COUNT WHENEVER A FILTER IS ACTIVE, even though the
@@ -3836,7 +3849,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # and the legend from a row that had space for both.
         mode_hint = Text(no_wrap=True, overflow="ellipsis")
         mode_hint.append(" · ", style=faint)
-        mode_hint.append("ctrl+e", style=dim)
+        mode_hint.append(_t(_x.session_picker_preview_mode_key()), style=dim)
         mode_hint.append(f" {self.preview_mode_for_test()}", style=dim)
 
         def key_row(room: int, *, budget: int | None = None) -> Text:

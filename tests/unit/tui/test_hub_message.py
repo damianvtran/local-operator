@@ -340,6 +340,13 @@ async def test_ordered_same_id_repair_groups_like_the_first_paint_control() -> N
                 app._project_settled_rows([steer])
                 await pilot.pause()
             view = app.query_one(TranscriptView)
+            seats = [
+                block
+                for block in view.blocks()
+                if block.navigation_anchor_id == steer.id and not isinstance(block, QuietGroupBlock)
+            ]
+            assert seats
+            assert all(block.work_view_identity == view.work_identity for block in seats)
             bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
             assert len(bars) == 1
             bar = bars[0]
@@ -684,6 +691,13 @@ async def test_seated_picture_joins_its_owner_group_membership() -> None:
             if late:
                 app._project_settled_rows([receipt("qa_h1", picture=True)])
                 await pilot.pause()
+            source_parts = [
+                block
+                for block in view.blocks()
+                if block.navigation_anchor_id == "qa_h1" and not isinstance(block, QuietGroupBlock)
+            ]
+            assert len(source_parts) == 2
+            assert all(block.work_view_identity == view.work_identity for block in source_parts)
             bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
             assert len(bars) == 1
             bar = bars[0]

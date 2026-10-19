@@ -23,6 +23,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,11 +62,26 @@ def valid_memory_tool_arguments(value: Any) -> bool:
 
 ITEM_TOKENS = 256
 ITEM_BYTES = 8192
+#: Token caps per scope. One authority: the write gate (``_quota``), the move
+#: destination check, the warning state and inventory/status all read these, so
+#: a reported headroom cannot disagree with the number a write is refused on.
+#: Global is the shared bank everyone reads; every other scope is per-owner.
+GLOBAL_TOKENS = 16000
+OWNER_TOKENS = 50000
+#: Percent thresholds that warn ONCE on the write that crosses them, highest
+#: first: a write jumping straight past both reports the endangering one.
+WARNING_THRESHOLDS = (90, 80)
 RECALL_TOKENS = 1200
 RECALL_HARD_TOKENS = 2000
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_OWNER_OPS = 20000
 MAX_REVISIONS = 128
+#: One confirmed filter-based forget accepts this many facts. The human preview
+#: must refuse ABOVE it rather than print a confirmation the store will reject:
+#: a command that cannot run is worse than no command. Reachable within the caps
+#: (measured in review round 1: 205 minimal facts fit the global 16,000-token
+#: bank), so the preview checks it before offering anything.
+MAX_BULK_FORGET = 200
 MAX_TOMBSTONES = 5000
 MAX_BATCH_BYTES = 256 * 1024
 INVENTORY_HELP = (
@@ -161,6 +177,105 @@ def _fold(text: str) -> str:
     return "".join(out)
 
 
+# Work/lane/progress locators and status verbs. GLOBAL memory is for durable user facts;
+# MR/CI/release status and lane next-steps belong in a session bank. These patterns are
+# deliberately narrow: they require WORK CONTEXT next to the locator, and are only ever
+# matched against the FOLDED copy (never stored or echoed).
+#
+# QA round 1 (M-1): a bare `#N` is how people write chapters, order/invoice/room/seat
+# and extension numbers (`Office #4`, `order #1123`), and `next step`/`HOLD` occur in
+# ordinary prose (`next step is to fold in the flour`, `a HOLD on the cheque`). A locator
+# alone is therefore NOT a marker: it must sit next to a work word.
+#
+# Code review rounds 1/3 (M-1/F-3): `mrs?` under re.I matched the honorific Mr/Mrs
+# (`Mr Okafor lives at #12`, `mr smith lives at #12`). The merge-request abbreviation
+# is therefore UPPERCASE-ONLY here (`MR`, `MRs`); the lowercase form is never a tracker
+# word. GitLab work uses `!N`, which is matched absolutely.
+#
+# KNOWN BOUNDARY (documented, not debt): this is a bounded SHAPE rule, so prose work
+# text with no locator (`Fleet scratchpad purge 2026-10-15/16: …`) and hyphenated keys
+# (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
+# deliberately rejects; the guide states this bound rather than overclaiming.
+_WORK_WORD = (
+    r"pr|pull request|merge request|(?-i:MRs?)|issue|ticket|ci|pipeline|build|commit|"
+    r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
+    r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
+)
+_WORK_REF = re.compile(
+    r"\b(?:" + _WORK_WORD + r")\b[^.\n]{0,24}(?<![\w#])#\d{1,6}\b"
+    r"|(?<![\w#])#\d{1,6}\b[^.\n]{0,24}\b(?:" + _WORK_WORD + r")\b"
+    r"|(?<![\w!])!\d{1,6}\b",
+    re.I,
+)
+# A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
+# all-letter abbreviation (`cafebabe`) is not.
+_WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
+_WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I)
+_WORK_STATUS = re.compile(
+    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
+    r"\b"
+    r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
+    r"\b(?:pr|(?-i:MRs?)|#\d|into main)\b"
+    # Noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between:
+    # `PR`/`MR` are also permanent residency, public relations and a person
+    # (`My PR application merged into the family one`, `The PR agency merged with a rival`),
+    # while `the PR was merged` / `MRs rebased onto main` are real work text.
+    r"|\b(?:pr|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
+    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b"
+    r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
+    r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
+    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
+    r"|\bremaining work\b",
+    re.I,
+)
+# A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI, not a
+# bank/parcel/dry-cleaner hold an ordinary person records.
+_WORK_HOLD = re.compile(
+    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + _WORK_NOUN + r")\b"
+    r"|\b(?:" + _WORK_NOUN + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+    re.I,
+)
+
+
+def work_progress_markers(text: str) -> list[str]:
+    """Names of work/lane/progress markers in ``text`` — value-free, never the match."""
+    folded = _fold(text)
+    found: list[str] = []
+    for name, pattern in (
+        ("tracker-ref", _WORK_REF),
+        ("named-commit", _WORK_SHA),
+        ("ci-release-status", _WORK_STATUS),
+        ("hold-token", _WORK_HOLD),
+    ):
+        if pattern.search(folded):
+            found.append(name)
+    return found
+
+
+def scope_fit(scope: str, fact: dict[str, Any]) -> None:
+    """Refuse work/lane/progress content in the GLOBAL bank, before any write.
+
+    A bounded SHAPE rule, not a classifier: it catches a tracker ref, a named commit,
+    a CI/release status verb or a `next step` phrase. Global is for durable personal
+    facts, contacts, preferences, environment; work state belongs in a session bank.
+    Value-free refusal (no offending text echoed); explicit session/team/agent writes
+    and every wire/import path are untouched, and forget is never reached here.
+    """
+    if scope != "global" or not isinstance(fact, dict):
+        return
+    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
+    for key in ("tags", "aliases"):
+        value = fact.get(key) or []
+        if isinstance(value, list):
+            haystack += "\n" + "\n".join(str(item) for item in value)
+    if work_progress_markers(haystack):
+        raise MemoryError(
+            "This looks like session-scoped work (a tracker reference, CI/release "
+            "status or a next step). Store work state in memory://session; global is "
+            "for durable personal facts, contacts, preferences and environment."
+        )
+
+
 def _card_issuer_range(digits: str) -> bool:
     """Known payment-card prefix AND length. Random 13-digit ids (unix-ms, order numbers)
     pass Luhn about one time in ten, so Luhn alone refused ordinary data (QA Q2)."""
@@ -252,7 +367,10 @@ def _looks_sensitive(text: str, *, opaque: bool) -> bool:
     return False
 
 
-_STOP = set(
+#: Words that carry no discriminating evidence. Public because the read-only
+#: duplicate preview in ``memory_duplicates`` must weigh the SAME vocabulary the
+#: search ranker drops; a second private copy would drift and score differently.
+STOP_WORDS = frozenset(
     (
         "a an and are as at be by can could did do does for from have how i in is it me my of on "
         "or our please should that the their this to use was we what when where which who will "
@@ -279,11 +397,59 @@ def fts5_available() -> bool:
         probe.close()
 
 
-def safe_segment(value: Any) -> str:
+def safe_segment(value: Any, *, structural: bool = False) -> str:
     if not isinstance(value, str) or not _SAFE.fullmatch(value) or value in (".", ".."):
         raise MemoryError("Memory identity must be one safe segment (1–128 characters).")
-    guard(value)
+    # Structural identifiers are minted, not user prose: device ids are
+    # ``d_`` + hex and op/entity ids are UUID/hex, so a free-text sensitive
+    # shape (an IBAN/mod-97 or card/Luhn match on the hex run) can occur by
+    # chance in a legitimate id. Running guard() over them therefore refused
+    # whole installs permanently — the id persists in store meta — while
+    # adding no protection: the _SAFE shape above is the actual constraint
+    # on an identifier. Callers validating fact *content* keep guard().
+    if not structural:
+        guard(value)
     return value
+
+
+#: The shapes a value may legitimately BE as a structural REFERENCE, each one cited at
+#: the source that mints it. A reference is not prose, so the free-text guard is the
+#: wrong question to ask of one: its hex runs can satisfy the IBAN/mod-97 or card/Luhn
+#: shape BY CHANCE — that collision refused every put on an install whose device id
+#: happened to pass mod-97 (the write path fixed it through ``safe_segment``), and its
+#: read-side twin refused every recall whose QUERY was such an id.
+_REFERENCE_SHAPES = (
+    # network.identity.device_id_for: "d_" + sha256(DEVICE_ID_DOMAIN + key).hexdigest()[:32].
+    re.compile(r"d_[0-9a-f]{32}"),
+    # memory._id(): the canonical UUID string minted for entity and operation ids —
+    # the SCOPE/ID the CLI prints and the version=REV a read accepts. The store mints
+    # UUIDv7, but this guard is shape-based and pins no version/variant nibble, so any
+    # canonical UUID spelling matches.
+    re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+)
+
+
+def structural_reference(value: Any) -> bool:
+    """True iff ``value`` IS exactly one minted structural reference, nothing else.
+
+    A recall query is a READ and may legitimately BE an identifier this codebase mints
+    and hands back (a device id, or an entity/operation id) rather than user prose, so
+    ``guard()``'s store-oriented refusal — keep only the NAME — is the wrong verdict for
+    it. Callers skip the free-text guard for a value this admits, and for that value
+    alone: the match is a FULL match, so a secret-shaped token inside prose, a labelled
+    value and any multi-token string are not references and keep the guard.
+
+    The admitted set is exactly the two shapes above, each justified by the function
+    that mints it. A shape with no such source is not a reference here: a bare 64-hex
+    ``body_sha`` digest is spelled ``[0-9a-f]{64}`` at its validation, but it is an
+    integrity value over the operation payload the store compares, never a *lookup*
+    handle — it does ride op records (``memory_capture.py`` computes one per captured
+    op) and no code path searches by it, since ``search()`` takes no body-hash input —
+    and the free-text guard already admits it. This is a READ-side classification only;
+    a WRITE keeps the guard, because storing a value is not the same act as looking one
+    up.
+    """
+    return isinstance(value, str) and any(shape.fullmatch(value) for shape in _REFERENCE_SHAPES)
 
 
 def guard(value: Any, *, opaque: bool = False) -> None:
@@ -339,6 +505,71 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+#: Total wire budget for the suggestion tail: the WHOLE block, wrapper
+#: included. One number, shared by the renderer and the admission rule in
+#: :meth:`MemoryStore.search` — when the two disagreed the documented
+#: ``limit=3`` silently rendered 2.
+SUGGESTION_TOKENS = 180
+
+#: The suggestion block's fixed wrapper. ``memory_capture._session_tail``
+#: renders these around the admitted lines; both it and the admission budget
+#: charge them, because "180 tokens" is the block on the wire, not its lines.
+#: Measured 19 tokens (14 header + 5 closing): charging only the lines let three
+#: 156-char titles be admitted at 166 and then dropped by the tail's exact
+#: check, so a documented ``limit=3`` rendered 2 — the same defect class the
+#: per-line ruler fixed, confined to long titles.
+SUGGESTION_BLOCK_HEADER = (
+    "<memory_suggestions>\nUntrusted recall candidates; read before relying.\n"
+)
+SUGGESTION_BLOCK_CLOSING = "</memory_suggestions>"
+
+
+def suggestion_block(lines: str) -> str:
+    """The exact text ``lines`` renders as: header, admitted lines, closing.
+
+    ONE authority for the wrapper, for the same reason :func:`suggest_line` is
+    one for the lines: the tail builds the block with this and the admission
+    check in :meth:`MemoryStore.search` measures the block this returns, so the
+    two cannot drift apart on what a candidate costs.
+    """
+    return SUGGESTION_BLOCK_HEADER + lines + SUGGESTION_BLOCK_CLOSING
+
+
+def suggest_line(item: Mapping[str, Any]) -> str:
+    """The single rendered line a suggestion actually costs on the wire.
+
+    ONE authority for this string, for two readers that must agree: the
+    prompt tail (``memory_capture._session_tail``) renders it, and the
+    suggestion budget in :meth:`MemoryStore.search` measures it. Before this
+    existed the budget measured ``_dump(item)`` — the whole candidate record,
+    ~87-90 tokens against the 32-35 the rendered line costs — so the
+    documented ``tokens=180, limit=3`` admitted only TWO candidates and
+    silently crowded out the third relevant fact in every measured fixture.
+    """
+    captured = " (captured)" if item["status"] == "candidate" else ""
+    return f"- memory://{item['scope']}/{item['id']}: {json.dumps(item['title'])}{captured}\n"
+
+
+def _suggestion_key(fact: Mapping[str, Any]) -> str:
+    """Identity of a suggestion by its FACT, not its record.
+
+    Distinct rows often carry one fact: capture writes the same body under
+    slightly different titles ("Mercury deployment", "... corrected", "...
+    again"). Collapsing on the normalized body makes them cost one slot; the
+    title is only the fallback for a body-less row. Normalization is
+    whitespace/case only — a fuzzy match would merge genuinely distinct facts,
+    which is worse than showing two. Explicit ``search`` does NOT collapse
+    (a reader may legitimately want every revision), so this key is only
+    consulted on the suggestion path.
+    """
+    text = str(fact.get("body") or fact.get("title") or "")
+    # ``casefold`` is the normalization that means case-insensitive: it folds
+    # non-ASCII pairs ``lower`` misses (ß vs SS, final sigma). Identical for
+    # ASCII, so this is the correctness of the collapse rule, not a behaviour
+    # change for existing rows.
+    return " ".join(text.casefold().split())
+
+
 def _id() -> str:
     # UUIDv7 layout without depending on Python 3.14 (the supported floor is 3.12).
     bits = (int(time.time() * 1000) << 80) | (7 << 76) | (uuid.uuid4().int & ((1 << 76) - 1))
@@ -380,6 +611,20 @@ class MemoryIdentity:
             except MemoryError:
                 continue
         return result
+
+
+#: The status vocabulary a stored fact may carry. Exported so a READER
+#: (``memory_inspect``) gates the same closed set the writer enforces instead of
+#: restating it: an imported row can hold any string in this column, and the
+#: reader echoes it to the screen. Two spellings of "valid status" is how one
+#: surface ends up showing a value the other refuses.
+FACT_STATUSES = ("active", "candidate", "disputed", "superseded", "expired")
+
+#: The inclusive upper bound on any stored freshness timestamp (year 3000).
+#: Named and exported for the same reason as ``FACT_STATUSES``: the read-only
+#: inspector gates fields with the writer's rule, and a second literal in that
+#: reader is how the two drift apart silently.
+MAX_FACT_TIMESTAMP = 32503680000
 
 
 def validate_fact(raw: Any) -> dict[str, Any]:
@@ -444,14 +689,11 @@ def validate_fact(raw: Any) -> dict[str, Any]:
             raise MemoryError(
                 "Tags/aliases must contain at most 12 short strings (64 characters each)."
             )
-    if (
-        fact["status"] not in ("active", "candidate", "disputed", "superseded", "expired")
-        or type(fact["pinned"]) is not bool
-    ):
+    if fact["status"] not in FACT_STATUSES or type(fact["pinned"]) is not bool:
         raise MemoryError("Invalid memory status or pinned flag.")
     for key in ("verified_at", "expires_at", "created_at", "source_time"):
         x = fact[key]
-        if x is not None and (type(x) not in (int, float) or not 0 <= x <= 32503680000):
+        if x is not None and (type(x) not in (int, float) or not 0 <= x <= MAX_FACT_TIMESTAMP):
             raise MemoryError("Freshness timestamps must be finite Unix seconds or null.")
     source = fact["source"]
     if (
@@ -482,7 +724,6 @@ def validate_fact(raw: Any) -> dict[str, Any]:
 def validate_op(op: Any, *, allow_redacted: bool = False) -> dict[str, Any]:
     if not isinstance(op, dict) or len(_dump(op).encode()) > 16384:
         raise MemoryError("Invalid or oversized memory operation.")
-    guard(op)
     required = {
         "v",
         "op_id",
@@ -499,8 +740,16 @@ def validate_op(op: Any, *, allow_redacted: bool = False) -> dict[str, Any]:
     }
     if set(op) != required or type(op["v"]) is not int or op["v"] != 1:
         raise MemoryError("Unsupported memory operation version/fields; update both peers.")
+    # Do NOT guard() the whole op: its structural identifiers (op/entity ids,
+    # origin_device, owner_key, parents, body_sha) are minted hex/UUID shapes
+    # that legitimately collide with the free-text IBAN/card patterns — a
+    # ``d_`` + hex device id whose tail passes mod-97 made every put on that
+    # install fail as "sensitive". Those fields get the structural _SAFE /
+    # hex checks here and below instead. The fact payload is still free text
+    # and is guarded as such by validate_fact() on the put path below, so a
+    # real IBAN or card number in a title/body remains refused.
     for key in ("op_id", "entity_id", "origin_device", "owner_key"):
-        safe_segment(op[key])
+        safe_segment(op[key], structural=True)
     if type(op["seq"]) is not int or not 1 <= op["seq"] <= 2**63 - 1:
         raise MemoryError("Invalid origin sequence.")
     if (
@@ -513,7 +762,7 @@ def validate_op(op: Any, *, allow_redacted: bool = False) -> dict[str, Any]:
     if not isinstance(op["parents"], list) or len(op["parents"]) > 16:
         raise MemoryError("Memory parents must be a bounded list.")
     for parent in op["parents"]:
-        safe_segment(parent)
+        safe_segment(parent, structural=True)
     if (
         op["scope"] not in SCOPES
         or (op["scope"] == "global" and op["owner_key"] != "global")
@@ -558,6 +807,104 @@ CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n I
 """
 
 
+#: The relief sentence and its command hint for a near-cap scope, shared by the
+#: write warning and `lop memory status`. ONE function because the two surfaces
+#: drifted: the write warning learned that a session->session move is refused,
+#: while status kept prescribing `--to session` at session scope — an impossible
+#: instruction at the exact moment the operator is out of space.
+def quota_relief(scope: str) -> tuple[str, str]:
+    """``(advice, command hint)`` for relieving ``scope`` at 80% or more.
+
+    Every branch returns both halves, and the hint is the command that actually
+    works at that scope: global moves work state to session, session forgets
+    (a session->session move is refused), and team/agent move only facts that
+    belong elsewhere.
+    """
+    if scope == "global":
+        return (
+            "Consolidate stale facts with forget, or move work-state facts to session " "scope.",
+            "`lop memory move ID --to session`",
+        )
+    if scope == "session":
+        return (
+            "Consolidate this session's stale facts with forget — completed steps, "
+            "superseded values and next-step notes from earlier turns are the stale ones; "
+            "move only facts that belong in another scope.",
+            "`lop memory forget SCOPE/ID --revision REV --yes`",
+        )
+    return (
+        "Consolidate stale facts with forget; move only facts that belong in another " "scope.",
+        "`lop memory move ID --to SCOPE`",
+    )
+
+
+def _contains_unbounded_repeat(text: str) -> bool:
+    """Whether ``text`` contains an unbounded repeat outside a character class."""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            # A quantifier inside a character class is a literal, not a repeat.
+            index += 1
+            if index < len(text) and text[index] == "^":
+                index += 1
+            if index < len(text) and text[index] == "]":
+                index += 1
+            while index < len(text) and text[index] != "]":
+                index += 2 if text[index] == "\\" else 1
+            index += 1
+            continue
+        if char in "*+":
+            return True
+        if char == "{" and re.match(r"\{\d+,\}", text[index:]):
+            return True
+        index += 1
+    return False
+
+
+def _nested_unbounded_repeat(pattern: str) -> bool:
+    """Whether a repeated group contains an unbounded repeat, e.g. ``(a+)+``.
+
+    WHY refuse instead of compile: that shape backtracks exponentially in the
+    subject (measured in review round 1: ``(a+)+$`` on 29 characters ran longer
+    than three seconds), and Python's ``re`` has no timeout. This is a lexical
+    HEURISTIC, not a proof — an overlapping alternation such as ``(a|aa)+`` is not
+    detected — so the contract is "recognised catastrophic shapes are refused",
+    not "every accepted pattern runs in bounded time". Filter subjects are
+    bounded by the store (title <= 160 chars, item <= ITEM_BYTES).
+    """
+    stack: list[int] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            index += 1
+            if index < len(pattern) and pattern[index] == "^":
+                index += 1
+            if index < len(pattern) and pattern[index] == "]":
+                index += 1
+            while index < len(pattern) and pattern[index] != "]":
+                index += 2 if pattern[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "(":
+            stack.append(index)
+        elif char == ")" and stack:
+            start = stack.pop()
+            following = pattern[index + 1 : index + 2]
+            repeated = following in ("*", "+") or bool(re.match(r"\{\d+,\}", pattern[index + 1 :]))
+            if repeated and _contains_unbounded_repeat(pattern[start + 1 : index]):
+                return True
+        index += 1
+    return False
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -571,7 +918,9 @@ class MemoryStore:
         self.path = self.root / "memory.db"
         self.identity = identity
         self.session_dir = session_dir
-        self.origin = safe_segment(origin) if origin else None
+        # Origin is a minted device id (``d_`` + hex; see _origin), i.e.
+        # structural — never free-text guard it (see safe_segment).
+        self.origin = safe_segment(origin, structural=True) if origin else None
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -698,6 +1047,68 @@ class MemoryStore:
             )
 
     @staticmethod
+    def token_cap(scope: str) -> int:
+        return GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
+
+    @classmethod
+    def _quota_view(cls, db: sqlite3.Connection, scope: str, owner: str) -> dict[str, Any]:
+        """Used/percent/headroom for one owner, from the same ``current`` rows ``_quota`` counts."""
+        used = db.execute(
+            "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+            (scope, owner),
+        ).fetchone()[0]
+        cap = cls.token_cap(scope)
+        return {
+            "scope": scope,
+            "owner": owner,
+            "used_tokens": used,
+            "cap_tokens": cap,
+            "percent": round(100.0 * used / cap, 1) if cap else 0.0,
+            "headroom_tokens": cap - used,
+        }
+
+    @classmethod
+    def _quota_notice(
+        cls, db: sqlite3.Connection, scope: str, owner: str
+    ) -> tuple[dict[str, Any], str | None]:
+        """Return the quota view plus a warning only on a NEW 80/90% crossing.
+
+        The state is the highest threshold this owner has been WARNED about, kept
+        beside the store so it survives restarts: without it every subsequent
+        write over the line nags, and with it a drop back below 80% (forget/move
+        out) clears the state so a later recrossing warns again. Writes are the
+        only caller — a read path must never mutate meta or carry a warning.
+        """
+        view = cls._quota_view(db, scope, owner)
+        key = "quota-warn:" + scope + ":" + owner
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        stored = int(row[0]) if row else 0
+        reached = next((line for line in WARNING_THRESHOLDS if view["percent"] >= line), 0)
+        if not reached:
+            if stored:
+                db.execute("DELETE FROM meta WHERE key=?", (key,))
+            return view, None
+        if reached <= stored:
+            return view, None
+        db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(reached)))
+        # The relief must be actionable WHERE it is offered: a session->session move
+        # is refused, so telling a session owner to "move to session" is noise; for
+        # team/agent only a fact that belongs elsewhere can move. The sentences live
+        # in `quota_relief` so the status page cannot drift from this warning.
+        advice, hint = quota_relief(scope)
+        relief = advice + (f" ({hint})" if hint else "")
+        if reached >= 90:
+            guidance = "Consolidate now: writes are refused once the cap is reached. " + relief
+        else:
+            guidance = relief
+        shortfall = "" if view["headroom_tokens"] >= 0 else " (OVER CAP)"
+        return view, (
+            f"Memory quota warning: {scope} crossed {reached}% "
+            f"({view['used_tokens']}/{view['cap_tokens']} tokens, "
+            f"{view['headroom_tokens']} left{shortfall}, {view['percent']}% used). " + guidance
+        )
+
+    @staticmethod
     def _quota(db: sqlite3.Connection, scope: str, owner: str, *, relief: bool = False) -> None:
         """Refuse growth past the caps. ``relief`` (a forget) skips the OP/TOMBSTONE counts:
         a tombstone is the only way to remove a sensitive body, so refusing it at the cap
@@ -713,7 +1124,7 @@ class MemoryStore:
             "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
         if (not relief and (count > MAX_OWNER_OPS or tombs > MAX_TOMBSTONES)) or tokens > (
-            16000 if scope == "global" else 50000
+            GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
         ):
             raise MemoryError(
                 "Memory quota reached (including history/tombstones). Inspect memory://, "
@@ -760,6 +1171,17 @@ class MemoryStore:
         list (``show``) opts in explicitly.
         """
         owner = self.identity.owner(scope)
+        if forget and merge:
+            # A merge forget builds a multi-parent tombstone, which is
+            # indistinguishable on the wire from a move's source tombstone — the
+            # peer-side move guard would refuse a legitimate forget. No shipping
+            # surface passes both (the CLI's --resolve is correction-only), so
+            # refuse the shape instead of keeping a latent false positive: resolve
+            # the conflict with an edit, then forget the revision that was read.
+            raise MemoryError(
+                "Forget cannot merge concurrent revisions. Resolve them with an edit "
+                "(--resolve), then forget the revision you read."
+            )
         if entity is not None:
             safe_segment(entity)
             if not expected_version:
@@ -772,6 +1194,10 @@ class MemoryStore:
         # Retention creation is not verification; unknown external source time
         # stays null. Every writer uses the same pure, value-free validator.
         clean = None if forget else self.prepare_fact(fact)
+        if clean is not None:
+            # Scope-fit refusal BEFORE any DB/index/oplog write (and before the
+            # session export): global is for durable personal facts, not work state.
+            scope_fit(scope, clean)
         if scope == "session" and self.session_dir:
             self.import_session()
         if entity is not None and not self.path.exists():
@@ -796,6 +1222,7 @@ class MemoryStore:
                         "scope": scope,
                         "status": "active",
                         "deduplicated": True,
+                        "quota": self._quota_view(db, scope, owner),
                     }
             heads: list[dict[str, Any]] = []
             if ops:
@@ -878,6 +1305,9 @@ class MemoryStore:
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
             self._reindex(db, entity)
             self._quota(db, scope, owner, relief=forget)
+            # Headroom/percent every write, but a warning only on a NEW crossing;
+            # the state lives in meta, committed with the write it describes.
+            quota, warning = self._quota_notice(db, scope, owner)
             # A session's portable log is fsync'd before the index commit. If
             # that commit crashes, lazy import reconstructs it idempotently.
             if scope == "session" and self.session_dir:
@@ -887,12 +1317,431 @@ class MemoryStore:
                 db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
                 db.commit()
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return {
+        result: dict[str, Any] = {
             "id": entity,
             "version": op["op_id"],
             "scope": scope,
             "status": "forgotten" if clean is None else clean["status"],
+            "quota": quota,
         }
+        if warning:
+            result["warning"] = warning
+        return result
+
+    def forget_many(self, scope: str, expected: dict[str, str]) -> dict[str, Any]:
+        """Forget a set of facts in ONE transaction, refusing if any revision moved.
+
+        WHY this exists: the human bulk-forget preview is only honest if the
+        confirmed run cannot leave half the set deleted. ``put(forget=True)`` is
+        one fact per call and commits each, so looping it would make a partial
+        failure permanent. This method re-reads every head inside a single
+        ``BEGIN IMMEDIATE`` transaction and inserts every tombstone there: a
+        mismatch on any entry refuses the WHOLE set with nothing written.
+
+        ``expected`` maps entity id to the head revision the caller previewed —
+        the same token ``put`` takes. The write lock is taken before the first
+        re-read, which closes the window between a caller's SELECT and commit; a
+        concurrent correction therefore surfaces as a refusal, never as a
+        silently forgotten fact under a filter that merely still matched it.
+        """
+        if not isinstance(expected, dict) or not expected:
+            raise MemoryError("Bulk forget needs at least one memory ID and revision.")
+        if len(expected) > MAX_BULK_FORGET:
+            raise MemoryError(f"A bulk forget accepts at most {MAX_BULK_FORGET} memories at once.")
+        owner = self.identity.owner(scope)
+        for entity, revision in expected.items():
+            # Neither value is free text; refusing a malformed one here keeps the
+            # transaction from opening on a request that cannot succeed.
+            safe_segment(entity)
+            safe_segment(revision)
+        if scope == "session" and self.session_dir:
+            self.import_session()
+        if not self.path.exists():
+            raise MemoryError("Memory not found in the authorized scope.")
+        forgotten: list[dict[str, Any]] = []
+        tokens = 0
+        with self.connection() as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                origin = self._origin(db)
+                last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
+                clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
+                for entity in sorted(expected):
+                    ops = self._ops(db, entity)
+                    if not ops or any(
+                        op["scope"] != scope or op["owner_key"] != owner for op in ops
+                    ):
+                        raise MemoryError("Memory not found in the authorized scope.")
+                    if any(op["kind"] == "tombstone" for op in ops):
+                        raise MemoryError(
+                            "Memory was forgotten concurrently. Read the current set and "
+                            "retry; no fact in this bulk forget was changed."
+                        )
+                    heads = self._heads(ops)
+                    if not heads or heads[0]["op_id"] != expected[entity]:
+                        raise MemoryError(
+                            "Memory changed concurrently. Read its current revision and retry; "
+                            "no fact in this bulk forget was changed."
+                        )
+                    seq = db.execute(
+                        "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
+                    ).fetchone()[0]
+                    # One strictly increasing HLC per tombstone in this transaction:
+                    # two ops sharing a clock would make head order depend on op_id.
+                    clock = max(clock + 1, int(time.time() * 1000))
+                    op = {
+                        "v": 1,
+                        "op_id": _id(),
+                        "entity_id": entity,
+                        "origin_device": origin,
+                        "seq": seq,
+                        "hlc": [clock, 0, origin],
+                        "parents": [expected[entity]],
+                        "kind": "tombstone",
+                        "scope": scope,
+                        "owner_key": owner,
+                        "fact": None,
+                        "body_sha": heads[0]["body_sha"],
+                    }
+                    validate_op(op)
+                    db.execute(
+                        "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                        (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
+                    )
+                    db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+                    row = db.execute(
+                        "SELECT tokens FROM current WHERE entity_id=?", (entity,)
+                    ).fetchone()
+                    tokens += int(row[0]) if row else 0
+                    self._reindex(db, entity)
+                    forgotten.append(
+                        {
+                            "id": entity,
+                            "version": op["op_id"],
+                            "scope": scope,
+                            "status": "forgotten",
+                        }
+                    )
+                self._quota(db, scope, owner, relief=True)
+                quota, warning = self._quota_notice(db, scope, owner)
+                if scope == "session" and self.session_dir:
+                    self._export(db, owner)
+                db.commit()
+            except BaseException:
+                # sqlite would roll back on close as well; being explicit keeps a
+                # caller's error handler from seeing a half-applied batch if the
+                # connection is ever reused or pooled.
+                db.rollback()
+                raise
+            db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
+            db.commit()
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        result: dict[str, Any] = {"forgotten": forgotten, "tokens": tokens, "quota": quota}
+        if warning:
+            result["warning"] = warning
+        return result
+
+    def move(
+        self,
+        targets: str | list[str],
+        destination: str,
+        *,
+        expected_version: str | None = None,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Move one or more facts to ``destination`` atomically, preserving the fact.
+
+        WHY this exists: a fact written to the wrong scope could previously only be
+        forgotten (destroys it) or edited (scope is immutable). The global bank filled
+        to its cap with work state while session scope sat empty, and an agent could
+        not act on the advice to "use session scope instead".
+
+        DESIGN CONSTRAINT: ``apply_ops`` refuses an entity whose ops change scope, so
+        a move cannot rewrite an entity in place. It is represented as two ordinary
+        ops that OLD PEERS ALREADY UNDERSTAND (no protocol bump): a ``put`` at the
+        destination whose first revision PARENTS the source head, and a ``tombstone``
+        at the source. The destination fact is byte-identical (text, provenance,
+        created_at and every other timestamp), ``show`` reports ``moved_from`` from
+        the cross-entity root parent, and the ordinary op stream replicates it. A new
+        op kind was rejected deliberately: a peer running an older release would
+        refuse the whole batch and then sit behind a permanent sequence gap.
+
+        The source tombstone is destructive exactly like a forget — it ends that
+        entity. A move therefore refuses a source that already has unmerged
+        concurrent revisions, and ``apply_ops`` refuses a move tombstone that would
+        destroy a revision the moving device never saw (the tombstone names the
+        destination op as a second parent, which is how a peer tells it apart from a
+        forget without a protocol change).
+
+        All-or-nothing: every target is resolved and validated, the destination
+        quota and the source's history caps are checked, before the single
+        ``BEGIN IMMEDIATE`` transaction inserts any op; any failure before commit
+        leaves the store untouched.
+        """
+        if isinstance(targets, str):
+            targets = [targets]
+        if not targets:
+            raise MemoryError("A move needs at least one memory ID.")
+        if len(targets) > 64:
+            raise MemoryError("A move accepts at most 64 memories at once.")
+        if destination not in SCOPES:
+            raise MemoryError("Unknown move destination; use session, team, agent or global.")
+        dest_owner = self.identity.owner(destination)
+        if expected_version is not None:
+            safe_segment(expected_version)
+        resolved: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            if not isinstance(target, str) or not target.strip():
+                raise MemoryError("Every move target must be an explicit memory ID.")
+            source_scope, entity = self.resolve(target, scope)
+            if (source_scope, entity) in seen:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is listed twice; a move takes each fact once."
+                )
+            seen.add((source_scope, entity))
+            if source_scope == destination:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is already in {destination}; "
+                    "moving it there would do nothing."
+                )
+            resolved.append((source_scope, entity))
+        if expected_version is not None and len(resolved) != 1:
+            raise MemoryError("A revision guards one fact; omit it when moving a batch.")
+        if destination == "session" or any(source == "session" for source, _ in resolved):
+            # A moved/opened session's portable log may hold rows the local index
+            # has not rebuilt yet; moving against a stale index could miss a
+            # conflict or resurrect a forgotten fact on the next import.
+            self.import_session()
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            origin = self._origin(db)
+            # Validate EVERY target before writing anything, so a refusal later in
+            # the batch cannot leave an earlier move half-applied.
+            prepared: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+            needed = 0
+            batch_facts: set[str] = set()
+            source_counts: dict[tuple[str, str], int] = {}
+            for source_scope, entity in resolved:
+                source_owner = self.identity.owner(source_scope)
+                ops = self._ops(db, entity)
+                if not ops or any(
+                    op["scope"] != source_scope or op["owner_key"] != source_owner for op in ops
+                ):
+                    raise MemoryError("Memory not found in the authorized scope.")
+                if any(op["kind"] == "tombstone" for op in ops):
+                    raise MemoryError(
+                        f"{source_scope}/{entity} was forgotten; it cannot be moved. Store it "
+                        "again in the destination scope instead."
+                    )
+                heads = self._heads(ops)
+                if len(heads) > 1:
+                    # Concurrent sibling revisions are a decision a human has to
+                    # make. Moving the newest and tombstoning the entity would
+                    # silently discard the others, so refuse while it is ambiguous.
+                    raise MemoryError(
+                        f"{source_scope}/{entity} has {len(heads)} concurrent revisions; "
+                        "resolve the conflict (edit with --resolve) before moving it."
+                    )
+                head = heads[0]
+                if expected_version is not None and head["op_id"] != expected_version:
+                    raise MemoryError(
+                        "Memory changed concurrently. Read its current revision and retry."
+                    )
+                fact = dict(head["fact"])
+                # A move must never be a route around the guards ``put`` enforces.
+                # The strongest of them is scope-fit: work/lane/progress content is
+                # refused in the global bank, and moving it there would defeat it.
+                scope_fit(destination, fact)
+                if fact["replaces"]:
+                    # ``replaces`` is a same-scope lineage link; carrying it across
+                    # scopes is refused by ``put``'s replacement check. Say so plainly
+                    # rather than fail mid-transaction.
+                    raise MemoryError(
+                        f"{source_scope}/{entity} supersedes another fact in the same "
+                        "scope, so a cross-scope move would break that link. Resolve the "
+                        "supersession first (forget the superseded fact, or keep this "
+                        "one in place)."
+                    )
+                duplicate = db.execute(
+                    "SELECT entity_id FROM current WHERE scope=? AND owner=? "
+                    "AND json_remove(fact,'$.created_at')=json_remove(?,'$.created_at') LIMIT 1",
+                    (destination, dest_owner, _dump(fact)),
+                ).fetchone()
+                if duplicate:
+                    raise MemoryError(
+                        f"{source_scope}/{entity} already has an identical fact at "
+                        f"{destination}/{duplicate[0]}; a move would silently merge them. "
+                        "Resolve one of the two first."
+                    )
+                needed += count_text_tokens(_dump(fact))
+                # Two byte-identical facts in one batch would create two identical
+                # destination rows: ``put``'s idempotence would have refused the
+                # second, and ``move`` bypasses ``put``, so refuse it here.
+                signature = _dump(
+                    {key: value for key, value in fact.items() if key != "created_at"}
+                )
+                if signature in batch_facts:
+                    raise MemoryError(
+                        "Two targets in this batch hold the same fact; moving both would "
+                        "duplicate it at the destination. Keep one."
+                    )
+                batch_facts.add(signature)
+                source_counts[(source_scope, source_owner)] = (
+                    source_counts.get((source_scope, source_owner), 0) + 1
+                )
+                prepared.append((source_scope, entity, head, fact))
+            cap = self.token_cap(destination)
+            current_tokens = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+                (destination, dest_owner),
+            ).fetchone()[0]
+            if current_tokens + needed > cap:
+                raise MemoryError(
+                    f"Memory move refused: {destination} would exceed its {cap}-token cap "
+                    f"(current {current_tokens} tokens, needs {needed} tokens, cap {cap}). "
+                    "Consolidate the destination or move fewer facts; no fact was truncated "
+                    "and nothing was changed."
+                )
+            destination_ops = db.execute(
+                "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                (destination, dest_owner),
+            ).fetchone()[0]
+            if destination_ops + len(prepared) > MAX_OWNER_OPS:
+                raise MemoryError(
+                    f"Memory move refused: {destination} would exceed its operation history "
+                    "cap. Consolidate or export the destination history first."
+                )
+            # The source gains one tombstone per moved fact. Refuse rather than push
+            # a scope past the history caps: the next write there would then be
+            # refused, and tombstones are never collected (review MINOR-5).
+            for (source_scope, source_owner), count in source_counts.items():
+                source_ops = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                source_tombs = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=? AND kind='tombstone'",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                if source_ops + count > MAX_OWNER_OPS or source_tombs + count > MAX_TOMBSTONES:
+                    raise MemoryError(
+                        f"Memory move refused: {source_scope} would exceed its operation/"
+                        "tombstone history cap. Consolidate or export that history first; "
+                        "nothing was changed."
+                    )
+            seq = db.execute(
+                "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
+            ).fetchone()[0]
+            last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
+            clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
+            moved: list[dict[str, Any]] = []
+            affected_sessions: set[str] = set()
+            for source_scope, entity, head, fact in prepared:
+                new_id = _id()
+                operation = {
+                    "v": 1,
+                    "op_id": _id(),
+                    "entity_id": new_id,
+                    "origin_device": origin,
+                    "seq": seq,
+                    "hlc": [clock, 0, origin],
+                    "parents": [head["op_id"]],
+                    "kind": "put",
+                    "scope": destination,
+                    "owner_key": dest_owner,
+                    "fact": fact,
+                    "body_sha": hashlib.sha256(_dump(fact).encode()).hexdigest(),
+                }
+                validate_op(operation)
+                db.execute(
+                    "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        operation["op_id"],
+                        new_id,
+                        origin,
+                        seq,
+                        destination,
+                        dest_owner,
+                        "put",
+                        _dump(operation),
+                    ),
+                )
+                self._reindex(db, new_id)
+                moved.append(
+                    {
+                        "from": f"{source_scope}/{entity}",
+                        "to": f"{destination}/{new_id}",
+                        "version": operation["op_id"],
+                        "title": fact["title"],
+                        "tokens": count_text_tokens(_dump(fact)),
+                    }
+                )
+                seq += 1
+                clock += 1
+                tombstone = {
+                    "v": 1,
+                    "op_id": _id(),
+                    "entity_id": entity,
+                    "origin_device": origin,
+                    "seq": seq,
+                    "hlc": [clock, 0, origin],
+                    "parents": [head["op_id"], operation["op_id"]],
+                    "kind": "tombstone",
+                    "scope": source_scope,
+                    "owner_key": self.identity.owner(source_scope),
+                    "fact": None,
+                    "body_sha": head["body_sha"],
+                }
+                validate_op(tombstone)
+                db.execute(
+                    "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        tombstone["op_id"],
+                        entity,
+                        origin,
+                        seq,
+                        source_scope,
+                        tombstone["owner_key"],
+                        "tombstone",
+                        _dump(tombstone),
+                    ),
+                )
+                self._reindex(db, entity)
+                seq += 1
+                clock += 1
+                if source_scope == "session":
+                    affected_sessions.add(tombstone["owner_key"])
+                if destination == "session":
+                    affected_sessions.add(dest_owner)
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+            self._quota(db, destination, dest_owner)
+            quota, warning = self._quota_notice(db, destination, dest_owner)
+            # Move-out relief must reset the SOURCE's crossing state exactly like a
+            # forget does, or a later recross into that scope warns nothing.
+            for (source_scope, source_owner), _count in source_counts.items():
+                self._quota_notice(db, source_scope, source_owner)
+            # Mirror ``put``/``apply_ops``: a session's portable log is written
+            # before the index commit, so a crash is repaired by lazy import.
+            for owner in sorted(affected_sessions):
+                directory = (
+                    self.session_dir
+                    if owner == self.identity.session_id
+                    else self._session_directory(owner, db)
+                )
+                if directory is not None:
+                    if directory.is_dir() or owner == self.identity.session_id:
+                        self._export(db, owner, directory)
+            db.commit()
+        result: dict[str, Any] = {
+            "action": "moved",
+            "destination": destination,
+            "moved": moved,
+            "quota": quota,
+        }
+        if warning:
+            result["warning"] = warning
+        return result
 
     def _session_directory(self, owner: str, db: sqlite3.Connection | None = None) -> Path | None:
         if owner == self.identity.session_id and self.session_dir:
@@ -1089,6 +1938,12 @@ class MemoryStore:
                             "Memory operation identity cannot be reused with different content."
                         )
                     continue
+                if op["kind"] == "tombstone":
+                    # A move's tombstone must not erase a revision the mover never
+                    # saw; a forget's own guarantee is untouched (see the helper).
+                    conflict = self._move_tombstone_conflict(db, op, old_ops)
+                    if conflict:
+                        raise MemoryError(conflict)
                 if contiguous:
                     seq = db.execute(
                         "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?",
@@ -1241,8 +2096,11 @@ class MemoryStore:
                 [*values, len(target), target],
             ).fetchall()
         if len(rows) > 1:
+            # The query is capped, so a full page means "at least this many" — a
+            # bare count would understate an ambiguity the caller must widen.
+            count = "at least 4" if len(rows) == 4 else str(len(rows))
             raise MemoryError(
-                f"'{target}' matches {len(rows)} memories; type more of the ID "
+                f"'{target}' matches {count} memories; type more of the ID "
                 "(or use the full SCOPE/ID shown by list)."
             )
         if not rows:
@@ -1314,8 +2172,96 @@ class MemoryStore:
                     ]
                 ),
                 "revisions": len(ops),
+                "moved_from": None if tombs else self._moved_from(db, entity, ops),
                 "untrusted": True,
             }
+
+    def _moved_from(
+        self, db: sqlite3.Connection, entity: str, ops: list[dict[str, Any]]
+    ) -> dict[str, str] | None:
+        """The source of a moved fact, from the cross-entity parent ``move`` writes.
+
+        Derived from the entity's ROOT revision, not its head: an ordinary
+        correction parents only the same entity, so after the first edit the head
+        no longer names the move and the receipt's promise would silently vanish.
+        An ordinary creation has no parents, and a ``replaces`` creation's parent
+        is a supersession link (not a move), so this cannot mislabel either.
+        """
+        revisions = [op for op in ops if op["kind"] == "put"]
+        ids = {op["op_id"] for op in revisions}
+        # A root revision has no SAME-ENTITY parent; a correction does.
+        roots = sorted(
+            (op for op in revisions if not any(parent in ids for parent in op["parents"])),
+            key=lambda op: (op["hlc"], op["op_id"]),
+        )
+        if not roots:
+            return None
+        root_fact = roots[0]["fact"] or {}
+        replaced = root_fact.get("replaces") or ""
+        for parent in roots[0]["parents"]:
+            row = db.execute("SELECT scope,entity_id FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if row and row[1] != entity and row[1] != replaced:
+                return {"scope": row[0], "id": row[1]}
+        return None
+
+    def _move_tombstone_conflict(
+        self,
+        db: sqlite3.Connection,
+        op: dict[str, Any],
+        old_ops: list[dict[str, Any]],
+    ) -> str | None:
+        """Refuse a MOVE's source tombstone when it would erase an unseen revision.
+
+        ``move`` names its destination ``put`` as a second parent of the source
+        tombstone; a forget tombstone's parents are all same-entity revisions. That
+        is the protocol-safe marker: an old peer still reads the op as an ordinary
+        tombstone, while a peer that holds a concurrent correction can refuse
+        instead of redacting it. A move is advertised as a relocation, so losing an
+        edit the mover never saw is not a documented forget.
+
+        The destination op may be absent here when this peer's ``network.memory.scopes``
+        filters out the destination scope; the second, unresolvable parent still
+        identifies the op as move-shaped, and coverage comes from the same-entity
+        parents the mover DID send — an unseen sibling is exactly a local head that
+        is not among them.
+
+        Deliberately returns a refusal only for that marker: a real forget must
+        still replicate and redact unconditionally (a tombstone is the only way to
+        remove a sensitive body). An entity already tombstoned locally is allowed
+        through — there is no live revision left to protect.
+        """
+        if any(existing["kind"] == "tombstone" for existing in old_ops):
+            return None
+        local = {existing["op_id"] for existing in old_ops}
+        covered = {parent for parent in op["parents"] if parent in local}
+        unresolved = [parent for parent in op["parents"] if parent not in local]
+        if not unresolved:
+            return None  # an ordinary forget: every parent is a local revision
+        move = False
+        for parent in unresolved:
+            row = db.execute("SELECT data FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if not row:
+                continue
+            foreign = json.loads(row[0])
+            if foreign["entity_id"] != op["entity_id"] and foreign["kind"] == "put":
+                move = True
+        if not move and len(op["parents"]) > 1 and covered:
+            # The destination scope was filtered out of this peer's sync config, so
+            # the destination op never arrived. A forget's parents are ALL local by
+            # construction; a second, unresolvable parent is move-shaped.
+            move = True
+        if not move:
+            return None
+        unseen = [head for head in self._heads(old_ops) if head["op_id"] not in covered]
+        if not unseen:
+            return None
+        return (
+            "Memory move refused: a move from another device would replace a revision "
+            "this device holds but the moving device never saw. Read that revision and "
+            "keep anything it adds (or forget the source fact). Memory sync retries "
+            "automatically after about 30 minutes; restarting this device picks the retry up "
+            "sooner."
+        )
 
     def inventory(
         self, scope: str | None = None, *, limit: int = 20, cursor: str | None = None
@@ -1332,7 +2278,12 @@ class MemoryStore:
                 "available_scopes": [name for name, _ in self.identity.scopes()],
                 "active_tokens": 0,
                 "ops": 0,
-                "limits": {"global_tokens": 16000, "owner_tokens": 50000, "item_tokens": 256},
+                "quotas": [],
+                "limits": {
+                    "global_tokens": GLOBAL_TOKENS,
+                    "owner_tokens": OWNER_TOKENS,
+                    "item_tokens": ITEM_TOKENS,
+                },
             }
         with self.connection() as db:
             page_where = where + (" AND entity_id<?" if cursor else "")
@@ -1346,6 +2297,24 @@ class MemoryStore:
                 f"SELECT coalesce(sum(tokens),0) FROM current WHERE {where}", values
             ).fetchone()[0]
             count = db.execute(f"SELECT count(*) FROM ops WHERE {where}", values).fetchone()[0]
+            pairs = [(scope, self.identity.owner(scope))] if scope else self.identity.scopes()
+            quotas = []
+            for name, owner in pairs:
+                used = db.execute(
+                    "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+                    (name, owner),
+                ).fetchone()[0]
+                cap = self.token_cap(name)
+                quotas.append(
+                    {
+                        "scope": name,
+                        "owner": owner,
+                        "used_tokens": used,
+                        "cap_tokens": cap,
+                        "percent": round(100.0 * used / cap, 1) if cap else 0.0,
+                        "headroom_tokens": cap - used,
+                    }
+                )
             return {
                 "items": [
                     {
@@ -1360,14 +2329,15 @@ class MemoryStore:
                 ],
                 "active_tokens": usage,
                 "ops": count,
+                "quotas": quotas,
                 "next_cursor": rows[-1][0] if len(rows) == limit else None,
                 "storage_bytes": sum(
                     p.stat().st_size for p in self.root.glob("memory.db*") if p.is_file()
                 ),
                 "limits": {
-                    "global_tokens": 16000,
-                    "owner_tokens": 50000,
-                    "item_tokens": 256,
+                    "global_tokens": GLOBAL_TOKENS,
+                    "owner_tokens": OWNER_TOKENS,
+                    "item_tokens": ITEM_TOKENS,
                     "owner_ops": MAX_OWNER_OPS,
                     "revisions": MAX_REVISIONS,
                     "storage_bytes": MAX_DB_BYTES,
@@ -1375,6 +2345,118 @@ class MemoryStore:
                 "help": INVENTORY_HELP,
                 "available_scopes": [name for name, _ in self.identity.scopes()],
             }
+
+    def scan(self, scope: str | None = None) -> list[dict[str, Any]]:
+        """Every current fact in the authorised scope(s), flattened for a preview.
+
+        WHY not ``search()``: a maintenance preview must see the WHOLE scope —
+        including facts the FTS ranker would not return together and rows whose
+        status is candidate/disputed/expired, which are precisely the ones a
+        cleanup is asked to retire. Read-only by construction: it checks for the
+        file before ``connection()`` (which would create an empty store) and runs
+        one SELECT, so ``consolidate`` can promise it changed nothing.
+        """
+        where, values = self._where(scope)
+        if not self.path.exists():
+            return []
+        with self.connection() as db:
+            rows = db.execute(
+                f"SELECT entity_id,scope,op_id,fact,tokens FROM current WHERE {where} "
+                "ORDER BY entity_id DESC",
+                values,
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            fact = json.loads(row[3])
+            items.append(
+                {
+                    "id": row[0],
+                    "scope": row[1],
+                    "version": row[2],
+                    "title": fact["title"],
+                    "body": fact["body"],
+                    "tags": fact["tags"],
+                    "status": fact["status"],
+                    "created_at": fact["created_at"],
+                    "verified_at": fact["verified_at"],
+                    "tokens": row[4],
+                }
+            )
+        return items
+
+    def select(
+        self,
+        scope: str,
+        *,
+        older_than: float | None = None,
+        unverified: bool = False,
+        tags: list[str] | None = None,
+        title_matches: str | None = None,
+        body_matches: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Predicate selection over one scope for a bulk-forget preview.
+
+        Composable: predicate KINDS are ANDed, repeated ``tags`` are ANY-of.
+        Regexes are case-insensitive and length-capped; a group repeated around an
+        unbounded repeat (``(a+)+``) is refused before compilation because Python's
+        ``re`` has no timeout and that shape backtracks exponentially. The check is
+        a lexical heuristic, not a proof (see ``_nested_unbounded_repeat``), so the
+        contract is "recognised catastrophic shapes are refused", never "every
+        accepted pattern is bounded". Read-only: the caller prints the result and
+        hands the returned ``(id, version)`` pairs to :meth:`forget_many`, which
+        re-checks every revision at commit time.
+        """
+        patterns: dict[str, re.Pattern[str]] = {}
+        for name, value in (("title", title_matches), ("body", body_matches)):
+            if value:
+                if len(value) > 500:
+                    raise MemoryError(f"--{name}-matches is limited to 500 characters.")
+                if _nested_unbounded_repeat(value):
+                    raise MemoryError(
+                        f"--{name}-matches repeats a group that itself contains an "
+                        "unbounded repeat (for example '(a+)+'); that shape can backtrack "
+                        "exponentially, so it is refused rather than run. Rewrite it "
+                        "without nesting repetitions."
+                    )
+                try:
+                    patterns[name] = re.compile(value, re.IGNORECASE)
+                except re.error:
+                    # Never echo the pattern: a half-typed value may be a secret.
+                    raise MemoryError(
+                        f"--{name}-matches is not a valid regular expression."
+                    ) from None
+        current = time.time() if now is None else now
+        cutoff = None
+        if older_than is not None:
+            if older_than <= 0:
+                raise MemoryError("--older-than needs a positive duration.")
+            cutoff = current - older_than
+        wanted = {tag.lower() for tag in (tags or [])}
+        rows = self.scan(scope)
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            created = row["created_at"]
+            # A fact with no retention timestamp cannot be shown to be old; a
+            # time filter must not quietly treat it as ancient.
+            if cutoff is not None and not (isinstance(created, (int, float)) and created <= cutoff):
+                continue
+            if unverified and row["verified_at"] is not None:
+                continue
+            if wanted and not wanted & {tag.lower() for tag in row["tags"]}:
+                continue
+            if "title" in patterns and not patterns["title"].search(row["title"]):
+                continue
+            if "body" in patterns and not patterns["body"].search(row["body"]):
+                continue
+            matched.append(row)
+        return {
+            "scope": scope,
+            "items": matched,
+            "total": len(rows),
+            "tokens": sum(row["tokens"] for row in matched),
+            "total_tokens": sum(row["tokens"] for row in rows),
+        }
 
     def search(
         self,
@@ -1385,7 +2467,16 @@ class MemoryStore:
         limit: int = 10,
         suggest: bool = False,
     ) -> list[dict[str, Any]]:
-        guard(query)
+        # ``guard`` is the free-text STORE guard: its own message asks for the value to
+        # be kept as a secret NAME. A recall query is a READ and may legitimately BE a
+        # minted structural reference (see structural_reference), so running the store
+        # guard over it refused a benign identifier lookup with store-oriented advice.
+        # Prose takes the guard below, exactly as before. Nothing is weakened off this
+        # call site: search() persists nothing, and the journal/provider-payload copy of
+        # the same arguments is guarded independently by memory_privacy.retained_arguments,
+        # which fails closed — an admitted query spelling is still never retained.
+        if not structural_reference(query):
+            guard(query)
         if (
             not isinstance(query, str)
             or len(query) > 2048
@@ -1396,7 +2487,7 @@ class MemoryStore:
             raise MemoryError("Search accepts ≤2048 characters, 1–20 results and 1–2000 tokens.")
         where, values = self._where(scope)
         words = [t.lower() for t in re.findall(r"[\w]+", query) if len(t) >= 2]
-        terms = list(dict.fromkeys(t for t in words if t not in _STOP))[:24]
+        terms = list(dict.fromkeys(t for t in words if t not in STOP_WORDS))[:24]
         if not self.path.exists():
             return []
         if words and not suggest:
@@ -1406,7 +2497,7 @@ class MemoryStore:
             # suggestion path keeps its generic-word suppression.
             where_alias, alias_values = self._where(scope)
             with self.connection() as db:
-                for word in dict.fromkeys(w for w in words if w in _STOP):
+                for word in dict.fromkeys(w for w in words if w in STOP_WORDS):
                     hit = db.execute(
                         "SELECT 1 FROM recall JOIN current c ON c.entity_id=recall.entity_id "
                         "WHERE recall MATCH ? AND "
@@ -1438,6 +2529,17 @@ class MemoryStore:
             ).fetchall()
             result: list[dict[str, Any]] = []
             used = 0
+            # The suggestion budget is the WHOLE emitted block, matching
+            # ``suggestion_block`` byte for byte: header and closing are fixed
+            # costs the renderer pays, so admitting lines up to the full budget
+            # over-commits by the 19-token wrapper and the tail's own exact
+            # check then drops the last admitted line.
+            block = ""
+            # One slot per distinct FACT on the suggestion path, keyed by body.
+            # Two rows carrying the same body are one fact and must charge the
+            # budget once, or they crowd out a distinct matching fact (measured:
+            # 2 entries / 1 fact, the third relevant fact never rendered).
+            seen: set[str] = set()
             # Document frequency is indexed, not an O(bank) Python pass. Ask FTS
             # itself for per-term matches so porter stemming cannot disagree.
             authorized_count = db.execute(
@@ -1469,6 +2571,10 @@ class MemoryStore:
                     coverage = len(hits) / len(terms)
                     if not ((len(hits) >= 2 and coverage >= 0.4) or (specific and coverage >= 0.5)):
                         continue
+                    key = _suggestion_key(fact)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                 item = {
                     "id": row[0],
                     "scope": row[1],
@@ -1485,10 +2591,23 @@ class MemoryStore:
                         verified_at=fact["verified_at"],
                         expires_at=fact["expires_at"],
                     )
-                cost = count_text_tokens(_dump(item))
-                if used + cost <= tokens:
-                    result.append(item)
-                    used += cost
+                # The suggestion budget is a WIRE budget: charge the block the
+                # tail actually renders, not the full candidate record.
+                # ``_dump(item)`` is ~3x the rendered line, which silently made
+                # ``tokens=180, limit=3`` a 2-entry cap on every fixture; and a
+                # per-line charge without the wrapper did the same to long
+                # titles. An explicit search keeps the record-shaped charge,
+                # since that is what a caller receives there.
+                if suggest:
+                    line = suggest_line(item)
+                    if count_text_tokens(suggestion_block(block + line)) <= tokens:
+                        result.append(item)
+                        block += line
+                else:
+                    cost = count_text_tokens(_dump(item))
+                    if used + cost <= tokens:
+                        result.append(item)
+                        used += cost
                 if len(result) >= min(limit, 3 if suggest else limit):
                     break
             return result

@@ -406,14 +406,18 @@ class SessionProtocol(Protocol):
         """
         ...
 
-    async def adopt_aside(self, messages: list[Message]) -> None:
+    async def adopt_aside(self, messages: list[Message]) -> Literal["queued", "applied"] | None:
         """Promote an off-the-record aside exchange into the conversation.
 
         The user's explicit opt-out of :meth:`complete_aside`'s no-trace
         contract: appends the messages as ordinary turns to both the live
-        context and the transcript. Raises while a turn is running — the loop
-        owns the message list for the duration, and splicing into a tool batch
-        makes it unsendable.
+        context and the transcript. Nothing is ever spliced into a live tool
+        batch: while a turn runs the exchange is QUEUED and lands at the turn's
+        next safe boundary (``"queued"``, announced by a ``HistoryDeltaEvent``
+        carrying the pair); an idle session writes it now (``"applied"``). A
+        ``None`` answer (an older implementation or a test double) means
+        applied. A state that cannot defer — a closed session, or an idle list
+        still ending in unanswered calls — raises ``AsideAdoptRefused``.
         """
         ...
 
@@ -746,7 +750,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 147 public members and a POSITIVE
+    than stylistic. This protocol carries 148 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -820,7 +824,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``bridge_decide`` on the viewer contract — the dock looks that name up on
     whichever session holds the ask, so a paired device without it could not
     decide an agent-messages request at all (U1, the round that wired the owner
-    half of the same door), one more member on
+    half of the same door), 148 once the desktop history reader needed
+    ``history_peer_cycle_display_records`` on the viewer contract — the remote
+    reader holds an attached facade, so the optional member belongs here and
+    not on the owner-side protocol, one member on
     the queued-ask rung), so recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1276,6 +1283,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         from the owner's display replay, or it arrived live after the page); a
         consumer reads that as "unstated" rather than substituting its own clock.
         Empty for an owner too old to ship the join.
+        """
+        ...
+
+    def history_peer_cycle_display_records(self) -> dict[str, Any] | None:
+        """Optional proof for the facade's loaded history window, not owner state.
+
+        Desktop's remote-history reader holds an attached viewer here; local
+        owners use their concrete transcript/frontend store instead. Missing
+        old-owner capability stays absent rather than manufacturing a record.
         """
         ...
 

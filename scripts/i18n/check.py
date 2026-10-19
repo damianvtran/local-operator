@@ -106,10 +106,14 @@ class Violation:
 def _arguments(call: ast.Call) -> list[ast.expr]:
     """Every argument expression of ``call``, positional then keyword.
 
-    KNOWN BLIND SPOT, stated rather than implied: a literal assembled with `+`
-    (`"a " + name`) is a BinOp, not a constant, and is NOT counted. The
-    extraction slices re-spell those as f-strings as they pass, and a checker
-    extension that follows the tui slice's counts would add `+` folding here.
+    KNOWN BLIND SPOT, stated rather than implied: only an expression whose
+    own shape is prose-like counts, so copy ASSIGNED or RETURNED before it
+    reaches a sink is not seen — ``s = "a " + name`` followed by
+    ``out.append(s)`` counts nothing, and neither does a value selected by
+    ``dict.get(platform)``. ``_literal_worthy`` folds ``+`` and the ternary
+    IN argument position (added in the scanner-coverage change that followed
+    the tui slice series); widening further needs a data-flow analysis, not
+    another syntactic fold, and is deliberately out of scope.
     """
     return [*call.args, *(kw.value for kw in call.keywords)]
 
@@ -122,6 +126,17 @@ def _literal_worthy(node: ast.expr) -> bool:
     does not). Counting f-strings is deliberate: they are the dominant prose
     form in the TUI (RFC §1), and a ratchet that cannot see them would pass
     exactly the new code it exists to catch.
+
+    Two assembled forms fold, because they reach sinks as user copy just as
+    plainly as a literal does:
+
+    * ``+`` concatenation — ``" member" + ("" if n == 1 else "s")`` is a
+      BinOp whose text the pre-fold scanner could not see at all;
+    * the conditional expression — ``"cmd" if darwin else "ctrl"`` is an
+      IfExp selecting between two pieces of copy.
+
+    Folding is recursive through those two shapes and no further: a literal
+    merely REFERENCED by name is still invisible (see ``_arguments``).
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return bool(_LETTER_RE.search(node.value))
@@ -132,6 +147,10 @@ def _literal_worthy(node: ast.expr) -> bool:
             and _LETTER_RE.search(part.value)
             for part in node.values
         )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _literal_worthy(node.left) or _literal_worthy(node.right)
+    if isinstance(node, ast.IfExp):
+        return _literal_worthy(node.body) or _literal_worthy(node.orelse)
     return False
 
 

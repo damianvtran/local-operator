@@ -37,6 +37,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "delivery",
         "extensions",
         "failover",
+        "harness-import",
         "highlights",
         "i18n",
         "image-generation",
@@ -51,6 +52,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "scratchpad",
         "sessions",
         "skills",
+        "sound-generation",
         "system-tools",
         "teams",
         "tunnel",
@@ -105,6 +107,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("generate an image of a cat", "image-generation"),
         ("generate a video from a photo", "video-generation"),
+        # The sound-generation wave's row: "voiceover" is vocabulary the
+        # lexical router can see, and the guide's description carries it —
+        # the same shape the image/video rows above pin.
+        ("make a voiceover of this text", "sound-generation"),
         # The edit lane's router-honest row: "image to image" is vocabulary
         # the lexical router can see (measured 2026-10-10), so the
         # post-hub-slice edit capability is routable. A task that only says
@@ -683,15 +689,22 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
 
     assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
-    # The boundary: a write is refused before it lands; the shell channel is
-    # checked AFTER the command and can only be reported on — and the check's
-    # trigger is the pad being NAMED, not any command that touched it.
-    assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
-    assert "a command that names the pad" in collapsed
+    # The boundary is TWO halves now: a write is refused before it lands, and a
+    # shell command that would ADD bytes to an over-cap pad is stopped before
+    # the child exists; the after-the-fact `[scratch]` line is the backstop for
+    # what the scan could not resolve. The triggers are pinned too, so a guide
+    # that stopped documenting either half fails here.
+    assert (
+        "enforced at the TOOLS, and the shell is refused BEFORE IT RUNS when it "
+        "would ADD bytes to an over-cap pad" in collapsed
+    )
+    assert "is stopped before the child exists" in collapsed
+    assert "the after-the-fact line still reports what it left behind" in collapsed
+    assert "A command that names the pad" in collapsed
+    assert "`[scratch]` line when it ran and left the pad over its budget" in collapsed
     assert "copied it in" in collapsed
     assert "reads the command, not the disk" in collapsed
-    assert "The `eval` kernel gets the budget and entry-cap line only." in collapsed
-    assert "it cannot undo" in collapsed
+    assert "The `eval` kernel gets the budget and entry-cap line only" in collapsed
 
 
 def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:
@@ -774,6 +787,20 @@ def test_scratchpad_guide_names_the_exported_path_and_the_pad_local_mktemp() -> 
     # The unset case is stated, because the operator's own terminal does not
     # have it and a recipe that assumes it is a recipe that fails there.
     assert "unset in the user's terminal" in body
+
+
+def test_browser_guide_routes_a_typed_credential_through_secret_ref() -> None:
+    """A literal credential in `type`'s `text` is the incident shape (KOHO
+    analytics QA, 2026-10-16): the guide must name the ref before a model
+    reaches for `text`, and name the manual fallback."""
+    guides = {guide.name: guide for guide in discover_guides()}
+    resolver = make_guide_resolver(guides)
+
+    browser = resolver("guide://browser")
+    assert browser is not None
+    assert "secret_ref" in browser
+    assert "never `text`" in browser
+    assert "sign in by hand" in browser
 
 
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
@@ -899,3 +926,15 @@ def test_a_looping_guide_base_dir_does_not_escape_the_resolver(tmp_path: Path) -
     child = resolver("guide://demo/references")
     assert child is not None and "not found" in child
     assert resolver("guide://demo") is not None
+
+
+def test_harness_import_guide_states_the_safe_preview_first_flow() -> None:
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://harness-import")
+    assert body is not None
+    assert "preview_token" in body
+    assert "confirm=true" in body
+    assert "no default-all" in body.lower()
+    assert "read-only on the other harness" in body
+    assert "Re-run is safe" in body
+    assert "No filesystem path is accepted" in body

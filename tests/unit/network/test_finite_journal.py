@@ -473,7 +473,7 @@ def test_finite_apply_and_pair_order_writer_do_not_deadlock(
         with store._write_lock(record_path):
             a_holds.set()
             time.sleep(1.0)
-            with placement._document_lock(proj_path):
+            with placement._document_lock(proj_path, root=rig.root):
                 outcome["writer"] = "entered"
 
     def finite_apply() -> None:

@@ -15,9 +15,10 @@ Two routes, both gated on the managed-mode boundary like the legacy
   classifies with the shared mapper in ``stt/errors.py``, so the two surfaces
   cannot disagree).
 
-The legacy ``/v1/transcriptions`` route is untouched in behaviour: it stays
-the Radient-only path (rung 1). Surfaces migrate to this family when they want
-the cascade.
+The legacy ``/v1/transcriptions`` route stays the Radient-only path (rung 1),
+but since LOH-5 slice 3 it shares the same pure cleanup rules and additive
+provenance fields; it is not a second behaviour. Surfaces migrate to this
+family when they want the cascade.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_409_CONFLICT,
@@ -58,6 +59,7 @@ from local_operator.stt.cascade import (
     resolve_audio_path,
     transcribe_audio,
 )
+from local_operator.stt.cleanup import InvalidCleanupMode, configured_cleanup
 
 router = APIRouter()
 
@@ -70,6 +72,15 @@ class SttAttemptPayload(BaseModel):
     detail: str = ""
 
 
+class SttRemovedSpanPayload(BaseModel):
+    """One span our cleanup rules removed, in raw-transcript coordinates."""
+
+    start: int
+    end: int
+    kind: str
+    token: str
+
+
 class SttTranscriptionPayload(BaseModel):
     """The 200 body: the text, the rung that produced it, and the walk."""
 
@@ -77,6 +88,14 @@ class SttTranscriptionPayload(BaseModel):
     path: AudioPath
     attempts: list[SttAttemptPayload]
     duration_s: float
+    #: Cleanup provenance for ``text`` (never empty).
+    cleanup: str = "none"
+    #: Text before OUR rules. ``None`` means no raw copy exists; the reason is
+    #: in ``raw_unavailable`` and must not be read as "nothing was removed".
+    raw_text: Optional[str] = None
+    raw_unavailable: str = ""
+    language: Optional[str] = None
+    removed: list[SttRemovedSpanPayload] = Field(default_factory=list)
 
 
 def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any | None:
@@ -171,6 +190,7 @@ async def create_stt_transcription_endpoint(
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
+    cleanup: Optional[str] = Form(None),
     #: Optional client correlation id (PR-3): additive and tolerant — used for
     #: the spend record (analytics + the session's pending marker) and the hub
     #: correlation header on the Radient rung; never for credential lookup.
@@ -215,6 +235,10 @@ async def create_stt_transcription_endpoint(
     finally:
         await file.close()
 
+    # The request field wins; absent, the /settings key supplies the mode.
+    requested_cleanup = cleanup if isinstance(cleanup, str) and cleanup.strip() else None
+    effective_cleanup = requested_cleanup or configured_cleanup(config_manager)
+
     try:
         outcome = await transcribe_audio(
             Path(temp_file_path),
@@ -224,6 +248,7 @@ async def create_stt_transcription_endpoint(
             model=model_spec,
             language=language,
             prompt=prompt,
+            cleanup=effective_cleanup,
             # The caller's conversation id for the hub correlation header and
             # the emitted record — attribution only; the cascade's credential
             # scope stays as it was (QA round 1, Q4).
@@ -247,6 +272,13 @@ async def create_stt_transcription_endpoint(
         raise HTTPException(
             status_code=exc.status_code or HTTP_502_BAD_GATEWAY,
             detail=_wm.media_refusal(error=exc.detail or str(exc)).envelope(),
+        )
+    except InvalidCleanupMode as exc:
+        # A cleanup mode this build cannot execute is a client error, not the
+        # prompt-length 400 arm below. The typed class keeps the two apart.
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_wm.media_refusal(error=str(exc)).envelope(),
         )
     except ValueError as ve:  # A client-side validation error (e.g. prompt length)
         raise HTTPException(
@@ -297,5 +329,15 @@ async def create_stt_transcription_endpoint(
                 for attempt in outcome.attempts
             ],
             duration_s=round(time.monotonic() - started, 3),
+            cleanup=outcome.cleanup,
+            raw_text=outcome.raw_text,
+            raw_unavailable=outcome.raw_unavailable,
+            language=outcome.language,
+            removed=[
+                SttRemovedSpanPayload(
+                    start=span.start, end=span.end, kind=span.kind, token=span.token
+                )
+                for span in outcome.removed
+            ],
         ),
     )

@@ -58,10 +58,17 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import AskQuestion
+
+# i18n: the window counter's grammar words are user-facing picker copy;
+# they stay separate fragments because the numerals carry a brighter style.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.notify import remote_park_hints
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import wrap_cells
+
+_t = tr("tui.small")
 
 #: Cells of the card's own padding on EACH side, mirroring the horizontal half
 #: of ``padding: 1 1`` in the stylesheet. One cell rather than the modal's two:
@@ -294,6 +301,9 @@ SCROLLBAR_THUMB = "█"
 
 #: The free-text row's label while it holds nothing and is not selected.
 OTHER_LABEL = "Other (type your own)"
+#: The free-text row on a READ-ONLY (lapsed) card: the option existed, but the
+#: card takes no typing, so it is named without the invitation.
+OTHER_READ_ONLY_LABEL = "Other"
 #: Its label once it is selected or carries text; the typed string follows.
 OTHER_PREFIX = "Other: "
 #: The text caret drawn at the end of the field while the row is selected.
@@ -754,6 +764,12 @@ class AskPickerScreen(Container):
         #: future that raises if it is resolved twice. The same idempotence the
         #: approval prompt's :meth:`resolve` has, for the same reason.
         self._settled = False
+        #: Set by the owner when the ask behind a MOUNTED queued card lapses
+        #: (decision D10: a timed-out ask is read-only on every surface). The card
+        #: stays on screen — it is not yanked from under someone reading or typing
+        #: — but nothing it holds can be sent: Enter, a click, a routed digit and a
+        #: phone answer all stop committing, and Escape still closes it.
+        self._read_only = False
         #: What held focus when the card appeared, so answering hands it back
         #: rather than leaving the user out of the composer.
         self._restore_target: object | None = None
@@ -913,6 +929,32 @@ class AskPickerScreen(Container):
         """Whether the answers have already been handed back."""
         return self._settled
 
+    @property
+    def read_only(self) -> bool:
+        """Whether the card has stopped taking answers (see :meth:`set_read_only`)."""
+        return self._read_only
+
+    def set_read_only(self) -> None:
+        """Stop taking answers: the queued ask behind this card has LAPSED (D10).
+
+        One-way. A lapse does not un-happen, and a card that could become
+        answerable again would need the owner to prove the ask is open — which
+        it would do by mounting a fresh card. Escape keeps working: it settles
+        with nothing, which the owner reads as a back-out, never an answer, so the
+        user returns to the list where the row now reads ``timed out``.
+        """
+        if self._read_only:
+            return
+        self._read_only = True
+        # Text typed before the lapse is half an answer that will never be sent;
+        # left painted in the Other row it read as pending (#2481 UX U6). Checked
+        # boxes go for the same reason.
+        self.state.typed = ""
+        self.state.checked.clear()
+        # The Other row's description is cached per width; it changes now.
+        self._invalidate_description_wraps()
+        self._repaint()
+
     def restore_focus(self) -> None:
         """Return focus to whatever held it when the question appeared.
 
@@ -931,12 +973,49 @@ class AskPickerScreen(Container):
 
     # -- actions -------------------------------------------------------------
     def action_cancel(self) -> None:
-        """Escape: stop answering. Whatever was already answered still counts."""
-        self.settle(self._answers or None)
+        """Escape: stop answering. Whatever was already answered still counts.
+
+        A READ-ONLY card settles with NOTHING: answers the user gave before the
+        ask lapsed must not ride the back-out to the owner as a complete map.
+        """
+        self.settle(None if self._read_only else (self._answers or None))
 
     def action_move(self, delta: int) -> None:
         """Arrow/vi movement WRAPS: a discrete, deliberate keypress."""
+        if self._read_only:
+            self._scroll_read_only(delta)
+            return
         self._move_to((self.state.selected + delta) % self.row_count)
+
+    def _scroll_read_only(self, delta: int) -> None:
+        """``↑↓`` on a READ-ONLY card: move the WINDOW one row, clamped at the ends.
+
+        The answer card moves a selection and the window follows it, but a
+        read-only card draws no selection (D10), so that left the arrows moving
+        an invisible cursor: a press inside the window changed nothing on screen
+        and `down` past the end wrapped to the top (#2481 UX round 3, U15). Here
+        every press scrolls by one row or, at an end, stops — the documented
+        exception for a list that is the whole surface (AGENTS.md "Wrapping vs
+        clamping"). The hidden selection follows the window's TOP row, so
+        ``ctrl+e`` reveals the row the reader is looking at.
+        """
+        layout = self._layout()
+        lsbr = layout.line_start_by_row
+        body = layout.body_line_budget
+        window = self._window(layout)
+        if not lsbr or body <= 0 or not window:
+            return
+        max_off = max(0, lsbr[-1] - body)
+        top = window[0]
+        if delta > 0:
+            offset = min(lsbr[min(top + 1, self.row_count - 1)], max_off)
+        else:
+            offset = lsbr[max(0, top - 1)] if self._offset <= lsbr[top] else lsbr[top]
+        if offset == self._offset:
+            return
+        self._offset = offset
+        self.state.selected = self._window(layout)[0]
+        self._repaint()
 
     def action_page(self, delta: int) -> None:
         """PageUp/PageDown move the cursor a page and let the window follow.
@@ -1017,6 +1096,8 @@ class AskPickerScreen(Container):
         would either be Enter under another name or a selection the user cannot
         see the effect of.
         """
+        if self._read_only:
+            return  # D10: a lapsed card takes no selection (#2481 review m1)
         if not self.question.multi or self.state.selected == self.other_row:
             return
         index = self.state.selected
@@ -1056,6 +1137,9 @@ class AskPickerScreen(Container):
         # user was never shown. The footer already refuses to advertise `enter`
         # there for exactly this reason; this makes the key agree with the hint
         # rather than merely going unadvertised (D9, design round 2).
+        if self._read_only:
+            # A lapsed ask takes no answer (D10); the footer already says so.
+            return
         if not self.visible_rows:
             self._rejected = True
             self._repaint()
@@ -1105,6 +1189,12 @@ class AskPickerScreen(Container):
         # card could not even draw.
         if self.settled:
             return True
+        if self._read_only:
+            # DEFENSIVE (#2481 review m4): this route is the blocking card's
+            # (`tui_handle._ask_pending`), where no queued card is registered
+            # today. A phone answers a queued ask through `ask_respond`, which the
+            # queue still accepts as `late` (D10 leaves the store alone).
+            raise ValueError("that ask timed out — the agent went ahead without an answer")
         if not values:
             # Nothing chosen. On Q0 this is "the user answered nothing" — settle
             # with None so the tool falls back to its recommendation. Past Q0,
@@ -1200,7 +1290,7 @@ class AskPickerScreen(Container):
         rows are numbered, and swallowing letters would cost the vi movement
         for nothing.
         """
-        if self.state.selected != self.other_row:
+        if self._read_only or self.state.selected != self.other_row:
             return
         char = event.character
         if char is not None and char.isprintable() and len(char) == 1:
@@ -1218,6 +1308,12 @@ class AskPickerScreen(Container):
         value would land in the composer behind the card instead.
         """
         if self.state.selected != self.other_row:
+            return
+        if self._read_only:
+            # D10: nothing typed or pasted lands on a lapsed card (#2481 review m1).
+            # Stopped so the paste does not fall through to the composer behind.
+            event.stop()
+            event.prevent_default()
             return
         text = getattr(event, "text", "") or ""
         if not text:
@@ -1237,10 +1333,16 @@ class AskPickerScreen(Container):
     # the event so one gesture does not also scroll the transcript behind.
     def on_mouse_scroll_down(self, event) -> None:  # type: ignore[no-untyped-def]
         event.stop()
+        if self._read_only:
+            self._scroll_read_only(1)  # the window, not an invisible cursor (U15)
+            return
         self._move_to(min(self.row_count - 1, self.state.selected + 1))
 
     def on_mouse_scroll_up(self, event) -> None:  # type: ignore[no-untyped-def]
         event.stop()
+        if self._read_only:
+            self._scroll_read_only(-1)
+            return
         self._move_to(max(0, self.state.selected - 1))
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -1268,6 +1370,11 @@ class AskPickerScreen(Container):
         # choosing this card, and that has to end a passive card's passivity for good,
         # not only while it happens to hold the caret.
         self.engage()
+        if self._read_only:
+            # A click selects nothing on a lapsed card: on a single-select it
+            # would have been an answer (D10).
+            event.stop()
+            return
         index = self._index_at(event)
         if index is None:
             return
@@ -2575,6 +2682,8 @@ class AskPickerScreen(Container):
             # `^e more` becomes `^e less` and back, and the hint disappears
             # entirely once the reveal has drawn everything there was.
             self.state.revealed,
+            # A lapse strips every answer key from the footer (D10).
+            self._read_only,
         )
 
     def repaint_if_stale(self) -> None:
@@ -2662,7 +2771,7 @@ class AskPickerScreen(Container):
         lets Tab hand it the caret. The alternative, routing digits to a card the
         user has not engaged with, answers questions by accident (see ``_passive``).
         """
-        if self._passive or self.question.multi or not self.visible_rows:
+        if self._read_only or self._passive or self.question.multi or not self.visible_rows:
             return frozenset()
         return frozenset(
             str(index + 1) for index in self._window() if index < 9 and index != self.other_row
@@ -2775,6 +2884,10 @@ class AskPickerScreen(Container):
         """One row's label text, free-text row included, without styling."""
         if index != self.other_row:
             return self.question.options[index].label
+        if self._read_only:
+            # "(type your own)" invites typing a lapsed card refuses (#2481
+            # design D8); the row still says the agent offered a free answer.
+            return OTHER_READ_ONLY_LABEL
         typed = self.state.typed
         if self.question.secret:
             if typed or self.state.selected == self.other_row:
@@ -2789,6 +2902,9 @@ class AskPickerScreen(Container):
 
     def _row_description(self, index: int) -> str:
         if index == self.other_row:
+            if self._read_only:
+                # "type it here" invites input a lapsed card refuses (review m1).
+                return ""
             return SECRET_HINT if self.question.secret else OTHER_HINT
         return self.question.options[index].description
 
@@ -3032,10 +3148,13 @@ class AskPickerScreen(Container):
         span = f"{window[0] + 1}–{window[-1] + 1}"
         total = str(self.row_count)
         row = Text(no_wrap=True, overflow="ellipsis")
-        if cell_len(f"showing {span} of {total}") <= width:
-            row.append("showing ", style=dim)
+        prefix = _t(_x.picker_showing_prefix())
+        separator = _t(_x.picker_of_separator())
+        counter = f"{prefix}{span}{separator}{total}"
+        if cell_len(counter) <= width:
+            row.append(_t(_x.picker_showing_prefix()), style=dim)
         row.append(span, style=muted)
-        row.append(" of ", style=dim)
+        row.append(_t(_x.picker_of_separator()), style=dim)
         row.append(total, style=muted)
         return _cut_row(row, width)
 
@@ -3119,8 +3238,10 @@ class AskPickerScreen(Container):
         the faintest step in the ramp and the highlight vanished exactly when the
         user reached for the mouse.
         """
-        hovered = index == self._hovered
-        if index == self.state.selected and not self.passive:
+        # A READ-ONLY card marks no row either (D10): a lit row says "a click or
+        # Enter takes this one", and on a lapsed card nothing does.
+        hovered = index == self._hovered and not self._read_only
+        if index == self.state.selected and not self.passive and not self._read_only:
             token = "tint-select-hi" if hovered else "tint-select"
         elif hovered:
             token = "tint-select"
@@ -3208,7 +3329,7 @@ class AskPickerScreen(Container):
         ``recommended`` badge is untouched: it is a statement about the options,
         not about the keys, and it never depended on ``selected``.
         """
-        selected = index == self.state.selected and not self.passive
+        selected = index == self.state.selected and not self.passive and not self._read_only
         accent = ground + Style(color=theme_mod.semantic_color("accent"))
         row = Text(no_wrap=True, overflow="ellipsis")
         row.append(
@@ -3496,6 +3617,34 @@ class AskPickerScreen(Container):
         # reachable: the composer has focus and takes the arrows, Enter and the
         # printable keys as text. Only what the app routes still works — the
         # row ordinals and Escape — so those are all the footer claims.
+        if self._read_only:
+            # A LAPSED card (D10) takes no answer by any key, so the footer names
+            # only the keys that READ (#2481 UX U9): `↑↓` where the options are
+            # windowed and `^e` where the reveal would show more — of the question
+            # above all, which the explicit look exists to show in full. Each is
+            # offered only where it changes the frame, the rule every other
+            # footer here keeps. The card's own exit word, never a secret
+            # question's `decline`: Escape here declines nothing.
+            hints = []
+            ladder = []
+            # FOCUSED only (#2481 review round 3, M2): the composer takes `↑↓`
+            # and `ctrl+e` while it holds the caret, so naming them over a card
+            # that does not is D13's lie again. Unfocused, `esc` alone — the one
+            # key the app routes from anywhere.
+            #
+            # Windowed by the DRAWN rows, not by the position row: a short card
+            # windows its options without room for `showing 1–1 of 4`, and the
+            # arrows still scroll there (measured at 80x16).
+            if self.has_focus and self.visible_rows and len(self._window()) < self.row_count:
+                hints.append(("↑↓", "scroll"))
+                ladder.append("↑↓")
+            reveal = self._reveal_hint() if self.has_focus else None
+            if reveal is not None:
+                hints.append(reveal)
+                ladder.append(REVEAL_HINT_KEY)
+            hints.append(self._exit_hint)
+            ladder.append(self._exit_hint[0])
+            return self._shed_to_fit(hints, ladder, width)
         #
         # A footer describing one keyboard while the caret sits on another is
         # the same lie this row already refuses to tell about `enter` on a

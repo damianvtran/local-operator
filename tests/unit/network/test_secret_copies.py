@@ -209,6 +209,20 @@ def test_a_rotated_value_reaches_the_member_as_a_new_generation(secret_mesh: Any
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(lambda: _member_value(mesh.b.root, SECRET_NAME) == VALUE_2)
+    # WHY wait on the ledger, not just the value: the copy path writes the
+    # member's store first and the applied-generation ledger second
+    # (``_pull_blocking``: ``_apply_value`` then ``record_applied``), so the
+    # value becoming readable does NOT prove the generation has been recorded.
+    # Reading the ledger immediately after the value wait races that second
+    # write on a loaded shard (CI 38863032433: value converged, applied gen
+    # still 1). CONTRIBUTING's flake rule is the same point: wait on the
+    # acknowledgement/ledger before asserting it.
+    assert net_fixtures.wait_for(
+        lambda: int(
+            (SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY) or {}).get("gen") or 0
+        )
+        >= 2
+    )
     applied = SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY) or {}
     assert int(applied.get("gen") or 0) >= 2
     assert str(applied.get("record_id") or ""), "the class-2 record id rides the sidecar"

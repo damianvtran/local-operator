@@ -70,6 +70,7 @@ from local_operator.tools.builtin import (
     _guard,
     _text,
     _validation_error,
+    identifier_text,
     spill_truncate,
 )
 
@@ -206,13 +207,25 @@ def _estimate_text(project: Project) -> str:
     return f"est {number}{suffix}"
 
 
-def _row(project: Project, *, now: float | None = None, window: float | None = None) -> str:
-    """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS)."""
-    identity = display_name(project) or "- unnamed"
+def _row(
+    project: Project,
+    *,
+    now: float | None = None,
+    window: float | None = None,
+    context: ToolContext | None = None,
+) -> str:
+    """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS).
+
+    Identifier fields: the display title and the parenthesized key are marked
+    spans, so redaction leaves the names a caller addresses projects by.
+    """
+    title = display_name(project)
     if project.title:
         # Title-first with the key as secondary: the key is the addressing
         # handle, so a titled row must keep it recoverable from the listing.
-        identity = f"{identity} ({project.name})"
+        identity = f"{identifier_text(context, title)} ({identifier_text(context, project.name)})"
+    else:
+        identity = identifier_text(context, title or "- unnamed")
     parts = [
         f"- {identity} [{project.status}]",
         _estimate_text(project),
@@ -220,7 +233,8 @@ def _row(project: Project, *, now: float | None = None, window: float | None = N
     if project.owner:
         parts.append(f"owner: {project.owner}")
     if project.team:
-        parts.append(f"team: {project.team}")
+        # Identifier field: a team name is a rendered identifier, not prose.
+        parts.append(f"team: {identifier_text(context, project.team)}")
     if project.target_date:
         parts.append(f"→{project.target_date}")
     if project.milestones:
@@ -254,21 +268,30 @@ def _row(project: Project, *, now: float | None = None, window: float | None = N
 
 
 def _field_lines(
-    project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL, window: float | None = None
+    project: Project,
+    *,
+    history_tail: int = HISTORY_DEFAULT_TAIL,
+    window: float | None = None,
+    context: ToolContext | None = None,
 ) -> list[str]:
-    """The ``show`` header block: every stored field, derived status where one exists."""
+    """The ``show`` header block: every stored field, derived status where one exists.
+
+    Identifier fields: the display name on the first line and the ``key:`` line
+    are marked spans — both are names the caller quotes back, never credentials.
+    """
+    title = display_name(project)
     lines = [
-        f"{display_name(project) or '(unnamed)'} [{project.status}]",
+        f"{identifier_text(context, title) if title else '(unnamed)'} [{project.status}]",
     ]
     if project.title:
         # The display title is the first line; the addressing key must stay
         # visible (it is what op='update'/'link' take).
-        lines.append(f"key: {project.name}")
+        lines.append(f"key: {identifier_text(context, project.name)}")
     lines.extend(
         [
             f"description: {project.description or '(unstated)'}",
             f"owner: {project.owner or '(unstated)'}",
-            f"team: {project.team or '(unstated)'}",
+            f"team: {identifier_text(context, project.team) if project.team else '(unstated)'}",
             f"estimate: {_estimate_text(project)}",
             f"dates: start {project.start_date or '—'} · target {project.target_date or '—'}"
             f" · completed {project.completed_at or '—'}",
@@ -280,7 +303,12 @@ def _field_lines(
     freshness = f"reported {age} ago{stale}" if age is not None else "none recorded"
     lines.append(f"progress ({freshness}): {project.progress or '—'}")
     if project.progress and project.progress_reported_by:
-        lines.append(f"progress reported by: {project.progress_reported_by}")
+        # Identifier field: the reporter is a session id, a name the caller
+        # may look up; the owner field above stays plain (a person, not in the
+        # identifier class).
+        lines.append(
+            f"progress reported by: {identifier_text(context, project.progress_reported_by)}"
+        )
     note = refreshed_note(project)
     if note is not None:
         # THE sentence, one copy (``projects.refreshed_note``): "refreshed 1h
@@ -292,19 +320,24 @@ def _field_lines(
         for milestone in project.milestones:
             state = milestone_status(milestone)
             target = milestone.target_date or "—"
-            lines.append(f"  - {milestone.name} [{state}] target {target}")
+            lines.append(
+                f"  - {identifier_text(context, milestone.name)} " f"[{state}] target {target}"
+            )
     else:
         lines.append("milestones: (none)")
     return lines
 
 
-def _session_lines(view: dict[str, Any]) -> list[str]:
+def _session_lines(view: dict[str, Any], context: ToolContext | None = None) -> list[str]:
     """Per-session rollup from the ONE shared composition (``build_project_view``).
 
     WORKING sessions and filings are separate sections: the working list is
     what feeds every liveness reading, and a filing (``role='coordination'``)
     is provenance — it is never rendered with a runtime state (there is none on
     the row) so it can never be misread as participation.
+
+    Identifier fields: every row's session id and title are marked spans, so
+    redaction leaves the names a caller resumes or peeks by.
     """
     rows = view.get("sessions") or []
     if not rows:
@@ -318,11 +351,11 @@ def _session_lines(view: dict[str, Any]) -> list[str]:
             runtime = row.get("runtime") or {}
             state = runtime.get("state") or "stopped"
             busy = ", busy" if runtime.get("busy") else ""
-            session_id = row["session_id"]
+            session_id = identifier_text(context, str(row["session_id"]))
             if not row.get("exists"):
                 lines.append(f"  - {session_id} [missing] — no session directory")
                 continue
-            title = row.get("title") or "(untitled)"
+            title = identifier_text(context, str(row.get("title") or "")) or "(untitled)"
             bits = [state + busy]
             agents = row.get("subagents")
             if agents is not None:
@@ -336,11 +369,11 @@ def _session_lines(view: dict[str, Any]) -> list[str]:
     if filed:
         lines.append(f"filed by ({len(filed)}):")
         for row in filed:
-            session_id = row["session_id"]
+            session_id = identifier_text(context, str(row["session_id"]))
             if not row.get("exists"):
                 lines.append(f"  - {session_id} [filed] — no session directory")
                 continue
-            title = row.get("title") or "(untitled)"
+            title = identifier_text(context, str(row.get("title") or "")) or "(untitled)"
             bits = ["filed"]
             if row.get("archived"):
                 bits.append("archived")
@@ -429,8 +462,11 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "guide://projects first."
         )
         return _text(tool_call_id, "project", body)
+    # Identifier fields: every project's key and display title are marked
+    # inside the row renderer, so redaction leaves them readable.
     body = "projects:\n" + "\n".join(
-        _row(project, window=stale_after_s(registry.config_dir)) for project in projects
+        _row(project, window=stale_after_s(registry.config_dir), context=context)
+        for project in projects
     )
     body += "\n\nop='show' name='<name>' has the full record plus its sessions."
     text, spill = spill_truncate(body, "project", context)
@@ -448,17 +484,27 @@ async def _op_show(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list')",
+        )
     lines = _field_lines(
         project,
         history_tail=history_tail,
         window=stale_after_s(registry.config_dir),
+        context=context,
     )
+    view: dict[str, Any] | None = None
     try:
-        lines.extend(_session_lines(build_project_view(project, config_dir=registry.config_dir)))
+        view = build_project_view(project, config_dir=registry.config_dir)
     except Exception as exc:  # noqa: BLE001 — the record is the point; the view degrades
         logger.warning("could not compose project view for %s: %s", project.name, exc)
         lines.append("linked sessions: (view unavailable this call)")
+    if view is not None:
+        # Identifier fields: every linked session's id and title are marked
+        # inside the row renderer; both are names, not credentials.
+        lines.extend(_session_lines(view, context))
     body = "\n".join(lines)
     text, spill = spill_truncate(body, "project", context)
     return _text(tool_call_id, "project", text, details=spill or None)
@@ -518,17 +564,20 @@ async def _op_create(
         forced = "status 'done' forced with milestones incomplete (force_done=true). "
     if session_id and coordination:
         receipt = (
-            f"created project {project.name!r} [{project.status}]; filed by this session "
+            f"created project {identifier_text(context, repr(project.name))} "
+            f"[{project.status}]; filed by this session "
             f"(session {session_id}) — a coordination link, not a working session. "
         )
     elif session_id:
         receipt = (
-            f"created project {project.name!r} [{project.status}] and linked this session "
+            f"created project {identifier_text(context, repr(project.name))} "
+            f"[{project.status}] and linked this session "
             f"(session {session_id}). "
         )
     else:
         receipt = (
-            f"created project {project.name!r} [{project.status}] with no session link "
+            f"created project {identifier_text(context, repr(project.name))} "
+            f"[{project.status}] with no session link "
             "(this host has no session id). "
         )
     return _text(
@@ -553,7 +602,10 @@ async def _op_update(
         return _error(tool_call_id, "project", str(exc))
     if project is None:
         return _error(
-            tool_call_id, "project", f"no project named {name!r} to update (try op='list')."
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} to update "
+            "(try op='list').",
         )
     if (
         "milestones" in params.model_fields_set
@@ -597,7 +649,8 @@ async def _op_update(
         return _text(
             tool_call_id,
             "project",
-            f"project {updated.name!r} already held those values — nothing written.",
+            f"project {identifier_text(context, repr(updated.name))} already held those "
+            "values — nothing written.",
         )
     # The receipt must NAME a deliberate replace wherever the call made one — a
     # bare "updated project" is exactly the sentence that hid the wipe this
@@ -634,8 +687,8 @@ async def _op_update(
         return _text(
             tool_call_id,
             "project",
-            f"refreshed project {updated.name!r} — progress unchanged; {still} "
-            f"(no new content){replaced}{forced}.",
+            f"refreshed project {identifier_text(context, repr(updated.name))} — progress "
+            f"unchanged; {still} (no new content){replaced}{forced}.",
         )
     age = reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
@@ -652,7 +705,8 @@ async def _op_update(
     return _text(
         tool_call_id,
         "project",
-        f"updated project {updated.name!r} [{updated.status}] — {detail}.",
+        f"updated project {identifier_text(context, repr(updated.name))} "
+        f"[{updated.status}] — {detail}.",
     )
 
 
@@ -691,12 +745,17 @@ async def _op_refresh(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list').",
+        )
     if not (project.progress or "").strip():
         return _error(
             tool_call_id,
             "project",
-            f"project {project.name!r} has no recorded progress to refresh — write the "
+            f"project {identifier_text(context, repr(project.name))} has no recorded "
+            f"progress to refresh — write the "
             "first line with op='update' progress=<text>.",
         )
     reporter = _calling_session_id(context) or "operator"
@@ -714,7 +773,8 @@ async def _op_refresh(
         return _text(
             tool_call_id,
             "project",
-            f"project {outcome.project.name!r} is not stale — nothing written "
+            f"project {identifier_text(context, repr(outcome.project.name))} is not stale "
+            "— nothing written "
             "(a refresh is for a stale record; there is no reason to send it every turn).",
         )
     refreshed = outcome.project
@@ -727,7 +787,8 @@ async def _op_refresh(
     return _text(
         tool_call_id,
         "project",
-        f"refreshed project {refreshed.name!r} — progress unchanged; {still} "
+        f"refreshed project {identifier_text(context, repr(refreshed.name))} — progress "
+        f"unchanged; {still} "
         "(no new content; the stale badge stays until a new line lands).",
     )
 
@@ -751,7 +812,11 @@ async def _op_link(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list').",
+        )
     # The pre-state decides which receipt is true: linking an id that was
     # FILED moves it between lists, and a receipt that said "linked" would
     # hide the one act a reader must know about (its liveness role changed).
@@ -796,41 +861,48 @@ async def _op_link(
             return _text(
                 tool_call_id,
                 "project",
-                f"filed session {session_id} on {project.name!r} — a coordination link, "
+                f"filed session {identifier_text(context, str(session_id))} on "
+                f"{identifier_text(context, repr(project.name))} — a coordination link, "
                 "not a working session.",
             )
         return _text(
             tool_call_id,
             "project",
-            f"session {session_id} is already filed on {project.name!r} — a coordination "
+            f"session {identifier_text(context, str(session_id))} is already filed on "
+            f"{identifier_text(context, repr(project.name))} — a coordination "
             "link, not a working session.",
         )
     if linking and not changed:
         return _text(
             tool_call_id,
             "project",
-            f"session {session_id} was already linked to {project.name!r} as a working "
+            f"session {identifier_text(context, str(session_id))} was already linked to "
+            f"{identifier_text(context, repr(project.name))} as a working "
             f"session ({working}).",
         )
     if not linking and not changed:
         return _error(
             tool_call_id,
             "project",
-            f"session {session_id} is not linked to {project.name!r}; "
+            f"session {identifier_text(context, str(session_id))} is not linked to "
+            f"{identifier_text(context, repr(project.name))}; "
             "op='show' lists its sessions and filings.",
         )
     if linking and was_filed:
         return _text(
             tool_call_id,
             "project",
-            f"moved session {session_id} from filed to working links on {project.name!r} "
+            f"moved session {identifier_text(context, str(session_id))} from filed to "
+            f"working links on {identifier_text(context, repr(project.name))} "
             f"({working} now).",
         )
     return _text(
         tool_call_id,
         "project",
-        f"{'linked' if linking else 'unlinked'} session {session_id} "
-        f"{'to' if linking else 'from'} {project.name!r} ({working} now).",
+        f"{'linked' if linking else 'unlinked'} session "
+        f"{identifier_text(context, str(session_id))} "
+        f"{'to' if linking else 'from'} {identifier_text(context, repr(project.name))} "
+        f"({working} now).",
     )
 
 
@@ -849,7 +921,11 @@ async def _op_milestone(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list').",
+        )
     payload: dict[str, Any] = {"name": milestone_name, "remove": params.remove}
     if "milestone_target_date" in params.model_fields_set:
         payload["target_date"] = params.milestone_target_date
@@ -871,13 +947,15 @@ async def _op_milestone(
         return _text(
             tool_call_id,
             "project",
-            f"milestone {milestone_name!r} on {project.name!r} already read that way "
+            f"milestone {identifier_text(context, repr(milestone_name))} on "
+            f"{identifier_text(context, repr(project.name))} already read that way "
             "— nothing written.",
         )
     return _text(
         tool_call_id,
         "project",
-        f"{action} milestone {milestone_name!r} on {project.name!r} "
+        f"{action} milestone {identifier_text(context, repr(milestone_name))} on "
+        f"{identifier_text(context, repr(project.name))} "
         f"({_milestone_counts(project)}).",
     )
 
@@ -970,12 +1048,18 @@ async def execute_project_delete(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project_delete", str(exc))
     if project is None:
-        return _error(tool_call_id, "project_delete", f"no project named {name!r} to delete.")
+        return _error(
+            tool_call_id,
+            "project_delete",
+            f"no project named {identifier_text(context, repr(name))} to delete.",
+        )
     try:
         registry.delete_project(project.id)
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project_delete", f"could not delete project: {exc}")
-    return _text(tool_call_id, "project_delete", f"deleted project {name!r}.")
+    return _text(
+        tool_call_id, "project_delete", f"deleted project {identifier_text(context, repr(name))}."
+    )
 
 
 def build_project_delete_tool(context: ToolContext) -> AgentTool | None:

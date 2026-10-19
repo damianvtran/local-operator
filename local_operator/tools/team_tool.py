@@ -19,7 +19,7 @@ full briefs. Mirrors how roles and skills are handled.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -30,13 +30,16 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.projects import truncate_row
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     TeamEditFields,
+    TeamMember,
     TeamRegistry,
     TeamRegistryLockTimeout,
     TeamRegistryRecoveryError,
     display_form,
+    find_member,
     parse_members,
 )
 from local_operator.tools.builtin import (
@@ -44,12 +47,42 @@ from local_operator.tools.builtin import (
     _guard,
     _text,
     _validation_error,
+    identifier_text,
     spill_truncate,
 )
 
 logger = logging.getLogger(__name__)
 
 _ROW_CAP = 160
+
+
+class TeamOverride(BaseModel):
+    """One ``overrides`` entry: a roster slot, and the fields to set or clear."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    member: str = Field(
+        description=(
+            "The roster slot to change, spelled exactly as in 'members': a role "
+            "name, or 'team:<name>' for a nested-team slot."
+        )
+    )
+    tier: str | None = Field(
+        default=None,
+        description=(
+            "Which model tier this slot runs on: 'lo', 'med' or 'hi' by default "
+            "(a key of values.subagents.models). 'inherit' clears it, so the slot "
+            "falls back to the role's own effort tag. Omit to leave it alone."
+        ),
+    )
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "How much reasoning this slot asks for: 'auto' (the model's own "
+            "default) or a level from 'none' to 'max', clamped to the model's "
+            "ladder. 'inherit' clears it. Omit to leave it alone."
+        ),
+    )
 
 
 class TeamParams(BaseModel):
@@ -116,6 +149,138 @@ class TeamParams(BaseModel):
             "team name or another team's alias."
         ),
     )
+    overrides: list[TeamOverride] | None = Field(
+        default=None,
+        description=(
+            "create/update: pin the MODEL or the REASONING EFFORT of individual "
+            "roster slots, so one member of a team can run on a stronger model "
+            "than the rest. Each entry names a slot from 'members' and sets or "
+            "clears 'tier'/'effort'; a slot this list does not name keeps "
+            "whatever it already had, including across an update that replaces "
+            "'members'. On a nested-team slot ('team:pod') the pin belongs to "
+            "that team's MANAGER when this roster launches it. Only available "
+            "when subagents.model_choice is 'model'; otherwise the operator "
+            "sets these in the desktop team editor."
+        ),
+    )
+
+
+def _slot_token(member: TeamMember) -> str:
+    """How ``members`` spells this slot, for a message a caller can act on."""
+
+    return f"team:{member.role}" if member.kind == "team" else str(member.role)
+
+
+def _override_lines(team: Any, mark: Callable[[str], str] | None = None) -> list[str]:
+    """The lines ``show`` adds for a roster carrying member overrides.
+
+    Deliberately NOT in ``roster_lines()``: that feeds the manager's and every
+    member's prompt, and a prompt change is a prompt-cache cost for no behaviour
+    gain. ``show`` is the surface a model reads when it needs to know, and the
+    desktop editor is the surface that writes them.
+
+    ``mark`` wraps the slot name for the redaction pass, like
+    ``Team.roster_lines``; a slot name is a rendered identifier.
+    """
+
+    label = mark or (lambda value: value)
+    rows: list[str] = []
+    for member in team.members:
+        if member.is_default():
+            continue
+        parts = []
+        if member.tier:
+            parts.append(f"tier {member.tier}")  # i18n: ignore model-facing tool output
+        if member.effort:
+            parts.append(f"effort {member.effort}")  # i18n: ignore model-facing tool output
+        rows.append(f"- {label(_slot_token(member))}: {', '.join(parts)}")
+    if not rows:
+        return []
+    return ["member overrides (model tier / reasoning effort):", *rows]
+
+
+def _carry_overrides(existing: Any, members: list[TeamMember]) -> list[TeamMember]:
+    """Keep the stored overrides on every slot ``members`` still names.
+
+    An ``update`` with ``members=`` replaces the roster WHOLESALE, so a roster
+    edit -- adding one role, reordering, or an editor echoing back what it read --
+    would otherwise drop every override the operator had set. They are PINS: a
+    dropped one puts that child back on the model the operator moved it off, and
+    nothing in the receipt would say so.
+    """
+
+    if existing is None:
+        return members
+    carried: list[TeamMember] = []
+    for member in members:
+        stored = find_member(existing.members, member.role, kind=member.kind)
+        if stored is not None and not stored.is_default() and member.is_default():
+            member = member.model_copy(update={"tier": stored.tier, "effort": stored.effort})
+        carried.append(member)
+    return carried
+
+
+def _apply_overrides(members: list[TeamMember], overrides: list[TeamOverride]) -> list[TeamMember]:
+    """Set or clear the named slots' overrides, in place, on a fresh roster.
+
+    ``inherit`` CLEARS a field, the same word the ``agent`` tool uses to clear a
+    pin, so a caller can take an override off without re-sending the roster.
+    A slot the roster does not name is refused by name rather than ignored: the
+    caller asked for something that did not happen, and silence about that is
+    how an operator ends up believing a pin exists.
+    """
+
+    updated = list(members)
+    for override in overrides:
+        token = (override.member or "").strip()
+        kind = "team" if token.lower().startswith("team:") else "agent"
+        name = token[len("team:") :].strip() if kind == "team" else token
+        index = next(
+            (
+                i
+                for i, member in enumerate(updated)
+                if member.kind == kind and str(member.role).strip().casefold() == name.casefold()
+            ),
+            None,
+        )
+        if index is None:
+            roster = ", ".join(_slot_token(member) for member in updated) or "(empty)"
+            raise ValueError(
+                f"no roster slot named {token!r} to put overrides on; this roster is: {roster}"
+            )
+        fields: dict[str, Any] = {}
+        for field in ("tier", "effort"):
+            value = getattr(override, field)
+            if value is None:
+                continue
+            fields[field] = None if value.strip().lower() == "inherit" else value.strip().lower()
+        if fields:
+            # Validate through the MODEL, not ``model_copy(update=...)``: the
+            # copy skips the field validators, so a bad word used to reach
+            # ``team.yml`` and the next load dropped it -- the receipt claimed a
+            # pin that did not exist, and the child then ran on a model the
+            # operator was not told about. The registry re-validates at save for
+            # the transports that never come through here; this arm is for the
+            # caller that can still correct its call.
+            current = updated[index]
+            updated[index] = TeamMember.model_validate({**current.model_dump(), **fields})
+    return updated
+
+
+def _overrides_refusal() -> str:
+    """Why a model may not set member overrides, and who can.
+
+    Ordered the way :func:`local_operator.tools.builtin._operator_choice_pin_rejection`
+    is: the OWNERSHIP first, then the operator's route, then the model's own
+    next step — the truncated card shows that lead and nothing else.
+    """
+
+    return (
+        "Member overrides are the operator's: they pin a slot's model or its "
+        "reasoning effort. Raising subagents.model_choice to 'model' delegates "
+        "that choice; until then the operator sets them in the desktop team "
+        "editor. Author the roster without 'overrides'."
+    )
 
 
 def _registry(context: ToolContext | None) -> TeamRegistry | None:
@@ -123,12 +288,15 @@ def _registry(context: ToolContext | None) -> TeamRegistry | None:
     return raw if isinstance(raw, TeamRegistry) else None
 
 
-def _row(team: Any) -> str:
+def _row(team: Any, *, context: ToolContext | None = None) -> str:
     # ``member_count()`` for the same reason every other listing uses it (D2):
     # `len(members) + 1` assumes the manager is not on the roster, which is
     # false for real teams, and collapses a multi-count slot to one. This row
     # is what the MODEL reads when it lists teams, so a wrong count here is a
     # wrong count in the agent's own reasoning about a roster it may staff.
+
+    # Identifier fields: the display form and the manager are marked spans; a
+    # team may be named or led by a word that looks credential-shaped.
     slots = team.member_count()
     summary = (team.description or "").strip() or "(no description)"
     # "members", matching the number (R6): `member_count()` excludes the
@@ -140,10 +308,10 @@ def _row(team: Any) -> str:
     # keeps the typeable key beside it (``Platform Reliability (ops)``) while
     # a derived default paints whatever the human surfaces paint.
     row = (
-        f"- {display_form(team.name, team.label)} "
-        f"[{slots} {member_word}, led by {team.manager}]: {summary}"
+        f"- {identifier_text(context, display_form(team.name, team.label))} "
+        f"[{slots} {member_word}, led by {identifier_text(context, team.manager)}]: {summary}"
     )
-    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
+    return truncate_row(row, cap=_ROW_CAP)
 
 
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:
@@ -161,7 +329,7 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "instance owns a product) the project brief. Read guide://teams first."
         )
         return _text(tool_call_id, "team", body)
-    body = "registered teams:\n" + "\n".join(_row(team) for team in teams)
+    body = "registered teams:\n" + "\n".join(_row(team, context=context) for team in teams)
     body += "\n\nlaunch with /team <name> <request>, or op='show' name='<name>'."
     text, spill = spill_truncate(body, "team", context)
     return _text(tool_call_id, "team", text, details=spill or None)
@@ -176,17 +344,25 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
     if team is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "team",
+            f"no team named {identifier_text(context, repr(name))} (try op='list')",
+        )
     header = [
-        f"{display_form(team.name, team.label)}. Led by {team.manager}",
+        f"{identifier_text(context, display_form(team.name, team.label))}. "
+        f"Led by {identifier_text(context, team.manager)}",
         f"description: {team.description or '(unstated)'}",
     ]
     if team.aliases:
         # D5: an alias resolves to this team, and the model has no other way
-        # to learn one exists.
-        header.append(f"aliases: {', '.join(team.aliases)}")
-    header.append("roster:")
-    header.extend(team.roster_lines())
+        # to learn one exists. Identifier fields: every alias is a name.
+        header.append(
+            f"aliases: {', '.join(identifier_text(context, alias) for alias in team.aliases)}"
+        )  # i18n: ignore model-facing tool output
+    header.append("roster:")  # i18n: ignore model-facing tool output
+    header.extend(team.roster_lines(lambda value: identifier_text(context, value)))
+    header.extend(_override_lines(team, lambda value: identifier_text(context, value)))
     body = "\n".join(header)
     if team.instructions.strip():
         body += "\n\ncollaboration:\n" + team.instructions.strip()
@@ -196,7 +372,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         body += "\n\nproject:\n" + team.project.strip()
     else:
         body += "\n\nproject: (none)"
-    body += f"\n\nlaunch with /team {team.name} <request>."
+    body += f"\n\nlaunch with /team {identifier_text(context, team.name)} <request>."
     text, spill = spill_truncate(body, "team", context)
     return _text(tool_call_id, "team", text, details=spill or None)
 
@@ -239,19 +415,50 @@ async def _op_write(
             return _error(
                 tool_call_id,
                 "team",
-                f"Team name {name!r} is already an alias of team {existing.name!r}",
+                f"Team name {identifier_text(context, repr(name))} is already an alias "
+                f"of team {identifier_text(context, repr(existing.name))}",
             )
         return _error(
             tool_call_id,
             "team",
-            f"team {name!r} already exists; use op='update' to change it.",
+            f"team {identifier_text(context, repr(name))} already exists; "
+            "use op='update' to change it.",
         )
     if not creating and existing is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} to update.")
+        return _error(
+            tool_call_id,
+            "team",
+            f"no team named {identifier_text(context, repr(name))} to update.",
+        )
+    if params.overrides:
+        # The operator gate (design §6): a roster-level pin is the operator's
+        # choice unless they have delegated model choice, exactly like a role's
+        # own ``effort`` tag. Evaluated against the LIVE config, so a setting
+        # flipped back to ``operator`` is obeyed by the very next call.
+        from local_operator.harness.subagent import model_may_choose_tier
+
+        if not model_may_choose_tier():
+            return _error(tool_call_id, "team", _overrides_refusal())
     try:
         members = parse_members(params.members) if params.members is not None else None
+        if members is not None:
+            # A ``members=`` update replaces the roster wholesale, so anything
+            # the operator had pinned on a surviving slot rides forward unless
+            # this call sets it (``_carry_overrides``).
+            members = _carry_overrides(existing, members)
+        if params.overrides:
+            members = _apply_overrides(
+                members if members is not None else list(existing.members if existing else []),
+                params.overrides,
+            )
         instructions = _bounded_field(params.instructions, "collaboration instructions")
         project = _bounded_field(params.project, "project instructions")
+    except ValidationError as exc:
+        # A word outside the vocabulary is the model's own call to correct, so it
+        # gets the per-field ``invalid arguments:`` refusal rather than a bare
+        # sentence (and stays a model fault, not an environmental one). Raised by
+        # ``_apply_overrides``, which validates the merged slot through the model.
+        return _validation_error(tool_call_id, "team", exc)
     except ValueError as exc:
         return _error(tool_call_id, "team", str(exc))
 
@@ -283,12 +490,46 @@ async def _op_write(
         return _error(tool_call_id, "team", str(exc))
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team", f"could not save team: {exc}")
+    pinned = sum(1 for member in team.members if not member.is_default())
+    # Identifier fields: the write receipt names the team and its manager; both
+    # are marked spans, never credentials.
+    note = ""
+    unconfigured = _unconfigured_tiers(team.members)
+    if unconfigured:
+        # Said HERE rather than refused: config moves independently of teams, so
+        # a write must not fail for a reason outside the team -- but the operator
+        # should learn that the slot will refuse to launch while the edit is
+        # still on screen, not on the launch.
+        note = (
+            f" No model is configured for tier {', '.join(repr(t) for t in unconfigured)} "
+            "in values.subagents.models, so a slot pinned to it will refuse to launch."
+        )
     return _text(
         tool_call_id,
         "team",
-        f"{verb} team {team.name!r}. {team.manager} leads it; "
-        f"{len(team.members)} member slot(s). Launch with /team {team.name} <request>.",
+        f"{verb} team {identifier_text(context, repr(team.name))}. "
+        f"{identifier_text(context, team.manager)} leads it; "
+        f"{len(team.members)} member slot(s)."
+        + (f" {pinned} carries a model/effort override." if pinned else "")
+        + note
+        + f" Launch with /team {identifier_text(context, team.name)} <request>.",
     )
+
+
+def _unconfigured_tiers(members: Iterable[TeamMember]) -> list[str]:
+    """The override tiers this config has no model for, sorted and deduplicated.
+
+    Read through :func:`configured_effort_tiers` -- the same reader the ``task``
+    schema uses to decide which tiers to advertise -- so a tier the tool says is
+    unconfigured is exactly one the launch will refuse.
+    """
+    wanted = sorted({str(member.tier) for member in members if member.tier})
+    if not wanted:
+        return []
+    from local_operator.harness.subagent import configured_effort_tiers
+
+    configured = configured_effort_tiers()
+    return [tier for tier in wanted if not configured.get(tier)]
 
 
 async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
@@ -300,12 +541,19 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team_delete", str(exc))
     if team is None:
-        return _error(tool_call_id, "team_delete", f"no team named {name!r} to delete.")
+        return _error(
+            tool_call_id,
+            "team_delete",
+            f"no team named {identifier_text(context, repr(name))} to delete.",
+        )
     try:
         registry.delete_team(team.id)
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team_delete", f"could not delete team: {exc}")
-    return _text(tool_call_id, "team_delete", f"deleted team {name!r}.")
+    # Identifier field: the delete receipt names the team the caller targeted.
+    return _text(
+        tool_call_id, "team_delete", f"deleted team {identifier_text(context, repr(name))}."
+    )
 
 
 @_guard("team")

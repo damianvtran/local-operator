@@ -158,6 +158,12 @@ COPY_SET_NAMES: tuple[str, ...] = (
     "asks.jsonl",
     "fork-boundary.json",
     "desktop.json",
+    # THE HARNESS-IMPORT MANIFEST (``harness_import.manifest.MANIFEST_NAME``):
+    # provenance, capture opt-out and compaction anchors for a conversation
+    # imported from another harness. A move that dropped it would re-enable
+    # automatic memory capture, lose the idempotency fingerprint and leave the
+    # target looking like a native session. It is a fact about the session.
+    "harness-import.json",
     # THE SESSION'S BIRTH TIME (``session/creation.CREATED_AT_NAME``). Without it
     # a moved conversation reads as newly created on the destination, because
     # ``session_created_at`` falls back to the directory's ``st_birthtime`` — and

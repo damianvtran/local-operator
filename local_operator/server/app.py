@@ -48,6 +48,9 @@ from local_operator.server.routes import (
     desktop_claim,
     desktop_code_requests,
     desktop_hub,
+    desktop_imports,
+    desktop_librarian,
+    desktop_library,
     desktop_lifecycle,
     desktop_mcp,
     desktop_mesh,
@@ -254,6 +257,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("aida: boot ensure failed", exc_info=True)
 
     app.state.aida_boot_task = asyncio.create_task(_aida_boot_ensure())
+
+    # THE LIBRARIAN'S BOOT ENSURE, on the same schedule-never-await rule and
+    # behind the same activation gate: a cloud/automation daemon with no human
+    # surface must not pay for a session, a cadence and a wake supervisor it
+    # never asked for. An explicit POST /v1/desktop/librarian {"op":"open"}
+    # still creates her on such an install.
+    async def _librarian_boot_ensure() -> None:
+        try:
+            from local_operator.aida import activation
+            from local_operator.librarian import ensure_session
+
+            if not activation.human_surface_present():
+                logger.info("librarian: no human surface at boot; not auto-activating")
+                return
+            if activation.terminal_under_a_foreign_home():
+                logger.info("librarian: boot terminal is under a foreign HOME; not auto-activating")
+                return
+            await ensure_session(config_dir)
+        except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
+            logger.warning("librarian: boot ensure failed", exc_info=True)
+
+    app.state.librarian_boot_task = asyncio.create_task(_librarian_boot_ensure())
     app.state.job_manager = JobManager()
     # The SSE fan-out. One instance per process: it is the ONLY streaming
     # transport the server offers (the deprecated /v1/ws socket surface was
@@ -830,6 +855,10 @@ app.include_router(i18n.router)
 # the routes on the env switch would make the desktop's discovery loop read a
 # 404 as a broken backend rather than a switched-off feature.
 app.include_router(desktop_aida.router)
+# The Librarian's control plane, beside Aida's and for the same reason: the
+# handlers answer `enabled: false` themselves, so a switched-off install is a
+# typed refusal rather than a 404 the desktop would read as a broken backend.
+app.include_router(desktop_librarian.router)
 # The way IN to a daemon the desktop app did not start. It carries no
 # `require_desktop` dependency on purpose (that is the deadlock the design
 # names): the gate is the record's 0600 key, checked inside the route.
@@ -839,6 +868,7 @@ app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
+app.include_router(desktop_imports.router)
 # Agent Hub update availability/apply. Beside the profile routes it extends; no
 # sibling declares a `/v1/desktop/hub...` template, so nothing can swallow it.
 app.include_router(desktop_hub.router)
@@ -924,6 +954,10 @@ app.include_router(desktop_code_requests.router)
 # `/files/{file_id}/materialise`) match no sessions-router route (no `/files` child of a
 # session is declared there) and the POST's literal suffix cannot be swallowed by a parent.
 app.include_router(desktop_session_files.router)
+# The global Library's own plane. `/v1/desktop/library/*` shares no prefix with
+# the sessions router, so declaration order cannot shadow a session child; the
+# service's own content route is id-addressed and never accepts a path.
+app.include_router(desktop_library.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

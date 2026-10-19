@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "scope": "completed-peer-cycle-only; default quiet-groups.parity.json unchanged",
+  "session_id": "synthetic-cycle",
+  "view_epoch": 7,
+  "cases": [
+    {"id": "one-exchange", "rows": [{"source_id":"peer:0","kind":"peer"},{"source_id":"tool:send:0","kind":"send","successful":true}], "quiet":true, "expected":true},
+    {"id": "peer-only-even-with-quiet", "rows": [{"source_id":"peer:0","kind":"peer"}], "quiet":true, "expected":false},
+    {"id": "send-only", "rows": [{"source_id":"tool:send:0","kind":"send","successful":true}], "quiet":true, "expected":false},
+    {"id": "success-without-quiet", "rows": [{"source_id":"peer:0","kind":"peer"},{"source_id":"tool:send:0","kind":"send","successful":true}], "quiet":false, "expected":false},
+    {"id": "never-sent", "rows": [{"source_id":"peer:0","kind":"peer"},{"source_id":"tool:send:0","kind":"send","successful":true,"never_sent":true}], "quiet":true, "expected":false},
+    {"id": "unknown-success", "rows": [{"source_id":"peer:0","kind":"peer"},{"source_id":"tool:send:0","kind":"send"}], "quiet":true, "expected":false},
+    {"id": "attention", "rows": [{"source_id":"peer:0","kind":"peer","attention":true},{"source_id":"tool:send:0","kind":"send","successful":true}], "quiet":true, "expected":false},
+    {"id": "final-or-first-token", "rows": [{"source_id":"peer:0","kind":"peer"},{"source_id":"answer:0","kind":"boundary"},{"source_id":"tool:send:0","kind":"send","successful":true}], "quiet":true, "expected":false},
+    {"id": "late-peer-not-acknowledged", "rows": [{"source_id":"peer:0","kind":"peer"},{"source_id":"tool:send:0","kind":"send","successful":true},{"source_id":"later:0","kind":"peer"}], "quiet":true, "expected":false}
+  ]
+}

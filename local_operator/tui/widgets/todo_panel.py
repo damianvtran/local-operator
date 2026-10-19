@@ -46,7 +46,11 @@ from textual.dom import NoScreen
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
+
+_t = tr("tui.small")
 
 #: Rows shown before the list collapses to a ``… N more`` line, on any terminal
 #: tall enough to afford them. The panel is chrome above the composer, not the
@@ -991,15 +995,18 @@ class TodoPanel(Container):
         resolved = sum(1 for _text, status, _reason in rows if status in RESOLVED_STATUSES)
         dropped = sum(1 for _text, status, _reason in rows if status == "dropped")
         header = Text(no_wrap=True, overflow="ellipsis")
-        header.append("Todos", style=muted)
+        header.append(_t(_x.todo_panel_header()), style=muted)
         header.append(" · ", style=dim)
         # ``muted``, not ``dim``: ``dim`` is 4.18:1 on the band's ground and
         # these are the numbers the panel exists to add — the same call the
         # subagent panel's numbers got one file over (``compose_row``).
-        header.append(f"{resolved}/{len(rows)} resolved", style=muted)
+        header.append(
+            _t(_x.todo_panel_resolved(resolved=str(resolved), total=str(len(rows)))),
+            style=muted,
+        )
         if dropped:
             header.append(" · ", style=dim)
-            header.append(f"{dropped} dropped", style=muted)
+            header.append(_t(_x.todo_panel_dropped(count=str(dropped))), style=muted)
 
         # Rows are allocated in priority order out of what the screen affords.
         # The header is never negotiable: it is the only line that states the
@@ -1039,7 +1046,9 @@ class TodoPanel(Container):
         if marker:
             overflow = Text(no_wrap=True, overflow="ellipsis")
             # Counts what the reader cannot see, not what this loop dropped.
-            overflow.append(f"… {len(rows) - len(visible)} more todos", style=dim)
+            overflow.append(
+                _t(_x.todo_panel_more_todos(count=str(len(rows) - len(visible)))), style=dim
+            )
             lines.append(overflow)
         # Collapsed flat stays byte-identical: the marker is a BODY line and no
         # affordance widget is mounted (design §6.3, the back-compat goldens).
@@ -1103,9 +1112,12 @@ class TodoPanel(Container):
         active_stage = _active_phase_index(phases)
         total_stages = len(phases)
         root = Text(no_wrap=True, overflow="ellipsis")
-        root.append("Todos", style=muted)
+        root.append(_t(_x.todo_panel_header()), style=muted)
         if total_stages:
-            root.append(f" · stage {active_stage + 1}/{total_stages}", style=dim)
+            root.append(
+                _t(_x.todo_panel_stage(stage=str(active_stage + 1), total=str(total_stages))),
+                style=dim,
+            )
 
         # Items hidden from THIS view that the affordance line must confess.
         # Split done/open so an affordance can never label an open item "done" —
@@ -1359,10 +1371,13 @@ class TodoPanel(Container):
         total_hidden = hidden_done + hidden_open
         if total_hidden:
             if hidden_open:
-                row.append(f"+{total_hidden} more · ", style=dim)
+                row.append(_t(_x.todo_panel_more_hidden(count=str(total_hidden))), style=dim)
             else:
-                row.append(f"+{hidden_done} done · ", style=dim)
-        row.append("ctrl+t to collapse" if self._expanded else "ctrl+t to expand", style=muted)
+                row.append(_t(_x.todo_panel_done_hidden(count=str(hidden_done))), style=dim)
+        row.append(
+            _t(_x.todo_panel_collapse()) if self._expanded else _t(_x.todo_panel_expand()),
+            style=muted,
+        )
         return row
 
     def _expanded_viewport(self) -> tuple[int, int, int]:
@@ -1505,7 +1520,9 @@ class TodoPanel(Container):
         # Sized on the WIDEST remainder this list can show (U1): ``total`` at the
         # top of the scroll. Whatever fits must fit at every position, or the cue
         # is not offered at all.
-        widest = Text(f"↓ {total} more · ", no_wrap=True, overflow="ellipsis")
+        widest = Text(
+            _t(_x.todo_panel_more_below(count=str(total))), no_wrap=True, overflow="ellipsis"
+        )
         if cells and widest.cell_len + affordance.cell_len > cells:
             if not more_below:
                 return affordance
@@ -1541,7 +1558,9 @@ class TodoPanel(Container):
             # end-state move, so a reader scrolling to the bottom saw the
             # affordance shift twice where the design intends once — D1's exact
             # defect class, re-opened by the row that fixed D2.
-            prefix.append(f"↓ {'':>{len(str(total))}} more · ", style=dim)
+            prefix.append(
+                _t(_x.todo_panel_more_below_padded(pad="".rjust(len(str(total))))), style=dim
+            )
             prefix.append_text(affordance)
             return prefix
         # The remainder is right-aligned in the widest number's field (design
@@ -1555,7 +1574,9 @@ class TodoPanel(Container):
         # reader watching. Padding to ``len(str(total))`` pins the hotkey's column
         # across every position the prefix is shown at, so the only time it moves
         # is the single deliberate transition to the end state.
-        prefix.append(f"↓ {remaining:>{len(str(total))}} more · ", style=dim)
+        prefix.append(
+            _t(_x.todo_panel_more_below(count=f"{remaining:>{len(str(total))}}")), style=dim
+        )
         prefix.append_text(affordance)
         return prefix
 
@@ -1858,9 +1879,9 @@ class TodoPanel(Container):
         # approval prompt and the tool cards).
         row.append(strip_control_sequences(text), style=body)
         if status == "blocked":
-            row.append(" — blocked", style=muted)
+            row.append(_t(_x.todo_panel_blocked()), style=muted)
             if reason:
                 row.append(f": {strip_control_sequences(reason)}", style=muted)
         elif status == "dropped":
-            row.append(" — dropped", style=dim)
+            row.append(_t(_x.todo_panel_dropped_row()), style=dim)
         return row

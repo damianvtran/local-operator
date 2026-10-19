@@ -21,7 +21,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.cli import _content_row_text, sessions_cleanup_command
+from local_operator.cli import (
+    _CLEANUP_TEXT_ROWS,
+    _content_row_text,
+    sessions_cleanup_command,
+)
 from local_operator.config import ConfigManager
 from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
@@ -37,6 +41,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         max_total_bytes=None,
         remove_empty=None,
         delegated_max_age_hours=None,
+        scratchpads_only=False,
         json=False,
     )
     base.update(overrides)
@@ -265,6 +270,40 @@ def test_json_keeps_its_old_keys_and_gains_per_class_objects(store: Path, capsys
     assert payload["scanned"] == _count(store) == 19
 
 
+def test_the_kept_listing_and_json_are_both_capped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """The kept names are CAPPED, so the text must not promise a full ``--json``.
+
+    The pass names at most ``WINDOW_NAMES_CAP`` kept-by-origin sessions (the
+    totals line still carries the true count), and the printer shows at most
+    ``_CLEANUP_TEXT_ROWS`` of those. Past the cap the old line said ``--json
+    lists every row``, which was false: JSON carries the same capped list. One
+    600-session store pins the cap and both truncations at once.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    mark_store(tmp_path / "sessions")
+    for index in range(600):
+        _delegated(tmp_path, f"k{index:03d}", age_h=40 * 24, origin="agent-config")
+
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    printed = [line for line in out.splitlines() if line.startswith("  kept ")]
+    assert len(printed) == _CLEANUP_TEXT_ROWS
+    # The remainder counts against the NAMED list the printer was handed
+    # (500), not the store total: 600 kept, 500 named, 200 printed, 300 more.
+    assert f"... and {dr.WINDOW_NAMES_CAP - _CLEANUP_TEXT_ROWS} more kept" in out
+    assert f"capped at {dr.WINDOW_NAMES_CAP} per group" in out
+    assert "--json lists every row" not in out
+
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    delegated = json.loads(capsys.readouterr().out)["delegated"]
+    assert delegated["kept_by_origin"] == 600
+    assert len(delegated["kept_by_origin_names"]) == dr.WINDOW_NAMES_CAP
+    assert len(delegated["protected"]) == dr.WINDOW_NAMES_CAP
+    assert {entry["guard"] for entry in delegated["protected"]} == {"origin not reapable"}
+
+
 def test_parent_limits_with_the_switch_off_refuse_even_though_delegated_is_on(
     store: Path, capsys: Any
 ) -> None:
@@ -377,7 +416,7 @@ def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) ->
     out = capsys.readouterr().out
     assert "scratchpad content: would reclaim 1 pad(s)" in out
     assert "(1 stale output)" in out
-    assert "content-kid-01" in out and "(stale output past the window; 1 entry)" in out
+    assert "content-kid-01" in out and "(stale output; 1 entry)" in out
     assert big.exists(), "a dry run removes nothing"
 
 
@@ -404,9 +443,15 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     assert sessions_cleanup_command(_args()) == 0
     out = capsys.readouterr().out
-    assert "reclaim scratchpad content from 1 session(s)? type 'yes' to confirm" in out
+    assert (
+        "Reclaim build/cache content from 1 session(s)? Transcripts and conversation "
+        "records will be kept. Type 'yes' to confirm"
+    ) in out
     assert not big.exists()
-    assert "reclaimed scratchpad content from 1 session(s)" in out
+    assert (
+        "Reclaimed scratchpad content from 1 session(s); no transcripts or "
+        "conversation records were deleted."
+    ) in out
     rows = [
         json.loads(line)
         for line in (store / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
@@ -482,8 +527,8 @@ def test_apply_confines_content_to_the_previewed_pads(
     grown: list[Path] = []
     original = cli_module._print_content
 
-    def mutate(delegated: Any, verb: str) -> None:
-        original(delegated, verb)
+    def mutate(delegated: Any, verb: str, policy: Any | None = None) -> None:
+        original(delegated, verb, policy)
         # A pad that becomes eligible AFTER the preview (the preview's own rows
         # were computed before this runs). The apply must not ride it in.
         if not grown:
@@ -493,6 +538,148 @@ def test_apply_confines_content_to_the_previewed_pads(
     monkeypatch.setattr(cli_module, "_print_content", mutate)
     assert sessions_cleanup_command(_args(yes=True)) == 0
     out = capsys.readouterr().out
-    assert "reclaimed scratchpad content from 1 session(s)" in out
+    assert "Reclaimed scratchpad content from 1 session(s)" in out
     assert not big_x.exists(), "the previewed pad is reclaimed"
     assert grown and grown[0].exists(), "a pad that became eligible after the preview is not"
+
+
+# -- --scratchpads-only: the audit, the content plan, and the switches --------
+
+
+def _pad_cap(root: Path, monkeypatch: pytest.MonkeyPatch, value: int) -> None:
+    """A configured pad cap with the reader's floor patched to test scale."""
+    from local_operator import scratchpad as scratchpad_module
+
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+    ConfigManager(root).update_config({"session": {"scratchpad": {"max_bytes": value}}})
+
+
+def test_scratchpads_only_dry_run_prints_the_audit_and_the_plan_only(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mode is AUDIT + CONTENT PLAN, not a record preview (addendum; n4a)."""
+    pad = _content_pad(store, "sp-dry")
+    big = _big_log(pad / "desktop-suite.log")
+    (pad / "build").mkdir()
+    (pad / "build" / "x.o").write_bytes(b"x" * 4096)
+
+    assert sessions_cleanup_command(_args(dry_run=True, scratchpads_only=True)) == 0
+    out = capsys.readouterr().out
+
+    assert "== Scratchpads ==" in out
+    assert "session pad(s)" in out and "shapes: build" in out
+    assert "== Scratchpad content ==" in out
+    assert "would reclaim" in out and "sp-dry" in out
+    assert "Your conversations" not in out and "Delegated work" not in out
+    assert big.exists(), "a dry run removes nothing"
+
+
+def test_scratchpads_only_dry_run_json_carries_the_audit_and_the_flag(
+    store: Path, capsys: Any
+) -> None:
+    pad = _content_pad(store, "sp-json")
+    _big_log(pad / "desktop-suite.log")
+
+    assert sessions_cleanup_command(_args(dry_run=True, scratchpads_only=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["scratchpads_only"] is True
+    assert payload["outcome"] == "dry-run"
+    assert payload["scratchpads"]["count"] >= 1
+    row = next(row for row in payload["scratchpads"]["pads"] if row["session"] == "sp-json")
+    assert row["path"].endswith("/sp-json/scratchpad")
+    assert [shape["path"] for shape in row["shapes"]] == []
+
+
+def test_the_off_sentence_names_the_switch_that_is_actually_off(store: Path, capsys: Any) -> None:
+    """QA Q1, both directions: naming the scratchpad switch while the MASTER
+    delegated switch is the one off sends the operator to a row already on."""
+    pad = _content_pad(store, "switch-kid")
+    big = _big_log(pad / "desktop-suite.log")
+
+    _config(store, delegated={"enabled": False, "scratchpad": {"enabled": True}})
+    assert sessions_cleanup_command(_args(dry_run=True, scratchpads_only=True)) == 0
+    out = capsys.readouterr().out
+    assert "session.cleanup.delegated.enabled is off" in out
+    assert "scratchpad.enabled is off" not in out
+
+    _config(store, delegated={"enabled": True, "scratchpad": {"enabled": False}})
+    assert sessions_cleanup_command(_args(scratchpads_only=True, yes=True)) == 2
+    err = capsys.readouterr().err
+    assert "session.cleanup.delegated.scratchpad.enabled is off" in err
+    assert big.exists()
+
+    _config(store, delegated={"enabled": False, "scratchpad": {"enabled": False}})
+    assert sessions_cleanup_command(_args(scratchpads_only=True, yes=True)) == 2
+    err = capsys.readouterr().err
+    assert "session.cleanup.delegated.enabled and " in err
+    assert "are both off" in err
+
+
+def test_scratchpads_only_yes_reports_confirmed_true(store: Path, capsys: Any) -> None:
+    """QA Q2: ``--yes`` confirms the shown plan; null meant "no confirmation"
+    and made an applied run indistinguishable from one that was never asked."""
+    pad = _content_pad(store, "confirmed-kid")
+    _big_log(pad / "desktop-suite.log")
+
+    assert sessions_cleanup_command(_args(scratchpads_only=True, yes=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["outcome"] == "removed"
+    assert payload["confirmed"] is True
+    assert payload["scratchpads_only"] is True
+
+
+def test_an_interactive_confirmation_and_a_decline_both_report_their_answer(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _content_pad(store, "typed-kid")
+    _big_log(pad / "desktop-suite.log")
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert sessions_cleanup_command(_args(json=True)) == 2
+    declined = json.loads(capsys.readouterr().out)
+    assert declined["confirmed"] is False
+
+    confirmed_stdin = io.StringIO("yes\n")
+    monkeypatch.setattr("sys.stdin", confirmed_stdin)
+    monkeypatch.setattr(confirmed_stdin, "isatty", lambda: True)
+    assert sessions_cleanup_command(_args(json=True)) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["confirmed"] is True
+
+
+def test_an_over_cap_audit_row_says_where_the_rest_of_the_bytes_are(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX U1: the shapes are a vocabulary, not an accounting. The row names the
+    pad and what the shapes do NOT explain, from the totals already measured."""
+    pad = _content_pad(store, "over-kid")
+    (pad / "bulk.dat").write_bytes(b"x" * 8192)
+    (pad / "build").mkdir()
+    (pad / "build" / "x.o").write_bytes(b"x" * 4096)
+    _pad_cap(store, monkeypatch, 4095)
+
+    assert sessions_cleanup_command(_args(dry_run=True, scratchpads_only=True)) == 0
+    out = capsys.readouterr().out
+
+    assert "[OVER CAP" in out
+    assert f"other content: inspect {pad} with du; shapes account for" in out
+    assert "shapes account for 4.0K" in out
+
+
+def test_the_ordinary_dry_run_points_at_the_size_view_before_the_kept_list(
+    store: Path, capsys: Any
+) -> None:
+    """UX U4: the kept list can be thousands of rows; the size view must be
+    named above it, not after it."""
+    _content_pad(store, "pointer-kid")
+
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+
+    pointer = out.index("size by pad: lop sessions cleanup --scratchpads-only --dry-run")
+    kept = out.index("  kept ")
+    assert pointer < kept
+    assert "Scratchpads section below" in out

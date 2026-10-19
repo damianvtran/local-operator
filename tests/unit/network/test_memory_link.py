@@ -1,13 +1,130 @@
 """Native relay/PeerLink sockets, two isolated homes, no live mesh mutation."""
 
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.memory import MemoryIdentity, MemoryStore
+from local_operator.memory import MemoryError
+from local_operator.memory import MemoryError as SensitiveMemoryError
+from local_operator.memory import (
+    MemoryIdentity,
+    MemoryStore,
+    guard,
+    parse_url,
+    safe_segment,
+)
 from local_operator.network import audit, identity, memory, wire
 from tests.unit.network.test_mcpdefs_link import _bind_and_start, _set_peer_endpoints
 from tests.unit.network.test_relay_e2e import _pair, serve_shaped_relay
+
+# Fixed PUBLIC Ed25519 bytes from the independent public-origin discriminator.
+# This is neither a private key nor host provenance. Derive through production
+# device_id_for in the test; never search/mint until a guard happens to accept.
+_PUBLIC_ORIGIN_KEY = "8464ccf9ebd8d19a0f63287f11100526a9b9ca0222825fc2ed997f6cfe1821e0"
+_PUBLIC_ORIGIN_ID = "d_ac37443550475dfe7a5ffd3028fc5964"
+
+
+def _public_origin_hazard():
+    value = identity.device_id_for(bytes.fromhex(_PUBLIC_ORIGIN_KEY))
+    binding_matches = value == _PUBLIC_ORIGIN_ID
+    assert binding_matches, "fixed public-key/device-ID binding changed"
+    return value
+
+
+def _assert_value_free_refusal(caught, value):
+    # Keep rejected bytes out of failure messages/properties: report only the
+    # label/boolean, not an assertion that renders the rejected argument.
+    did_not_echo = value not in str(caught.value)
+    assert did_not_echo, "sensitive-memory refusal echoed its input"
+
+
+def test_public_origin_free_text_guards_still_refuse_before_any_put(tmp_path):
+    """The free-text refusals survive the merged structural-id repairs.
+
+    This case originally characterized raw-string refusal as the fail-closed
+    state of every surface. The merged repairs deliberately accept a minted
+    ``d_``+hex device id on the write/sync path (#2492) and exempt a minted
+    reference from the recall-query guard (#2511); both are pinned by their own
+    regression suites. This control keeps what those repairs did NOT move:
+    guard() and a free-text safe_segment() still refuse the raw value, and
+    constructing with it (no put) writes no storage artifact; a future
+    host-bound change must arrive through a separately reviewed path, never
+    this arbitrary naked string. No peer/identity mint/socket fixture is
+    requested by these controls.
+    """
+    value = _public_origin_hazard()
+    root = tmp_path / "refused-origin"
+    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
+        guard(value)
+    _assert_value_free_refusal(rejected, value)
+    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
+        safe_segment(value)
+    _assert_value_free_refusal(rejected, value)
+    # Structural acceptance itself belongs to #2492's regression suite; the
+    # only claim here is that construction alone touches no storage (no put).
+    MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin=value,
+    )
+    assert not root.exists(), "constructing with a structural origin left a storage artifact"
+
+
+# A minted-reference recall query is now an admitted read (#2511), pinned by
+# that repair's own tests; these carriers are the surfaces that still refuse.
+@pytest.mark.parametrize("carrier", ["body", "title", "tags", "source-uri", "url", "owner"])
+def test_public_origin_bytes_remain_untrusted_in_other_fields(tmp_path, carrier):
+    value = _public_origin_hazard()
+    root = tmp_path / "refused-carrier"
+    store = MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin="synthetic-device",
+    )
+    fact: dict[str, Any] = {
+        "title": "Widget proof",
+        "body": "Deployment evidence in docs/widget.md",
+    }
+    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
+        if carrier in ("body", "title"):
+            fact[carrier] = value
+            store.put("session", fact)
+        elif carrier == "tags":
+            fact["tags"] = [value]
+            store.put("session", fact)
+        elif carrier == "source-uri":
+            fact["source"] = {
+                "kind": "observed",
+                "uri": "https://example.invalid/evidence/" + value,
+            }
+            store.put("session", fact)
+        elif carrier == "url":
+            # A valid memory URL/entity reaches the actual safe-segment guard;
+            # unknown scope/syntax errors are not a sensitive-value refusal.
+            parse_url("memory://session/" + value)
+        else:
+            MemoryIdentity(session_id=value)
+    _assert_value_free_refusal(rejected, value)
+    assert not root.exists(), "untrusted carrier refusal left a storage artifact"
+
+
+def test_benign_origin_and_fact_still_use_the_real_store(tmp_path):
+    root = tmp_path / "benign-control"
+    store = MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin="synthetic-device",
+    )
+    body = "Widget deployment evidence lives at docs/widget.md"
+    item = store.put("session", {"title": "Widget proof", "body": body})
+    assert store.path.is_file()
+    assert store.show("session", item["id"])["fact"]["body"] == body
+    assert store.search("Widget deployment", scope="session")
 
 
 @pytest.fixture
@@ -178,8 +295,9 @@ def test_sender_withholds_by_id_and_receiver_refuses_without_secret_residue(devi
         timeout=5,
     )
     assert reply["op"] == "error"
-    # The receiver guard refuses the whole payload before field-level parsing,
-    # so the sentence names no operation and certainly not the rejected value.
+    # The receiver refuses at the op level: validate_op → validate_fact applies the
+    # free-text guard to the fact body, so the sentence names the op REFERENCE (its
+    # id) and certainly not the rejected value itself.
     assert "Sensitive value refused" in reply["message"]
     assert bad not in json.dumps(reply)
     with right.connection() as db:
@@ -249,6 +367,65 @@ def test_scope_filter_reenable_resends_old_rows_without_cursor_loss(devices, mon
     enable(a)
     assert memory.push_to_peer(a, b.identity.device_id)["ok"]
     assert right.search("team", "team")
+
+
+def test_iban_shaped_origin_syncs_but_a_secret_body_is_still_refused(tmp_path):
+    """The mesh push path is structural-vs-fact, same as a local write.
+
+    R1: an install whose minted device id is IBAN/mod-97-shaped could write
+    locally (after the put-path fix) yet still could not sync — the receiver's
+    blanket ``guard(payload)`` scanned the STRUCTURAL origin as if it were user
+    text. ``receive`` is the handler's push entrypoint, so it is exercised
+    directly with a payload built from a real op, not a hand-written stub.
+    """
+    import hashlib
+    import types
+
+    from local_operator.memory import _dump
+
+    iban_shaped = "d_cd474787b1adaa67f8cb5934196c4834"
+    sender = MemoryStore(tmp_path / "sender", MemoryIdentity("s", "t", "a"), origin=iban_shaped)
+    item = sender.put("global", {"title": "Host", "body": "staging host is stage-2 docs/h.md"})
+    with sender.connection() as db:
+        op = json.loads(
+            db.execute("SELECT data FROM ops WHERE op_id=?", (item["version"],)).fetchone()[0]
+        )
+    assert op["origin_device"] == iban_shaped
+
+    def payload(operation):
+        return {
+            "v": 1,
+            "generation": 0,
+            "scopes": ["global"],
+            "after": {iban_shaped: operation["seq"]},
+            "ops": [operation],
+            "skips": [],
+            "proofs": [],
+        }
+
+    # A real op whose structural origin is IBAN-shaped now syncs end to end.
+    receiver = types.SimpleNamespace(root=tmp_path / "receiver")
+    result = memory.receive(receiver, iban_shaped, payload(op), ["global"], {iban_shaped})
+    assert result["phase"] == "push" and result["changed"] == 1, result
+    landed = MemoryStore(tmp_path / "receiver", MemoryIdentity("s", "t", "a"))
+    assert landed.search("stage-2")
+
+    # The structural exemption must not weaken the fact guard: a real secret in a
+    # synced body is refused, exactly as an admitted local write is. Built by
+    # bypassing the store boundary, so it is NOT an admitted write.
+    secret = "passport number AB1234567"
+    poisoned = dict(op, entity_id="0123456789abcdef0123456789abcdef")
+    poisoned["fact"] = dict(op["fact"], body=secret)
+    poisoned["body_sha"] = hashlib.sha256(_dump(poisoned["fact"]).encode()).hexdigest()
+    with pytest.raises(MemoryError, match="Sensitive value refused"):
+        memory.receive(
+            types.SimpleNamespace(root=tmp_path / "receiver2"),
+            iban_shaped,
+            payload(poisoned),
+            ["global"],
+            {iban_shaped},
+        )
+    print("MESH IBAN-shaped origin syncs; real secret in synced body still refused PASS")
 
 
 def test_old_peer_skips_before_memory_frame(devices, monkeypatch):
@@ -340,3 +517,361 @@ def test_offline_return_restarts_real_relay_same_roots_and_catches_up(devices, m
         )
     finally:
         returned.stop()
+
+
+class _StubMemoryLink:
+    """A link that answers memory frames with canned payloads, no socket.
+
+    This is the reviewer/QA shape that exposed the silent refusal: `_push_to_peer`
+    talks to the peer only through `link.request`, so a stub is honest here — the
+    assertion is about what the RECEIPT keeps, not about the transport.
+    """
+
+    def __init__(self, answers: list[dict[str, Any]]) -> None:
+        self.capabilities = (wire.MEMORY_SYNC_V1,)
+        self.network_id = "n_memory_stub"
+        self.answers = list(answers)
+        self.frames: list[dict[str, Any]] = []
+
+    def request(self, frame: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
+        self.frames.append(frame)
+        return self.answers.pop(0)
+
+
+def _memory_server(root: Path) -> Any:
+    from local_operator.network import relay
+
+    return relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+
+
+def _stub_memory_sync(server: Any, link: _StubMemoryLink, monkeypatch: pytest.MonkeyPatch) -> None:
+    from argparse import Namespace
+
+    monkeypatch.setattr(memory, "settings", lambda root: (True, list(memory.SCOPES), []))
+    monkeypatch.setattr(server, "_ensure_link", lambda device_id: link)
+    monkeypatch.setattr(server, "_next_relay_req", lambda: 1)
+    # The push batch is built for the active origins; a one-member namespace is
+    # enough and keeps this test off the network store entirely.
+    monkeypatch.setattr(
+        memory.network_store,
+        "load",
+        lambda *args, **kwargs: Namespace(active_members=lambda: [Namespace(device_id="device-a")]),
+    )
+
+
+def test_a_peer_refusal_message_reaches_the_receipt_and_status(tmp_path, monkeypatch):
+    """Round-2 MAJOR: the actionable sentence was dropped and status claimed success."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    store.put("global", {"title": "Sync proof", "body": "Durable preference for tea"})
+    server = _memory_server(tmp_path)
+    refusal = (
+        "Memory move refused: resolve the conflict on this device. Memory sync retries "
+        "automatically after about 30 minutes; restarting this device picks the retry up sooner."
+    )
+    link = _StubMemoryLink(
+        [
+            {
+                "op": "ack",
+                "req": 1,
+                "detail": {"v": 1, "generation": 0, "scopes": ["global"], "vector": {}},
+            },
+            {"op": "error", "req": 1, "code": "bad_memory", "message": refusal},
+        ]
+    )
+    _stub_memory_sync(server, link, monkeypatch)
+    device = "d_" + "a" * 32
+
+    result = memory.push_to_peer(server, device)
+    assert result == {
+        "ok": False,
+        "code": "bad_memory",
+        "message": refusal,
+        "batches": 0,
+    }
+    receipt = memory.peer_status(tmp_path)[0]
+    assert receipt["code"] == "bad_memory"
+    assert receipt["message"] == refusal
+
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "Peers synced: 0" in human
+    assert "1 failing" in human
+    assert device in human and "bad_memory" in human
+    # The sentence is wrapped at the row bar, so the assertion is per clause.
+    assert "Memory move" in human
+    assert "resolve the conflict on this device" in human
+
+    # A healthy answer clears the stale sentence: a recovered peer must not keep
+    # showing the failure that was just resolved.
+    monkeypatch.setattr(
+        memory, "_push_to_peer", lambda server, device_id: {"ok": True, "code": "in_sync"}
+    )
+    assert memory.push_to_peer(server, device)["code"] == "in_sync"
+    recovered = memory.peer_status(tmp_path)[0]
+    assert recovered["message"] == ""
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert "Peers synced: 1" in render_human(text, failed)
+    assert "Not syncing with" not in render_human(text, failed)
+
+
+def test_bad_memory_is_a_policy_refusal_not_a_fast_retry():
+    """The refusal repeats until the conflict is resolved; 15 s retries only flood logs."""
+    from local_operator.network import definitions
+
+    assert "bad_memory" in definitions.POLICY_REFUSAL_CODES
+
+
+def test_peer_refusal_text_reaches_the_terminal_inert(tmp_path):
+    """A paired peer must not be able to paint the operator's terminal.
+
+    The refusal sentence is the first peer-controlled text rendered by a `lop`
+    status surface. It is stripped with the repo's own `strip_control_sequences`
+    (which removes OSC payloads with their terminator) and then flattened, so an
+    erase-screen or hyperlink sequence is inert while the ordinary words — the
+    ones that name the remedy — still read.
+    """
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "c" * 32
+    hostile = (
+        "safe-start \x1b[2J middle "
+        "\x1b]8;;https://evil.invalid\x07click here\x1b]8;;\x07 safe-end"
+    )
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": hostile,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "\x1b" not in human
+    assert "\x07" not in human
+    assert "safe-start" in human and "safe-end" in human
+    # OSC 8's visible label is ordinary text and stays; its URL is device data and
+    # is removed with the terminator, so no clickable link can be forged.
+    assert "click here" in human
+    assert "evil.invalid" not in human
+    assert "bad_memory" in human and "Peers synced: 0" in human
+
+
+def test_a_missing_admin_grant_has_a_real_remedy(tmp_path):
+    """`skipped:no_admin` used to fall through to circular advice."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "d" * 32
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "skipped:no_admin",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": "",
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "skipped:no_admin" in human
+    # Wrapped at the row bar, so assert the distinctive word rather than the phrase.
+    assert "receiver-admin" in human
+    assert "exclude" in human
+
+
+def test_status_bounds_a_long_peer_message(tmp_path):
+    """D2: peer verbosity must not push the failure out of the viewport."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "f" * 32
+    long_message = "diagnostic word " * 200
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": long_message,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    lines = human.splitlines()
+    start = next(i for i, line in enumerate(lines) if "Not syncing with" in line)
+    # The failure and its remedy are near the top, not after 30 lines of prose.
+    assert start < 10
+    assert any("1 failing" in line for line in lines[:start])
+    assert "Full peer text" in human
+    # The bounded excerpt is a handful of lines; the remedy and the pointer follow.
+    end = next(i for i, line in enumerate(lines[start:], start) if "Full peer text" in line)
+    remedy = next(i for i, line in enumerate(lines[start:end], start) if line.startswith("Remedy:"))
+    assert remedy - start <= 6
+    assert end > remedy
+    # Nothing is lost: the full sentence is still in the machine-readable output.
+    assert json.loads(text)["sync"]["peers"][0]["message"] == long_message
+
+
+def test_status_names_a_failing_peer_from_the_network_records(tmp_path):
+    """D4: an operator must recognise the machine, not just its 32-hex id."""
+    from local_operator.memory_cli import render_human, run
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    device = "d_" + "e" * 32
+    network_store.save(
+        NetworkRecord(
+            network_id="n_0123456789abcdef01234567",
+            name="studio",
+            self_device_id="d_" + "a" * 32,
+            members=[
+                MemberRecord(device_id=device, name="laptop-b", role="admin"),
+                MemberRecord(device_id="d_" + "a" * 32, name="studio-mac", role="admin"),
+            ],
+        ),
+        tmp_path,
+    )
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": "",
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "laptop-b" in human
+    assert device in human
+    # The machine-readable row carries the same resolved label.
+    assert json.loads(text)["sync"]["peers"][0]["name"] == "laptop-b"
+
+
+def _named_peer(tmp_path, name: str) -> str:
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    peer = "d_" + "e" * 32
+    network_store.save(
+        NetworkRecord(
+            network_id="n_0123456789abcdef01234567",
+            name="studio",
+            self_device_id="d_" + "a" * 32,
+            members=[MemberRecord(device_id=peer, name=name, role="admin")],
+        ),
+        tmp_path,
+    )
+    return peer
+
+
+def _seed_receipt(tmp_path, peer: str, message: str = "") -> None:
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + peer,
+                json.dumps(
+                    {
+                        "device": peer,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": message,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+
+
+def _peer_block(human: str) -> list[str]:
+    lines = human.splitlines()
+    start = next(i for i, line in enumerate(lines) if "Not syncing with" in line)
+    end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("Stored:"))
+    return lines[start:end]
+
+
+def test_status_sanitises_a_hostile_peer_name(tmp_path):
+    """A name is peer-supplied and stored verbatim; the render point strips it."""
+    from local_operator.memory_cli import render_human, run
+
+    peer = _named_peer(
+        tmp_path,
+        "safe \x1b[2J\x1b]8;;https://evil.invalid\x07click\x1b]8;;\x07 end",
+    )
+    _seed_receipt(tmp_path, peer)
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "\x1b" not in human
+    assert "\x07" not in human
+    assert "evil.invalid" not in human
+    assert "safe" in human and "end" in human
+    assert all(len(line) <= 80 for line in _peer_block(human))
+
+
+def test_status_bounds_a_300_char_peer_name(tmp_path):
+    from local_operator.memory_cli import render_human, run
+
+    long_name = "n" * 300
+    peer = _named_peer(tmp_path, long_name)
+    _seed_receipt(tmp_path, peer)
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    block = _peer_block(human)
+    assert long_name not in human
+    assert "…" in " ".join(block)
+    assert all(len(line) <= 80 for line in block)

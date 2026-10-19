@@ -224,8 +224,11 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
     _bootstrap()
     from local_operator.i18n import catalogues
     from local_operator.i18n.keys import cli_exec_help as keys
+    from local_operator.i18n.runtime import render_message
 
     source = catalogues.load_catalogue("en", "cli.exec_help")
+    french = catalogues.load_catalogue("fr", "cli.exec_help")
+    assert set(french) == set(source)
     functions = [f for _, f in inspect.getmembers(keys, inspect.isfunction)]
     assert len(source) == len(functions) == 20
     for function in functions:
@@ -233,7 +236,14 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
         msg = function()
         assert msg.params == {}
         en = messages.render(msg.code, msg.params, locale="en")
-        assert messages.render(msg.code, msg.params, locale="fr") == en
+        fr = messages.render(msg.code, msg.params, locale="fr")
+        # fr carries this namespace: its rendered bytes are the catalogue value,
+        # not the English source.
+        assert fr == render_message(french[msg.code], msg.params, "fr")
+        assert fr != en
+        # A locale without the namespace still falls back to the English source.
+        for locale in ("es", "ru", "vi", "hi", "zh-CN", "unknown"):
+            assert messages.render(msg.code, msg.params, locale=locale) == en
     assert "{'required_sections': [...]}" in keys.output_schema().envelope(locale="en")["text"]
 
 
@@ -284,7 +294,24 @@ def test_extracted_sites_ratchet_without_activating_legacy_cli(i18n_check):
         assert violations == [], "CLI20's new help site must fail the scoped ratchet"
     baseline = i18n_check.load_baseline(i18n_check.BASELINE)
     assert not i18n_check.in_enforced_scope("local_operator/cli.py", baseline["enforced"])
-    assert baseline["files"]["local_operator/cli.py"] == 772
+    # 772 -> 807 in the scanner-coverage change that taught the checker to fold
+    # `+` and the ternary in argument position: the legacy CLI's own literal
+    # count is unchanged, but the improved scanner now SEES more of it. The
+    # pin moves with the detector, which is the point of pinning it here.
+    #
+    # 807 -> 746 in CLI tranche 1 (#2552), 746 -> 702 in help tranche 1
+    # (#2558): the ceiling moves with each extraction tranche. Hard-coding it
+    # here turned every later tranche into a stale-pin break, so the assertion
+    # is now DERIVED (no slack: ceiling == live count) plus a never-rises bound
+    # -- the pin's real meaning, without the chain.
+    entries = i18n_check.load_allowlist(i18n_check.ALLOWLIST)
+    scanned = i18n_check.scan_tree(i18n_check.REPO)
+    live = i18n_check._counts(scanned, entries).get("local_operator/cli.py", 0)
+    assert baseline["files"]["local_operator/cli.py"] == live, (
+        baseline["files"]["local_operator/cli.py"],
+        live,
+    )
+    assert live <= 702, live
     assert baseline["files"]["local_operator/exec_startup.py"] == 0
 
 

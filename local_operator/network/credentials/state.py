@@ -40,6 +40,7 @@ from typing import Any
 from local_operator.network.credentials.placement import (
     PLACEMENT_SCHEMA,
     _assert_no_material,
+    _config_root,
     _ensure_private_dir,
     placement_state_path,
 )
@@ -82,7 +83,7 @@ class PlacementState:
 
     def __init__(self, network_id: str, *, root: Path | None = None) -> None:
         self.network_id = network_id
-        self.root = root
+        self.root = _config_root(root)
         self._observations: dict[str, dict[str, Any]] = {}
 
     # -- reads --------------------------------------------------------------
@@ -224,7 +225,7 @@ class PlacementState:
         from local_operator.network import store
 
         payload = self.to_json()
-        _ensure_private_dir(self.path.parent)
+        _ensure_private_dir(self.path.parent, root=self.root)
         with store._write_lock(self.path):
             return store._write_private_json(self.path, payload)
 

@@ -61,15 +61,16 @@ LATE_LEAD = (
 )
 
 #: The timeout notice. "Proceed without it" is the actionable half — the point of
-#: the deadline is that the session must not stall forever — and the last sentence
-#: is what makes a late answer safe to accept rather than a second decision the
-#: model did not ask for.
+#: the deadline is that the session must not stall forever. It used to end "The ask
+#: stays open for the user; if they answer later you will be told", which stopped
+#: being true when decision D10 made a lapsed ask read-only on every surface: no
+#: surface offers the late answer it promised. A late answer through chat is still
+#: delivered (``LATE_LEAD`` frames it), so nothing here forbids one.
 TIMEOUT_NOTICE = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
     "Proceed without it: use your recommended option or best judgment and state the "
-    "assumption in your report. The ask stays open for the user; if they answer later "
-    "you will be told."
+    "assumption in your report."
 )
 
 #: Added when the ask was urgent (``timeout <= 15 min``). An urgent ask whose
@@ -96,8 +97,30 @@ TIMEOUT_LAPSED_WHILE_STOPPED = (
 TIMEOUT_SECRET = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "The credential {keys} was not provided. Do not run anything that needed it; "
-    "report what was left undone. The ask stays open for the user; if they answer "
-    "later you will be told."
+    "report what was left undone."
+)
+
+#: The deadline notice a DISMISSAL still owes (fork A, 2026-10-16, §14). A
+#: dismissal is a VIEW action — the user putting the ask away — and it tells the
+#: model nothing, so an ask dismissed before its notice was delivered still owes
+#: one; the sentence is what keeps the row from reading as an ordinary deadline.
+#: Everything else is byte-identical to :data:`TIMEOUT_NOTICE`, and deliberately:
+#: "Proceed without it" is the actionable half, and a dismissal makes proceeding
+#: MORE certain, not less — there is no answer coming at all now.
+TIMEOUT_NOTICE_DISMISSED = (
+    "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
+    "{questions}\n"
+    "The user dismissed it without answering.\n"
+    "Proceed without it: use your recommended option or best judgment and state the "
+    "assumption in your report."
+)
+
+#: The same row for a SECRET ask: names the key and nothing else (see
+#: :data:`TIMEOUT_SECRET`), and keeps that variant's own instruction.
+TIMEOUT_SECRET_DISMISSED = (
+    "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
+    "The credential {keys} was not provided. The user dismissed it without answering. "
+    "Do not run anything that needed it; report what was left undone."
 )
 
 #: When a secret answer was stored but the session restarted before the response
@@ -213,7 +236,11 @@ def _timeout_listing_line(question: Mapping[str, Any]) -> str:
 
 
 def timeout_text(
-    record: Mapping[str, Any], *, now_ms: int, lapsed_while_stopped: bool = False
+    record: Mapping[str, Any],
+    *,
+    now_ms: int,
+    lapsed_while_stopped: bool = False,
+    dismissed: bool = False,
 ) -> str:
     """The text for an ``ask_timeout`` row (design §2.5).
 
@@ -226,6 +253,11 @@ def timeout_text(
     the stop rule's copy half (§2.2): the row is delivered at reopen for a deadline
     that passed with nothing running, and the reason it is late is the user's own
     stop rather than the agent's inattention.
+
+    ``dismissed`` selects the fork-A variants (the row a dismissal still owes): the
+    same notice with one added sentence saying the user put the ask away. It is a
+    FLAG rather than the caller swapping templates, so the two variants cannot
+    drift from the notices they are variants of.
     """
     questions = list(record.get("questions") or [])
     expires_at = int(record.get("expires_at") or 0)
@@ -233,12 +265,14 @@ def timeout_text(
     asked = _stamp(record.get("created_at"))
     if any(q.get("secret") for q in questions):
         keys = ", ".join(str(q.get("id")) for q in questions if q.get("secret")) or "requested"
-        text = TIMEOUT_SECRET.format(
+        template = TIMEOUT_SECRET_DISMISSED if dismissed else TIMEOUT_SECRET
+        text = template.format(
             ask_id=record.get("ask_id", ""), waited=waited, asked=asked, keys=keys
         )
     else:
         listing = "; ".join(_timeout_listing_line(q) for q in questions)
-        text = TIMEOUT_NOTICE.format(
+        template = TIMEOUT_NOTICE_DISMISSED if dismissed else TIMEOUT_NOTICE
+        text = template.format(
             ask_id=record.get("ask_id", ""),
             waited=waited,
             asked=asked,
@@ -262,7 +296,6 @@ REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
 
 
 #: The ``by`` words that name a ROLE rather than a surface (D4, round 14).
-#:
 #: Every ordinary caller of ``AskQueue.respond``/``revise`` passes the SURFACE the
 #: human answered from ("terminal" from the TUI, "remote" from the phone), and
 #: the sentence below is in the user's voice — so naming the surface tells them
@@ -296,8 +329,13 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         return ""  # accepted again; still one response row
     if status == store.STATUS_EXPIRED:
         return "this ask expired 7 days ago — ask again if it is still needed."
-    if status in (store.STATUS_DECLINED, store.STATUS_DISMISSED):
+    if status == store.STATUS_DECLINED:
         return "you already declined this."
+    if status == store.STATUS_DISMISSED:
+        # THE VIEW ACTION HAS ITS OWN WORD (UX round 1, U3 = QA Q3 = agent review
+        # round 1, MINOR-4): a dismissal is a decision the user took, but "declined"
+        # names a different act — the one where the agent was told to decide.
+        return DISMISS_ALREADY_DISMISSED
     if status == store.STATUS_WITHDRAWN:
         # DESIGN §12's sentence, verbatim: a withdrawn ask is not answerable
         # from any surface (its box hides everywhere — ``withdrawn`` is not
@@ -313,6 +351,56 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
             return "already answered."
         return f"already answered by {by}."
     return "this ask is no longer open."
+
+
+#: The refusal a DISMISSAL returns when the ask is not lapsed.
+#:
+#: ONE constant, read by both doors — ``AskQueue.dismiss`` when a runtime is live
+#: and :func:`local_operator.asks.dismiss.dismiss_cold` when there is none (fork A,
+#: §14). Each used to spell the sentence itself, and two wordings for one state
+#: would make a stale tap look like a different rule depending on which process
+#: answered it.
+#:
+#: WHY IT NAMES ONLY THE LAPSED CASE. :func:`refusal_copy` answers "why can I not
+#: ANSWER this", and it has a better sentence per state for that question. This
+#: op's question is "why can I not DISMISS this", and the answer for an OPEN,
+#: declined or answered ask is that the ask is still live — one sentence for all
+#: three, because the surface offered the button on a row that had already moved on
+#: and the user's act is the same either way. A DISMISSED ask is the one state that
+#: needs a different word, and it has its own below.
+DISMISS_NOT_LAPSED = "only a timed-out ask can be dismissed; it is still open."
+
+
+#: What a DISMISSED ask answers when something is asked of it AGAIN (UX round 1,
+#: U3 = QA round 1, Q3 = agent review round 1, MINOR-4). ``DISMISS_NOT_LAPSED``
+#: says the ask "is still open", which is the one thing a dismissed ask is not —
+#: a repeat tap on the row the user had struck out was told the opposite of what
+#: they had just done. ONE constant read by :func:`refusal_copy` (an ANSWER or a
+#: revision aimed at a dismissed ask) and :func:`dismiss_refusal` (the repeat tap)
+#: on both doors, so a stale sheet and a live queue cannot word it differently.
+DISMISS_ALREADY_DISMISSED = "you already dismissed this."
+
+
+def dismiss_refusal(record: Mapping[str, Any] | None) -> str:
+    """Why a dismissal was refused, or ``""`` when it is ACCEPTED.
+
+    ``record`` is the FOLDED ask (``None`` when the log holds no such ask). The
+    decision is a property of the log rather than of the surface asking, which is
+    what lets the cold door hold a runtime-less session to exactly the rule a live
+    one applies — and why this is one function rather than two.
+    """
+    from local_operator.asks import store
+
+    if record is None:
+        return refusal_copy(None)
+    status = str(record.get("status") or "")
+    if status == store.STATUS_DISMISSED:
+        # THE REPEAT TAP, above the lapsed-only rule: a dismissed ask is not a
+        # live one, and this is the sentence that says what the user did.
+        return DISMISS_ALREADY_DISMISSED
+    if status != store.STATUS_TIMED_OUT:
+        return DISMISS_NOT_LAPSED
+    return ""
 
 
 #: The tool result an agent-side WITHDRAWAL returns (design §12). Written to the
@@ -431,10 +519,11 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
 
     Only an ``open`` ask is mirrored, deliberately: a ``timed_out`` ask is past
     its deadline, and painting the old "waiting for you" card for it would tell
-    the user their answer still counts as one did before the deadline. It is
-    still answerable — that is the ``ask_timeout`` row's message and the
-    ``late`` fold — but the mirror is the pre-deadline shape and must not lie
-    about the clock.
+    the user their answer still counts as one did before the deadline. Since D10
+    a timed-out ask is read-only on every surface (the ``ask_timeout`` row now
+    says the agent goes ahead without the answer); the store still folds a late
+    chat answer as ``late``, but no surface offers one, so the mirror has nothing
+    to show for it.
 
     ``None`` means "no ask to mirror": the caller publishes its own empty card
     exactly as it does today.

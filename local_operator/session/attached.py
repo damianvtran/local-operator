@@ -27,7 +27,7 @@ import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Literal, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -5471,6 +5471,9 @@ class AttachedSession:
         # absent, which :meth:`history_entry_times` turns into "unstated" rather
         # than a reader-clock guess.
         entry_times = dict(window.entry_times)
+        from local_operator.harness.peer_cycle_display import merge_page_records
+
+        peer_records = window.peer_cycle_display_records
         page = window
         reset = self._hydrated_once and (
             previous is None
@@ -5488,9 +5491,12 @@ class AttachedSession:
                     raise ConnectionError("history changed during reconnect; retry attachment")
                 rows[:0] = page.messages
                 entry_times.update(page.entry_times)
+                peer_records = merge_page_records(peer_records, page.peer_cycle_display_records)
+            peer_records = merge_page_records(previous.peer_cycle_display_records, peer_records)
         self._display_history = window.model_copy(
             update={
                 "messages": rows,
+                "peer_cycle_display_records": peer_records,
                 "start": page.start,
                 "before_token": page.before_token,
                 "has_more": page.has_more,
@@ -6021,6 +6027,8 @@ class AttachedSession:
         # loaded interval the same way ``_history`` does.
         self._entry_times.update(page.entry_times)
         self._history_ids.update(m.id for m in page.messages)
+        from local_operator.harness.peer_cycle_display import merge_page_records
+
         self._display_history = window.model_copy(
             update={
                 # An audit page must not move the window's context coordinate:
@@ -6030,6 +6038,9 @@ class AttachedSession:
                 "before_token": page.before_token,
                 "has_more": page.has_more,
                 "messages": list(self._history),
+                "peer_cycle_display_records": merge_page_records(
+                    window.peer_cycle_display_records, page.peer_cycle_display_records
+                ),
                 "audit": page.audit,
                 "audit_available": page.audit_available,
             }
@@ -6666,6 +6677,15 @@ class AttachedSession:
     def _track(self, event: AgentEvent[Any]) -> None:
         """Record painted identity separately from complete source display data."""
         self._remember_live(event)
+        if isinstance(event, HistoryDeltaEvent):
+            # An owner-emitted delta (a queued aside adopt landing at the turn
+            # boundary) paints settled rows; claim them as painted so a later
+            # reconnect's gap replay does not draw the same rows a second time.
+            self._message_events.update(
+                str(getattr(row, "id", "") or "")
+                for row in event.messages
+                if getattr(row, "id", None)
+            )
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
         if message_id and (
@@ -9286,6 +9306,18 @@ class AttachedSession:
         """
         return dict(self._entry_times)
 
+    def history_peer_cycle_display_records(self) -> dict[str, Any] | None:
+        """The optional OWNER-validated records for this loaded display window.
+
+        No journal scan or new cache: paging/reset/epoch ownership is already
+        enforced by the negotiated DisplayHistoryWindow and its bounded merge.
+        A detached value prevents an HTTP consumer mutating the attach cache.
+        """
+        from copy import deepcopy
+
+        window = self._display_history
+        return deepcopy(window.peer_cycle_display_records) if window is not None else None
+
     @property
     def history_message_count(self) -> int:
         durable = (
@@ -9564,26 +9596,28 @@ class AttachedSession:
         """
         return {"session": self._session_id, "patience_cancelled": [], "cadence_dropped": False}
 
-    async def adopt_aside(self, messages: list[Message]) -> None:
+    async def adopt_aside(self, messages: list[Message]) -> Literal["queued", "applied"]:
         """Promote the aside exchange into the conversation through the owner.
 
         The Ctrl+F fork is advertised on the standard aside card, so it must
         work on a follower too. The owner appends the pair to its live context
-        and transcript (the same idle-turn guard and durable-first order as a
-        local :meth:`Session.adopt_aside`), then the canonical frontend update
-        carries the new rows to every terminal — the follower does not splice
-        anything itself.
+        and transcript (the same queue-while-busy rule and durable-first order
+        as a local :meth:`Session.adopt_aside`), then the canonical frontend
+        update — or, for a pair queued mid-turn, the owner's history delta when
+        it lands — carries the new rows to every terminal; the follower does
+        not splice anything itself. Returns the owner's ``adopt_state``.
         """
         client = self._client
         if client is None:
             raise ConnectionError(self._unavailable_reason())
-        await client.adopt_aside(
+        state = await client.adopt_aside(
             [
                 message.model_dump(mode="json")
                 for message in messages
                 if hasattr(message, "model_dump")
             ]
         )
+        return "queued" if state == "queued" else "applied"
 
     async def route_shared_slash(
         self,

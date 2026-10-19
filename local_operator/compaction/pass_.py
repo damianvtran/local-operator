@@ -61,13 +61,15 @@ __all__ = [
 ]
 
 #: Why a pass did not rebuild. ``below-threshold`` and
-#: ``nothing-to-summarize`` are the everyday answers; the other two are
-#: configuration or provider outcomes the caller may want to surface.
+#: ``nothing-to-summarize`` are the everyday answers; ``no-token-reduction``
+#: rejects a summary that cannot buy headroom. The others are configuration or
+#: provider outcomes the caller may want to surface.
 RefusalReason = Literal[
     "disabled",
     "below-threshold",
     "nothing-to-summarize",
     "summarizer-failed",
+    "no-token-reduction",
 ]
 
 #: ``summarize(prompt) -> summary_text``. The host owns the provider call
@@ -225,6 +227,7 @@ async def run_compaction_pass(
                 model.model_id,
                 _previous_archive_text(to_summarize),
                 context_window=model.context_window,
+                previous_carry=_previous_archive_carry(to_summarize),
             )
             summary = snapcompact.archive_summary(archive, model.provider, model.model_id) or " "
             preserve_data = {"snapcompact": archive.model_dump(mode="json")}
@@ -276,6 +279,19 @@ async def run_compaction_pass(
     rendered = render_compaction_marker(marker, entry_id=marker.id)
     rebuilt: list[Message] = [rendered, *kept]
     tokens_after = estimate_messages_tokens(rebuilt)
+    # Selection can only predict savings: a summary/marker can outweigh the
+    # prefix it replaces. Never commit a non-shrinking rewrite and strand the
+    # next pass behind that marker. Compare the actual pruned input as well as
+    # the reported context: provider accounting may exceed local estimates,
+    # but must not authorize growth of the message history itself.
+    if tokens_after >= min(tokens_before, local_estimate):
+        return _refused(
+            working,
+            "no-token-reduction",
+            pruned=pruned,
+            frames_dropped=frames_dropped,
+            tokens=tokens_before,
+        )
     return CompactionPassResult(
         messages=rebuilt,
         ran=True,
@@ -360,4 +376,26 @@ def _previous_archive_text(to_summarize: Sequence[Message]) -> str | None:
             return str(snap["text"])
         summary = details.get("summary")
         return str(summary) if summary else None
+    return None
+
+
+def _previous_archive_carry(to_summarize: Sequence[Message]) -> str | None:
+    """The newest archive's carry digest, so a pass merges into the retained
+    material instead of restarting it (mirrors ``Session._previous_archive_carry``).
+
+    Kept SEPARATE from ``_previous_archive_text`` because the carry must not be
+    re-folded through the edge/paginate/drop path: that is the path that
+    re-truncates the oldest material every pass, and the carry exists precisely
+    to stop it. ``None`` when the newest marker carries no snapcompact archive
+    or no carry.
+    """
+    for message in reversed(to_summarize):
+        details = marker_details(message)
+        if details is None:
+            continue
+        preserve = details.get("preserve_data") or {}
+        snap = preserve.get("snapcompact") if isinstance(preserve, dict) else None
+        if isinstance(snap, dict) and snap.get("carry"):
+            return str(snap["carry"])
+        return None
     return None

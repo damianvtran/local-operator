@@ -50,8 +50,9 @@ const row = (ask_id: string, status = "open") => ({ ask_id, status });
 describe("readQueue — what ONE frame says about the queue", () => {
 	it("calls a named answerable ask PENDING (clause 2)", () => {
 		expect(readQueue([row("a1")], 1)).toBe("pending");
-		// A timed-out ask is still answerable, so it is still pending.
-		expect(readQueue([row("a1", "timed_out")], 1)).toBe("pending");
+		// A timed-out ask BESIDE an open one: the open one is what makes it pending.
+		// (A timed-out ask alone is lapsed — see the lapsed-queue case below.)
+		expect(readQueue([row("a1", "timed_out"), row("a2")], 2)).toBe("pending");
 	});
 
 	it("calls an explicit zero tally EMPTY, and only an explicit one (clause 1)", () => {
@@ -85,6 +86,28 @@ describe("readQueue — what ONE frame says about the queue", () => {
 
 	it("treats a row with no status as open (the wire's default)", () => {
 		expect(readQueue([{ ask_id: "a1" }], undefined)).toBe("pending");
+	});
+
+	it("does not call a queue of LAPSED asks pending — nothing in it can be answered", () => {
+		/* A stopped conversation's screen now carries its asks from the index, and
+		   Ben's specimens are exactly that: past their deadline, the agent long
+		   since moved on. The card shows them read-only, so opening the modal
+		   sheet over the conversation for them would spend the view's one open
+		   on a queue with nothing to answer. Every row is addressed as far as an
+		   answer goes, so the reading is the one clause 3 gives settled rows:
+		   SETTLED, and the view stays closed — beside a tally of 0 (#2388) or
+		   of the lapsed rows themselves (a runtime from before it). */
+		expect(readQueue([row("t", "timed_out")], 0)).toBe("settled");
+		expect(readQueue([row("t", "timed_out")], 1)).toBe("settled");
+		expect(readQueue([row("t1", "timed_out"), row("t2", "timed_out")], 2)).toBe("settled");
+		/* The dropped-rows guard still holds: a tally larger than the lapsed rows
+		   named means an outstanding row the frame does not carry. */
+		expect(readQueue([row("t", "timed_out")], 2)).toBe("unresolved");
+		/* An `open` row is pending whatever the phone's clock says: the deadline is
+		   judged on the runtime's host, which re-derives a stale `open` past its
+		   deadline to `timed_out` before the row reaches the phone (review round 1,
+		   R3 — a phone running ahead must not withhold a live ask). */
+		expect(readQueue([row("o", "open")], 1)).toBe("pending");
 	});
 });
 

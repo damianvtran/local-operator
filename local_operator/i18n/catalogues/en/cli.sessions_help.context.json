@@ -1,0 +1,237 @@
+{
+  "cli.sessions_help.sessions": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the `sessions` command's one-liner; command tokens stay in situ"
+  },
+  "cli.sessions_help.sessions_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the sessions subcommand's long description (argparse description=)"
+  },
+  "cli.sessions_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --json flag's one-liner; the flag token stays in situ"
+  },
+  "cli.sessions_help.all": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --all filter; mentions RSS/UPTIME which are markers, not copy"
+  },
+  "cli.sessions_help.limit": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --limit cap; N/50 are values, keep digits"
+  },
+  "cli.sessions_help.paused": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --paused stored-session filter"
+  },
+  "cli.sessions_help.failed": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --failed stored-session filter"
+  },
+  "cli.sessions_help.peer": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --peer device filter; DEVICE is a metavar"
+  },
+  "cli.sessions_help.all_peers": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the --all-peers mesh list toggle"
+  },
+  "cli.sessions_help.cleanup": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the cleanup subcommand's long description (argparse description=)"
+  },
+  "cli.sessions_help.cleanup_dry_run": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_dry_run`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_force": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_force`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_yes": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_yes`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_max_sessions": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_max_sessions`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_max_inactive_days": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_max_inactive_days`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_max_total_bytes": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_max_total_bytes`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_remove_empty": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_remove_empty`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_delegated_max_age_hours": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `cleanup_delegated_max_age_hours`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.reclaim": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `reclaim`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.reclaim_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the reclaim subcommand's long description (argparse description=)"
+  },
+  "cli.sessions_help.reclaim_dry_run": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `reclaim_dry_run`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.reclaim_yes": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `reclaim_yes`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.reclaim_confirm_s": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `reclaim_confirm_s`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the resume subcommand's long description (argparse description=)"
+  },
+  "cli.sessions_help.resume_paused": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume_paused`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume_failed": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume_failed`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume_all": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume_all`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume_dry_run": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume_dry_run`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume_limit": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume_limit`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.resume_message": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `resume_message`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the move subcommand's long description (argparse description=)"
+  },
+  "cli.sessions_help.move_session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_session`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_to": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_to`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_keep": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_keep`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_wait": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_wait`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_queue": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_queue`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_cancel_queued": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_cancel_queued`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_from_replica": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_from_replica`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.move_engage_on_arrival": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `move_engage_on_arrival`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.sync": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `sync`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.sync_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the sync subcommand's long description (argparse description=)"
+  },
+  "cli.sessions_help.sync_session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `sync_session`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.sync_owner": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `sync_owner`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_scratchpads_only": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "names both modes: --dry-run audits pads; otherwise reclaims only build/cache content from delegated scratchpads, never transcripts or conversations. 'scratchpad' is the product noun (the URL scheme and the on-disk folder); use it as the settled term rather than 'pad'."
+  }
+}

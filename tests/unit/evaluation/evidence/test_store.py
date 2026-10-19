@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -21,6 +22,7 @@ from local_operator.evaluation.evidence.models import (
     AgentStopPayload,
     BudgetCommitmentPayload,
     CancelPayload,
+    ErrorPayload,
     FinalizationIntent,
     FinalizationStartPayload,
     ObservationPayload,
@@ -1367,3 +1369,42 @@ def test_hardlinked_artifact_is_rejected(tmp_path: Path) -> None:
         )
     report = verify_bundle(root)
     assert "artifact_unsafe" in {issue.code for issue in report.issues}
+
+
+def test_a_diagnostic_temp_cleanup_failure_does_not_poison(tmp_path: Path) -> None:
+    """A failed temp unlink costs the diagnostic, never the writer.
+
+    The diagnostic is disposable evidence: poison is permanent and refuses
+    ``abandon()``, so the best-effort publish must leave the writer usable even
+    when it cannot clean its own staging file. The sweep then removes that
+    staging file (``.artifact.*.tmp``), whose NAME the verifier would otherwise
+    reject as ``artifact_name_invalid``.
+    """
+
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        _append_authority(writer)
+
+        def failing_cleanup(fd: int, temp: str) -> BaseException:
+            # Close but do NOT unlink: exactly what an EIO on unlink leaves.
+            if fd >= 0:
+                os.close(fd)
+            return OSError(errno.EIO, "unlink failed", temp)
+
+        writer._cleanup_artifact_temp = failing_cleanup  # type: ignore[method-assign]
+        with pytest.raises(EvidenceRecoveryOnly):
+            writer.publish_failure_diagnostic(b"layer: evidence\nphase: evidence\n")
+
+        # Still healthy: the event records and nothing refuses.
+        writer.record_failure_diagnostic(
+            ErrorPayload(
+                error_id="err-000000000000",
+                category="infrastructure",
+                diagnostic_code="evidence-test",
+                retryable=False,
+            )
+        )
+        assert writer.discard_unreferenced_artifacts() == 1
+        assert not [path for path in (root / "artifacts").iterdir() if path.name.endswith(".tmp")]
+
+    assert verify_bundle(root).valid

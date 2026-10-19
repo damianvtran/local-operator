@@ -10,11 +10,13 @@ always the state its filename claims):
 
     bar          MINIMIZED, one open ask — the default presentation
     bar3         MINIMIZED, three open asks (the count and the head question)
-    bar-timeout  MINIMIZED with nothing open but one timed-out ask still
-                 answerable — the case where the count is not what is drawn
+    bar-timeout  MINIMIZED with nothing open but one timed-out ask: read-only
+                 since D10, the bar stays for its Dismiss and says `view`
     list         EXPANDED onto the list of the three, with a timed-out row
+                 collapsed to one settled line behind its `timed out` chip
     card         EXPANDED onto one ask's picker
-    card-timeout the picker of an ask that timed out UNDER it (the title flips)
+    card-timeout the picker of an ask that timed out UNDER it (the title flips
+                 and the card goes read-only: no answer keys, `esc` only)
     list-late    the list with one ask answered after its deadline: it is absent
                  from the rows AND from the count
     list-refreshed the list after a snapshot drops two of its three asks (it
@@ -232,6 +234,10 @@ THREE = [
 #: list rather than three names for the same rows.
 MIXED = [
     THREE[0],
+    # TWO answerable rows, so the door mounts the LIST: since D11 a timed-out
+    # row is settled and read-only, and one answerable row expands straight to
+    # its card. The lapsed `a3` stays, filed under Settled behind `timed out`.
+    THREE[1],
     THREE[2],
     _row(
         "a4",

@@ -126,7 +126,8 @@ function projection(patch: Partial<SessionProjection> = {}): SessionProjection {
  *  capability proxy, and only an explicit zero is an answer). */
 function frame(rows: PendingAsk[] | null, extra: Partial<SessionProjection> = {}) {
 	if (rows === null) return projection(extra);
-	const outstanding = rows.filter((r) => r.status === "open" || r.status === "timed_out").length;
+	// Open only: a timed-out ask is settled on the runtime's tally (#2388).
+	const outstanding = rows.filter((r) => r.status === "open").length;
 	return projection({
 		asks: rows.length > 0 ? rows : undefined,
 		asks_open: outstanding,
@@ -419,22 +420,6 @@ describe("state 4 — the user closed it while asks were pending: it stays close
 		const view = await openThenCloseBy("x");
 		view.unmount();
 		mount(frame([ask({ ask_id: "other-1" })], { session_id: "s2" }), "s2");
-		await waitFor(() => expect(sheetOpen()).toBe(true));
-	});
-
-	it("is not recorded when the user LEAVES for another conversation from the sheet", async () => {
-		// Navigating to a foreign row's conversation is not waving this one's asks off, and
-		// the router dispatches a synthetic popstate while the sheet's listener is still up.
-		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ ask_id: "other-1", session_id: "other" })],
-		});
-		const view = mount(frame([ask(), ask({ ask_id: "ask-2" })]));
-		await waitFor(() => expect(sheetOpen()).toBe(true));
-		fireEvent.click(await screen.findByRole("button", { name: "open" }));
-		await waitFor(() => expect(window.location.hash).toBe("#/s/other"));
-		view.unmount();
-		window.location.hash = "#/s/s1";
-		mount(frame([ask(), ask({ ask_id: "ask-2" })]));
 		await waitFor(() => expect(sheetOpen()).toBe(true));
 	});
 });

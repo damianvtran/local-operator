@@ -153,6 +153,66 @@ def force_requires_confirm_replace() -> Msg:
     return Msg("wire.errors.desktop.force_requires_confirm_replace", {})
 
 
+def librarian_bootstrap_failed() -> Msg:
+    return Msg("wire.errors.desktop.librarian_bootstrap_failed", {})
+
+
+def librarian_disabled(*, op: str) -> Msg:
+    return Msg("wire.errors.desktop.librarian_disabled", {"op": op})
+
+
+def librarian_owner_active() -> Msg:
+    return Msg("wire.errors.desktop.librarian_owner_active", {})
+
+
+def library_asset_not_found() -> Msg:
+    return Msg("wire.errors.desktop.library_asset_not_found", {})
+
+
+def library_bad_cursor() -> Msg:
+    return Msg("wire.errors.desktop.library_bad_cursor", {})
+
+
+def library_bad_filter(*, field: str, value: str) -> Msg:
+    return Msg("wire.errors.desktop.library_bad_filter", {"field": field, "value": value})
+
+
+def library_chat_session_missing() -> Msg:
+    return Msg("wire.errors.desktop.library_chat_session_missing", {})
+
+
+def library_content_denied() -> Msg:
+    return Msg("wire.errors.desktop.library_content_denied", {})
+
+
+def library_content_missing() -> Msg:
+    return Msg("wire.errors.desktop.library_content_missing", {})
+
+
+def library_metadata_unavailable() -> Msg:
+    return Msg("wire.errors.desktop.library_metadata_unavailable", {})
+
+
+def library_not_an_image() -> Msg:
+    return Msg("wire.errors.desktop.library_not_an_image", {})
+
+
+def library_tag_category(*, category: str) -> Msg:
+    return Msg("wire.errors.desktop.library_tag_category", {"category": category})
+
+
+def library_tag_limit(*, max: int | float) -> Msg:
+    return Msg("wire.errors.desktop.library_tag_limit", {"max": max})
+
+
+def library_tag_name(*, name: str) -> Msg:
+    return Msg("wire.errors.desktop.library_tag_name", {"name": name})
+
+
+def library_tag_unknown() -> Msg:
+    return Msg("wire.errors.desktop.library_tag_unknown", {})
+
+
 def masked_credential_form() -> Msg:
     return Msg("wire.errors.desktop.masked_credential_form", {})
 
@@ -273,6 +333,10 @@ def session_not_found(*, session_id: str) -> Msg:
 
 def skill_not_found() -> Msg:
     return Msg("wire.errors.desktop.skill_not_found", {})
+
+
+def sort_unknown(*, sorts: str) -> Msg:
+    return Msg("wire.errors.desktop.sort_unknown", {"sorts": sorts})
 
 
 def start_after_end() -> Msg:

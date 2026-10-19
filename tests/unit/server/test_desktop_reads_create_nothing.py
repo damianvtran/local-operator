@@ -147,16 +147,20 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
 
     with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         # THE BOOT'S OWN WORK SETTLES BEFORE THE DELTAS. The lifespan schedules
-        # the built-in assistant's first-run ensure as a background task — a
-        # session build (and the wake-supervisor install behind it) must not
-        # hold the daemon's readiness, see `local_operator/server/app.py` — so
-        # without this wait its writes can land between a route's before/after
-        # snapshots and read as "this READ created a session" when the write
-        # came from the boot. The wait is on the TASK itself, not a clock; a
+        # first-run ensures for the built-in assistant AND the Librarian as
+        # background tasks — a session build (and the wake-supervisor install
+        # behind it) must not hold the daemon's readiness, see
+        # `local_operator/server/app.py` — so without this wait their writes can
+        # land between a route's before/after snapshots and read as "this READ
+        # created a session" when the write came from the boot. Every scheduled
+        # ensure count: the Librarian's is the newer one and was the gap that
+        # made this sweep flaky. The wait is on the TASK itself, not a clock; a
         # bootstrap that cannot run is a log line in production, and here the
-        # absence of the task (older layouts) is fine too.
-        task = getattr(app.state, "aida_boot_task", None)
-        if task is not None:
+        # absence of a task (older layouts) is fine too.
+        for task_name in ("aida_boot_task", "librarian_boot_task"):
+            task = getattr(app.state, task_name, None)
+            if task is None:
+                continue
             portal = client.portal
             assert portal is not None
             portal.call(_settle_boot_task, task)

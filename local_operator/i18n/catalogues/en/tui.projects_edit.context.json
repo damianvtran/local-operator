@@ -1,0 +1,177 @@
+{
+  "tui.projects_edit.form_title": {
+    "role": "page title suffix",
+    "tone": "plain",
+    "note": "Detail-page edit form identity; appended after the bold 'projects', same shape as tui.projects.new_project. Keep the leading middot and space."
+  },
+  "tui.projects_edit.binding_edit": {
+    "role": "key binding description",
+    "tone": "plain",
+    "note": "Binding for `e` on the project detail page; opens the prefilled edit form. Not painted in the hint row (hints use the shorter hint_ keys)."
+  },
+  "tui.projects_edit.binding_add_milestone": {
+    "role": "key binding description",
+    "tone": "plain",
+    "note": "Binding for `a` on the detail page; opens the add-milestone prompt."
+  },
+  "tui.projects_edit.binding_remove_milestone": {
+    "role": "key binding description",
+    "tone": "plain",
+    "note": "Binding for `x` on the detail page; asks the inline y/n confirm before removing the selected milestone."
+  },
+  "tui.projects_edit.binding_next_field": {
+    "role": "key binding description",
+    "tone": "plain",
+    "note": "Tab inside the add-milestone prompt; moves between its two fields."
+  },
+  "tui.projects_edit.binding_add": {
+    "role": "key binding description",
+    "tone": "plain",
+    "note": "Enter inside the add-milestone prompt; submits it."
+  },
+  "tui.projects_edit.binding_cancel": {
+    "role": "key binding description",
+    "tone": "plain",
+    "note": "Escape inside the add-milestone prompt; closes it without writing."
+  },
+  "tui.projects_edit.hint_edit": {
+    "role": "hint label",
+    "tone": "plain",
+    "note": "Detail footer hint after the `e` key. Lowercase; the painter supplies the leading space and the key glyph."
+  },
+  "tui.projects_edit.hint_add_milestone": {
+    "role": "hint label",
+    "tone": "plain",
+    "note": "Detail footer hint after the `a` key. Lowercase."
+  },
+  "tui.projects_edit.hint_remove_milestone": {
+    "role": "hint label",
+    "tone": "plain",
+    "note": "Detail footer hint after the `x` key; armed only while a milestone row is selected. Lowercase."
+  },
+  "tui.projects_edit.hint_next_field": {
+    "role": "hint label",
+    "tone": "plain",
+    "note": "Add-milestone prompt footer hint after `tab`. Lowercase."
+  },
+  "tui.projects_edit.hint_add": {
+    "role": "hint label",
+    "tone": "plain",
+    "note": "Add-milestone prompt footer hint after `enter`. Lowercase."
+  },
+  "tui.projects_edit.hint_cancel": {
+    "role": "hint label",
+    "tone": "plain",
+    "note": "Escape label in the add-milestone prompt footer. Lowercase."
+  },
+  "tui.projects_edit.key_hint_edit": {
+    "role": "field hint",
+    "tone": "quiet",
+    "note": "Under the key field in EDIT mode only. Create mode keeps tui.projects' follows-the-title hint. Single line; may clip at narrow widths."
+  },
+  "tui.projects_edit.refusal_estimate_clear": {
+    "role": "field refusal",
+    "tone": "plain",
+    "note": "Under the estimate field when the reader clears it: the store has no clear state for an estimate (ProjectEdit.estimate None means untouched). Must name the two ways forward."
+  },
+  "tui.projects_edit.refusal_estimate_number": {
+    "role": "field refusal",
+    "tone": "plain",
+    "note": "Under the estimate field when the text is not a number; matches the store's own sentence for the same case."
+  },
+  "tui.projects_edit.refusal_estimate_range": {
+    "role": "field refusal",
+    "tone": "plain",
+    "note": "Under the estimate field when the number is outside the store's bound. {maximum} is the cap the store enforces (1000)."
+  },
+  "tui.projects_edit.refusal_date_order": {
+    "role": "field refusal",
+    "tone": "plain",
+    "note": "Under the target date when it precedes the start date. Mirrors the create form's rule in this namespace so the edit form does not reach into a pinned namespace."
+  },
+  "tui.projects_edit.refusal_name_required": {
+    "role": "field refusal",
+    "tone": "plain",
+    "note": "Under the key field when it is emptied. Same meaning as the create form's sentence; the edit form has no auto-slug, so there is no example to give."
+  },
+  "tui.projects_edit.refusal_project_gone_edit": {
+    "role": "page notice",
+    "tone": "plain",
+    "note": "Footer notice when the project vanished between opening the edit form and saving. {name} is the project's display name."
+  },
+  "tui.projects_edit.refusal_project_gone_milestone": {
+    "role": "page notice",
+    "tone": "plain",
+    "note": "Footer notice when the project vanished during an add/remove milestone write. {name} is the project's display name."
+  },
+  "tui.projects_edit.no_changes": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Form footer after ctrl+s with nothing changed: no write happened. Short — the footer is one row."
+  },
+  "tui.projects_edit.saved": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Detail footer after an edit landed. Short; the page recomposes from the store around it."
+  },
+  "tui.projects_edit.confirm_remove": {
+    "role": "inline confirm",
+    "tone": "plain",
+    "note": "Pinned one-line question before removing a milestone. Keep `y` and `n` literal: they are the keys. {name} is the milestone name."
+  },
+  "tui.projects_edit.remove_needs_row": {
+    "role": "page notice",
+    "tone": "plain",
+    "note": "Footer notice when `x` is pressed with a non-milestone row selected; names the arrow keys."
+  },
+  "tui.projects_edit.removed": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Detail footer after a milestone was removed. {name} is the milestone name."
+  },
+  "tui.projects_edit.milestone_added": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Detail footer after a NEW milestone was added. {name} is the milestone name."
+  },
+  "tui.projects_edit.milestone_updated": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Detail footer when `a` named a milestone that already existed: the store's add-or-update op updated it instead. {name} is the milestone name."
+  },
+  "tui.projects_edit.milestone_unchanged": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Detail footer when `a` echoed an existing milestone exactly: the store reports a truthful no-change. {name} is the milestone name."
+  },
+  "tui.projects_edit.prompt_title": {
+    "role": "page title suffix",
+    "tone": "plain",
+    "note": "Appended to the detail title while the add-milestone prompt is up. Keep the leading middot and space, like tui.projects.new_project."
+  },
+  "tui.projects_edit.prompt_name_label": {
+    "role": "field label",
+    "tone": "plain",
+    "note": "Label over the prompt's name input. Lowercase, one line."
+  },
+  "tui.projects_edit.prompt_name_hint": {
+    "role": "field hint",
+    "tone": "quiet",
+    "note": "States the store's add-or-update rule so a duplicate name does not surprise. One line."
+  },
+  "tui.projects_edit.prompt_name_required": {
+    "role": "field refusal",
+    "tone": "plain",
+    "note": "Under the name input when it is empty. One line."
+  },
+  "tui.projects_edit.prompt_date_label": {
+    "role": "field label",
+    "tone": "plain",
+    "note": "Label over the prompt's optional target-date input. Lowercase."
+  },
+  "tui.projects_edit.prompt_date_hint": {
+    "role": "field hint",
+    "tone": "quiet",
+    "note": "Names the optional format. Keep YYYY-MM-DD literal: it is the accepted spelling."
+  }
+}

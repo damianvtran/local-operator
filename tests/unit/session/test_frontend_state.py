@@ -101,6 +101,37 @@ def _state(**changes) -> FrontendSessionState:  # noqa: ANN003
     return state.model_copy(update=changes)
 
 
+def test_internal_observer_is_not_a_viewer_and_a_reused_callable_cannot_leak() -> None:
+    """RF-2/RF-3: ``has_subscribers`` reads VIEWERS from the callback set.
+
+    Work reserved for an attached frontend (the turn-end checkpoint write) must
+    not run for a session whose only observer is the harness's own display fold.
+    Reading the classification from the CALLBACK SET rather than a parallel
+    counter is what makes a reused callable safe: registering the same function
+    as a viewer and then as an internal observer, then dropping the viewer, must
+    leave the session unattended -- with a counter it left ``has_subscribers``
+    True, i.e. a headless runtime doing viewer-only work.
+    """
+    store = FrontendStateStore(_state())
+
+    def observer(_update) -> None:
+        return None
+
+    assert store.has_subscribers is False
+    viewer = store.subscribe(observer)
+    assert store.has_subscribers is True
+    viewer.unsubscribe()
+    assert store.has_subscribers is False
+
+    # The collision the fix closes: SAME callable, viewer then internal.
+    viewer = store.subscribe(observer)
+    internal = store.subscribe_internal_threadsafe(observer)
+    viewer.unsubscribe()
+    assert store.has_subscribers is False, "an internal observer must not read as a viewer"
+    internal.unsubscribe()
+    assert store.has_subscribers is False
+
+
 def test_state_json_roundtrip_preserves_full_model_usage_and_future_fields() -> None:
     payload = _state().model_dump(mode="json")
     payload["future_owner_field"] = {"new": True}
@@ -2129,6 +2160,100 @@ def test_a_host_with_no_directory_of_its_own_restores_the_checkpoints() -> None:
     restored = FrontendStateStore.from_checkpoint(_owner_over("s1", stored)).state
 
     assert restored.cwd == "/evidence/before"
+
+
+def test_a_checkpoint_cannot_pin_occupancy_below_the_journals_newest_receipt() -> None:
+    """The headless restore is the path the earlier settled-readout fix did not cover.
+
+    A checkpoint is written at a turn end, and the runtime keeps serving receipts
+    after it: the journal's newest one is the conversation's current size while
+    the row's ``context_tokens`` is the length it had at an earlier message. A
+    ``from_checkpoint`` store that installed the row's figure verbatim published
+    that older number as the runtime's FIRST state - the readout stepping
+    backwards around a send - until something re-materialized the pair. The money
+    half of this same class was fixed for ``spend_channels``; occupancy rides the
+    rule both replay sites already use.
+    """
+    checkpoint = _state(context_tokens=402_000)
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(checkpoint),
+        restored_usage=lambda: Usage(input_tokens=433_000, context_tokens=433_000),
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.context_tokens == 433_000
+    assert restored.context_is_estimate is False
+    # The PAIR advances together: the strip and the cost chip read one receipt,
+    # and the next replay compares these two fields against each other.
+    assert restored.last_usage is not None
+    assert restored.last_usage.context_tokens == 433_000
+
+
+def test_a_checkpoint_without_a_pair_still_advances_the_numerator() -> None:
+    """The half the serving host owns: no receipt pair, but the count is current.
+
+    ``from_checkpoint`` installs the receipt only when the row had one (the
+    serving host materializes it at adopt), and the NUMERATOR still advances:
+    the journal's newest receipt is what the conversation actually has, and a
+    checkpoint restored onto the older figure is the backwards first frame this
+    change exists to remove. Pinned separately because a guard on the whole
+    block would stay green while reintroducing exactly that (review round 4,
+    R4-1).
+    """
+    checkpoint = _state(last_usage=None, context_tokens=402_000)
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(checkpoint),
+        restored_usage=lambda: Usage(input_tokens=433_000, context_tokens=433_000),
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.context_tokens == 433_000
+    assert restored.last_usage is None
+
+
+def test_an_equal_receipt_leaves_a_settled_compaction_estimate_standing() -> None:
+    """The guard is the shared rule, not "take the receipt": an already-folded
+    receipt moves nothing, so a post-pass estimate is not reverted to the
+    pre-pass count it was measured against."""
+    checkpoint = _state(
+        context_tokens=148_000,
+        context_is_estimate=True,
+        last_usage=FrontendUsage(context_tokens=404_900),
+    )
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(checkpoint),
+        restored_usage=lambda: Usage(input_tokens=404_900, context_tokens=404_900),
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.context_tokens == 148_000
+    assert restored.context_is_estimate is True
+
+
+def test_a_receipt_with_no_context_number_cannot_move_occupancy() -> None:
+    """A wire that reported only input/output says nothing about occupancy: it
+    may not blank or move the reading (the shared rule's second clause)."""
+    checkpoint = _state(context_tokens=402_000)
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(checkpoint),
+        restored_usage=lambda: Usage(input_tokens=10, context_tokens=None),
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.context_tokens == 402_000
+    # The pair does not split for a receipt that says nothing about occupancy:
+    # blanking it would also disarm the equal-receipt guard on the next replay.
+    assert restored.last_usage is not None
+    assert restored.last_usage.context_tokens == 402_000
+    assert restored.last_usage == checkpoint.last_usage
 
 
 def test_the_at_ms_stamp_survives_the_wire_and_the_frozen_wrapper() -> None:

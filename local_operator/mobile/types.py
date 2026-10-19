@@ -541,7 +541,8 @@ ControlOp = Literal[
     # ``error: unknown op`` gracefully, which the surfaces render as "this
     # session's runtime predates queued asks". ``ask_respond`` is atomic per ask
     # (whole-ask answers), ``ask_decline`` is the explicit no/decide-yourself,
-    # and ``ask_dismiss`` is a view-only removal that injects nothing.
+    # and ``ask_dismiss`` is a view-only removal that asks the model nothing (it
+    # can still deliver the deadline notice the ask never got — design §14).
     "ask_respond",  # {ask_id, answers: {qid: [str]}, by?}
     # ``ask_revise`` is the ONE sanctioned exception to the one-way answer rule
     # (design §10, #1936): the same atomic body, said as a CHANGE OF MIND rather
@@ -1071,6 +1072,9 @@ class SessionProjection:
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable
     transcript: list[TranscriptEntry] = field(default_factory=list)
+    # Optional DISPLAY capability, never inferred from raw entry details. Old
+    # owners omit it; only the updated owner source binding sets version 1.
+    peer_cycles: int | None = None
     #: Todos grouped into phases (``builtin`` stores them phased). A single
     #: implicit ``"Todos"`` phase carries a flat list and renders headerless.
     todos: list[TodoPhase] = field(default_factory=list)
@@ -1089,10 +1093,10 @@ class SessionProjection:
     #: something.
     pending_count: int = 0
     #: The session's queued asks (design §4), newest first with the OPEN ones in
-    #: front, and how many are still OUTSTANDING — open, or timed out and still
-    #: answerable late (``asks.store.OUTSTANDING_STATUSES``). Not "open asks":
-    #: a timed-out ask the user can still answer still counts, which is the
-    #: state the defect this field's rule fixed was about.
+    #: front, and how many are still OUTSTANDING — the open asks, still waiting
+    #: on the user (``asks.store.OUTSTANDING_STATUSES``). A timed-out ask is
+    #: settled (#2388): its row stays in ``asks`` as a dismissible receipt, but
+    #: the tally does not count it.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (N2): both are ABSENT — ``None``, not
     #: empty — unless queued asks are live in the runtime that published this
@@ -1160,6 +1164,8 @@ class SessionProjection:
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        if self.peer_cycles is None:
+            data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None
         if self.asks is not None:
             data["asks"] = [row.to_json() for row in self.asks]

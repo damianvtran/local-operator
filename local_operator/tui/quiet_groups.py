@@ -21,7 +21,8 @@ THE TUI MAPPING, stated once (what this surface can and cannot express):
 - Receipt rows exist for three families here: peer deliveries
   (``PeerMessageBlock``), wake receipts (``WakeBlock``) and monitor deltas
   (``MonitorDeltaBlock``). All three are real, production-firing triggers.
-- The ``job`` family has NO receipt row on this surface: a delivered job result
+- In the DEFAULT standalone projection, the ``job`` family has NO receipt row:
+  a delivered job result
   paints nothing (the turn it opened carries its answer), and a HELD one paints
   a generic notice — once it is a notice row, no field distinguishes it from
   any other notice — so it splits, which is the safe direction: an
@@ -51,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
 from local_operator.harness.rows import is_quiet_turn_name
+from local_operator.tui.internal_work_membership import WorkMembership
 
 #: The family word's set (design §5): the trigger kinds that can compose a
 #: group, plus ``mixed`` for more than one. ``job`` is kept because this is the
@@ -140,15 +142,51 @@ class QuietGroupRecord:
     tool_state: str = ""
     expects_reply: bool | None = None
     steer: bool | None = None
+    # Optional local source proof; the standalone/pinned corpus supplies none.
+    work: WorkMembership | None = None
+
+
+#: The kinds the BASE vocabulary already classifies as interior — a row every
+#: reader may have hidden. Named ONCE and read by both the base checks and the
+#: work gate below: two copies of this list are how the work arm came to rescue
+#: a FAILED ``tool`` row (the deny-list omitted ``tool``/``inside``, so a tool
+#: row carrying ``work`` was classified by its membership role, and a
+#: failed/stopped call — ``role=boundary`` — split the very run it must fold
+#: into, contradicting the shared parity fixture's own failed-call case).
+WORK_ARM_EXEMPT_KINDS: frozenset[str] = frozenset(
+    {"tool", "peer", "hub", "wake", "monitor", "inside"}
+)
 
 
 def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
     """The family this row contributes when it is a trigger, or null.
 
-    On this surface only the three receipt kinds are positively classifiable:
-    a peer message, a wake receipt, a monitor delta. ``job`` exists in the
-    shared union above but no row reaches it here (see the module doc).
+    The default projection positively classifies peer/wake/monitor rows only.
+    Optional LOCAL owned-work metadata admits a source-backed delivered job
+    result inside a genuine user/tool interval. Generic INFO notices never
+    acquire that authority. The hash-pinned standalone corpus supplies none.
     """
+    # The work arm ADMITS what the base vocabulary cannot classify (a delivered
+    # job result inside a genuine user/tool interval) and never re-classifies a
+    # row the base already knows. A receipt kind keeps its base family: the
+    # internal-work view calls a hub STEER a boundary because it demands
+    # attention, and reading that role here turned the steer into a run
+    # SPLITTER on a row that the fold has always been able to hide, breaking
+    # the ordering/prefix runs (test_hub_message ordered-repair, seated-picture
+    # and human-prefix cases). The role belongs to the membership view, not to
+    # this fold's boundary rule.
+    if record.work is not None and record.kind not in WORK_ARM_EXEMPT_KINDS:
+        if record.work.role != "receipt":
+            return None
+        if record.work.family in ("peer", "hub"):
+            return "peer"
+        if record.work.family == "job_result":
+            return "job"
+        if record.work.family == "wake":
+            return "wake"
+        if record.work.family == "monitor":
+            return "monitor"
+        return None
     if record.kind in ("peer", "hub"):
         return "peer"
     if record.kind == "wake":
@@ -175,7 +213,12 @@ def group_splitter_of(record: QuietGroupRecord) -> bool:
     would miss: an empty or still-streaming assistant row, and this surface's
     ``inside`` kind (an image a folded tool row produced).
     """
-    if record.kind in ("tool", "peer", "hub", "wake", "monitor", "inside"):
+    # Same gate as `quiet_family_of`: the work arm speaks only for rows the
+    # base vocabulary does not classify, so a receipt kind keeps its base
+    # reading (not a splitter) whatever the membership view calls its role.
+    if record.work is not None and record.kind not in WORK_ARM_EXEMPT_KINDS:
+        return record.work.role == "boundary"
+    if record.kind in WORK_ARM_EXEMPT_KINDS:
         return False
     if record.kind == "assistant":
         return bool(record.text.strip())
@@ -286,10 +329,21 @@ def quiet_group_of_segment(
         records[i].kind == "tool" and not is_quiet_turn_call(records[i])
         for i in range(span_from, span_to + 1)
     )
-    if len(triggers) < 2 and not (triggers and real_actions >= 3):
+    members = [records[i].work for i in range(span_from, span_to + 1)]
+    owned = members[0] if members else None
+    contextual = owned is not None and all(
+        member is not None
+        and member.scope_id == owned.scope_id
+        and member.stretch_id == owned.stretch_id
+        and member.role != "boundary"
+        for member in members
+    )
+    # Contextual user work has the existing action threshold; standalone quiet
+    # groups keep their exact receipt-only / mixed-work admission vocabulary.
+    if len(triggers) < 2 and not ((triggers or contextual) and real_actions >= 3):
         return None
-    first = triggers[0]
-    last = triggers[-1]
+    first = records[span_from] if contextual else triggers[0]
+    last = triggers[-1] if triggers else records[span_to]
     actions = 0
     failed = 0
     # Peer senders keep their first-appearance order for the tie-break below.
@@ -335,7 +389,7 @@ def quiet_group_of_segment(
         open=open if open is not None else (span_to == len(records) - 1),
         row_ids=tuple(records[i].id for i in range(span_from, span_to + 1)),
         mixed_actions=real_actions >= 3
-        and (len(triggers) < 2 or any(record.kind == "hub" for record in triggers)),
+        and (contextual or len(triggers) < 2 or any(record.kind == "hub" for record in triggers)),
         reply_requested=sum(record.expects_reply is True for record in triggers),
         steered=sum(record.steer is True for record in triggers),
     )

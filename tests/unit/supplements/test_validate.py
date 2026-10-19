@@ -133,6 +133,149 @@ def test_a_fabricated_series_is_refused() -> None:
     assert any("evidence" in error for error in result.rejected[0].errors)
 
 
+def test_emphasis_marked_cells_admit_their_content_not_their_glyphs() -> None:
+    """The 2026-10-17 investigation (session 8197f86e639d): a markdown table bolds its
+    winners, so extracted cells read ``**77.0**`` / ``**Terminal-Bench 4.0**``. The model's
+    faithful emission -- the plain value, the plain label -- must be admitted; keeping the
+    glyphs made every bolded cell fail provenance ("not in the evidence", and "an invented
+    label is a fabrication" against a label printed in bold in the evidence itself).
+
+    A lone ``_`` in an identifier is content and survives the canonicalisation.
+    """
+    marked = (
+        Dataset(
+            title="Vendor table",
+            source="answer",
+            columns=("Benchmark", "score"),
+            rows=(
+                ("**DeepSWE v1.1**", "**77.0**"),
+                ("**Terminal-Bench 4.0**", "**+11.1**"),
+                ("snake_case", "**2.8**"),
+            ),
+            n_rows=3,
+            numeric_columns=("score",),
+        ),
+    )
+    emitted = component(
+        json.dumps(
+            {
+                "tab": {
+                    "title": "Vendor table",
+                    "columns": ["Benchmark", "score"],
+                    "rows": [
+                        ["DeepSWE v1.1", 77.0],
+                        ["Terminal-Bench 4.0", 11.1],
+                        ["snake_case", 2.8],
+                    ],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.bar(document.getElementById("c"),"tab",'
+        '{x:"Benchmark",y:"score"})</script>',
+        title="Vendor table",
+        source="answer",
+    )
+    result = validate_output(emitted, marked)
+    assert result.components, [error for block in result.rejected for error in block.errors]
+
+
+def test_the_emphasis_canonicalisation_never_admits_a_fabrication() -> None:
+    """MUTATION twin: stripping glyphs must not loosen provenance -- values the evidence
+    never holds (77.1) and labels it never prints (``Invented v9``) stay refused."""
+    marked = (
+        Dataset(
+            title="Vendor table",
+            source="answer",
+            columns=("Benchmark", "score"),
+            rows=(("**DeepSWE v1.1**", "**77.0**"),),
+            n_rows=1,
+            numeric_columns=("score",),
+        ),
+    )
+    lying = component(
+        json.dumps(
+            {
+                "tab": {
+                    "title": "Vendor table",
+                    "columns": ["Benchmark", "score"],
+                    "rows": [["Invented v9", 77.1]],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.bar(document.getElementById("c"),"tab",'
+        '{x:"Benchmark",y:"score"})</script>',
+        title="Vendor table",
+        source="answer",
+    )
+    result = validate_output(lying, marked)
+    assert not result.components
+    joined = " ".join(error for block in result.rejected for error in block.errors)
+    assert "'Invented v9'" in joined and "77.1" in joined
+
+
+def test_asterisks_between_digits_are_data_not_emphasis() -> None:
+    """R1 (reviewer) / Q-1 (QA): the first cut of ``_strip_emphasis`` removed EVERY asterisk
+    run, so a cell ``5*12`` canonicalised to ``512`` and a component claiming 512 passed
+    provenance (BASE rejects, HEAD accepted before this tightening). A glyph run flanked by
+    word characters on both sides is data -- arithmetic, an identifier -- and stays verbatim;
+    wrappers around a token still strip.
+    """
+    from local_operator.supplements.validate import _strip_emphasis
+
+    assert _strip_emphasis("5*12") == "5*12"
+    assert _strip_emphasis("8*8") == "8*8"
+    assert _strip_emphasis("foo__bar") == "foo__bar"
+    assert _strip_emphasis("snake_case") == "snake_case"
+    assert _strip_emphasis("**42.3**") == "42.3"
+    assert _strip_emphasis("**5*12**") == "5*12"  # wrapper strips; the inner datum keeps
+
+    marked = (
+        Dataset(
+            title="Sizes",
+            source="notes.md",
+            columns=("item", "size"),
+            rows=(("board", "5*12"), ("tile", "**8*8**")),
+            n_rows=2,
+            numeric_columns=(),
+        ),
+    )
+    # The concatenation a looser strip would have fused is NOT admissible...
+    lying = component(
+        json.dumps(
+            {
+                "sizes": {
+                    "title": "Sizes",
+                    "columns": ["item", "size"],
+                    "rows": [["board", 512], ["tile", 64]],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.table(document.getElementById("c"),"sizes")</script>',
+        title="Sizes",
+        source="notes.md",
+    )
+    result = validate_output(lying, marked)
+    assert not result.components, "5*12 must never canonicalise to the number 512"
+    joined = " ".join(error for block in result.rejected for error in block.errors)
+    assert "512" in joined and "64" in joined
+    # ...while the verbatim data cells remain admissible identifiers.
+    verbatim = component(
+        json.dumps(
+            {
+                "sizes": {
+                    "title": "Sizes",
+                    "columns": ["item", "size"],
+                    "rows": [["board", "5*12"], ["tile", "8*8"]],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.table(document.getElementById("c"),"sizes")</script>',
+        title="Sizes",
+        source="notes.md",
+    )
+    assert validate_output(verbatim, marked).components, "the verbatim cells must be admitted"
+
+
 def test_an_extrapolated_trend_is_refused() -> None:
     """MUTATION: a forecast point. The evidence measured four regions, not a fifth quarter."""
     extrapolated = component(

@@ -55,8 +55,19 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.settings.hub_defaults",
+        # Account-routing policy copy is an approved English-only child, not
+        # an edit to the already-audited wire.settings or translated ledgers.
+        "wire.settings.account_policy",
         "wire.slash",
+        # The Library slice's two slash doors (`/library`, `/librarian`)
+        # resolve through this English-only CHILD of `wire.slash`, the
+        # `wire.settings.account_policy` shape: their copy must not move the
+        # already-audited `wire.slash` locale hashes.
+        "wire.slash.library",
         "wire.aida_cadence",
+        # The OpenRouter host-speed settings row (English-only, own namespace so
+        # the audited wire.settings hash is untouched).
+        "wire.host_speed",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
@@ -78,7 +89,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     # Approved source namespace, not a prefix-wide wildcard. Mutation controls
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
+    assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
@@ -91,7 +104,10 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
 
 
-@pytest.mark.parametrize("target_namespace", ["wire.errors.files", "wire.errors.sdk_spec"])
+@pytest.mark.parametrize(
+    "target_namespace",
+    ["wire.errors.files", "wire.errors.sdk_spec", "wire.settings.account_policy"],
+)
 @pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
 def test_exact_wire_namespace_contract_rejects_mutations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, target_namespace: str
@@ -130,11 +146,23 @@ def test_exact_wire_namespace_contract_rejects_mutations(
 
 
 def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
-    # Pin only the original ten Hindi groups. Analytics/desktop backfill is
-    # explicitly unfinished; mechanical parity is not full-surface coverage.
+    # Pin only the original ten Hindi groups plus each later reviewed slice.
+    # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
+    # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
+    # namespace, added here with its own ledger row; `tui.schedule` is P1's,
+    # carried only now that its audit row exists (the carried-namespace gate
+    # un-ships a locale for an unaudited file); `tui.projects_edit` is P2's
+    # audited namespace, carried the same way on top of the union. P3a adds
+    # `tui.authoring` only after its independent 40-key audit passed. P3b adds
+    # `tui.team_authoring` after its independent 35-key audit passed.
     locale = "hi"
     namespaces = (
+        "tui.authoring",
+        "tui.projects_edit",
+        "tui.review",
+        "tui.schedule",
         "tui.status",
+        "tui.team_authoring",
         "tui.transcript",
         "tui.welcome",
         "wire.errors",

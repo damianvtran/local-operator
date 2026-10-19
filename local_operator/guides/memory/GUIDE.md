@@ -13,7 +13,7 @@ description: "Save or recall goals, files, channels, threads, contacts and decis
   **session** scope. Store shared workstream facts in **team** scope only when
   intentionally shared; **agent** scope is a persistent registry profile, not a
   role tag. Subagents inherit that profile. Anonymous `main` has no agent bank:
-  use session or global instead.
+  use session for work, not global.
 - Save durable user preferences, names, colleagues, locations, contacts and
   environment facts in **global** scope only when intentionally cross-session.
   Do not automatically promote captured facts out of session scope.
@@ -36,17 +36,27 @@ description: "Save or recall goals, files, channels, threads, contacts and decis
 nonsecret personal/user knowledge in **global** memory, across sessions. Recall with
 `memory(op="recall", text="Elara location")`. Both operations are bound to global;
 there is **no scope argument**. Old scope-bearing calls are refused, never stripped
-or reinterpreted. This is a declared personal-only convenience, not a content
-classifier or a guarantee that a model will always choose the right tool.
+or reinterpreted. This is a declared personal-only convenience with a bounded shape
+check: a `#N` tracker reference next to a work word, any `!N` (GitLab work syntax),
+a `commit`/`sha`/`head` hex, a CI/release status verb, or a `next step`/`HOLD` tied to
+a work word is refused with a redirect to `memory://session`. It is a bounded locator
+filter, not a classifier — prose work text with no locator, or a hyphenated key like
+`LOH-13`, still passes, and it is not a guarantee that a model will always choose the
+right tool.
 
-Temporary work, checkpoints and team/profile knowledge use the explicit URLs below:
-`memory://session`, `memory://team`, `memory://agent`, or `memory://global` when
-intentionally durable. Existing session rows are not promoted or rewritten. Guards,
-quotas, provenance and host approvals are shared. Explicit role allowlists are never
-widened; when the helper is absent, use read/write/edit URLs.
+Work state and checkpoints use `memory://session`; intentionally shared work uses
+`memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
+Long-lived work stays in those scopes, not global. `memory://global` is only for
+durable personal/user facts, preferences, contacts and environment. This boundary
+is about the kind of knowledge, not how long it should survive: an unavailable
+agent bank or a future-session request does not turn work state into personal facts.
+Existing session rows are not promoted or rewritten. Guards, quotas, provenance and
+host approvals are shared. Explicit role allowlists are never widened; when the
+helper is absent, use read/write/edit URLs with the same scope boundaries.
 
-The human CLI verbs are `list`, `show`, `search`, `edit`, `forget`, `status` — there
-are no `lop memory remember` or `recall` CLI commands.
+The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `status`,
+`inspect` and `consolidate` — there are no `lop memory remember` or `recall` CLI
+commands.
 
 ## Existing read/write/edit tools
 
@@ -81,6 +91,20 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
 - Correct with `edit(path="memory://session/ID", old_text="REV",
   new_text=<replacement JSON string>)`. Read again on conflict; do not retry a
   stale version blindly. File hunks/replace-all do not apply to memory.
+- Move a fact between scopes instead of re-creating it: `lop memory move ID --to
+  session` (batch: several IDs before `--to`; an agent uses `edit(path="memory://SCOPE/ID",
+  old_text="REV", new_text='{"move":"session"}')`). The move is atomic, refuses when
+  the destination would exceed its cap, keeps the fact's text, provenance and
+  timestamps, and records the source as `moved_from` in the destination's history.
+  Moving to the scope it is already in is refused. The source entity then ends
+  exactly like a forget: its own revisions are closed, not kept. A source with
+  unmerged concurrent revisions is refused. A trusted peer **running this
+  release** that holds a correction the moving device never saw refuses the
+  replication rather than erase it — resolve the conflict first. That protection
+  is version-bound: an older peer applies the move as a forget (its own unseen
+  correction is erased), and an older mover's single-parent tombstone cannot be
+  told apart from a forget even by an upgraded peer. Moved facts replicate to
+  trusted peers exactly like any other mutation.
 - Replace a separate old fact with `replaces:"OLD_ID"` on an explicit new store.
   Without that intent both facts stay visible, even near-duplicates. Superseded
   facts remain inspectable. Exact same-body/source repeats are idempotent;
@@ -99,15 +123,23 @@ Items cap at 256 tokens/8192 bytes including metadata. Global active quota is
 16k tokens; each session/team/agent owner 50k. Recall, suggestions (≤3/180 tokens)
 and compaction hints (≤80 tokens) have separate budgets. History, conflicts,
 tombstones, metadata, storage and WAL are bounded too. Overflow refuses with
-inventory/consolidation guidance; it never evicts explicit or pinned facts.
+inventory/consolidation guidance; it never evicts explicit or pinned facts. Every
+write reports the scope's headroom and percent, and crossing 80% or 90% warns
+once (in the write result) with relief for the scope under pressure: forget
+stale facts everywhere, and move work-state facts to session scope where that
+move exists (global); session and the other scopes consolidate in place.
 
 ## Compaction and mobility
 
 A concurrent deterministic scan captures bounded safe locators (paths, URLs,
 contacts, thread/PR references and secret names). Context-full additionally
-reuses semantic sections of its existing summary. Snapcompact has **no model
-summary**, so old unstored goals/decisions can age out: explicitly retain them.
-No extra inference call or model fork is made. Capture cannot block compaction;
+reuses semantic sections of its existing summary. Snapcompact still makes **no
+model-summary call**, but its pass now carries a bounded, tier-ranked digest of
+the material it drops (operator asks, decisions, identifiers), and capture reads
+that digest too — so retained asks and decisions become session facts instead of
+aging out with the frames. Automatic capture remains best-effort: explicitly
+retain goals and decisions anyway. No extra inference call or model fork is made.
+Capture cannot block compaction;
 its terminal hint arrives at the next ordinary provider boundary and never
 wakes a session. A crash between commit and capture is retried idempotently.
 
@@ -122,11 +154,30 @@ No live-peer interoperability claim follows from isolated loopback tests.
 Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
 `.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
 for policy, quotas and peer exclusions. Human inspection/correction uses
-`lop memory` / `/memory`: list, show, search, edit, forget and status. Rows print
+`lop memory` / `/memory`: list, show, search, move, edit, forget, status, inspect and
+consolidate. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
 (automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
 changes only the named fields; `--json` prints machine-readable output.
+
+Bulk maintenance is deliberate. `lop memory forget --scope S [--older-than 30d]
+[--unverified] [--tag T] [--title-matches RE] [--body-matches RE]` is a DRY RUN: it
+prints the filter in words, the exact match count, the tokens it would free and the
+list, and deletes nothing. The confirmation it prints carries an `--expect`
+fingerprint of the previewed revisions; if any fact changed in between, the whole
+command is refused. Confirmation is all-or-nothing, and a second run of the same
+command reports zero matches instead of failing. A filter must name its `--scope`
+explicitly (a bulk removal never inherits the scope set, and `--scope global` must be
+chosen on purpose), and it refuses a whole-scope match or more than half the scope
+unless the preview is confirmed with `--force` (the preview never prints `--force`
+itself). One confirmed run accepts at most 200 facts; a larger match is refused at
+preview time, so narrow the filter or chunk the cleanup. `lop memory consolidate
+[--scope S] [--limit N]` is a READ-ONLY lexical duplicate preview: identical titles
+that carry real text, or at least 70% title+body token overlap, grouped transitively
+with the similarity measure, the shared tokens and what differs shown (or the
+identical text for an exact pair). It never deletes or merges; review with `show`, merge with `edit`, retire with
+`forget`. No embedding, model call or new dependency is involved.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.

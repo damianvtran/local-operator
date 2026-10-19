@@ -966,8 +966,11 @@ def test_close_drops_the_handle_even_when_cmux_fails(monkeypatch) -> None:
 
 
 def test_every_action_degrades_without_cmux(monkeypatch) -> None:
-    """Absence is not an error state: the tool is not advertised at all, and a
-    host that forces it on gets one clear message per action, never a raise."""
+    """Host actions refuse absence; inspection reports it without creating a lane.
+
+    The forced tool must preserve the diagnostic's effect-free missing-record
+    result even when no host can run ordinary browser commands.
+    """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     # Hermetic: the demotion guard classifies the bridge from the DISCOVERY FILE,
     # so without this the developer's own daemon decides which copy this test
@@ -986,9 +989,16 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
         execute=builtin.execute_browser,
     )
     for action in builtin.BROWSER_ACTIONS:
-        result = _run(forced, "t1", {"action": action, "url": "https://x.y"}, _ctx())
-        assert result.is_error, action
-        assert "not available" in result.text
+        context = _ctx()
+        result = _run(forced, "t1", {"action": action, "url": "https://x.y"}, context)
+        if action == "inspect_ownership":
+            assert not result.is_error
+            assert result.details == {"version": 1, "local_scope_missing": True}
+            assert json.loads(result.text) == result.details
+            assert context.browser is None, "inspection must not create a browser holder"
+        else:
+            assert result.is_error, action
+            assert "not available" in result.text
 
 
 def test_unknown_action_lists_the_real_ones(monkeypatch) -> None:
@@ -1315,6 +1325,492 @@ def test_type_refuses_flag_shaped_text(monkeypatch) -> None:
     assert not fake.calls, "a refused value must never reach the subprocess"
 
 
+# --- typing a referenced secret: the value must not reach the model ----------
+#
+# The incident shape this lane exists for (KOHO analytics QA, 2026-10-16): a
+# `type` call carried a literal password, so the plaintext landed in a
+# subagent's transcript, where no shape rule can catch it. The cells below are
+# the console tool's secret suite applied to this lane (see
+# tests/unit/tools/test_console_tool.py) — same ref convention, same
+# session-first precedence, same fail-closed rule — plus the two carriers this
+# lane adds: the cmux argv and the bridge wire.
+
+#: Synthetic, and deliberately not credential-SHAPED: a plain value is exactly
+#: what the shape pass cannot see, which is why the registration is the defense.
+SECRET = "synthetic-test-password"
+FRESH = "synthetic-fresh-handover"
+STALE = "synthetic-stale-store-value"
+
+
+def _store() -> Any:
+    from local_operator.variables import VariableStore
+
+    return VariableStore(cwd=".")
+
+
+def _stored_secret(monkeypatch) -> None:
+    """The real resolution path, minus the encrypted store on disk."""
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: SECRET.encode())
+
+
+def _secret_ctx(store: Any = None, surface_id: str = "surface:3") -> ToolContext:
+    ctx = ToolContext(cwd="/tmp", variables=store)
+    ctx.browser = BrowserSurface()
+    ctx.browser.surface_id = surface_id
+    return ctx
+
+
+def _bridge_only(monkeypatch) -> None:
+    """Pin the host probes so a `bridge:` handle takes the bridge lane.
+
+    Liveness readings are pinned to "no record", like test_tool_selection.py's
+    `_availability`: an answer that changes with the developer's own daemon is
+    not a test.
+    """
+
+    async def bridge_reachable(classified=None):
+        return True
+
+    async def ui_reachable(classified=None):
+        return False
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_reachable", bridge_reachable)
+    monkeypatch.setattr(builtin, "ui_browser_reachable", ui_reachable)
+    monkeypatch.setattr(builtin, "_bridge_liveness", lambda: (None, None))
+    monkeypatch.setattr(builtin, "_ui_liveness", lambda: (None, None))
+
+
+def test_a_secret_ref_reaches_the_cmux_field_without_reaching_the_model(monkeypatch) -> None:
+    """The negative test, asserted rather than argued.
+
+    Three surfaces of the model's view must be clean — the tool RESULT, the
+    arguments it emitted, and the details the call returns — while the fill
+    command itself must carry the value (that is how it gets typed), and the
+    session's redaction seam must contain it afterwards.
+    """
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", SECRET, "ask")
+    from local_operator.secrets import access
+
+    consulted: list[str] = []
+
+    def boom(name: str, base: Path | None = None) -> bytes:
+        consulted.append(name)
+        raise KeyError(name)
+
+    monkeypatch.setattr(access, "retrieve_secret", boom)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    args = {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"}
+    result = _run(tool, "t1", args, _secret_ctx(store))
+
+    assert not result.is_error, result.text
+    # The fill (never a keystroke `type`, which APPENDS on a retry) carries the
+    # value: the one-call disclosure, asserted in BOTH directions so the claim
+    # cannot be quietly upgraded to "the value never leaves the runtime".
+    fills = [call for call in fake.calls if call[3:4] == ["fill"]]
+    assert fills and fills[-1][fills[-1].index("--text") + 1] == SECRET
+    assert "type" not in fake.verbs(), "a retry would double the input"
+    assert fake.value == SECRET
+    # The model's views name the ref and never the value.
+    assert SECRET not in result.text
+    assert "SUDO_PASSWORD" in result.text
+    assert SECRET not in repr(args)
+    assert SECRET not in repr(result.details)
+    # The session's own redaction seam contains it afterwards.
+    assert SECRET in store.redaction_values()
+    assert store.redact(f"env SUDO_PASSWORD={SECRET}") == "env SUDO_PASSWORD=[redacted]"
+    # The session store answered, so the encrypted store was never consulted.
+    assert consulted == []
+
+
+def test_a_ref_fill_that_did_not_take_names_the_ref_not_the_value(monkeypatch) -> None:
+    """The failure sentence keeps the field-contents diagnostic (`got`) and the
+    EXPECTED side names the ref: an error text is a model-visible surface too."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", SECRET, "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+    fake = _install(monkeypatch, FakeCmux())
+    fake.value = "stale contents"
+
+    async def fill_does_nothing(argv, timeout: float = 30.0):
+        if argv[3:4] == ["fill"]:
+            fake.calls.append(list(argv))
+            return 0, "OK"  # exit 0, field untouched — cmux's actual shape here
+        return await FakeCmux.__call__(fake, argv, timeout)
+
+    monkeypatch.setattr(builtin, "_run_cmux", fill_does_nothing)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(store),
+    )
+    assert result.is_error
+    assert "did not take" in result.text
+    assert "'stale contents'" in result.text
+    assert "value stored as 'SUDO_PASSWORD'" in result.text
+    assert SECRET not in result.text
+
+
+def test_a_secret_ref_reaches_the_bridge_field_without_reaching_the_model(monkeypatch) -> None:
+    """The same contract on the other lane: the wire carries the value (the
+    host has to type it), the result does not."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", SECRET, "ask")
+    captured: dict[str, Any] = {}
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        captured["action"] = action
+        captured["params"] = params
+        return {"value": SECRET}, None
+
+    _bridge_only(monkeypatch)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: True)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    tool = builtin.build_browser_tool(_ctx())
+    assert tool is not None
+    args = {"action": "type", "selector": "input[name=pw]", "secret_ref": "SUDO_PASSWORD"}
+    result = _run(tool, "t1", args, _secret_ctx(store, surface_id="bridge:9:nonce"))
+
+    assert not result.is_error, result.text
+    assert captured["action"] == "type"
+    assert captured["params"]["text"] == SECRET
+    assert SECRET not in result.text
+    assert "SUDO_PASSWORD" in result.text
+    assert SECRET not in repr(result.details)
+    assert SECRET in store.redaction_values()
+
+
+def test_a_bridge_ref_fill_that_did_not_take_names_the_ref_not_the_value(monkeypatch) -> None:
+    """The wire lane's failure copy, pinned for the same reason as the cmux one:
+    the read-back mismatch must name the ref, never the expected value."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", SECRET, "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        return {"value": "stale contents"}, None
+
+    _bridge_only(monkeypatch)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: True)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=pw]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(store, surface_id="bridge:9:nonce"),
+    )
+    assert result.is_error
+    assert "did not take" in result.text
+    assert "'stale contents'" in result.text
+    assert "value stored as 'SUDO_PASSWORD'" in result.text
+    assert SECRET not in result.text
+
+
+def test_no_redaction_sink_fails_closed(monkeypatch) -> None:
+    """A store that cannot contain the value must not type it.
+
+    Without the registration, a page that echoes the field back would put the
+    plaintext into a tool result with nothing to mask it.
+    """
+    _stored_secret(monkeypatch)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    args = {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"}
+    result = _run(tool, "t1", args, _secret_ctx(None))
+    assert result.is_error
+    assert "no redaction sink" in result.text
+    assert "`secret` tool" in result.text
+    assert "`text`" in result.text
+    assert fake.calls == [], "a refused value must never reach the subprocess"
+
+
+def test_an_unresolvable_secret_ref_is_refused_without_dialling(monkeypatch) -> None:
+    from local_operator.secrets import access
+
+    def boom(name: str, base: Path | None = None) -> bytes:
+        raise KeyError(name)
+
+    monkeypatch.setattr(access, "retrieve_secret", boom)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "NOPE"},
+        _secret_ctx(_store()),
+    )
+    assert result.is_error
+    assert "could not resolve secret_ref 'NOPE'" in result.text
+    # The remedy names the routes that DO carry the value, and none of them is
+    # "paste the value".
+    assert "`ask` secret question" in result.text
+    assert "`secret` tool" in result.text
+    assert "sign in" in result.text
+    assert "do not put the value itself in `text`" in result.text
+    assert fake.calls == []
+
+
+def test_the_refusal_closes_the_stores_own_sentence_with_one_period(monkeypatch) -> None:
+    """`SecretNotFound`'s text already ends in a period and the refusal template
+    appends its own, which printed `...in this store..` (console QA round 1, Q2;
+    the same fix applies here)."""
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound
+
+    def boom(name: str, base: Path | None = None) -> bytes:
+        raise SecretNotFound(f"No secret named {name!r} in this store.")
+
+    monkeypatch.setattr(access, "retrieve_secret", boom)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "NOPE"},
+        _secret_ctx(_store()),
+    )
+    assert result.is_error
+    assert "in this store. Get the value" in result.text
+    assert ".." not in result.text
+    assert fake.calls == []
+
+
+def test_a_session_credential_beats_a_same_named_stored_secret(monkeypatch) -> None:
+    """Precedence, pinned: the fresh handover is what the user acted on."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", FRESH, "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: STALE.encode())
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(store),
+    )
+    assert not result.is_error, result.text
+    assert fake.value == FRESH
+    # The fresh value is what got registered; the stored one was never used.
+    assert FRESH in store.redaction_values()
+    assert STALE not in store.redaction_values()
+    assert FRESH not in result.text and STALE not in result.text
+
+
+def test_a_loosely_spelled_session_key_still_resolves(monkeypatch) -> None:
+    """`secret_ref` is model-authored text, so the read applies the same
+    normalize-on-write the store applied: `sudo-password` finds `SUDO_PASSWORD`."""
+    store = _store()
+    store.store_credential("sudo password", SECRET, "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "sudo-password"},
+        _secret_ctx(store),
+    )
+    assert not result.is_error, result.text
+    assert fake.value == SECRET
+
+
+def test_a_raising_session_store_falls_through_to_the_encrypted_store(monkeypatch) -> None:
+    """A duck-typed store's accessor can raise; the resolver then degrades to
+    "no session value" and lets the encrypted store answer — never an unhandled
+    exception out of `_execute_browser`."""
+    from local_operator.variables import VariableStore
+
+    class Hostile(VariableStore):
+        def credential_env(self) -> dict[str, str]:
+            raise RuntimeError("store exploded")
+
+    _stored_secret(monkeypatch)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(Hostile(cwd=".")),
+    )
+    assert not result.is_error, result.text
+    assert fake.value == SECRET
+
+
+def test_a_non_dict_session_store_read_falls_through_too(monkeypatch) -> None:
+    """The shape guard, separately: an accessor that returns something that is
+    not a mapping is treated as "no session value" rather than subscripted."""
+    from local_operator.variables import VariableStore
+
+    class Shapeless(VariableStore):
+        def credential_env(self) -> Any:
+            return ["not", "a", "mapping"]
+
+    _stored_secret(monkeypatch)
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(Shapeless(cwd=".")),
+    )
+    assert not result.is_error, result.text
+    assert fake.value == SECRET
+
+
+def test_type_refuses_text_and_secret_ref_together(monkeypatch) -> None:
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input", "text": "x", "secret_ref": "SUDO_PASSWORD"},
+        _with_surface(),
+    )
+    assert result.is_error
+    assert "'text' or 'secret_ref', not both" in result.text
+    assert not fake.calls
+
+
+def test_secret_ref_is_refused_on_actions_that_never_enter_a_field(monkeypatch) -> None:
+    """Refused rather than silently ignored: a caller whose ref was dropped
+    would believe the secret had been used."""
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    for action, extra in (("read", {"selector": "body"}), ("click", {"selector": "a"})):
+        result = _run(
+            tool,
+            "t1",
+            {"action": action, "secret_ref": "SUDO_PASSWORD", **extra},
+            _with_surface(),
+        )
+        assert result.is_error, action
+        assert "only valid for 'type'" in result.text
+    assert not fake.calls
+
+
+def test_a_dash_shaped_secret_value_is_not_refused(monkeypatch) -> None:
+    """The `_validate_typed_text` dash guard is skipped for a resolved secret,
+    deliberately: the value is the session's, not model-authored text, and a
+    password may legitimately start with a dash. The discriminating control is
+    the same string as literal `text`, which IS refused — so this cell fails if
+    the skip is ever removed."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", "--dash-shaped-secret", "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+    fake = _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    by_ref = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(store),
+    )
+    assert not by_ref.is_error, by_ref.text
+    assert fake.value == "--dash-shaped-secret"
+    literal = _run(
+        tool,
+        "t2",
+        {"action": "type", "selector": "input[name=q]", "text": "--dash-shaped-secret"},
+        _with_surface(),
+    )
+    assert literal.is_error and "flag-shaped text" in literal.text
+
+
+def test_a_literal_type_registers_nothing(monkeypatch) -> None:
+    """Only a RESOLVED value is registered: `text` is the model's own string,
+    already in its context by definition, and registering it would scrub an
+    ordinary word out of every later result."""
+    store = _store()
+    _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool, "t1", {"action": "type", "selector": "input", "text": "hello"}, _secret_ctx(store)
+    )
+    assert not result.is_error, result.text
+    assert store.redaction_values() == []
+
+
+def test_no_log_surface_carries_the_value(monkeypatch, caplog) -> None:
+    """A DEBUG level over the whole ref call changes nothing: no logging site on
+    the type path touches `params.text` after the resolver fills it."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", SECRET, "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+    _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    with caplog.at_level(logging.DEBUG):
+        result = _run(
+            tool,
+            "t1",
+            {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+            _secret_ctx(store),
+        )
+    assert not result.is_error, result.text
+    assert SECRET not in caplog.text
+    assert SECRET not in result.text
+
+
+def test_the_value_is_scrubbed_from_journaled_arguments_too(monkeypatch) -> None:
+    """The second line of defense: history REPLAYS the assistant's tool-call
+    arguments, so with the value registered the copied turn that is stored and
+    replayed must carry the mask, not the plaintext."""
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", SECRET, "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+    _install(monkeypatch, FakeCmux())
+    tool = builtin.build_browser_tool(_ctx())
+    result = _run(
+        tool,
+        "t1",
+        {"action": "type", "selector": "input[name=q]", "secret_ref": "SUDO_PASSWORD"},
+        _secret_ctx(store),
+    )
+    assert not result.is_error, result.text
+
+    from local_operator.harness.loop import _scrub_history_arguments
+    from local_operator.harness.types import Message, TextContent, ToolCall
+
+    message = Message(
+        role="assistant",
+        content=[TextContent(text="")],
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                name="browser",
+                arguments={"action": "type", "selector": "input[name=q]", "text": SECRET},
+            )
+        ],
+    )
+    scrubbed = _scrub_history_arguments(message, store.redact)
+    assert isinstance(scrubbed, Message)
+    retained = str(scrubbed.tool_calls[0].arguments)
+    assert SECRET not in retained
+    assert "[redacted]" in retained
+
+
 # --- cancellation must not orphan the child ----------------------------------
 
 
@@ -1427,3 +1923,32 @@ def test_a_running_bridge_with_no_browser_is_not_reported_as_unconfigured(monkey
     assert "lop browser install" not in idle.text
     assert "remembers this browser" in idle.text, idle.text
     assert (idle.details or {}).get("error_code") == "extension_disconnected"
+
+
+def test_screenshot_into_an_over_cap_pad_is_refused_before_cmux(monkeypatch, tmp_path) -> None:
+    """The REAL tool path (review n4b): a screenshot destination is an ordinary
+    path, so it must reach the same pad policy ``write`` does, and the refusal
+    must land before cmux is invoked — not after a PNG exists."""
+    from local_operator import scratchpad as scratchpad_module
+
+    fake = _install(monkeypatch, FakeCmux())
+    pad = tmp_path / "sessions" / "s" / "scratchpad"
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    config = tmp_path / "cfg"
+    config.mkdir()
+    (config / "config.yml").write_text(
+        "values:\n  session:\n    scratchpad:\n      max_bytes: 4095\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface()
+    ctx.scratchpad_dir = str(pad)
+    result = _run(tool, "t1", {"action": "screenshot", "path": str(pad / "shot.png")}, ctx)
+
+    assert result.is_error is True, result.text
+    assert "4,095-byte ceiling" in result.text
+    assert not (pad / "shot.png").exists()
+    assert all(call[3] != "screenshot" for call in fake.calls if call[:1] == ["browser"])

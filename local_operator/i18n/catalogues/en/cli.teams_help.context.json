@@ -1,0 +1,172 @@
+{
+  "cli.teams_help.teams": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the `teams` command's one-liner"
+  },
+  "cli.teams_help.list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create_manager": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_manager' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create_member": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_member' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_description' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create_label": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_label' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.create_alias": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_alias' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.show": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'show' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.show_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'show_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.delete": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'delete' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.delete_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'delete_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.push": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "exit codes and hub behaviour are documented in the text; keep tokens"
+  },
+  "cli.teams_help.push_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'push_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.push_org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "command example in situ; tenant ids are values"
+  },
+  "cli.teams_help.push_public": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'push_public' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.push_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'push_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.pull": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "accepts an id or a public name; tokens in situ"
+  },
+  "cli.teams_help.pull_team_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pull_team_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.pull_org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pull_org' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.sync": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'sync' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.sync_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'sync_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.sync_all": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'sync_all' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.link": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.link_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.link_hub_team_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_hub_team_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.link_org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_org' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.link_accept_unknown_baseline": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_accept_unknown_baseline' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.search": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the public Agent Hub; product name stays"
+  },
+  "cli.teams_help.search_query": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'search_query' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.search_page": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'search_page' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.search_perpage": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'search_perpage' argument; flag/command tokens stay in situ"
+  },
+  "cli.teams_help.search_json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'search_json' argument; flag/command tokens stay in situ"
+  }
+}

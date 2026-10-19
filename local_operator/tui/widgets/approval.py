@@ -66,6 +66,8 @@ from textual.app import SkipAction
 from textual.events import Key
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.i18n.keys import tui_small as copy
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.tool_card import truncate_cells
@@ -73,6 +75,11 @@ from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.harness.types import AskQuestion
+
+#: The slice's catalogued copy, resolved at each render point. This module holds
+#: no copy CONSTANT, so it registers no locale refresher (text.py: only
+#: constants re-materialise when the active locale moves).
+_t = tr("tui.small")
 
 #: What each key does, in the order the row prints them. Kept as data so the
 #: hint row and the key handler cannot disagree about what is on offer.
@@ -702,7 +709,9 @@ class ApprovalBlock(TranscriptBlock):
             else:
                 question.append(f"{PROMPT_GLYPH} ", style=warning)
             if verb:
-                question.append("allow ", style=muted)
+                # The catalogued verb, trailing space included: the row reads
+                # `allow <target>` once the caller appends the target.
+                question.append(_t(copy.approval_allow_verb()), style=muted)
         else:
             allowed = self._answer in ("y", "a")
             question.append("✓" if allowed else "✗", style=fg if allowed else danger)
@@ -722,7 +731,14 @@ class ApprovalBlock(TranscriptBlock):
                 # already say. `allowed ` costs 8 cells where `allow ` costs 6,
                 # which is why the receipt used to lose the clause two columns
                 # before the live ask did.
-                question.append("allowed " if allowed else "denied ", style=muted)
+                question.append(
+                    _t(
+                        copy.approval_decision_allowed()
+                        if allowed
+                        else copy.approval_decision_denied()
+                    ),
+                    style=muted,
+                )
         # The RAW tool name, always whole, where the ledger row two lines below
         # shows the shortened `display_name`. The divergence is intended and is
         # not a consistency bug to fix: a security prompt must name exactly what

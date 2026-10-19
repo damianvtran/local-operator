@@ -31,6 +31,25 @@ WHAT EACH FRAME IS FOR (design §5.0/§5.3, R7):
   is a receipt and the count fell, with no reload — the live-update half.
 * ``-refusal``  — the queue's own sentence ("already answered by desktop.") in
   the card, from the single-winner race.
+* ``-scoped``   — the sheet opened from a conversation whose aggregate row set
+  includes other conversations' asks: only its own row is listed.
+* ``-ended``    — an ENDED (stopped) conversation's own screen: the dock, from
+  the session's asks in the index, and its sheet showing the timed-out ask as
+  lapsed — dismiss, no options. ``-ended-bar`` is the screen before the tap,
+  and shows the sheet did not open by itself over a queue of lapsed asks: the
+  quiet "1 question timed out" entry, dim rather than accent.
+* ``-ended-open`` — the same lapsed card after the user taps its ``Timed out``
+  header open (decision D11): the card arrives COLLAPSED behind that badge, and
+  the read-only body — the lapsed line, the question, Dismiss — is one explicit
+  tap away. ``-ended`` is the collapsed state.
+* ``-stale-bar`` / ``-stale`` — a STOPPED conversation whose index row still
+  says ``open`` past its deadline: the relay re-derives it to ``timed_out``, so
+  the same quiet entry, and a lapsed card WITH Dismiss.
+* ``-sheet`` is the MIXED sheet: open asks beside the lapsed ``qa-deadline``,
+  with the title counting only the open ones as questions.
+* ``-sheet`` also carries the LAPSED card (``qa-deadline``, timed out): the
+  question read-only under "Timed out — the agent goes ahead without your answer",
+  with dismiss and no options.
 * ``-loading``  — the read in flight (the fetch is stalled for the frame, so the
   state is reproducible rather than a timing race).
 * ``-empty``    — the aggregate answering empty (second fixture, empty index).
@@ -188,32 +207,17 @@ SUBMIT_HEAD = """
 })()
 """
 
-#: Tap the `open` control that belongs to the ENDED conversation's row — the
-#: foreign-row link r2-M1 broke, and the one D7/U9 resized. The link lives in the
-#: row's header, above its card, so it is found from the card outwards.
-OPEN_FOREIGN = """
-(() => {
-  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="en-mine"]');
-  if (!card) return "no card";
-  const row = card.parentElement;
-  const link = row ? [...row.querySelectorAll('button')]
-      .find((b) => b.textContent.trim() === "open") : null;
-  if (!link) return "no open control";
-  link.click();
-  return "tapped";
-})()
-"""
-
-
-#: The single-winner race, in TWO steps. They cannot be one ``Runtime.evaluate``:
+#: The single-winner race, in TWO steps, on ``qa-second`` — an OPEN ask, because
+#: the timed-out ``qa-deadline`` is lapsed and offers no picker to race with.
+#: They cannot be one ``Runtime.evaluate``:
 #: React has not re-rendered after the option click, so the send control is still
 #: disabled at that moment and the click lands on nothing — which is what the
 #: first version of this step did, and the frame showed an untouched card while
 #: the log claimed it had sent.
-PICK_DEADLINE = """
+PICK_RACED = """
 (() => {
-  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="qa-deadline"]');
-  if (!card) return "no deadline card";
+  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="qa-second"]');
+  if (!card) return "no raced card";
   const picker = [...card.querySelectorAll('button')]
     .find((b) => !/skip|decline|dismiss|send/.test(b.textContent));
   if (!picker) return "no picker";
@@ -222,9 +226,9 @@ PICK_DEADLINE = """
 })()
 """
 
-SUBMIT_DEADLINE = """
+SUBMIT_RACED = """
 (() => {
-  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="qa-deadline"]');
+  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="qa-second"]');
   const send = [...card.querySelectorAll('button')].find((b) => /send answer/.test(b.textContent));
   if (!send) return "no send control";
   if (send.disabled) return "send disabled — the form is incomplete";
@@ -242,6 +246,27 @@ STALL_AGGREGATE = """
     return real(input, init);
   };
   return "stalled";
+})()
+"""
+
+#: Tap the first lapsed card's collapsed header open (D11). Returns whether a
+#: header was found; ``LAPSED_EXPANDED`` reads the result AFTER React has
+#: re-rendered (read in the same tick as the click, it reports the old value).
+EXPAND_LAPSED = """
+(() => {
+    const card = document.querySelector('[data-testid="ask-card"][data-ask-status="timed_out"]');
+    const header = card && card.querySelector('button[aria-expanded]');
+    if (!header) return false;
+    header.click();
+    return true;
+})()
+"""
+
+LAPSED_EXPANDED = """
+(() => {
+    const card = document.querySelector('[data-testid="ask-card"][data-ask-status="timed_out"]');
+    const header = card && card.querySelector('button[aria-expanded]');
+    return header ? header.getAttribute('aria-expanded') : null;
 })()
 """
 
@@ -320,9 +345,9 @@ SCROLL_TO_CARD_JS = """
   const panel = document.querySelector('[role="dialog"] .lo-scroll');
   const card = document.querySelector('[data-testid="ask-card"][data-ask-id="' + askId + '"]');
   if (!panel || !card) return null;
-  // THE ROW, not the card: a foreign row's name and its "this conversation has
-  // ended" sentence live in the row's header, ABOVE the card, so scrolling the
-  // card to the top clips the very lines a frame of that row exists to show.
+  // THE ROW, not the card: the "this conversation has ended" sentence lives in
+  // the row's header, ABOVE the card, so scrolling the card to the top clips the
+  // very line a frame of that row exists to show.
   const target = card.parentElement || card;
   const p = panel.getBoundingClientRect();
   const c = target.getBoundingClientRect();
@@ -350,9 +375,9 @@ def scroll_to_card(page: Page, ask_id: str) -> dict[str, Any] | None:
         return None
     geo = json.loads(raw)
     # Ten steps, not six: a row's HEADER is taller than the 8 px tolerance this
-    # aims for (a foreign row carries a name line and, when the conversation has
-    # ended, its sentence), and a swipe moves the panel by a bounded amount — the
-    # Q-1 frame this loop exists for came up 159 px short at six.
+    # aims for (an ended conversation's row carries its sentence), and a swipe
+    # moves the panel by a bounded amount — the Q-1 frame this loop exists for
+    # came up 159 px short at six.
     for _ in range(10):
         if abs(geo["dy"]) < 12:
             break
@@ -416,43 +441,62 @@ def main() -> None:
             page.shot(outdir / f"{label}-{vp}-recommended.png")
             report[f"{vp}-recommended"].update(json.loads(page.js(SHEET_PROBE)))
 
-            # 2b. The FOREIGN row (design round 1, D6): the sheet opened from a
-            #     conversation that is not the one most of its rows belong to, which
-            #     is the case the sheet exists for and the case no frame showed.
+            # 2b. ONE CONVERSATION'S ASKS (Ben's report, 2026-10-15): the sheet opened
+            #     from `asks-foreign`, whose aggregate neighbours include every other
+            #     fixture session's rows, lists only `fa-mine`. It used to list them all.
             page.goto(f"{base}/#/s/asks-foreign")
             time.sleep(1.5)
             page.js(TAP_ROW)
             time.sleep(1.5)
-            page.shot(outdir / f"{label}-{vp}-foreign.png")
-            report[f"{vp}-foreign"] = json.loads(page.js(SHEET_PROBE))
+            page.shot(outdir / f"{label}-{vp}-scoped.png")
+            report[f"{vp}-scoped"] = json.loads(page.js(SHEET_PROBE))
 
-            # 2b2. The ENDED conversation's sentence (design round 1, D6/D8): a
-            #      foreign row whose runtime is gone, stated BEFORE the tap. The
-            #      card is dragged into the panel's viewport so the sentence, not
-            #      just the row, is on screen.
-            page.goto(f"{base}/#/s/asks")
-            time.sleep(1.5)
-            page.js(TAP_ROW)
+            # 2b2. A STOPPED conversation's OWN asks (decision D4): its screen is the
+            #      relay's durable projection, which now carries the session's asks
+            #      from the index — the dock is there, the sheet opens from it, and the
+            #      timed-out ask is lapsed. The bar frame comes first and records
+            #      whether the sheet opened by itself (it must not: nothing in a queue
+            #      of lapsed asks can be answered).
+            page.goto(f"{base}/#/s/asks-ended")
+            time.sleep(2.5)
+            # Its own key, because the summary prints a dock row OR an autoOpened
+            # row per key, and this frame's point is the second one.
+            report[f"{vp}-ended-settle"] = {
+                "autoOpened": page.js("document.querySelector('[role=\"dialog\"]') !== null")
+            }
+            report[f"{vp}-ended-bar"] = json.loads(page.js(BAR_PROBE))
+            page.shot(outdir / f"{label}-{vp}-ended-bar.png")
+            report[f"{vp}-ended"] = {"tap": page.js(TAP_ROW)}
             time.sleep(1.2)
-            hash_at_drag = page.js("location.hash")
-            report[f"{vp}-ended"] = {"drag": scroll_to_card(page, "en-mine")}
+            report[f"{vp}-ended"]["drag"] = scroll_to_card(page, "en-mine")
             time.sleep(0.6)
             page.shot(outdir / f"{label}-{vp}-ended.png")
             report[f"{vp}-ended"].update(json.loads(page.js(SHEET_PROBE)))
-            # r2-M1: the link must actually GO there. Tapped for real, and the
-            # resulting hash reported, because that is the fact the finding was
-            # about (the old order navigated and then popped itself back).
-            tapped = page.js(OPEN_FOREIGN)
-            time.sleep(1.5)
-            # NOT keyed `open`: that is the sheet's own field in SHEET_PROBE, and
-            # overwriting it hid whether the panel was even mounted when the drag
-            # came up empty.
-            report[f"{vp}-ended"]["openTap"] = {
-                "tap": tapped,
-                "hash": page.js("location.hash"),
+            # 2b2'. The collapsed lapsed card OPENED by the user (D11). A tap on the
+            #       disclosure header the card carries; a build without the collapse
+            #       has no such header and the frame repeats `-ended`, which is what
+            #       `expanded` records.
+            report[f"{vp}-ended-open"] = {"tapped": page.js(EXPAND_LAPSED)}
+            time.sleep(0.6)
+            report[f"{vp}-ended-open"]["expanded"] = page.js(LAPSED_EXPANDED)
+            page.shot(outdir / f"{label}-{vp}-ended-open.png")
+
+            # 2b3. A STALE `open` past its deadline on a stopped conversation (review
+            #      round 1, R1; QA Q1): re-derived on the runtime's host to
+            #      `timed_out`, so the card carries Dismiss and nothing calls it waiting.
+            page.goto(f"{base}/#/s/asks-stale")
+            time.sleep(2.5)
+            report[f"{vp}-stale-settle"] = {
+                "autoOpened": page.js("document.querySelector('[role=\"dialog\"]') !== null")
             }
-            report[f"{vp}-ended"]["hashAtDrag"] = hash_at_drag
-            page.shot(outdir / f"{label}-{vp}-opened.png")
+            report[f"{vp}-stale-bar"] = json.loads(page.js(BAR_PROBE))
+            page.shot(outdir / f"{label}-{vp}-stale-bar.png")
+            report[f"{vp}-stale"] = {"tap": page.js(TAP_ROW)}
+            time.sleep(1.2)
+            report[f"{vp}-stale"]["drag"] = scroll_to_card(page, "sa-open")
+            time.sleep(0.6)
+            page.shot(outdir / f"{label}-{vp}-stale.png")
+            report[f"{vp}-stale"].update(json.loads(page.js(SHEET_PROBE)))
 
             # 2c. The BUSIEST STACK (design round 1, D6): todos, a running roster,
             #     an approval card AND the ask chip sharing one column.
@@ -507,16 +551,16 @@ def main() -> None:
             report[f"{vp}-answered"] = {"submit": sent, **json.loads(page.js(SHEET_PROBE))}
 
             # 5. The single-winner refusal: the queue's own sentence, verbatim.
-            page.js(PICK_DEADLINE)
+            page.js(PICK_RACED)
             time.sleep(0.5)
-            page.js(SUBMIT_DEADLINE)
+            page.js(SUBMIT_RACED)
             time.sleep(2.5)
             # THE FRAME MUST SHOW THE SENTENCE IT EXISTS FOR (QA round 1, Q-3 =
             # design round 1, D4). The refusal used to render below the fold of the
             # very card that produced it, so the PNG showed a pressed option and no
             # error. The card's own error line now sits with its controls, and this
             # drags the card into the panel's viewport before the shutter.
-            report[f"{vp}-refusal"] = {"drag": scroll_to_card(page, "qa-deadline")}
+            report[f"{vp}-refusal"] = {"drag": scroll_to_card(page, "qa-second")}
             time.sleep(0.6)
             page.shot(outdir / f"{label}-{vp}-refusal.png")
             report[f"{vp}-refusal"].update(json.loads(page.js(SHEET_PROBE)))

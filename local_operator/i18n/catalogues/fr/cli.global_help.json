@@ -1,0 +1,19 @@
+{
+  "cli.global_help.debug": "Activer le mode debug pour une sortie détaillée",
+  "cli.global_help.agent": "Sélectionner un ancien agent nommé (le crée s’il manque). Sans --train, utilise une session persistée séparée ; exec --profile attache plutôt un rôle réutilisable.",
+  "cli.global_help.train": "Utiliser l’ancien répertoire d’historique de l’agent (ou un agent en autosave) au lieu d’une session séparée. Les sessions ordinaires sont aussi persistées et reprenables ; --resume prime sur ce choix de répertoire.",
+  "cli.global_help.description": "\n    Local Operator - Un environnement pour modèles d’IA agentiques afin d’exécuter des tâches sur l’appareil local.\n\n    Prend en charge plusieurs plateformes d’hébergement, dont DeepSeek, OpenAI, Anthropic, Ollama, Kimi\n    et Alibaba. Fonctionnalités : conversation interactive, exécution de code sécurisée,\n    historique de conversation contextuel et contrôles de sécurité intégrés.\n\n    Configurez votre modèle et votre plateforme d’hébergement via les arguments de ligne de commande. Votre\n    fichier de configuration se trouve dans ~/.local-operator/config.yml et peut être modifié directement.\n",
+  "cli.global_help.resume": "Reprendre une session précédente par id, en rejouant sa transcription. L’id est celui affiché quand une session est arrêtée par Ctrl+C deux fois, et c’est le nom du répertoire sous ~/.local-operator/sessions. Indiquez --resume sans id pour rouvrir la session la plus récente.",
+  "cli.global_help.version": "Afficher le numéro de version du programme et quitter",
+  "cli.global_help.hosting": "Plateforme d’hébergement à utiliser (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+  "cli.global_help.model": "Modèle à utiliser (p. ex. gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5). Facultatif : quand il est omis, le modèle suggéré par le fournisseur est utilisé.",
+  "cli.global_help.run_in": "Répertoire de travail dans lequel exécuter l’opérateur. Doit être un répertoire valide.",
+  "cli.global_help.yolo": "Approuver automatiquement toutes les exécutions d’outils (niveaux lecture/écriture/exécution) sans demander",
+  "cli.global_help.no_tui": "Désactiver la TUI plein écran ; utiliser le REPL simple sans interface à la place",
+  "cli.global_help.tui": "Forcer la TUI plein écran même quand stdout n’est pas un tty (échec explicite si la TUI ne peut pas fonctionner sans tty)",
+  "cli.global_help.yolo_conditional": "Conditionnel pour la commande peer create associée à ce verbe : la session démarre sans surveillance uniquement si l’appareil cible accorde à celle-ci la capacité `unattended`",
+  "cli.global_help.propagated_resume": "Reprendre une session précédente par id. À passer sans id pour la plus récente.",
+  "cli.global_help.propagated_hosting": "Plateforme d’hébergement pour cette exécution (p. ex. anthropic, openai, openrouter)",
+  "cli.global_help.propagated_model": "Modèle à utiliser pour cette exécution",
+  "cli.global_help.propagated_run_in": "Répertoire de travail dans lequel exécuter l’opérateur"
+}

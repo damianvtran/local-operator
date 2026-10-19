@@ -413,6 +413,26 @@ Same `browser` tool. Actions:
 - `upload` (attach local files to a file input; see below)
 - `close` (drop the surface and its tab)
 
+### Typing a credential: use `secret_ref`, never `text`
+
+A literal password in `type`'s `text` is written into the transcript that
+produced the call — there is no credible way to take it back. When a field needs
+a stored secret, pass its NAME instead:
+
+```text
+type selector="input[name=password]" secret_ref="SUDO_PASSWORD"
+```
+
+- The ref resolves **session-first** — the value the user typed into an `ask`
+  `secret: true` question, or handed over with `/credential` — then from the
+  encrypted store (the `secret` tool's).
+- The value never appears in the call, the result or a trace: every sentence
+  names the ref, and the session's redaction sink is armed with the value before
+  it is typed, so even a page that echoes it back reads `[redacted]`.
+- Nothing stored under that name? Ask the user to sign in by hand in the tab
+  (the browser drives their real session), or hand the value over with the
+  `secret` tool, then retry. Never fall back to putting the value in `text`.
+
 ### Downloading a file the page offers
 
 Seven receipts from a billing page is the case this exists for, and it is the
@@ -728,3 +748,36 @@ supports the `chrome.debugger` API: **Chrome, Edge, Brave, Arc**. Firefox and
 Safari are out of scope (different extension/debugger models). If the user is
 on Firefox/Safari and inside cmux, the cmux panel is the fallback; otherwise
 static-page reading via `bash`/curl is the honest limit.
+
+## Read-only ownership inspection
+
+`browser(action="inspect_ownership")` asks the existing extension scope whether
+its private proof and session match, and whether its stored generation matches
+the caller's current, previous, or bounded ancestry. It returns only booleans and
+an input-ancestry count. A missing local record is reported without creating one;
+a missing remote scope is distinct from a same-proof session mismatch. Unknown
+proofs reveal no other scope, and foreign sessions receive no scope counts.
+A missing local record or remote scope is not proof that no tab, approval,
+retained scope or other ownership obligation remains; inspection is not an
+all-host inventory or authorization to activate an extension update.
+
+Inspection does not recover, repair, retry, allocate, close, select a host, grant
+access, or change local/extension ownership records. It targets only the existing
+extension lane; other hosts/old peers return a typed unsupported result. An
+unavailable peer is not an instruction to restart or retry. Stale-generation
+fences remain in force. The result cannot reconstruct historical lost evidence
+or establish why a generation changed.
+
+**Source support is not loaded support.** Merging this code or updating the
+Python runtime does not add the handler to an already-loaded extension. Do not
+reload/update/disable an extension to obtain diagnostics during an unresolved
+incident: Chrome clears `storage.session` on extension reload, update, disable,
+and browser restart (ordinary service-worker churn preserves it). A new
+`onInstalled` handler cannot save the old session state after Chrome erases it.
+Activation requires an explicitly authorized quiescent/settled boundary across
+all hosts' tab debt, unknown reservations, retained scopes and pending approvals,
+or a separately reviewed pre-activation checkpoint/restore strategy executed by
+the still-loaded old build. This inspection adds no persistence migration.
+
+Chrome's documented storage lifecycle:
+https://developer.chrome.com/docs/extensions/reference/api/storage#storage_areas

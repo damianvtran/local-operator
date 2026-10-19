@@ -44,6 +44,7 @@ import {
 	messageRuntime,
 	publishMarkNotice,
 	retainSessionListStream,
+	useCapabilities,
 	useMarkNotice,
 	usePinMarks,
 	useSessions,
@@ -51,6 +52,7 @@ import {
 import { WideViewButton } from "../components/wide-view-button";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
+import { LIBRARY_LABEL } from "../lib/library-copy";
 import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
 import type { SessionSummary } from "../types";
@@ -535,16 +537,16 @@ function SessionCard({
 				    outstanding, which needs no mark. */}
 				{typeof s.asks_open === "number" && s.asks_open > 0 ? (
 					/* THE UNIT IS THE FIELD'S OWN (agent review round 1, R3): `asks_open`
-					   counts ASKS (open, or timed-out and still answerable — the
-					   outstanding set), and this chip used to print that number with the
-					   word "questions" — so the PR's own fixture showed "2 questions"
+					   counts ASKS (the outstanding set — open asks since #2388, when a
+					   timed-out ask became settled), and this chip used to print that
+					   number with the word "questions" — so the PR's own fixture showed "2 questions"
 					   where the bar above it said "4 questions waiting" and the header
 					   said 3. The chip now says what it counts ("2 asks"); the surfaces
 					   that hold the whole ask list state questions, which is §5.0's own
 					   unit for the bar.
 
 					   THE ARIA LABEL IS NOT "waiting" (M1, asks-open widening): the
-					   field's set now includes a timed-out-but-answerable ask, and §5's
+					   field's set once included a timed-out ask, and §5's
 					   header rule is explicit that an outstanding ask "is not a
 					   'waiting for you' state" — the agent keeps working. So the label
 					   uses this client's own word for the set (`outstandingAsks`,
@@ -597,6 +599,14 @@ function ThemePicker({
 	return (
 		<Sheet open={open} onClose={onClose} title="theme">
 			<div className="flex flex-col p-2">
+				{/* The wide-view preference moved here when the Library entry made the
+				    footer six controls wide: measured at 360px the six-control row ran
+				    372px against a 360px footer, clipping `wide`. Both preferences are
+				    per-phone display settings, so one sheet is where they belong; the
+				    component stays shared with the session header. */}
+				<div className="border-b border-hairline pb-1">
+					<WideViewButton className="w-full" />
+				</div>
 				{THEMES.map((t) => (
 					<button
 						key={t.id}
@@ -826,6 +836,7 @@ function usePaintedRows(
 
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
+	const capabilities = useCapabilities();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and
 	   its top in LAYOUT space (see `layoutTop`). The element is part of the
 	   record because a pin LIFT remounts a card under another section — a new
@@ -1358,6 +1369,11 @@ export function SessionListScreen() {
 				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
 				</h1>
+				<button type="button" onClick={() => navigate("/settings/account-routing")}
+					className="ml-auto min-h-11 shrink-0 rounded-md border border-control px-3 text-body-sm text-ink-muted"
+					aria-label={messageRuntime.t("relay.account_policy.title")}>
+					{messageRuntime.t("relay.account_policy.entry")}
+				</button>
 				{/* OFFLINE, QUIETLY (mobile UX batch 2, U11). `connected === false` on
 				    this screen used to change nothing once rows were on it: the list
 				    kept painting a frozen frame as though it were live. The chip is
@@ -1388,7 +1404,7 @@ export function SessionListScreen() {
 					<input
 						value={query}
 						onChange={(event) => setQuery(event.target.value)}
-						placeholder="Search conversations…"
+						placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
 					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live
@@ -1553,7 +1569,7 @@ export function SessionListScreen() {
 									: messageRuntime.t("relay.shell.list.connecting")}
 							</p>
 							<p className="text-body-sm text-ink-dim">
-								start one below, or from the TUI on your machine
+								{messageRuntime.t("relay.session.list.empty_hint")}
 							</p>
 						</div>
 					) : (
@@ -1588,7 +1604,7 @@ export function SessionListScreen() {
 							    one where the screen would otherwise be a wordless void. */}
 							{pinned.length + active.length + previous.length === 0 ? (
 								<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
-									no matching conversations
+									{messageRuntime.t("relay.session.list.no_matches")}
 								</p>
 							) : null}
 						</div>
@@ -1604,7 +1620,7 @@ export function SessionListScreen() {
 					{startError}
 				</p>
 			) : null}
-			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
+			<footer className="flex items-center gap-1 border-t border-hairline px-2 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
 					type="button"
 					onClick={() => void startNewSession()}
@@ -1612,7 +1628,9 @@ export function SessionListScreen() {
 					aria-busy={starting}
 					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated disabled:text-ink-disabled"
 				>
-					{starting ? "starting…" : "new session"}
+					{starting
+						? messageRuntime.t("relay.session.list.start_busy")
+						: messageRuntime.t("relay.session.list.start_idle")}
 				</button>
 				{/* U10 (mobile UX batch): the entry point the file's own contract
 				    describes. `#/past` — searchable, resumable history — was reachable
@@ -1622,15 +1640,29 @@ export function SessionListScreen() {
 				<button
 					type="button"
 					onClick={() => navigate("/past")}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
 				>
 					past
 				</button>
+				{/* THE LIBRARY DESTINATION (design §6.3). Gated on the relay's own
+				    ``capabilities.library``: an older relay cannot serve the routes,
+				    so offering the destination would paint a screen whose every
+				    request 404s. The label is owned copy in an advisory module —
+				    see ``lib/library-copy`` for why it is not a key yet. */}
+				{capabilities?.library ? (
+					<button
+						type="button"
+						onClick={() => navigate("/library")}
+						className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
+					>
+						{LIBRARY_LABEL}
+					</button>
+				) : null}
 				<button
 					type="button"
 					ref={projectsButtonRef}
 					onClick={() => setProjectsOpen(true)}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
 				>
 					projects
 				</button>
@@ -1642,12 +1674,6 @@ export function SessionListScreen() {
 				>
 					◐
 				</button>
-				{/* WIDE VIEW (issue #1870): the same control the session screen's
-				    header carries — one component, so the label and the pressed state
-				    cannot drift between the two places a reader can reach it. Lives
-				    here beside the theme because it is the same kind of preference
-				    (per-phone, persisted, not content). */}
-				<WideViewButton />
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
 			<ProjectsSheet

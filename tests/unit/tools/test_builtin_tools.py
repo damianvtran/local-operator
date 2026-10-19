@@ -3366,10 +3366,10 @@ async def test_a_bash_creation_inside_the_pad_is_never_nudged(tmp_path, monkeypa
 # refused after the fact. These rows pin the after arm: ONE [scratch] line on
 # the real tool result when a pad-naming command left the pad over budget, past
 # its entry cap, or holding a refused name — and silence, with no filesystem
-# walk at all, for a command that never names the pad. The budget/cap fixtures
-# patch BOTH bindings of the constants (the walk reads them off
-# ``local_operator.scratchpad``, the sentence off this module's import of them)
-# so the arm under test is the one that fires, not a neighbour.
+# walk at all, for a command that never names the pad. The budget fixtures patch
+# the constant on ``local_operator.scratchpad``, which is where both the walk
+# and the sentence now read it: ``scratchpad_budget_bytes`` falls back to that
+# module global when no config value is set, so ONE patch steers every arm.
 
 
 def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
@@ -3385,7 +3385,6 @@ def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
     filled.write_bytes(b"x" * size)
     held = filled.stat().st_blocks * 512
     monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
-    monkeypatch.setattr(builtin, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
     return context, pad, held
 
 
@@ -3395,19 +3394,24 @@ async def test_a_pad_over_budget_is_flagged_on_the_real_result(
     tmp_path, monkeypatch, spelling
 ) -> None:
     """The channel the guide used to call unpoliced, driven through the REAL
-    bash tool: the command took the pad over budget, and the result says so —
-    in the head window (line 2, under the exit code), one line, naming the size
-    held and the budget in the unit a reader parses (MiB once it is one,
-    design review round 1, D2) and claiming exactly what the write path refuses
-    — writes that add (F3: the earlier "refuse further writes" overstated a
-    shrinking overwrite's fate).
+    bash tool: the pad is over budget, and the result says so — in the head
+    window (line 2, under the exit code), one line, naming the size held and
+    the budget in the unit a reader parses (MiB once it is one, design review
+    round 1, D2) and claiming exactly what the write path refuses — writes that
+    add (F3: the earlier "refuse further writes" overstated a shrinking
+    overwrite's fate).
+
+    A READ-ONLY command drives this arm on purpose: a command that would CREATE
+    under the over-cap pad is now refused before it runs
+    (``_bash_pad_precheck``), which is a different sentence. ``ls`` names the pad
+    and leaves it alone, so the post-hoc state line is what the result carries.
 
     Both variable spellings, because either is how a session writes the pad and
     a gate that missed one would be silent exactly half the time.
     """
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
 
-    text = await _run_bash(context, f'mkdir -p "{spelling}/logs"')
+    text = await _run_bash(context, f'ls "{spelling}"')
 
     expected = (
         f"[scratch] The pad now holds ≥{held:,} bytes, over its {held - 1:,}-byte budget — "
@@ -3481,8 +3485,21 @@ async def test_the_shape_line_wins_over_the_budget_line_and_there_is_only_one(
     """At most one line per result, and the shape line is the one — it
     attributes the change to THIS command while the budget line reports state
     the pad already had. Pinned because the alternative (a second line, or the
-    budget line first) is what a later "improvement" reaches for."""
-    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+    budget line first) is what a later "improvement" reaches for.
+
+    The pad is over its ENTRY cap rather than its byte cap: a byte-over pad
+    refuses the creating command before it runs, so the two lines cannot meet
+    there any more. Over the entry cap the command still runs (the pre-check
+    judges bytes, as specified), and both arms are live on one result.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    for index in range(3):
+        (pad / f"f{index}.md").write_text("x")
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(builtin, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
 
     text = await _run_bash(
         context,
@@ -3500,7 +3517,7 @@ async def test_the_literal_pad_path_is_named_too(tmp_path, monkeypatch) -> None:
     session copies from one — names the pad exactly as the variable does."""
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
 
-    text = await _run_bash(context, f'mkdir -p "{pad}/logs"')
+    text = await _run_bash(context, f'ls "{pad}"')
 
     assert text.splitlines()[1].startswith("[scratch] The pad now holds ≥"), text
 
@@ -8162,3 +8179,392 @@ def test_the_signature_matches_a_real_shells_real_output(tmp_path: Path) -> None
     # row it replaced.
     assert exercised, "no shell on this host was exercised"
     assert any("probe.sh" in item for item in exercised), "the long-path script form did not run"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_edit_checks_projected_utf8_bytes_before_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    """A hunk is not a payload size: enforce quota on the computed result.
+
+    The initial scratch guard excludes the replaced file, so an edit can pass
+    address/name checks while its final UTF-8 content would exceed the pad cap.
+    Refusal must precede mutation; accepting then reporting an error is too late.
+    This is not a reproduction of the separately unproven article-write refusal.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    target = pad / "quota.txt"
+    before = b"seed\n"
+    target.write_bytes(before)
+    # Derive a small boundary from the real filesystem rather than assuming
+    # files allocate their apparent byte length (APFS commonly allocates 4KiB).
+    # There are no other files: excluding this target leaves zero held bytes.
+    allocated = target.stat().st_blocks * 512
+    budget = max(4096, allocated)
+    replacement = "é" * (budget // 2 + 1) + "\n"
+    payload_bytes = len(replacement.encode("utf-8"))
+    single_write_cap = 4 * budget
+    assert len(before) < budget < payload_bytes < single_write_cap
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_WRITE_BYTES", single_write_cap)
+    # This is the actual shared initial guard, not a mocked permission result.
+    assert scratchpad_module.check_scratchpad_write(target, pad, "scratchpad://quota.txt") is None
+
+    result = await tools["edit"].execute(
+        "scratch-quota-red",
+        {
+            "path": "scratchpad://quota.txt",
+            "old_text": "seed\n",
+            "new_text": replacement,
+        },
+        None,
+        None,
+        context,
+    )
+    after = target.read_bytes()
+    assert result.is_error is True, (
+        f"edit accepted {payload_bytes} UTF-8 bytes against cap {budget}; "
+        f"actual file bytes={len(after)}, original unchanged={after == before}"
+    )
+    assert f"over the {budget:,}-byte ceiling" in result.text
+    assert after == before, "a refused quota-changing edit must not mutate the file"
+
+
+# ---------------------------------------------------------------------------
+# The pad cap BEFORE the child exists: a shell cannot be refused after the fact
+# ---------------------------------------------------------------------------
+
+
+def _pad_cap_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: int) -> None:
+    """Point the config root at a fresh file carrying only the pad cap.
+
+    The floor is patched to 1 KiB so the fixture can measure a kilobyte pad
+    instead of the shipped 16 MiB; the clamp itself is exercised in
+    ``test_scratchpad.py``.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    config = tmp_path / "cap-config"
+    config.mkdir()
+    (config / "config.yml").write_text(
+        f"values:\n  session:\n    scratchpad:\n      max_bytes: {value}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+
+
+@pytest.mark.asyncio
+async def test_a_creating_command_is_refused_before_it_runs_on_an_over_cap_pad(
+    tmp_path, monkeypatch
+) -> None:
+    """The requirement: a command that would CREATE under an over-cap pad must
+    not run. The sentence names the held bytes, the cap and all three remedies,
+    because a refusal that only says no sends the work to the user's directory.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    cap = held - 1
+    _pad_cap_config(tmp_path, monkeypatch, cap)
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-refused",
+        {"command": f'mkdir -p "{pad}/build/sub"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "Scratchpad over cap" in result.text
+    assert f"holds ≥{held:,} bytes, cap {cap:,} bytes" in result.text
+    assert "session.scratchpad.max_bytes" in result.text
+    assert "git worktree" in result.text
+    assert result.text.rstrip().endswith("The command did not run.")
+    # UX U3: the cause leads; the destination follows it.
+    assert result.text.index("Scratchpad over cap") < result.text.index(str(pad))
+    assert not (pad / "build" / "sub").exists(), "the command must not have run"
+
+
+@pytest.mark.asyncio
+async def test_reads_and_shrinks_still_run_on_an_over_cap_pad(tmp_path, monkeypatch) -> None:
+    """``ls`` and ``rm`` are the recovery path. A gate that refused them would
+    strand the pad's owner with an unusable pad and no way back under the cap.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+    (pad / "build").mkdir()
+    (pad / "build" / "out.o").write_bytes(b"x" * 128)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    listed = await tools["bash"].execute(
+        "bash-pad-ls", {"command": f'ls "{pad}"'}, None, None, context
+    )
+    assert listed.is_error is False, listed.text
+    assert "bulk.dat" in listed.text
+
+    removed = await tools["bash"].execute(
+        "bash-pad-rm", {"command": f'rm -rf "{pad}/build"'}, None, None, context
+    )
+    assert removed.is_error is False, removed.text
+    assert not (pad / "build").exists()
+
+
+def test_a_browser_screenshot_destination_under_the_pad_is_checked(tmp_path, monkeypatch) -> None:
+    """The screenshot path takes an ordinary filesystem path, so the pad policy
+    must run on it explicitly — an absolute destination into ``scratchpad/``
+    otherwise wrote a PNG the next ``write`` would have refused."""
+    from local_operator.tools import builtin as builtin_module
+
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+
+    refused = builtin_module._pad_destination_refusal(
+        "shot-under-pad", "browser", str(pad / "shot.png"), context, 16
+    )
+    assert refused is not None and refused.is_error is True
+    assert "byte ceiling" in refused.text or "bytes, so this write" in refused.text
+
+    outside = builtin_module._pad_destination_refusal(
+        "shot-outside-pad", "browser", str(tmp_path / "shot.png"), context, 16
+    )
+    assert outside is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        ('cd "{pad}" && mkdir cddir', "cddir"),
+        ('cd "{pad}" && cp bulk.dat copy.dat', "copy.dat"),
+        ('cd "{pad}" && touch newfile.txt', "newfile.txt"),
+        ('cd "$LOCAL_OPERATOR_SCRATCHPAD" && touch relvar.txt', "relvar.txt"),
+    ],
+)
+async def test_a_cd_into_the_pad_does_not_hide_a_creating_command(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """Review M1: ``cd "<pad>" && mkdir d`` was the ordinary idiom and the
+    pre-execution gate judged only absolute targets, so it ran on an over-cap
+    pad. The walk now carries a pad base and expands the two known spellings
+    before it runs.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-cd-refused", {"command": command.format(pad=pad)}, None, None, context
+    )
+
+    assert result.is_error is True, result.text
+    assert "Scratchpad over cap" in result.text
+    assert not (pad / created).exists(), "the command must not have run"
+
+
+@pytest.mark.asyncio
+async def test_a_cd_shrink_and_no_growth_operations_still_run(tmp_path, monkeypatch) -> None:
+    """The recovery path after ``cd``, plus the two no-growth exemptions from
+    review m4: a rename wholly inside the pad and a ``mkdir -p`` whose target
+    already exists add no bytes, so refusing them was a false positive.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+    build = pad / "build"
+    build.mkdir()
+    (build / "out.o").write_bytes(b"x" * 128)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    def run(name: str, command: str):
+        return tools["bash"].execute(name, {"command": command}, None, None, context)
+
+    removed = await run("bash-pad-cd-rm", f'cd "{pad}" && rm -rf build')
+    assert removed.is_error is False, removed.text
+    assert not build.exists()
+
+    renamed = await run("bash-pad-mv", f'mv "{pad}/bulk.dat" "{pad}/bulk2.dat"')
+    assert renamed.is_error is False, renamed.text
+    assert (pad / "bulk2.dat").exists() and not (pad / "bulk.dat").exists()
+
+    noop_pad = await run("bash-pad-mkdir-self", f'mkdir -p "{pad}"')
+    assert noop_pad.is_error is False, noop_pad.text
+
+    (pad / "build").mkdir()
+    noop_child = await run("bash-pad-mkdir-existing", f'mkdir -p "{pad}/build"')
+    assert noop_child.is_error is False, noop_child.text
+
+    (pad / "notes.md").write_text("keep\n")
+    touched = await run("bash-pad-touch-existing", f'touch "{pad}/notes.md"')
+    assert touched.is_error is False, touched.text  # Minor 2: an existing FILE adds no bytes
+
+
+@pytest.mark.asyncio
+async def test_the_post_hoc_shape_audit_still_names_a_build_tree_the_precheck_exempts(
+    tmp_path, monkeypatch
+) -> None:
+    """R2-1: the no-growth exemptions are PRECHECK-ONLY. ``mkdir -p`` of an
+    existing build tree adds no bytes, so the precheck lets it run — but the
+    tree is still there, and the post-hoc audit must keep naming it."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "build" / "sub").mkdir(parents=True)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-shape-after-exempt",
+        {"command": 'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build/sub"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "'build' is a build or dependency directory" in result.text
+
+
+@pytest.mark.asyncio
+async def test_no_growth_forms_are_allowed_on_a_pad_under_cap(tmp_path) -> None:
+    """The same exemptions on the ordinary side, so they are not accidentally
+    tied to the over-cap branch: touch an existing file, mkdir the pad itself
+    and rename a file, all on a healthy pad."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    def run(name: str, command: str):
+        return tools["bash"].execute(name, {"command": command}, None, None, context)
+
+    touched = await run("bash-pad-touch", f'touch "{pad}/notes.md"')
+    assert touched.is_error is False, touched.text
+
+    mkdir_self = await run("bash-pad-mkdir-self", f'mkdir -p "{pad}"')
+    assert mkdir_self.is_error is False, mkdir_self.text
+
+    renamed = await run("bash-pad-rename", f'mv "{pad}/notes.md" "{pad}/notes2.md"')
+    assert renamed.is_error is False, renamed.text
+    assert (pad / "notes2.md").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "needle"),
+    [
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv a.dat b.tar.gz',
+            "'.tar.gz' is a compiled, archived or model artefact",
+        ),
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv notes.md build/notes.md',
+            "'build' is a build or dependency directory",
+        ),
+    ],
+)
+async def test_an_in_pad_rename_still_reports_the_refused_shape_post_hoc(
+    tmp_path, command, needle
+) -> None:
+    """R3-1: the rename exemption belongs to the PRECHECK only. The post-hoc
+    audit must still see where an in-pad rename PUT the name, or a rename is a
+    free way to leave a build tree/archive in the pad with no line."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a.dat").write_bytes(b"x")
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-rename-shape", {"command": command}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert "[scratch]" in result.text and needle in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "needle", "created"),
+    [
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv a.dat b.tar.gz',
+            "'.tar.gz' is a compiled, archived or model artefact",
+            "b.tar.gz",
+        ),
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv notes.md build/notes.md',
+            "'build' is a build or dependency directory",
+            "build/notes.md",
+        ),
+    ],
+)
+async def test_an_in_pad_rename_on_an_over_cap_pad_runs_and_still_reports(
+    tmp_path, monkeypatch, command, needle, created
+) -> None:
+    """The precheck exempts the rename (it adds no bytes); the command therefore
+    runs, and the post-hoc line must still name the refused shape it left."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a.dat").write_bytes(b"x" * 4096)
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+    held = sum(
+        entry.lstat().st_blocks * 512
+        for entry in pad.rglob("*")
+        if not entry.is_dir() and not entry.is_symlink()
+    )
+    _pad_cap_config(tmp_path, monkeypatch, max(1024, held - 1))
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-rename-over-cap", {"command": command}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert needle in result.text
+    assert (pad / created).exists(), "the rename itself is a no-growth command"
+
+
+@pytest.mark.asyncio
+async def test_touch_through_an_in_pad_symlink_is_refused(tmp_path, monkeypatch) -> None:
+    """R3-2: the symlink guard must run BEFORE ``_pad_target`` resolves the
+    link, or it is dead and ``touch`` through it is exempted as a no-op."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "real.md").write_bytes(b"x" * 4096)
+    (pad / "link.md").symlink_to("real.md")
+    held = (pad / "real.md").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, max(1024, held - 1))
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-touch-link",
+        {"command": 'touch "$LOCAL_OPERATOR_SCRATCHPAD/link.md"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True, result.text
+    assert "Scratchpad over cap" in result.text

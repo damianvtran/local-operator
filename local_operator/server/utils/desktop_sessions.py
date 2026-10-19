@@ -90,6 +90,7 @@ from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentSt
 from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
+    RUNNING_STATUS_CODES,
     CatalogueScope,
     ScopeCensus,
     catalogue_page,
@@ -3715,6 +3716,7 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
+        answer = await self._with_peer_cycle_records(answer, [page])
         return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
     async def _open_frame_history(
@@ -3827,6 +3829,7 @@ class DesktopSessionBridge:
             # window, not a tail cut, so the only honest reading of ``head_cut``
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
+            answer = await self._with_peer_cycle_records(answer, [page])
             return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
         collected: list[dict[str, Any]] = []
@@ -3979,6 +3982,7 @@ class DesktopSessionBridge:
         # page's oldest run from the rows it holds), which makes the false answer
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
+        answer = await self._with_peer_cycle_records(answer, order_pages)
         return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
 
     @staticmethod
@@ -4326,6 +4330,113 @@ class DesktopSessionBridge:
                 "event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True, "peer_source": True}
             )
 
+    async def _with_peer_cycle_records(
+        self, answer: dict[str, Any], pages: list[Any]
+    ) -> dict[str, Any]:
+        """Join display-only proof for this selected page, never model context.
+
+        THE READ PATH PAYS NO SCAN. This method used to build ``Transcript(self.root
+        / "sessions" / self.session_id)`` purely to hand its ``directory`` to
+        ``discover_records``, and then let that function ``refresh_index``: the
+        first eagerly replays the WHOLE journal in its constructor (70,353 rows /
+        485 MB measured at 6.6-8.9 s on the operator's store) and the second
+        re-reads and re-parses the whole cache JSON (45 MB, 1.5-2.5 s), both
+        synchronously on the event loop, for every snapshot and every page --
+        while the two only ever needed the directory.
+
+        Now the page's own candidates are derived FIRST from the rows this read
+        already selected: a page with no ``eval``/``no_reply`` assistant tool
+        call owes no proof, so it performs no journal, index or cache I/O at all.
+        A page that does have candidates takes the index module's existing
+        hot-path door -- ``fresh_resident`` for a CURRENT index (two stats), and
+        ``start_refresh`` (single-flight, runs the build in a thread) when there
+        is none. A cold read answers with the EXPLICIT empty partition naming
+        those candidates ("no proof yet"), never a missing key: the key's absence
+        means "this page owes none", and a client that conflated the two could
+        not tell a cold index from a page with nothing to prove. The next read,
+        once that build settles, carries the records. ``refresh_index`` is never
+        called here, so a cold 1.5-2.5 s cache parse can no longer sit on the
+        event loop. The byte budget and both overflow/refusal shapes are
+        unchanged.
+        """
+        from local_operator.harness.peer_cycle_display import (
+            candidate_record_ids,
+            discover_records,
+        )
+        from local_operator.session import transcript_index
+        from local_operator.session.transcript import _entry_to_message
+
+        selected = {row.get("id") for row in answer.get("entries", ())}
+        messages = []
+        seen: set[str] = set()
+        for page in pages:
+            for row in page.entries:
+                if row.id in selected and row.id not in seen:
+                    seen.add(row.id)
+                    message = _entry_to_message(row)
+                    if message is not None:
+                        messages.append(message)
+        if not messages:
+            return answer
+        candidates = candidate_record_ids(self.session_id, messages)
+        if not candidates:
+            # THE ZERO-COST DOOR: the shared derivation (``discover_records``
+            # uses the same one) says this page owes no proof, so it must not
+            # read a journal line or an index byte.
+            return answer
+        # ``fresh_resident`` is synchronous BY DESIGN and costs two ``stat``
+        # calls (see its docstring), so this call needs no thread hop; it is
+        # only ever a lookup, never a scan.
+        index = transcript_index.fresh_resident(self.root, self.session_id)
+        if index is None:
+            # No current index: build it off-request and answer with the SAME
+            # explicit empty partition the index-unavailable answer always used,
+            # naming this page's candidates. A client can then tell "still
+            # building" from "this page owes no proof" (which is the key's
+            # absence), and the next read finds the resident index and carries
+            # the records. The build is single-flight, so concurrent opens share
+            # one scan.
+            try:
+                task, _started = transcript_index.start_refresh(self.root, self.session_id)
+                # Retrieve a failed build's exception: this caller owns no await on
+                # the task (the whole point is not to wait), and an unobserved
+                # failure would surface as a second, misleading traceback at GC.
+                task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            except Exception:  # noqa: BLE001 — a refresh is an optimisation
+                logger.debug("peer display: index refresh start failed", exc_info=True)
+            records = {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
+        else:
+            baseline = len(json.dumps(answer, ensure_ascii=False).encode())
+            budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
+            # The archive read itself is bounded (<=512 ids, byte-capped) but
+            # still file I/O, so it leaves the event loop.
+            records = await asyncio.to_thread(
+                discover_records,
+                self.root / "sessions" / self.session_id,
+                messages,
+                self.session_id,
+                max_bytes=budget,
+                index=index,
+            )
+            if records is None:
+                return answer
+        candidate = {**answer, "peer_cycle_display_records": records}
+        if len(json.dumps(candidate, ensure_ascii=False).encode()) > OPEN_FRAME_MAX_BYTES:
+            # Keep EVERY original row. If even the remaining-ID list cannot
+            # fit, expose an explicit refusal/count, never a partial certificate.
+            pending = set(records.get("remaining", ())) | set(records.get("unavailable", ()))
+            pending.update(record["id"] for record in records.get("records", ()))
+            records = {
+                "records": [],
+                "remaining": [],
+                "unavailable": [],
+                "state": "page_cap",
+                "remaining_count": len(pending),
+                "bytes": 0,
+            }
+            candidate = {**answer, "peer_cycle_display_records": records}
+        return candidate
+
     def _frame_answer(self, result: Any) -> dict[str, Any]:
         """The frame's page as the wire states it, in the existing envelope."""
         return {
@@ -4579,6 +4690,8 @@ class DesktopSessionBridge:
         # from the join has no provable entry time (it was subtracted from the
         # owner's display replay, or it arrived live after the page).
         true_entry_times = remote.history_entry_times()
+        peer_cycle_source = getattr(remote, "history_peer_cycle_display_records", None)
+        peer_cycle_records = peer_cycle_source() if callable(peer_cycle_source) else None
         entries: list[dict[str, Any]] = []
         for row in page:
             row_id = str(getattr(row, "id", "") or "")
@@ -4613,6 +4726,8 @@ class DesktopSessionBridge:
             "cursor_missing": False,
             "has_newer": None,
         }
+        if peer_cycle_records is not None:
+            answer["peer_cycle_display_records"] = peer_cycle_records
         if open_frame:
             # THE LIVE WINDOW IS NOT THE FRAME'S BUILDER (see this method's own
             # ``open_frame`` paragraph): the facts are the owner's build over
@@ -6765,26 +6880,39 @@ class SessionPage:
     TWO LISTS, NOT ONE, and the route concatenates them for the wire. They are
     kept apart here because they answer different questions and only the caller
     knows how it wants them framed: ``rows`` is the page a ``limit`` describes,
-    ``pinned_off_page`` is everything below it that the user pinned. The wire
-    answer is their concatenation, which is also RANK ORDER — every extra ranks
-    below every page row by construction — so a client that renders the two as
-    one list needs no sort and no marker field.
+    ``off_page`` is the rows the catalogue appended below it because a client
+    holding one page must not have to ask twice for them. The wire answer is
+    their concatenation, which is also RANK ORDER — every extra ranks below
+    every page row by construction — so a client that renders the two as one
+    list needs no sort and no marker field.
+
+    THE NAME IS NOT ``pinned_off_page`` ANY MORE, and that is the honest
+    consequence of two populations riding one list: the catalogue appends every
+    RUNNING row below the window (``session.catalog.RUNNING_STATUS_CODES``) on
+    any scope's first page, and the pinned rows the HEAD page does not carry
+    (head only — a scoped answer cannot speak for the pinned set) — so a name
+    that mentioned only pins would be a comment that has stopped being true. No
+    wire field carries the name: it is internal, and the route concatenates the
+    two lists into one ``sessions`` array.
 
     ``truncated`` keeps its original meaning — the ranking held more rows than
     the page — and deliberately says nothing about the extras: a client uses it
-    to know whether more history exists, and an appended pin is a row it may
+    to know whether more history exists, and an appended row is a row it may
     already be holding rather than history it has not seen.
     """
 
     rows: list[dict[str, Any]]
-    pinned_off_page: list[dict[str, Any]]
+    #: Rows the catalogue appended AFTER the page: every RUNNING row below the
+    #: window, plus (head answer only) the pinned rows the page does not carry.
+    #: Rank order, below every page row — the route's concatenation relies on it.
+    off_page: list[dict[str, Any]]
     truncated: bool
     #: The sessions OTHER devices hold, present only for a listing that asked for
     #: them (``include_peers``). A SEPARATE FIELD rather than concatenated here, and
     #: the route concatenates: ``rows`` is the page a ``limit`` describes and
     #: ``truncated`` is a verdict about it, so folding a population that no ``limit``
     #: governs into the same list would make the count mean two things — the trap
-    #: ``pinned_off_page`` already documents one level up. ``truncated`` says nothing
+    #: ``off_page`` already documents one level up. ``truncated`` says nothing
     #: about these rows, deliberately: a peer's catalogue is not this device's history.
     remote: list[dict[str, Any]] = field(default_factory=list)
     #: The position to resume this page from, or ``None`` at the end of the scope.
@@ -6896,24 +7024,12 @@ class DraftAlreadyMaterialised(ValueError):
         super().__init__(message)
 
 
-#: The status codes whose rows the desktop UI files under RUNNING, and the
-#: ONLY rows this listing computes ``last_user_at`` for.
-#:
-#: THE SAME FIVE THE RENDERER USES (local-operator-ui's ``RUNNING_CODES``:
-#: busy, delegating, approval, answer, wedged), spelled here rather than
-#: derived from the wire because the projection decides what to PAY for: the
-#: tracker's cold scan is a real read, and a row the section will not order
-#: must not buy one. ``live_state or pending`` (the shape the design memo
-#: weighed) is a strict SUPERSET — every running code implies a non-empty
-#: live_state or a pending gate, including ``delegating``, whose counts come
-#: from a live record — and is rejected here for exactly that reason: it also
-#: covers ``attached`` and ``idle`` rows, which the UI files under Today, so
-#: it would pay a scan per resident session for a value no reader consumes.
-#: Both halves — the coverage of ``delegating`` and the exclusion of ``idle``
-#: — are pinned in tests/unit/server/test_desktop_sessions.py.
-RUNNING_STATUS_CODES: frozenset[str] = frozenset(
-    {"busy", "delegating", "approval", "answer", "wedged"}
-)
+#: ``RUNNING_STATUS_CODES`` — the five status codes the desktop UI files under
+#: RUNNING — lives in ``session.catalog`` and is imported above, because the
+#: catalogue is the layer that decides a first page's membership with no client
+#: present (see ``RUNNING_STATUS_CODES``'s own note there). This module reads the
+#: same set for a second, narrower reason: which rows buy a ``last_user_at``
+#: scan, stated at that read below.
 
 
 class DesktopSessions:
@@ -7199,6 +7315,73 @@ class DesktopSessions:
             return acknowledge_session_receipt(self.root, session_id, token)
 
         return await asyncio.to_thread(acknowledge)
+
+    async def tags(self) -> dict[str, Any]:
+        """Counts describe distinct assignments, never conversation deletion."""
+        from local_operator.session.session_tags import read_categories, usage_counts
+
+        def read() -> dict[str, Any]:
+            counts = usage_counts(self.root)
+            return {
+                "tags": [
+                    {**tag, "order": order, "conversations": counts.get(tag["id"], 0)}
+                    for order, tag in enumerate(read_categories(self.root))
+                ]
+            }
+
+        return await asyncio.to_thread(read)
+
+    async def replace_tags(self, desired: list[tuple[str | None, str]]) -> dict[str, Any]:
+        from local_operator.session.session_tags import write_categories
+
+        await asyncio.to_thread(write_categories, self.root, desired)
+        return await self.tags()
+
+    async def set_tags(
+        self,
+        session_id: str,
+        tag_ids: list[str],
+        primary: str | None,
+        expected_revision: str | int | None = None,
+    ) -> dict[str, Any]:
+        from local_operator.session.session_tags import (
+            TagRevisionConflict,
+            read_categories,
+            set_entity_tags,
+        )
+
+        def apply() -> dict[str, Any]:
+            # Like pins, delegated runs are taggable: directory admission is
+            # intentional, not the user-conversation visibility predicate.
+            if (
+                not SESSION_ID.fullmatch(session_id)
+                or not (self.root / "sessions" / session_id).is_dir()
+            ):
+                raise KeyError("Unknown session")
+            try:
+                state = set_entity_tags(
+                    self.root, "session", session_id, tag_ids, primary, expected_revision
+                )
+            except TagRevisionConflict as exc:
+                exc.current["session_id"] = session_id
+                raise
+            # Keep the returned revision paired with the write's state, rather
+            # than re-reading a possibly newer assignment from another caller.
+            categories = read_categories(self.root)
+            lookup = {tag["id"]: tag for tag in categories}
+            surviving = [key for key in state["tags"] if key in lookup]
+            return {
+                "session_id": session_id,
+                "primary": (
+                    state["primary"]
+                    if state["primary"] in surviving
+                    else (surviving[0] if surviving else None)
+                ),
+                "tags": [lookup[key] for key in surviving],
+                "tags_revision": str(state["revision"]),
+            }
+
+        return await asyncio.to_thread(apply)
 
     async def set_pin(self, session_id: str, pinned: bool) -> dict[str, Any]:
         """Put a session's pin into the state the caller asked for.
@@ -7583,6 +7766,52 @@ class DesktopSessions:
 
         return await asyncio.to_thread(read)
 
+    async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
+        """The waveform payload ``{version, bars, peaks}`` for one attachment.
+
+        Peaks are a sidecar of the SAME content-addressed store the bytes
+        live in (``<digest>.peaks.json``), normally computed at creation.
+        Legacy audio gets one bounded server-side repair on a missing sidecar:
+        a serialized child decoder with an input cap and deadline, off the
+        event loop. Successful repairs persist; failed attempts are cached.
+        No renderer decodes media. The
+        session gate is :meth:`attachment`'s, verbatim: the id is an
+        EXISTENCE check over the durable user-session namespace (plus the
+        peer-row door), and a digest held by another device raises
+        :class:`PeerAttachmentUnavailable` so the 409 branch is the same one
+        the byte route answers with. A digest with no sidecar — a pre-peaks
+        artifact that cannot be repaired within the recovery limits, or a
+        damaged sidecar — is ``KeyError``, an ordinary 404: the surface
+        draws its no-waveform state, exactly as a missing image degrades to
+        a placeholder.
+        """
+
+        def read() -> dict[str, Any]:
+            from local_operator.audiogen.recovery import waveform_payload
+
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
+            if not path.is_dir() or not is_user_session(path):
+                from local_operator.session.remote_open import remote_row_for
+
+                row = remote_row_for(session_id, self.root)
+                if row is None:
+                    raise KeyError("Unknown session")
+                # THIS DEVICE'S STORE FIRST, exactly as the byte route does:
+                # a moved conversation that kept a local copy still serves it.
+                payload = waveform_payload(store, digest)
+                if payload is None:
+                    raise PeerAttachmentUnavailable(session_id, row)
+                return payload
+            payload = waveform_payload(store, digest)
+            if payload is None:
+                raise KeyError("Unknown waveform")
+            return payload
+
+        return await asyncio.to_thread(read)
+
     async def supplement_document(self, session_id: str, digest: str) -> str:
         """The assembled HTML document of one stored supplement component.
 
@@ -7770,6 +7999,29 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def child_attachment_waveform(
+        self, session_id: str, child_id: str, digest: str
+    ) -> dict[str, Any]:
+        """The waveform payload for one CHILD transcript's attachment.
+
+        The mirror of :meth:`attachment_waveform`, and the same containment
+        proof runs before the store is touched
+        (:func:`_contained_child_dir`) — a child read cannot become a way to
+        enumerate another conversation's media. Bounded legacy recovery and
+        the 404 fallback are identical to the parent's.
+        """
+
+        def read() -> dict[str, Any]:
+            from local_operator.audiogen.recovery import waveform_payload
+
+            _contained_child_dir(self.root, session_id, child_id)
+            payload = waveform_payload(AttachmentStore(self.root / ATTACHMENTS_DIRNAME), digest)
+            if payload is None:
+                raise KeyError("Unknown waveform")
+            return payload
 
         return await asyncio.to_thread(read)
 
@@ -8170,6 +8422,7 @@ class DesktopSessions:
         scope: CatalogueScope | None = None,
         cursor: str | None = None,
         with_counts: bool = False,
+        sort: str = "",
     ) -> SessionPage:
         """One page of rows, plus the pinned rows the page does not carry.
 
@@ -8185,7 +8438,7 @@ class DesktopSessions:
         because the two are one question: the caller used to ask for
         ``limit + 1`` rows and slice them itself to learn whether the store held
         more, and that trick cannot survive rows that are deliberately appended
-        BEYOND the page (see ``SessionPage.pinned_off_page``) — the count would
+        BEYOND the page (see ``SessionPage.off_page``) — the count would
         no longer mean what it is read to mean.
 
         The catalogue itself refuses rather than lying when the store cannot be
@@ -8225,13 +8478,16 @@ class DesktopSessions:
         returned before: the head page, the whole visible ranking, the append-
         below-the-page pins, and no cursor and no counts.
 
-        THE PINS ARE APPENDED ON THE HEAD ANSWER ONLY. ``pinned_off_page`` exists
-        because a client that holds one page cannot otherwise render a pin made on
-        an older conversation, and that argument is about the listing as a whole —
-        which only the head request speaks for. A scoped answer carrying them
-        would be handing the client rows belonging to other teams under this
-        team, and the client gates its pin facts on the head answer for exactly
-        this reason.
+        THE PINS ARE APPENDED ON THE HEAD ANSWER ONLY, and the running rows are
+        not — the two populations the catalogue appends have different scopes.
+        A pin exists because a client that holds one page cannot otherwise render
+        a pin made on an older conversation, and that argument is about the
+        listing as a whole — which only the head request speaks for. A scoped
+        answer carrying them would be handing the client rows belonging to other
+        teams under this team, and the client gates its pin facts on the head
+        answer for exactly this reason. A RUNNING row is the opposite case: it is
+        in the scope the caller asked about, and leaving it out is the very bug
+        this change removes — so it rides the first page of every scope.
         """
 
         # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2). The exclusion
@@ -8256,6 +8512,28 @@ class DesktopSessions:
             # row of one answer describes the same pin set, which two reads a
             # millisecond apart would not guarantee.
             pins = set(read_pins(self.root))
+            from local_operator.session.session_tags import (
+                read_categories,
+                read_entity_tags,
+            )
+
+            categories = read_categories(self.root)
+            tag_lookup = {tag["id"]: tag for tag in categories}
+
+            def tags_for(session_id: str) -> dict[str, Any]:
+                try:
+                    state = read_entity_tags(
+                        self.root, "session", session_id, categories=categories
+                    )
+                except ValueError:
+                    # Imported legacy directory names remain listable, not taggable.
+                    state = {"tags": [], "primary": None, "revision": 0}
+                return {
+                    "tags": [tag_lookup[key] for key in state["tags"]],
+                    "primary": state["primary"],
+                    "tags_revision": str(state["revision"]),
+                }
+
             # THE CATALOGUE, SCOPED AND PAGED — one call, and the same one the
             # head page makes: `catalogue_page` with no scope, no cursor and no
             # counts IS `load_catalog` plus the truncation verdict this method
@@ -8267,6 +8545,12 @@ class DesktopSessions:
                 scope=scope,
                 cursor=cursor,
                 limit=limit,
+                # The order the caller asked for (``""`` = the rank order, the
+                # only one that existed before this parameter). Threaded here
+                # rather than re-decided: the page function owns both orders and
+                # the cursor that resumes them, and this route's job is to carry
+                # the request's own value to the one implementation.
+                sort=sort,
                 pinned_off_page=tuple(pins) if scope is None else (),
                 # THE ARCHIVE FILTER, at the one choke point the two surfaces
                 # share. ``catalogue_page`` reaches the predicate through
@@ -8291,15 +8575,7 @@ class DesktopSessions:
             )
             entries = page.entries
             page_entries = entries[:limit]
-            # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
-            # rather than on the projected row's flag so it runs before the
-            # projection. Everything from the page bound onwards is a candidate:
-            # the probe row belongs here when it is itself pinned, because the
-            # page does not carry it either. A pinned id that resolved to no
-            # entry at all — a deleted directory, or a hidden delegated run the
-            # catalogue never builds — is simply not among them, which is the
-            # outcome `load_catalog` documents and the one a listing wants.
-            extra_entries = [entry for entry in entries[limit:] if entry.id in pins]
+            extra_entries = entries[limit:]
             attention: dict[str, dict[str, Any]] = {}
             # NOT ``contextlib.suppress``: the suppression was silent, so this
             # route answered ``degraded: []`` -- "everything about this page was
@@ -8328,7 +8604,9 @@ class DesktopSessions:
             # attention object, the same status stamps, the same binding and
             # preview -- because the client renders them side by side in one
             # list and a second projector would be a second place for them to
-            # disagree.
+            # disagree. The extras are whichever rows the catalogue appended
+            # after the page (``entries[limit:]``): it decides them, so a filter
+            # here must not re-decide them.
             projected: dict[str, dict[str, Any]] = {}
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
@@ -8360,6 +8638,16 @@ class DesktopSessions:
                         # re-sorted the section under the cursor (9 of 47
                         # transitions on the operator's store over 235 s).
                         #
+                        # EXACTLY THAT FIVE-CODE SET, not ``live_state or
+                        # pending``: the latter is a strict SUPERSET (every
+                        # running code implies a non-empty ``live_state`` or a
+                        # pending gate, ``delegating`` through its live record)
+                        # and it also covers ``attached``/``idle``, which the UI
+                        # files under Today — so it would pay a scan per
+                        # resident session for a value no reader consumes. Both
+                        # halves (``delegating`` covered, ``idle`` excluded) are
+                        # pinned in tests/unit/server/test_desktop_sessions.py.
+                        #
                         # This runs in the SAME worker thread as the preview
                         # read beside it (``asyncio.to_thread`` at the bottom of
                         # this method), and after the first poll it is cheaper
@@ -8374,6 +8662,8 @@ class DesktopSessions:
                         # so a `false` here is load-bearing and omitting it would
                         # let a stale optimistic pin outlive a successful unpin.
                         "pinned": entry.id in pins,
+                        # Always settle optimistic client state, even empty/null.
+                        **tags_for(entry.id),
                         # Same rule, second axis: `archived` is always present and
                         # carries the scan's own answer rather than a re-read, so
                         # a row cannot be filtered out of the catalogue and still
@@ -8433,7 +8723,7 @@ class DesktopSessions:
                 projected[entry.id] = row
             return SessionPage(
                 rows=[projected[entry.id] for entry in page_entries],
-                pinned_off_page=[projected[entry.id] for entry in extra_entries],
+                off_page=[projected[entry.id] for entry in extra_entries],
                 # MORE ROWS THAN THE PAGE, which is the original question and is
                 # still the right one -- and it IS ``next_cursor``: the catalogue
                 # answers "is there more" once, as the position that more can be

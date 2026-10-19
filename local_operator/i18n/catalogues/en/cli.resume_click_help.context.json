@@ -1,0 +1,7 @@
+{
+  "cli.resume_click_help.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the hidden resume-click parser's only copy; keep 'session id' phrasing"
+  }
+}

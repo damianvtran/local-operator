@@ -39,6 +39,11 @@ from textual.containers import Container, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+# i18n: this screen's session-row clauses are user-facing copy, extracted so
+# a locale can carry them; `_t` is bound BELOW the whole import block so no
+# later import reads as not-at-top (E402, the earlier slice's CI failure).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.info.collect import LiveState
 from local_operator.info.model import (
     UNKNOWN,
@@ -76,6 +81,8 @@ from local_operator.tui.widgets.session_picker import (
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 from local_operator.tui.widgets.welcome import _fit_tail, _shorten_home
+
+_t = tr("tui.small")
 
 #: The copy chord. Deliberately the SAME constant the aside already binds rather
 #: than a second ``"ctrl+r"`` literal: "copy this surface out" should be one
@@ -893,11 +900,16 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # answering" is what a stale heartbeat establishes, and "wedged"
             # both invites a diagnosis the evidence does not support and hides
             # the fact that the process is still there.
-            bits.append("not answering" if line.state == "wedged" else line.state)
+            bits.append(_t(_x.info_panel_not_answering()) if line.state == "wedged" else line.state)
         # The measurement, ahead of uptime and memory for the same reason: on
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
-            bits.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
+            # The age is format_duration's own string, passed verbatim: the
+            # key carries only the words around it, so its digits cannot be
+            # regrouped or reformatted by the catalogue path.
+            bits.append(
+                _t(_x.info_panel_last_heartbeat_ago(age=format_duration(line.heartbeat_age_s)))
+            )
         # THE UPDATE WINDOW RANKS ABOVE THE DRAIN, AND IS APPENDED FIRST SO THAT IT
         # SHEDS LAST (design review round 1, D2; round 2, D7). The shed drops whole
         # items from the RIGHT, so the ORDER of these two appends is their ranking on a
@@ -943,12 +955,14 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         if sessions.usage_available and line.state != "wedged":
             bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
-            bits.append(f"needs {line.pending}")
+            # ``pending`` already carries its noun and count; the key is
+            # only the verb and its space, so nothing is re-worded here.
+            bits.append(_t(_x.info_panel_needs_pending(pending=line.pending)))
         elif line.busy and line.state != "wedged" and not line.leaving:
             # `busy` is what the phrase above already says in full, and printing
             # both reads as two facts where there is one. The wedged guard makes
             # the same argument for the other state whose words already cover it.
-            bits.append("busy")
+            bits.append(_t(_x.info_panel_busy_word()))
         metas = tuple(" · ".join(bits[:count]) for count in range(len(bits), 0, -1))
         name = line.conversation_name or line.session_id or f"pid {line.pid}"
         # ``short_meta`` below the note floor: the WORDS survive to the
@@ -1361,7 +1375,9 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # the depth it summarises is named instead of mimed.
         row = Text()
         row.append(
-            f"  +{deeper} deeper (below depth {_MAX_TREE_DEPTH})",
+            # Raw digit strings for both counts: the pre-extraction
+            # f-string printed them via str(), so 1200 must stay 1200.
+            _t(_x.info_panel_deeper_below_depth(deeper=str(deeper), depth=str(_MAX_TREE_DEPTH))),
             style=semantic_style("dim"),
         )
         body.lines.append(row)
@@ -1622,7 +1638,7 @@ class InfoScreen(ModalScreen[None]):
 
     def _title_text(self) -> Text:
         return Text(
-            "Install info\n" + "─" * max(1, self._card_width()),
+            _t(_x.info_panel_install_info_heading()) + "─" * max(1, self._card_width()),
             no_wrap=True,
             overflow="crop",
         )
@@ -1677,7 +1693,9 @@ class InfoScreen(ModalScreen[None]):
         scroll = getattr(self, "_scroll", None)
         hint = getattr(self, "_hint", None)
         if scroll is not None and hint is not None and hint.is_mounted:
-            hint.update(self._info_hint() + (" · ↑↓ scroll" if scroll.max_scroll_y > 0 else ""))
+            hint.update(
+                self._info_hint() + (_t(_x.panels_scroll_hint()) if scroll.max_scroll_y > 0 else "")
+            )
 
     def render_lines_for_test(self) -> list[str]:
         """The report as plain strings — what a user actually reads."""

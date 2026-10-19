@@ -89,6 +89,7 @@ from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
     AsyncJobManager,
+    effort_fallback_clause,
     is_model_fallback,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
@@ -137,11 +138,10 @@ from local_operator.harness.render import (
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
-    SubagentModelUnavailable,
     is_inherit_tier_sentinel,
-    read_effort_tier_selectors,
     resolve_launch_target,
     run_subagent,
+    team_slot_name,
 )
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
@@ -164,6 +164,7 @@ from local_operator.harness.types import (
     Content,
     CustomMessage,
     EventHandler,
+    HistoryDeltaEvent,
     ImageContent,
     LoopConfig,
     Message,
@@ -204,6 +205,8 @@ from local_operator.harness.wake import (
     format_duration,
     format_wake_delivery_text,
 )
+from local_operator.i18n.keys import tui_notices as _nt
+from local_operator.i18n.messages import Msg
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
     DELIBERATE_CUT_OFF_CAUSE,
@@ -211,7 +214,7 @@ from local_operator.incidents import (
     format_cut_off_raw,
     render_cut_off_reason,
 )
-from local_operator.model.effort import cheapest_real_rung
+from local_operator.model.effort import cheapest_real_rung, resolve_effort_in
 from local_operator.monitors.classify import MonitorClassify
 from local_operator.monitors.delivery import (
     MonitorDelivery,
@@ -237,6 +240,7 @@ from local_operator.projects import (
     stale_projects_for_session,
 )
 from local_operator.prompts_api import (
+    ADVISORY_TAIL_SECTIONS,
     STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
     assemble_system_block_sections,
@@ -366,6 +370,34 @@ if TYPE_CHECKING:
     from local_operator.session_factory import _KnowledgeHooks
 
 logger = logging.getLogger(__name__)
+
+
+def _notice(
+    message: Msg,
+    *,
+    kind: Literal["info", "warning", "error"] = "warning",
+    headline: str = "",
+) -> NoticeEvent:
+    """One typed notice: catalogue text plus its additive ``code``/``params``.
+
+    ``text`` stays present and English-first (RFC §2.6) so every existing
+    client keeps rendering what it rendered before; the id and parameters let
+    a locale-aware viewer re-render without parsing the sentence.
+    """
+    body = message.envelope()
+    return NoticeEvent(
+        text=body["text"],
+        code=body["code"],
+        params=body["params"],
+        kind=kind,
+        headline=headline,
+    )
+
+
+def _text(message: Msg) -> str:
+    """The English text of a catalogue message (fragments and headlines)."""
+    return message.envelope()["text"]
+
 
 #: Transcript custom-entry type recording which model is ACTUALLY serving
 #: requests when a provider fallback pins a route away from the selected
@@ -992,6 +1024,21 @@ class _PendingCompaction:
 
 
 @dataclass(frozen=True, slots=True)
+class _PendingAdoption:
+    """An aside exchange the user added while a turn owned the message list.
+
+    The second variant of ``Session._pending_shell_records`` beside the bare
+    ``(command, result)`` shell receipt (decision D1): ONE FIFO, so a bang
+    receipt and an adopted aside land in the order the user produced them, at
+    the same safe boundaries, through the same pop-after-write discipline.
+    Kept in memory only (D2) — journalling it at queue time would put
+    user/assistant rows inside a durable tool batch — and dispose flushes it.
+    """
+
+    messages: tuple[Message, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _ForkRequest:
     """A ``/fork`` waiting for a safe boundary in a RUNNING turn.
 
@@ -1190,11 +1237,15 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
         # clause would render a parked item as plain pending work.
         reason = item.get("reason")
         rows.append(
-            f"- {item['text']} — blocked: {reason}" if reason else f"- {item['text']} — blocked"
+            # i18n: ignore model-facing system reminder (not shown to the user)
+            f"- {item['text']} — blocked: {reason}"
+            if reason
+            else f"- {item['text']} — blocked"
         )
     paragraphs: list[str] = []
     if pending:
         paragraphs.append(
+            # i18n: ignore model-facing system reminder (not shown to the user)
             "Do not end the turn while pending items remain: either keep "
             "working, or resolve each one honestly — `todo done` when it is "
             "finished, `todo block` with a reason when it needs a user decision "
@@ -1204,6 +1255,7 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
         )
     if blocked:
         paragraphs.append(
+            # i18n: ignore model-facing system reminder (not shown to the user)
             "Before you finish, account for each blocked item: check whether "
             "its condition still holds. If it has cleared, resume the work; if "
             "the decision is the user's, raise it with the `ask` tool; if it "
@@ -1248,7 +1300,9 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
     for project in stale[:_PROJECT_REMINDER_MAX_ROWS]:
         age = reported_age(project, now=now)
         if age is None:
-            rows.append(f"- {project.name} [{project.status}] — no progress recorded")
+            rows.append(
+                f"- {project.name} [{project.status}] — no progress recorded"
+            )  # i18n: ignore model-facing system reminder (not shown to the user)
             continue
         # The reporter clause is dropped when the row carries no reporter (a
         # hand-edited or pre-tool row): "by session " with nothing after it
@@ -1260,12 +1314,15 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
         if len(excerpt) > _PROJECT_REMINDER_EXCERPT_CHARS:
             excerpt = excerpt[: _PROJECT_REMINDER_EXCERPT_CHARS - 1].rstrip() + "…"
         rows.append(
+            # i18n: ignore model-facing system reminder (not shown to the user)
             f"- {project.name} [{project.status}] — progress last reported "
             f'{age} ago{reporter}: "{excerpt}"'
         )
     extra = len(stale) - _PROJECT_REMINDER_MAX_ROWS
     if extra > 0:
-        rows.append(f"… and {extra} more")
+        rows.append(
+            f"… and {extra} more"
+        )  # i18n: ignore model-facing system reminder (not shown to the user)
     return (
         "<system-reminder>\n"
         "Injected by the harness at the turn boundary. Not from the user, and "
@@ -2733,6 +2790,43 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             blocks[index] = str(value)
 
 
+def _member_reasoning_effort(spec: ModelSpec, requested: str | None) -> str | None:
+    """A member override's effort word as a level THIS spec can be asked for.
+
+    ``auto`` is not a ladder rung and must not be clamped like one: it is the
+    member's explicit "use whatever this model does by default", which is why a
+    team can take tier ``hi`` without inheriting that tier's ``xhigh``. Mapping
+    it to the spec's own documented default says that once, here, instead of
+    leaning on ``resolve_effort_in``'s unrankable-word fallback -- which lands on
+    the default only for a model that documents one, and for a different reason.
+
+    ``None`` and a model with no ladder both pass through: the first means no
+    override, and the second is returned untouched by :func:`_with_tier_effort`.
+    """
+    if requested == "auto":
+        return spec.reasoning_default_effort
+    return requested
+
+
+def _with_tier_effort(spec: ModelSpec, effort: str | None) -> ModelSpec:
+    """``spec`` running at a tier's configured reasoning ``effort`` (#2428).
+
+    ``None`` (a bare-selector tier) returns ``spec`` untouched, so the child
+    keeps the model's own default — the only behaviour before the mapping form
+    existed. A level is clamped against the SPEC's ladder with
+    :func:`resolve_effort_in`, the clamp a fallback-chain hop's explicit effort
+    gets (``failover.spec_for_target``): a level the model lacks moves to its
+    nearest rung rather than reaching the wire as an HTTP 400. A model with no
+    effort knob (empty ladder) is returned unchanged.
+    """
+    if effort is None:
+        return spec
+    clamped = resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, effort)
+    if clamped is None or clamped == spec.reasoning_effort:
+        return spec
+    return spec.model_copy(update={"reasoning_effort": clamped})
+
+
 def _dispose_hook_failure_label(hook: object, exc: BaseException) -> str:
     """One bounded, sanitized line naming a cleanup hook that raised.
 
@@ -4131,7 +4225,13 @@ class Session:
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
         #: resume. The runtime flushes this FIFO before releasing `_turn_lock`.
-        self._pending_shell_records: list[tuple[str, ToolResult]] = []
+        #: An aside the user adopted mid-turn rides the same queue as a
+        #: :class:`_PendingAdoption`, for the same reason; a held one is skipped
+        #: rather than blocking receipts behind it (D7).
+        self._pending_shell_records: list[tuple[str, ToolResult] | _PendingAdoption] = []
+        #: Tail ids of held adoptions already warned about, so a hold is logged
+        #: once rather than at every boundary that re-tries it.
+        self._held_adoption_warned: set[str] = set()
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
         # automatic pass runs inside a turn and is covered by ``_is_streaming``;
@@ -4255,8 +4355,9 @@ class Session:
 
         self._config_dir = _resolve_session_root()
         #: Memory-capture bookkeeping (local_operator.memory_capture): the last compaction
-        #: marker a recovery pass claimed, and its (marker, 'ok'|'failed') terminal state.
-        #: Instance state, not durable: the durable truth is the capture watermark row.
+        #: marker a recovery pass claimed, and its (marker, 'ok'|'failed'|'declined')
+        #: terminal state. Instance state, not durable: the durable truth is the capture
+        #: watermark row.
         self._memory_recovery_marker: str | None = None
         self._memory_terminal: tuple[str, str] | None = None
         self._wake = WakeScheduler(
@@ -4352,6 +4453,14 @@ class Session:
         #: the gate on every aida hook below (load hold, persist reconcile,
         #: config-watch reconcile, delivery guard, after-turn tray drain).
         self._aida_duty = False
+        #: Whether this session is THE LIBRARIAN'S (``local_operator.librarian``),
+        #: resolved once per open beside ``_aida_duty`` — one stat of
+        #: ``<config>/librarian/state.json`` on every session that is not hers,
+        #: and the gate on the cadence filter/persist/config-watch hooks below.
+        self._librarian_duty = False
+        #: The accepted ``librarian-cadence`` occurrence, consumed by the
+        #: persist boundary after retirement (the twin of ``_aida_cadence_delivered``).
+        self._librarian_cadence_delivered: WakeSchedule | None = None
         #: Distinct wake-supervisor refusal reasons already reported (M3). The
         #: install hook runs on every schedule persist, so the set is what keeps
         #: "your check-ins need a session open" from printing on every write.
@@ -4906,16 +5015,7 @@ class Session:
             self._image_drop_diagnostic(),
         )
         self._spawn_background(
-            self._emit(
-                NoticeEvent(
-                    text=(
-                        f"{label} does not accept images — the images in this "
-                        "conversation are omitted from its context. Switch to a "
-                        "model that accepts images to see them again."
-                    ),
-                    kind="warning",
-                )
-            )
+            self._emit(_notice(_nt.image_unsupported(model=label), kind="warning"))
         )
 
     def _live_todo_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
@@ -5273,16 +5373,7 @@ class Session:
             self._wire_budget_override,
             frames_left,
         )
-        await self._emit(
-            NoticeEvent(
-                text=(
-                    "The provider refused the request as too large. Some screenshots "
-                    "have been dropped from the context and the size limit tightened — "
-                    "send your message again."
-                ),
-                kind="warning",
-            )
-        )
+        await self._emit(_notice(_nt.request_too_large_dropped(), kind="warning"))
         return True
 
     async def _degrade_images_for_size(self, budget: int, frames_left: int) -> bool:
@@ -5327,22 +5418,8 @@ class Session:
             self._image_drop_diagnostic(),
         )
         await self._emit(
-            NoticeEvent(
-                text=(
-                    # Branching on the actual history rather than emitting one
-                    # sentence that is false half the time: this rung is
-                    # reached on the FIRST refusal for a text-only history,
-                    # where "dropping screenshots" and "images have been
-                    # removed" both describe something that never happened
-                    # (agent review round 2, R9).
-                    "This conversation is too large for the provider to accept. "
-                    "Run /compact to summarise it, or start a new conversation."
-                    if frames_left == 0
-                    else "The conversation is too large for this provider even after "
-                    "dropping screenshots, so images have been removed from the "
-                    "context to keep the session working. If it still fails, run "
-                    "/compact or start a new conversation."
-                ),
+            _notice(
+                _nt.too_large_run_compact() if frames_left == 0 else _nt.too_large_images_removed(),
                 kind="warning",
             )
         )
@@ -5391,16 +5468,7 @@ class Session:
             "provider rejected an image; dropping images from this session's context (%s)",
             self._image_drop_diagnostic(),
         )
-        await self._emit(
-            NoticeEvent(
-                text=(
-                    "The provider rejected an image in this conversation's history. "
-                    "Images have been dropped from the context so the session keeps "
-                    "working — send your message again."
-                ),
-                kind="warning",
-            )
-        )
+        await self._emit(_notice(_nt.image_rejected_history(), kind="warning"))
 
     def _missing_media_diagnostic(self) -> str:
         """What the omitted payload-less block(s) look like, for the log.
@@ -5855,6 +5923,32 @@ class Session:
         A section's value is the exact piece text; ``""`` says the
         section is gone (the goal gated off, the team brief cleared) and must
         still be shipped, or the model keeps reading the old snapshot.
+
+        ADVISORY sections (:data:`ADVISORY_TAIL_SECTIONS` — memory suggestions
+        and the compaction hint) additionally skip a change whose EXACT new
+        text the model can still read in the frozen prefix or in a surviving
+        ``[session-state]`` record. Without that, the baseline is the previous
+        turn's DESIRED state, so a recall set that was frozen into the prefix,
+        dropped when the next message did not match, and then re-produced
+        verbatim on a later turn is appended again every time: measured on the
+        real wire as 4 verbatim copies / 352 tokens / 9.68% of the request by
+        turn 8, for ONE distinct fact.
+
+        Skipping a text the model can still read has a cost that must be named:
+        after A -> (empty) -> A, or A -> B -> A, the LAST surviving record about
+        the section still says ``(empty)`` or B, so suppression leaves the
+        model's most recent STATEMENT about the section stale while an older
+        copy of A stays readable in the prefix. That is tolerable ONLY because
+        these sections are declared untrusted hints whose copy may be
+        superseded (a recall candidate the model was told to verify, a
+        compaction notice) — and it is why the rule is confined to
+        :data:`ADVISORY_TAIL_SECTIONS`: an authoritative section (goal, team,
+        tools, credentials) must reach the model even beside an identical older
+        copy, because the intervening record may have said something else. The
+        removal record still ships when the section genuinely goes away.
+        Prefix stability is untouched: this only suppresses an APPEND, never a
+        rewrite, so the frozen prefix and every committed message stay
+        byte-identical.
         """
         previous = self._last_system_blocks or self._frozen_system_blocks or desired
         # Compaction may replace the record that carried the latest state.
@@ -5877,6 +5971,7 @@ class Session:
             # the tool inventory and the interactivity block re-sent unchanged.
             previous = self._visible_state_blocks()
         changes: dict[str, dict[str, str]] = {}
+        visible: dict[tuple[int, str], set[str]] | None = None
         for index, block in enumerate(desired):
             if index == 0:
                 continue
@@ -5887,6 +5982,21 @@ class Session:
             section_changes = {
                 name: text for name, text in sections.items() if prior.get(name) != text
             }
+            if any(
+                name in ADVISORY_TAIL_SECTIONS and text for name, text in section_changes.items()
+            ):
+                # The walk over context is only paid on the turns that could
+                # act on it; an unchanged memory section costs nothing.
+                if visible is None:
+                    visible = self._visible_advisory_texts()
+                for name in [
+                    name
+                    for name, text in section_changes.items()
+                    if name in ADVISORY_TAIL_SECTIONS
+                    and text
+                    and text in visible.get((index, name), set())
+                ]:
+                    del section_changes[name]
             section_changes.update(
                 {name: "" for name, text in prior.items() if name not in sections and text}
             )
@@ -5910,6 +6020,40 @@ class Session:
             if isinstance(message, CustomMessage) and message.custom_type == "session_state":
                 _fold_state_record(blocks, message.details.get("blocks", {}) or {})
         return blocks
+
+    def _visible_advisory_texts(self) -> dict[tuple[int, str], set[str]]:
+        """Exact advisory-section texts the model can still READ, by (index, section).
+
+        Two sources and only these: the frozen prefix (which every request
+        carries) and the ``[session-state]`` records still in
+        ``_context.messages`` — a record a compaction cut away is NOT visible,
+        so a text only it carried ships again. Unlike
+        :meth:`_visible_state_blocks`, this keeps the HISTORICAL texts rather
+        than folding to each section's latest value. The question here is
+        membership — "has this exact piece of advice already been put in front
+        of the model" — and a section's LATEST value being ``""`` (the recall
+        set came back empty) does not make the identical older copy higher up
+        unreadable. Re-shipping it then is the duplication this prevents.
+        """
+        texts: dict[tuple[int, str], set[str]] = {}
+
+        def collect(index: int, sections: Mapping[str, Any]) -> None:
+            for name, text in sections.items():
+                if text and name in ADVISORY_TAIL_SECTIONS:
+                    texts.setdefault((index, name), set()).add(str(text))
+
+        for index, block in enumerate(self._frozen_system_blocks or []):
+            collect(index, split_system_block_sections(index, block))
+        for message in self._context.messages:
+            if not (isinstance(message, CustomMessage) and message.custom_type == "session_state"):
+                continue
+            for key, value in (message.details.get("blocks", {}) or {}).items():
+                index = int(key)
+                if isinstance(value, Mapping):
+                    collect(index, {str(name): text for name, text in value.items() if text})
+                else:
+                    collect(index, split_system_block_sections(index, str(value)))
+        return texts
 
     @staticmethod
     def _system_state_message(changes: dict[str, Any]) -> CustomMessage:
@@ -8647,7 +8791,13 @@ class Session:
                 carried_prompt=True,
             )
         finally:
-            self._turn_lock.release()
+            # D8: anything queued after the pipeline's own flush (or on an
+            # early exit before it) lands before the lock goes free.
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def seed_history(self, messages: list[Message]) -> None:
         """Prime the conversation from a host-supplied history.
@@ -10895,7 +11045,7 @@ class Session:
         projection and the legacy single-slot card are built by whichever host
         is attached, and only that host can repaint them. The sink receives
         ``(rows, outstanding_count)`` — the frozen wire shape and its outstanding
-        tally (open + timed-out-and-answerable; see
+        tally (open asks; a timed-out one is settled, #2388 — see
         ``asks.store.OUTSTANDING_STATUSES``) — so a host never re-derives the
         fold.
         """
@@ -14480,7 +14630,7 @@ class Session:
         # that a turn died.
         if notify and kind != "error" and self._run_ended_quiet(event):
             notify = False
-        if notify and kind != "error" and self._aida_cadence_banner_veto(event):
+        if notify and kind != "error" and self._proactive_banner_veto(event):
             notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
         # of her check-in banners is judged HERE, once, beside ``notify``. The
@@ -14587,6 +14737,61 @@ class Session:
         from local_operator.aida import proactive
 
         return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _proactive_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Which engine's check-in veto applies — Aida's or the Librarian's.
+
+        Dispatched on the already-resolved duty flags, so a session pays one
+        attribute read per settle. The two vetoes are deliberate twins: the
+        quiet-day sentinel must silence the Librarian's daily pass exactly as
+        it silences Aida's check-in, and an Aida-only veto was the reported
+        defect (a quiet library day would have raised the completion banner).
+        """
+        if getattr(self, "_aida_duty", False):
+            return self._aida_cadence_banner_veto(event)
+        if getattr(self, "_librarian_duty", False):
+            return self._librarian_cadence_banner_veto(event)
+        return False
+
+    def _librarian_checkin_run(self) -> bool:
+        """Whether THIS run's notifying deliveries are EXCLUSIVELY her passes.
+
+        The Librarian's half of the scope test: hers, wake-delivery-only
+        triggers, every recorded wake id one of her cadence-family rows
+        (``librarian-cadence`` or ``librarian-extra-N``), and no unconsumed user
+        message. Anything else — a user-armed wake, a peer note, a job result,
+        a mixed run — keeps normal notification semantics.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return False
+        if self._has_awaiting_user():
+            return False
+        if set(self._run_triggers) != {WAKE_PROMPT_MESSAGE_TYPE}:
+            return False
+        wake_ids = set(self._run_wake_ids)
+        if not wake_ids:
+            return False
+        from local_operator.librarian import proactive
+
+        return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _librarian_cadence_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Whether one of the Librarian's passes must stay SILENT.
+
+        The quiet-day rule, applied to her own rows: an empty reply (nothing
+        was produced) or the exact sentinel normalised by
+        ``librarian.proactive.reply_is_quiet`` vetoes the banner. There is no
+        greeting ledger or banner budget on her side — she is not a personal
+        assistant and must not spend Aida's budget — so nothing else is read.
+        """
+        if not self._librarian_checkin_run():
+            return False
+        from local_operator.librarian import proactive
+
+        reply = self._run_last_assistant_text(event)
+        if not reply:
+            return True
+        return proactive.reply_is_quiet(reply)
 
     def _run_last_assistant_text(self, event: AgentEndEvent) -> str:
         """The run's LAST assistant reply text, or ``""`` when it produced none.
@@ -15703,6 +15908,10 @@ class Session:
             if store.read_field("history_generation") != replay_generation:
                 store.mutate(history_generation=replay_generation)
             store.observe_event(self, event)
+            # A nested quiet end closes display ownership only, never the
+            # model loop. Archive/publication is a normal acknowledged custom
+            # append; the raw tool result still follows its existing path.
+            await store.persist_peer_cycle_display(self._transcript)
         for handler in list(self._handlers):
             try:
                 outcome = handler(event)
@@ -15799,7 +16008,11 @@ class Session:
         # during the wait therefore bumps the epoch past this sample, which is
         # exactly how the honoured-vs-stale test below can tell the two apart.
         arrived_at_epoch = self._abort_epoch
-        async with self._turn_lock:
+        # acquire/try/finally rather than ``async with``, so every exit — the
+        # pipeline and both early returns below — passes D8's flush-before-
+        # release rule.
+        await self._turn_lock.acquire()
+        try:
             if self._leaving_deliveries:
                 # THE LATCH, RE-CHECKED AT ADMISSION (session 664a234ec561,
                 # 2026-09-28). The spawn-time check (``_deliver_job_results``)
@@ -15901,6 +16114,12 @@ class Session:
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
             )
+        finally:
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _run_turn_pipeline(
         self,
@@ -16527,6 +16746,15 @@ class Session:
                 # is built -- for the same reason the contract is: every
                 # consumer of this session gets the one answer.
                 recover_wordless_stop=await self._silent_end_is_a_failure(),
+                # A delegated CHILD's deliverable is often its last message, and
+                # its only reader is a parent that can continue it only by paying
+                # for a resume. So a child continues an answer the output limit
+                # cut off (once) instead of ending cut and forcing that resume;
+                # an interactive session keeps the notice and lets the human
+                # decide. ``_parent_session_id`` is the one fact that separates
+                # the two, and it is read here -- at the one place a turn's
+                # config is built -- like the flag above.
+                continue_truncated_answer=bool(self._parent_session_id),
                 # This session's output contract (or None). Read here, at the one
                 # place a turn's config is built, so every consumer of this
                 # session — exec foreground, the detached worker, an SDK
@@ -17043,15 +17271,7 @@ class Session:
             # to resume" described work they do not have to do and misnamed the
             # state. What they cannot see — and what this exists to say — is
             # that things are arriving and being held rather than run.
-            await self._emit(
-                NoticeEvent(
-                    text=(
-                        "Work arriving into this stopped session is being held, not run. "
-                        "The held items are read on the next turn."
-                    ),
-                    kind="warning",
-                )
-            )
+            await self._emit(_notice(_nt.stopped_session_held(), kind="warning"))
         logger.info(
             "dropped a pre-aborted turn (%d in this run); %d message(s) held for the next turn",
             self._pre_aborted_drops,
@@ -17079,11 +17299,8 @@ class Session:
                     dropped,
                 )
                 await self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"Auto-continuation limit ({_MAX_CONTINUATIONS}) reached; " "stopping."
-                        ),
-                        kind="warning",
+                    _notice(
+                        _nt.auto_continuation_limit(limit=str(_MAX_CONTINUATIONS)), kind="warning"
                     )
                 )
                 return
@@ -17608,6 +17825,13 @@ class Session:
             # rows themselves, and this method is the ONE append path for
             # ``video_job_v1`` records (see ``journal_video_job``).
             journal_video_job=self.journal_video_job,
+            # The audio lane's late-settlement pair: a cancelled-but-running
+            # job may finish minutes after the tool returned, so the settle
+            # poll rides the SESSION's background task set (tracked, and
+            # cancelled by dispose) and its record lands through the
+            # session's one append path — the tool can do neither itself.
+            journal_audio_settle=self.journal_audio_settle,
+            spawn_background=self._spawn_background,
             # The send tool's own notice hook, wired for the same reason and
             # with the same shape: the tool cannot write a transcript row
             # itself, and the gate (``send.journal_unconfirmed``, default off) is
@@ -17696,13 +17920,29 @@ class Session:
 
             if not model_may_choose_tier():
                 raise ValueError("specific task models require subagents.model_choice=model")
-        model_spec = self._resolve_subagent_model(target.role, effort, strict=True, model=model)
+        model_spec, selection_source = self._resolve_subagent_selection(
+            target.role,
+            effort,
+            strict=True,
+            model=model,
+            roster=target.roster,
+            slot_kind="team" if target.is_team_launch else "agent",
+            # For a ``team:pod`` launch the resolved ROLE is pod's manager while
+            # the override sits on the ``team:pod`` SLOT, so the slot's own name
+            # is what the roster lookup needs (``team_slot_name`` returns
+            # ``None`` for an agent slot, whose role IS its slot name).
+            slot_role=team_slot_name(agent, target.is_team_launch),
+        )
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
             model_spec=model_spec,
+            # Which LAYER chose that model, for the ``selection:`` label the
+            # delegating model reads back. Derived here, where the roster is in
+            # hand, because ``run_subagent`` cannot see one from the arguments.
+            selection_source=selection_source,
             target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
@@ -17745,7 +17985,16 @@ class Session:
                 self._prepared_writes[absolute] = content
 
     def _resolve_subagent_model(
-        self, agent: str, effort: str | None, *, strict: bool = False, model: str | None = None
+        self,
+        agent: str,
+        effort: str | None,
+        *,
+        strict: bool = False,
+        model: str | None = None,
+        apply_tier_effort: bool = True,
+        roster: Any = None,
+        slot_kind: str = "agent",
+        slot_role: str | None = None,
     ) -> ModelSpec | None:
         """Effort tier -> ModelSpec via config; None keeps the parent's model.
 
@@ -17786,7 +18035,84 @@ class Session:
         a sound fallback of their own — session naming on ``lo`` is one — and
         for whom failing would be worse than inheriting. See
         :meth:`_launch_subagent` for the incident that made the launch strict.
+
+        ``apply_tier_effort=False`` returns the tier's MODEL at that model's own
+        default effort, ignoring the reasoning effort a ``{model, effort}`` tier
+        carries (#2428). For a caller that borrows a tier's model without being
+        a delegated role: the supplement renderer reads ``hi`` only to pick a
+        model, and its per-turn token cap counts reasoning, so inheriting the
+        tier's ``max`` would spend the cap on thinking.
+
+        ``roster`` is the team whose ``team.yml`` NAMES this slot -- the
+        PARENT's active team (``LaunchTarget.roster``) -- and NOT the team the
+        child carries: a ``team:pod`` launch runs as pod's manager while the
+        ``TeamMember`` override that moved it lives on the ``team:pod`` slot of
+        the parent's roster. ``slot_kind`` picks that slot's kind, and
+        ``slot_role`` names it when it differs from ``agent`` (see
+        ``harness.subagent.team_slot_name``); the lookup casefolds and takes
+        the first match. All three default to "no roster", which is every
+        caller that has no launch behind it (session naming, the supplement
+        renderer) and keeps their behaviour byte-identical.
         """
+        spec, _source = self._resolve_subagent_selection(
+            agent,
+            effort,
+            strict=strict,
+            model=model,
+            apply_tier_effort=apply_tier_effort,
+            roster=roster,
+            slot_kind=slot_kind,
+            slot_role=slot_role,
+        )
+        return spec
+
+    def _resolve_subagent_selection(
+        self,
+        agent: str,
+        effort: str | None,
+        *,
+        strict: bool = False,
+        model: str | None = None,
+        apply_tier_effort: bool = True,
+        roster: Any = None,
+        slot_kind: str = "agent",
+        slot_role: str | None = None,
+    ) -> tuple[ModelSpec | None, str]:
+        """``(spec, model_selection_source)`` for one delegated role.
+
+        The SPEC half is what :meth:`_resolve_subagent_model` hands its naming and
+        resume callers. The SOURCE half names WHICH layer decided it, and is the
+        reason this exists: ``run_subagent`` derives a source from the launch
+        ARGUMENTS alone, which cannot see a roster, so the launch path passes the
+        value this computed instead.
+
+        Sources: ``explicit_inherit`` and ``explicit_model`` for a per-run
+        ``model``, ``team`` when a ``TeamMember`` ``tier``/``effort`` decided
+        either field, ``effort`` for the caller's own tier argument, ``role`` for
+        the row's ``effort:`` tag, ``parent`` for no pin at all.
+
+        The resolution itself is
+        :func:`~local_operator.harness.subagent.resolve_member_model` -- the SAME
+        function the desktop ``/effective`` route reads -- so the model a surface
+        ADVERTISES and the model a child RUNS are one answer. Two resolvers is
+        exactly how this codebase got schema-vs-launch drift (see
+        ``_launch_subagent``).
+        """
+        from local_operator.harness.subagent import (
+            SubagentModelUnavailable,
+            resolve_member_model,
+        )
+
+        def _resolved(registry: Any) -> Any:
+            return resolve_member_model(
+                agent,
+                roster=roster,
+                slot_kind=slot_kind,
+                slot_role=slot_role,
+                launch_tier=effort,
+                agent_registry=registry,
+            )
+
         if model is not None:
             # Explicit run choices override the role, but never rewrite it.
             # Retain the inherit sentinel separately from omission so restart
@@ -17794,52 +18120,54 @@ class Session:
             if effort is not None:
                 raise ValueError("pass either model or effort, not both")
             if model == "inherit":
-                return None
+                return None, "explicit_inherit"
             from local_operator.mobile.peer_model import validate_subagent_selection
 
             provider, separator, model_id = model.partition("/")
             if not separator or not provider or not model_id or any(c.isspace() for c in model):
                 raise ValueError("model must be 'inherit' or <provider>/<model-id>")
-            return validate_subagent_selection(provider, model_id)
-        wanted = effort
-        if wanted is None and agent and agent != "task":
-            from local_operator.agent_profiles import resolve_profile
-
-            registry = self.agent_registry
-            try:
-                # FRESH at spawn/resume: the registry's cached view is up to
-                # ``AgentRegistry._refresh_interval`` stale, and a role PIN
-                # written after this session started must reach the NEXT
-                # spawn — the resolution requirement this read exists to
-                # honour.
-                refresh = getattr(registry, "refresh_now", None)
-                if callable(refresh):
-                    refresh()
-                profile = resolve_profile(agent, registry=registry, strict_registry=True)
-            except Exception as exc:  # noqa: BLE001
-                # An unreadable registry is NOT "no role of that name": the
-                # old swallow sent this down the seed path (a packaged seed
-                # carries no operator pin) and then inherited the session
-                # model with no trace — precisely the silent substitution the
-                # strict tier path refuses one layer up. Surface it instead.
-                if strict:
-                    raise SubagentModelUnavailable(
-                        agent,
-                        f"the agent registry could not be read ({exc}); refusing to "
-                        "inherit the session model for a role whose pin cannot be "
-                        "resolved",
-                    ) from exc
-                logger.warning(
-                    "agent registry could not be read while resolving role %r (%s); "
-                    "using the session model",
+            chosen = validate_subagent_selection(provider, model_id)
+            # The MODEL and the DEPTH are independent fields, so a member's own
+            # ``effort`` still applies to an explicitly chosen model. Only that
+            # field does: an explicit ``model=`` IS a statement about the model,
+            # so a member TIER loses to it (including the effort a ``{model,
+            # effort}`` tier mapping carries -- that effort belongs to the tier's
+            # model, which is not the one being run).
+            member = _resolved(None)
+            if apply_tier_effort and member.effort_source == "team":
+                chosen = _with_tier_effort(chosen, _member_reasoning_effort(chosen, member.effort))
+            return chosen, "explicit_model"
+        try:
+            resolution = _resolved(self.agent_registry)
+        except Exception as exc:  # noqa: BLE001
+            # An unreadable registry is NOT "no role of that name": the old
+            # swallow sent this down the seed path (a packaged seed carries no
+            # operator pin) and then inherited the session model with no trace --
+            # precisely the silent substitution the strict tier path refuses one
+            # layer up. Surface it instead.
+            if strict:
+                raise SubagentModelUnavailable(
                     agent,
-                    exc,
-                )
-                profile = None
-            if profile is not None:
-                wanted = profile.effort
-        if wanted is None:
-            return None
+                    f"the agent registry could not be read ({exc}); refusing to "
+                    "inherit the session model for a role whose pin cannot be "
+                    "resolved",
+                ) from exc
+            logger.warning(
+                "agent registry could not be read while resolving role %r (%s); "
+                "using the session model",
+                agent,
+                exc,
+            )
+            # Re-resolve with no registry at all: the ROW pin is what could not
+            # be read, and a roster override does not need it, so a member tier
+            # still wins on the lenient path.
+            resolution = _resolved(None)
+        wanted = resolution.tier
+        source = (
+            "team"
+            if resolution.decided_by_team
+            else "effort" if effort else "role" if resolution.selector is not None else "parent"
+        )
 
         def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:
             # One exit for every "asked for a tier, cannot honour it" branch so
@@ -17855,68 +18183,57 @@ class Session:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None
 
-        try:
-            # The same read the tool schemas use (``configured_effort_tiers``),
-            # so a tier the schema advertises is one this path resolves and
-            # vice versa. Unstripped-but-not on purpose: the shared reader
-            # strips selectors once, so the tier it advertises cannot pass
-            # this check and then die on a whitespace-padded provider name at
-            # the first provider call. Malformed selectors are still kept by
-            # the read: they must reach the named refusal below, not vanish
-            # into "not configured".
-            selector = read_effort_tier_selectors().get(wanted)
-        except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
-            return _unavailable(f"config could not be read ({exc})")
-        # Type before falsiness, and the ``is not None`` is what makes the two
-        # surfaces agree (review R2-F7). A FALSY non-string (``lo: 0``,
-        # ``lo: []``) is a key the operator DID write, so it must draw the same
-        # "lacks provider/model" refusal that ``effort_tier_rejection`` gives
-        # it — under the old order it fell into the quiet "not configured"
-        # branch and the tool-argument path called the same key malformed,
-        # which is the schema-vs-launch drift this change exists to close,
-        # merely moved into the message text. Only a genuinely absent key
-        # (``None``) or an empty/whitespace-only string (the shared reader
-        # strips) stays quiet: a session with no ``subagents.models`` at all
-        # names itself on the parent model by design and must not warn.
-        if selector is not None and not isinstance(selector, str):
-            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
-        if not selector:
-            return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
+        if resolution.unavailable:
+            _unavailable(resolution.unavailable, quiet=resolution.unavailable_quiet)
+            return None, source
+        selector = resolution.selector
+        # ``apply_tier_effort=False`` returns the model at ITS OWN default: the
+        # one caller is the supplement renderer, which borrows a tier's model
+        # without being a delegated role and whose per-turn token cap counts
+        # reasoning.
+        requested = resolution.effort if apply_tier_effort else None
+        if selector is None:
+            # No tier anywhere. An effort override on its own is still a PIN --
+            # on the SESSION's model, the same shape the ``default`` sentinel
+            # returns below -- because an operator who asked for a depth asked
+            # for this child specifically. With no effort either there is nothing
+            # to resolve and the child inherits, as every unpinned child does.
+            if requested is None:
+                return None, source
+            return (
+                _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                source,
+            )
         if is_inherit_tier_sentinel(selector):
             # The explicit opt-in, resolved at LAUNCH and not at write time:
-            # ``self.model`` is the accessor the rest of the session uses to
-            # name the model every provider call is built from, and the SAME
-            # one ``run_subagent`` reaches for when a child owns no model
-            # (``model=model_spec if model_spec is not None else
-            # parent_session.model``). Reading it here rather than recording
-            # the model into the config is what makes a later default move
-            # every pin on this tier — the requirement the sentinel exists to
-            # satisfy, and the pinned test in
-            # ``tests/unit/session/test_pinned_subagent_model.py`` holds it.
+            # ``self.model`` is the accessor the rest of the session uses to name
+            # the model every provider call is built from, and the SAME one
+            # ``run_subagent`` reaches for when a child owns no model. Reading it
+            # here rather than recording the model into the config is what makes
+            # a later default move every pin on this tier.
             #
             # Because this returns a SPEC and not ``None``, ``owns_model`` is
             # stamped True and the child's routing is pinned to it: an
-            # operator-configured tier is a deliberate pin even when it points
-            # at the session's own model, and the disclosure code already
-            # anticipates exactly that (a pin whose label equals the parent's
-            # is why ``owns_model`` is a separate field).
-            return self.model
-        provider, _, model_id = selector.partition("/")
-        # BOTH halves, to the same standard ``configured_effort_tiers`` applies
-        # (review R3-F11). Checking only the model let a leading-slash selector
-        # (``hi: "/kimi"``) through here while the schema surface refused it —
-        # the same schema-vs-launch drift this change exists to close, and the
-        # worse direction of it: the launch built ``ModelSpec(provider='',
-        # model_id='kimi')`` and the child died at its first provider call
-        # instead of at launch, where the tier is still named.
-        if not provider or not model_id:
-            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
+            # operator-configured tier is a deliberate pin even when it points at
+            # the session's own model, and the disclosure code already
+            # anticipates exactly that (a pin whose label equals the parent's is
+            # why ``owns_model`` is a separate field).
+            return (
+                _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                source,
+            )
+        # BOTH halves were already checked, to the same standard
+        # ``configured_effort_tiers`` applies, by ``resolve_member_model`` -- one
+        # place, so a selector that reaches here has a provider and a model.
+        provider, _, model_id = str(selector).partition("/")
         try:
             from local_operator.model.configure import build_model_spec
 
-            return build_model_spec(provider, model_id)
+            spec = build_model_spec(provider, model_id)
         except Exception as exc:  # noqa: BLE001 — an unbuildable selector is a reason, not a crash
-            return _unavailable(f"{selector!r} could not be resolved ({exc})")
+            _unavailable(f"{selector!r} could not be resolved ({exc})")
+            return None, source
+        return _with_tier_effort(spec, _member_reasoning_effort(spec, requested)), source
 
     def _append_or_park_journal(self, message: CustomMessage) -> None:
         """Put a journal notice on the live context, or park it for a boundary.
@@ -18946,6 +19263,23 @@ class Session:
         """
         await self._transcript.append_custom(VIDEO_JOB_CUSTOM_TYPE, record, preserve_mtime=True)
 
+    async def journal_audio_settle(self, record: dict[str, Any]) -> None:
+        """Append one ``audio_settle_v1`` row after a RUNNING cancel.
+
+        The audio contract's cancel is a guaranteed stop ONLY while the job is
+        queued. A job refused mid-flight keeps running and is charged if it
+        produces audio, so the settle poll records what actually happened
+        minutes after the tool returned — a transcript row the tool cannot
+        write itself (the ``journal_video_job`` precedent).
+
+        BOOKKEEPING, like the video record: the write is caused by work the user
+        started earlier, and it must not re-rank the session as freshly worked.
+        Failures PROPAGATE so the caller decides (the settle task logs).
+        """
+        from local_operator.audiogen.settle import AUDIO_SETTLE_CUSTOM_TYPE
+
+        await self._transcript.append_custom(AUDIO_SETTLE_CUSTOM_TYPE, record, preserve_mtime=True)
+
     async def _boot_video_jobs(self) -> None:
         """Cold-follow conversion for pending video jobs (criterion b).
 
@@ -19465,13 +19799,38 @@ class Session:
         # the RUNTIME-only reason rides along when the live row still carries
         # one — after a restart it is gone and the labels still answer (see
         # ``AsyncJob.model_fallback_reason``).
+        #
+        # THE EFFORT CLAUSE (design §6), the same disclosure one field deeper:
+        # a substituted model is not the whole loss — a hop keeps the requested
+        # reasoning level only where the target's ladder accepts it, so a child
+        # pinned at ``xhigh`` can come back thinking at its substitute's default
+        # with the pin clause alone still reading as an ordinary substitution.
+        # Rides INSIDE the pin clause, between the model pair and the cause,
+        # because it is a property of the same move and reads in the same order
+        # as the live notice (one renderer builds the phrase:
+        # ``jobs.effort_fallback_clause``). Gated on the runtime
+        # ``model_fallback`` flag rather than on the labels, and that asymmetry
+        # with the clause above is deliberate: the labels can also diverge for
+        # reasons this row should NOT blame on a fallback (an operator's own
+        # ``/model`` switch leaves the flag False), while ``None`` as a level is
+        # a real answer — the substitute's own default — that a comparison
+        # cannot tell from "no fallback recorded". Both facts are runtime-only,
+        # so a restored row states neither, exactly like the reason above.
         requested = str(getattr(job, "requested_model_label", "") or "").strip()
         effective = str(getattr(job, "model_label", "") or "").strip()
         pin_clause = ""
         if is_model_fallback(requested, effective):
             reason = str(getattr(job, "model_fallback_reason", "") or "").strip()
             cause = f" — {reason}" if reason else ""
-            pin_clause = f" (pinned {requested}, ran on {effective}{cause})"
+            effort = (
+                effort_fallback_clause(
+                    getattr(job, "requested_effort", None),
+                    getattr(job, "model_fallback_effort", None),
+                )
+                if getattr(job, "model_fallback", False)
+                else ""
+            )
+            pin_clause = f" (pinned {requested}, ran on {effective}{effort}{cause})"
         delivery = (
             f"background job '{label}' {status}{pin_clause}:\n{summary}"
             if summary
@@ -19568,12 +19927,7 @@ class Session:
             except Exception:  # noqa: BLE001 - one handler cannot hide rejection from others
                 logger.exception("steering rejection handler failed")
         await self._emit(
-            NoticeEvent(
-                text=(
-                    f"steering command {command_id} was not saved: {reason}; "
-                    "retry with the same command ID"
-                )
-            )
+            _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
         )
         # Mobile projections optimistically count accepted steers. Rejection is
         # another terminal exit from that queue, even though it was not delivered.
@@ -20732,8 +21086,11 @@ class Session:
             # `record_shell` queues while manual compaction owns the message
             # list. Fold those receipts into the newly compacted context before
             # another prompt can acquire the lock and build its request.
-            await self._flush_shell_records()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     @staticmethod
     async def _offloaded(compaction_api: Any, name: str, *args: Any) -> Any:
@@ -21365,6 +21722,10 @@ class Session:
         enabled = policy(self._config_dir)
         if not enabled["enabled"] or not enabled["capture"] or not self._session_id:
             return
+        from local_operator.memory_capture import import_capture_disabled
+
+        if import_capture_disabled(getattr(self._transcript, "directory", None)):
+            return
         # The task returns data only. It is not a session background job and
         # cannot wake/continue a turn; stale speculative plans simply lose it.
         task = asyncio.create_task(
@@ -21581,6 +21942,18 @@ class Session:
 
                 self._memory_recovery_marker = memory_marker.id
 
+                # The snapcompact archive's carry digest, if this pass minted
+                # one: handed to capture so the retained asks/decisions become
+                # memory://session facts deterministically, rather than relying
+                # on the bounded locator scan over a sampled prefix (which
+                # misses them). Empty for a context-full pass and for a
+                # snapcompact pass whose mine found nothing.
+                carry_text = ""
+                if isinstance(preserve_data, dict):
+                    snap = preserve_data.get("snapcompact")
+                    if isinstance(snap, dict):
+                        carry_text = str(snap.get("carry") or "")
+
                 async def complete_memory_capture() -> None:
                     try:
                         terminal = await finish(
@@ -21589,6 +21962,7 @@ class Session:
                             plan.memory_capture[0],
                             summary if plan.strategy == "context-full" else "",
                             memory_marker.ts,
+                            carry_text,
                         )
                     except asyncio.CancelledError:
                         # A cancelled capture left no watermark. Re-arm the recovery that
@@ -22239,6 +22613,7 @@ class Session:
                     effective.model_id,
                     self._previous_archive_text(),
                     context_window=effective.context_window,
+                    previous_carry=self._previous_archive_carry(),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
@@ -22285,6 +22660,28 @@ class Session:
         if isinstance(snap, dict) and snap.get("text"):
             return str(snap["text"])
         return entry.payload.get("summary")
+
+    def _previous_archive_carry(self) -> str | None:
+        """The latest archive's carry digest, so a pass MERGES into the retained
+        material rather than restarting it.
+
+        The carry is the tier-ranked digest of what earlier passes dropped (see
+        :mod:`local_operator.compaction.mine`). Unlike ``_previous_archive_text``
+        — which the next pass re-folds through the edge/paginate/drop path, and
+        which is therefore re-truncated a little on every pass — the carry is
+        passed SEPARATELY and merged whole, which is what stops the same
+        material being dropped again and again. ``None`` (no prior archive, a
+        context-full prior pass, or an archive written before this field
+        existed) simply starts a fresh carry.
+        """
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return None
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        if isinstance(snap, dict) and snap.get("carry"):
+            return str(snap["carry"])
+        return None
 
     #: Output cap for :meth:`complete_once`, and the only bound on what a model
     #: that ignores the output format can bill us for. The cap counts EVERY
@@ -23422,7 +23819,7 @@ class Session:
             )
         return snapshot
 
-    async def adopt_aside(self, messages: Sequence[Message]) -> None:
+    async def adopt_aside(self, messages: Sequence[Message]) -> Literal["queued", "applied"]:
         """Promote an off-the-record aside exchange into the conversation.
 
         The one door out of :meth:`complete_aside`'s no-trace contract, and it
@@ -23430,20 +23827,106 @@ class Session:
         appended as ordinary user/assistant turns, to the live context and the
         transcript both, so the next real turn sees it and a resume replays it.
 
-        Refused while a turn is running, and not as caution. The loop owns
-        ``_context.messages`` for the duration and pairs every tool call with
-        its result; splicing a user message between an assistant tool-call
-        message and the results it is waiting for produces a message list no
-        provider will accept.
+        NOTHING IS EVER SPLICED INTO A LIVE TOOL BATCH. The loop owns
+        ``_context.messages`` while a turn runs and pairs every tool call with
+        its result; a user message between an assistant tool-call message and
+        the results it is waiting for is a list no provider will accept. So an
+        adopt that arrives mid-turn is QUEUED (returns ``"queued"``) on the
+        shell-receipt FIFO and lands at the turn's next safe boundary — the
+        ``_flush_shell_records`` sites, every one of which holds ``_turn_lock``
+        with no open batch (decision D1) — announced by a ``HistoryDeltaEvent``
+        carrying the pair. It never goes through the steering queue: anything
+        drained there continues the turn it lands in.
 
         The turn LOCK is consulted as well as the streaming flag, for the
         reason :meth:`prompt` spells out: ``_is_streaming`` covers only
         ``_run_turn`` itself, while the lock is held across the whole pipeline
-        including a post-compaction auto-continuation. A fork landing in that
-        gap would be swept into a continuation the user never saw.
+        including a post-compaction auto-continuation. The pipeline's own
+        ``finally`` flush runs after that continuation, so the pair lands once
+        the whole pipeline is done rather than being swept into it.
+
+        Two states refuse LOUDLY with :class:`AsideAdoptRefused` instead,
+        because deferring there would be a lie: a closed session (no boundary
+        will ever flush the queue), and an idle write that finds the live list
+        still ending in unanswered calls — the backstop for the invariant
+        above, should any path reach here with a batch open (decision D3).
         """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        if self._disposed:
+            raise AsideAdoptRefused(reason="session_closed")
+        fresh = self._unadopted_messages(messages)
+        if not fresh:
+            # A retried adopt (a client that lost the ack) must not land twice:
+            # every message is already queued or already durable.
+            durable = all(self._transcript.has_entry(m.id) for m in messages)
+            return "applied" if durable else "queued"
         if self._is_streaming or self._turn_lock.locked():
-            raise RuntimeError("cannot adopt an aside while a turn is running")
+            self._pending_shell_records.append(_PendingAdoption(tuple(fresh)))
+            return "queued"
+        # Serialized like the idle ``record_shell`` write, for its reason: a
+        # prompt acquiring the lock while the transcript write below awaits
+        # would start a turn, and the extend after it would then land inside
+        # that turn's live list — the splice this method exists to prevent.
+        await self._turn_lock.acquire()
+        try:
+            # Re-filtered under the lock: the holder we waited for may have
+            # landed some of these messages from the queue on its way out.
+            fresh = self._unadopted_messages(messages)
+            if fresh and unanswered_tail_call_ids(self._context.messages):
+                raise AsideAdoptRefused(reason="open_tool_batch")
+            if fresh:
+                await self._apply_adoption(fresh)
+        finally:
+            # D8: a record queued while this write awaited lands before release.
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+        return "applied"
+
+    def _unadopted_messages(self, messages: Sequence[Message]) -> list[Message]:
+        """The messages of ``messages`` not yet queued or durable, in order.
+
+        Dedupe is PER MESSAGE ID, across the queue and the transcript (review
+        R2-2, superseding D2's tail-id rule). An aside continuation re-sends the
+        whole exchange with a new tail — ``[Q1, A1, Q2, A2]`` after ``[Q1, A1]``
+        was adopted — so a tail-only check let ``Q1``/``A1`` land twice.
+
+        PAIR-SAFE, or refused: the exchange is user/assistant pairs, and a
+        filter that keeps half of one would land an answer with no question
+        (or the reverse). Each pair must be entirely known or entirely new, and
+        the result must be an even run starting with a user row; anything else
+        raises :class:`AsideAdoptRefused` (bare reason, the generic sentence)
+        instead of landing a half pair.
+        """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        known = {
+            message.id
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption)
+            for message in queued.messages
+        }
+        fresh: list[Message] = []
+        for index in range(0, len(messages), 2):
+            pair = list(messages[index : index + 2])
+            seen = [m.id in known or self._transcript.has_entry(m.id) for m in pair]
+            if all(seen):
+                continue
+            if any(seen) or len(pair) != 2:
+                raise AsideAdoptRefused()
+            fresh.extend(pair)
+        if any(
+            message.role != ("user" if offset % 2 == 0 else "assistant")
+            for offset, message in enumerate(fresh)
+        ):
+            raise AsideAdoptRefused()
+        return fresh
+
+    async def _apply_adoption(self, messages: Sequence[Message]) -> None:
+        """Write one adopted exchange to the transcript, then the live context."""
         # Persist first, then adopt — the order ``seed_history`` uses, and for
         # the same reason: a failed transcript write must not leave the live
         # context carrying messages a resume will not replay.
@@ -23471,7 +23954,9 @@ class Session:
         its safe boundary before another prompt can start.
         """
         if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
-            queued.tool_call_id == result.tool_call_id for _, queued in self._pending_shell_records
+            not isinstance(queued, _PendingAdoption)
+            and queued[1].tool_call_id == result.tool_call_id
+            for queued in self._pending_shell_records
         ):
             return
         if self._is_streaming or self._turn_lock.locked():
@@ -23481,12 +23966,21 @@ class Session:
         # while transcript.append_message is awaiting and build its request from
         # a half-written synthetic exchange. Re-check the FIFO after acquisition
         # to flush anything that raced us while we waited.
-        async with self._turn_lock:
+        await self._turn_lock.acquire()
+        try:
             # Queue-then-flush rather than a direct write: the FIFO pops only
             # after a successful transcript write, so a failure here leaves the
             # receipt for the next boundary instead of losing it.
             self._pending_shell_records.append((command, result))
             await self._flush_shell_records()
+        finally:
+            # D8's rule for every release; a no-op unless something queued
+            # during the write above (or the write failed, when it logs).
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
         """Append one synthetic bash exchange to transcript and live context."""
@@ -23513,10 +24007,182 @@ class Session:
         successful write so a transcript failure leaves the unpersisted tail
         available to the next boundary or dispose.
         """
-        while self._pending_shell_records:
-            command, result = self._pending_shell_records[0]
-            await self._persist_shell_record(command, result)
-            self._pending_shell_records.pop(0)
+        # Walk by INDEX and re-read the list each pass: a record queued during
+        # one of this loop's awaits is picked up by the same flush (D8).
+        #
+        # A held adoption is SKIPPED, not a barrier (D7): bang receipts behind it
+        # persist exactly as they did before adoptions shared this queue —
+        # unconditionally, even onto an open tail — because blocking them
+        # behind a pair that may never land lost receipts that used to be
+        # durable. Adoption-vs-later-receipt order is therefore guaranteed only
+        # while the tail is closed, which is every boundary but a cancelled turn.
+        index = 0
+        # Adoptions keep their order AMONG THEMSELVES even though receipts may
+        # pass them: a continuation's pair (Q2/A2) is queued already filtered of
+        # the first pair (R2-2), so landing it while Q1/A1 is still held — say
+        # a receipt closed the tail mid-pass — would put the follow-up before
+        # the question it follows. Once one adoption is held this pass, every
+        # later adoption waits with it.
+        adoption_held = False
+        while index < len(self._pending_shell_records):
+            queued = self._pending_shell_records[index]
+            if isinstance(queued, _PendingAdoption):
+                if adoption_held or not await self._land_deferred_adoption(queued):
+                    adoption_held = True
+                    index += 1
+                    continue
+            else:
+                command, result = queued
+                await self._persist_shell_record(command, result)
+            # Pop by IDENTITY, not by the index read before the await: the list
+            # may have grown during it, though nothing else removes from it.
+            # (``list.remove`` would match by equality instead, and it is the
+            # filesystem-deletion guard's ``.remove`` shape.)
+            position = next(
+                i for i, item in enumerate(self._pending_shell_records) if item is queued
+            )
+            del self._pending_shell_records[position]
+
+    async def _flush_queued_before_release(self) -> None:
+        """The last flush before ``_turn_lock`` is released.
+
+        THE RULE (D8): every ``_turn_lock.release()`` is immediately preceded by
+        this, with no await in between, in the shape::
+
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+
+        The inner ``finally`` is not optional (review R2-1): a cancel delivered
+        while this awaits a write is a ``BaseException`` the ``except`` below
+        does not catch, and a release skipped then holds the lock for good —
+        every later prompt is refused as "already streaming". ``release()`` is
+        synchronous, so the no-await rule still holds. The one exemption is
+        ``serving.py``'s ``_await_turn_lock_free`` (``async with lock: pass``):
+        nothing awaits inside that hold, so nothing can be queued during it.
+
+        Without this, a record queued while the lock is held is stranded until
+        some later turn: the pipeline's own flush is followed by further awaits
+        (shape incidents, the after-turn duty, the patience flush), and an adopt
+        arriving in that window saw the lock held, queued, and then nothing
+        flushed when the lock went free.
+
+        It LOGS rather than raises. It runs in ``finally`` blocks, where an
+        exception would replace the one already propagating (the turn's own
+        outcome); a failed write leaves its record queued for the next boundary
+        or for the dispose report, so nothing is lost by not raising here.
+        """
+        try:
+            await self._flush_shell_records()
+        except Exception:  # noqa: BLE001 — must not mask the in-flight exception
+            logger.error(
+                "could not persist %d queued record(s) before releasing the turn lock; "
+                "they stay queued for the next boundary",
+                len(self._pending_shell_records),
+                exc_info=True,
+            )
+
+    async def _report_unlanded_records(self) -> None:
+        """Say LOUDLY that a queued record will never land (D7).
+
+        Dispose is the last boundary, so whatever is still queued after its
+        flush never will be: an adoption held back by an open tool batch, or a
+        bang receipt whose transcript write failed. Nothing leaves the queue
+        without a write or this report. Each record is an ERROR line naming it,
+        and the batch is ONE user-visible ``NoticeEvent(kind="error")`` — the
+        path the session's other runtime warnings use — counting both kinds.
+        """
+        adoptions = [
+            queued
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption) and queued.messages
+        ]
+        receipts = [
+            queued
+            for queued in self._pending_shell_records
+            if not isinstance(queued, _PendingAdoption)
+        ]
+        if not adoptions and not receipts:
+            return
+        for adoption in adoptions:
+            logger.error(
+                "aside adopt %s never landed: the conversation closed with an open tool "
+                "batch, so the exchange was not added",
+                adoption.messages[-1].id,
+            )
+        for _command, result in receipts:
+            logger.error(
+                "shell receipt %s never landed: its transcript write failed and the "
+                "conversation closed",
+                result.tool_call_id,
+            )
+        lost: list[str] = []
+        if adoptions:
+            lost.append(_text(_nt.unsaved_asides(count=str(len(adoptions)))))
+        if receipts:
+            lost.append(_text(_nt.unsaved_receipts(count=str(len(receipts)))))
+        await self._emit(_notice(_nt.unsaved_records(summary=" and ".join(lost)), kind="error"))
+        # DURABLE as well (review R6): the notice reaches only a frontend still
+        # connected during teardown. The row is written straight to the
+        # transcript, as ``_journal_held_delivery_failure`` does once disposed —
+        # ``journal_incident`` returns early then, and the transcript still
+        # accepts appends until the end of ``dispose``.
+        from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+        from local_operator.incidents import format_unlanded_records_message
+
+        rendered = format_unlanded_records_message(
+            [adoption.messages[-1].id for adoption in adoptions],
+            [result.tool_call_id for _command, result in receipts],
+        )
+        try:
+            await self._transcript.append_message(
+                CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": rendered, "raw": rendered[:1000]},
+                ),
+                preserve_mtime=True,
+            )
+        except Exception:  # noqa: BLE001 — the ERROR lines above still stand
+            logger.error("could not journal the unlanded-records incident", exc_info=True)
+
+    async def _land_deferred_adoption(self, queued: _PendingAdoption) -> bool:
+        """Apply an adopt that waited for this boundary, and tell every frontend.
+
+        Returns False, writing nothing, when the live list still ends in
+        unanswered calls. A turn CANCELLED without an abort (its prompt task
+        dropped with the control socket) leaves the tail open at every later
+        boundary, and a future boundary placed inside a loop would too; either
+        way the pair would otherwise splice into a batch. It does not RAISE:
+        the adopt can still land once a new turn closes the tail, and an
+        exception out of a ``finally`` would mask the turn's own outcome. The
+        flush skips it (D7) and dispose reports it if it never lands.
+
+        The event is a HISTORY delta, not live message events: these rows were
+        never streamed, so a frontend must project them through the settled
+        renderer — the contract :class:`HistoryDeltaEvent` already states.
+        """
+        messages = [m for m in queued.messages if not self._transcript.has_entry(m.id)]
+        if not messages:
+            return True
+        if unanswered_tail_call_ids(self._context.messages):
+            # Named by the exchange's tail id, the identity the dedupe keys on.
+            # ONCE per held adoption, not per boundary: every boundary after a
+            # cancelled turn re-tries it, and a line per retry is noise that
+            # buries the dispose report that actually matters.
+            if messages[-1].id not in self._held_adoption_warned:
+                self._held_adoption_warned.add(messages[-1].id)
+                logger.warning(
+                    "aside adopt %s held back: the conversation still ends in an open "
+                    "tool batch at a flush boundary; it lands at the next safe one",
+                    messages[-1].id,
+                )
+            return False
+        await self._apply_adoption(messages)
+        self._held_adoption_warned.discard(messages[-1].id)
+        await self._emit(HistoryDeltaEvent(messages=list(messages)))
+        return True
 
     # -- wakes -------------------------------------------------------------------
 
@@ -23532,6 +24198,11 @@ class Session:
         # hold, the persist reconcile, the config-watch reconcile, the
         # delivery guard and the after-turn tray drain.
         self._aida_duty = self._aida_is_hers()
+        # THE LIBRARIAN'S DUTY rides the same seam and the same early placement
+        # reason: a session with no wake entry is exactly the state her engine
+        # must recover from, so the flag cannot sit behind "this session already
+        # has rows".
+        self._librarian_duty = self._librarian_is_hers()
         # A wake is active ownership, not conversation history. A fork declines
         # only snapshots copied at its creation boundary; snapshots appended
         # afterwards belong to the fork and must survive its next resume.
@@ -23560,6 +24231,8 @@ class Session:
         # ``delivery_allowed`` in the same module for the fire-time half).
         if self._aida_duty:
             schedules = self._aida_filter_rows(schedules)
+        elif self._librarian_duty:
+            schedules = self._librarian_filter_rows(schedules)
         # PATIENCE ROWS PAST THEIR EPISODE TTL RETIRE AT LOAD (§8.2.4): the
         # process was down past the 2 h hard stop, so the wait can never be
         # honoured and a row left armed would fire a note nobody can act on.
@@ -23676,6 +24349,67 @@ class Session:
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
             return schedules
 
+    # -- librarian engine attachment ----------------------------------------
+
+    def _librarian_is_hers(self) -> bool:
+        """Whether THIS session is the one ``librarian/state.json`` names.
+
+        One stat on every other session on the machine, and the flag every
+        Librarian hook is gated on. Failure answers False: a session that cannot
+        prove it is hers must not run her engine.
+        """
+        try:
+            from local_operator.librarian import state as librarian_state
+            from local_operator.paths import config_dir
+
+            return librarian_state.is_librarian_session(config_dir(), self._session_id)
+        except Exception:  # noqa: BLE001 — a lookup, never a boot dependency
+            logger.debug("librarian: could not resolve her session identity", exc_info=True)
+            return False
+
+    def _librarian_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+        """Drop her ``librarian-*`` rows when she is paused or disabled."""
+        try:
+            from local_operator.librarian import proactive
+
+            return proactive.filter_on_load(schedules, config_dir=self._config_dir)
+        except Exception:  # noqa: BLE001 — the fire-time guard still holds
+            logger.warning("librarian: load-time hold failed; arming unfiltered", exc_info=True)
+            return schedules
+
+    async def _librarian_reconcile_rows(
+        self,
+        schedules: list[WakeSchedule],
+        *,
+        cadence_fired: WakeSchedule | None = None,
+    ) -> list[WakeSchedule]:
+        """Her engine's reconcile over one schedule list, notes journaled.
+
+        Called from the persist (so a fire's automatic re-arm and every wake
+        tool mutation land through ONE writer) and from the config watcher (a
+        pause/resume issued in another process arrives within its 2 s tick).
+        Never raises: a failure leaves the list exactly as the caller gave it,
+        and an accepted occurrence is re-raised only so the retirement is not
+        committed without its successor.
+        """
+        try:
+            from local_operator.librarian import proactive
+
+            result = proactive.reconcile(
+                schedules,
+                config_dir=self._config_dir,
+                session_id=self._session_id,
+                cadence_fired=cadence_fired,
+            )
+            if result.notes:
+                await proactive.append_notes(self._transcript, result.notes)
+            return result.schedules
+        except Exception:  # noqa: BLE001 — the schedule write outranks the engine
+            if cadence_fired is not None:
+                raise
+            logger.warning("librarian: reconcile failed; leaving the list as given", exc_info=True)
+            return schedules
+
     async def _aida_reconcile_rows(
         self,
         schedules: list[WakeSchedule],
@@ -23691,6 +24425,10 @@ class Session:
         the list exactly as the caller gave it.
         """
         try:
+            if getattr(self, "_librarian_duty", False):
+                # THE SAME ONE-WRITER SEAM, a different engine: her persist
+                # path re-arms her own cadence and never touches Aida's rows.
+                return await self._librarian_reconcile_rows(schedules, cadence_fired=cadence_fired)
             from local_operator.aida import proactive
 
             # The stash is cleared BEFORE the reconcile: a token may only ever
@@ -23748,6 +24486,8 @@ class Session:
         # the sidebar all read what this writes. Equal values do nothing,
         # which is what keeps :meth:`_sync_aida_display_name` (which a rename
         # rings) from ringing the watcher straight back.
+        if not getattr(self, "_aida_duty", False):
+            return
         try:
             from local_operator.aida import naming as aida_naming
             from local_operator.paths import config_dir
@@ -24447,7 +25187,9 @@ class Session:
                     f"- {schedule.id} (due {_due_label(schedule)}): "
                     "missed while the session was down."
                 )
-            lines.append(f"{header}\n  Message: {schedule.message}")
+            lines.append(
+                f"{header}\n  Message: {schedule.message}"
+            )  # i18n: ignore model-facing wake prompt
         return (
             "(alarm) The session resumed after being closed; the following scheduled wake(s) "
             "came due while it was down. Each fires once now — handle them as missed wakes, "
@@ -24535,10 +25277,40 @@ class Session:
                     # cannot consume the authoritative replacement's owed phase.
                     schedules = [*schedules, previous_cadence]
             schedules = await self._aida_reconcile_rows(schedules, cadence_fired=cadence_fired)
+        if getattr(self, "_librarian_duty", False):
+            from local_operator.librarian import proactive as librarian_proactive
+
+            accepted = getattr(self, "_librarian_cadence_delivered", None)
+            previous = self._transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+            previous_rows = (
+                previous.payload.get("details", {}).get("schedules", []) if previous else []
+            )
+            # The accepted occurrence must match the authoritative retired arm:
+            # an unrelated same-id replacement is not a fire.
+            if not any(row.id == librarian_proactive.CADENCE_ID for row in schedules):
+                previous_cadence = next(
+                    (
+                        WakeSchedule.model_validate(raw)
+                        for raw in previous_rows
+                        if raw.get("id") == librarian_proactive.CADENCE_ID
+                    ),
+                    None,
+                )
+                if (
+                    accepted is not None
+                    and previous_cadence is not None
+                    and accepted.request_id == previous_cadence.request_id
+                    and accepted.created_at == previous_cadence.created_at
+                ):
+                    cadence_fired = accepted
+            schedules = await self._librarian_reconcile_rows(schedules, cadence_fired=cadence_fired)
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
+        if getattr(self, "_librarian_duty", False) and cadence_fired is not None:
+            # The successor is durable now; the receipt may go.
+            self._librarian_cadence_delivered = None
         if getattr(self, "_aida_duty", False):
             from local_operator.aida import proactive
 
@@ -25318,14 +26090,10 @@ class Session:
         if self._model_migration_notice:
             self._model_migration_notice = False
             await self._emit(
-                NoticeEvent(
-                    text=(
-                        "Saved model information is incomplete; "
-                        f"using {self.model_label}. "
-                        "This selection is now saved for future resumes."
-                    ),
+                _notice(
+                    _nt.model_info_incomplete(model=self.model_label),
                     kind="warning",
-                    headline="Model selected",
+                    headline=_text(_nt.model_info_incomplete_headline()),
                 )
             )
 
@@ -25683,6 +26451,20 @@ class Session:
                     return
             except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
                 logger.debug("aida: delivery guard could not read the hold", exc_info=True)
+        elif getattr(self, "_librarian_duty", False):
+            # Her fire-time hold, the twin of the block above: a pause that
+            # landed in another process suppresses this fire, and the load-time
+            # filter covers the session that opens while held.
+            try:
+                from local_operator.librarian import proactive as librarian_proactive
+
+                if librarian_proactive.is_librarian_row(
+                    due.schedule.id
+                ) and not librarian_proactive.delivery_allowed(self._config_dir):
+                    logger.info("librarian: dropping held wake %s (paused)", due.schedule.id)
+                    return
+            except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
+                logger.debug("librarian: delivery guard could not read the hold", exc_info=True)
         text = format_wake_delivery_text(due)
         missed_note = self._missed_delivery_note(due)
         if missed_note:
@@ -25722,6 +26504,11 @@ class Session:
                 # Aida-only accepted occurrence, consumed by the existing persist
                 # boundary after retirement. No generic fire/dedup behavior changes.
                 self._aida_cadence_delivered = due.schedule
+        elif getattr(self, "_librarian_duty", False):
+            if due.schedule.id == "librarian-cadence":
+                # Her accepted occurrence, consumed by the persist boundary
+                # after retirement exactly as Aida's is.
+                self._librarian_cadence_delivered = due.schedule
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
@@ -26296,6 +27083,14 @@ class Session:
         and only on her session — every other session short-circuits on the
         duty flag. Fail OPEN like the delivery guard it mirrors.
         """
+        if getattr(self, "_librarian_duty", False):
+            try:
+                from local_operator.librarian import proactive as librarian_proactive
+
+                return librarian_proactive.hold_active(self._config_dir)
+            except Exception:  # noqa: BLE001 — fail OPEN, matching the delivery guard
+                logger.debug("could not resolve the librarian hold", exc_info=True)
+                return False
         if not getattr(self, "_aida_duty", False):
             return False
         try:
@@ -26562,6 +27357,9 @@ class Session:
           the next session — the same boundary the comment on
           :data:`~local_operator.harness.subagent.CANONICAL_EFFORT_TIERS`
           documents for a hand-added tier.
+        * ``asks.lapsed_visible_for`` — republishes the ask state, because the
+          window is applied when the wire is built; also replaces the deadline
+          timer task so it wakes at the new ``expires_at + window``.
 
         Everything else the registry calls LIVE is already read per use
         (``fork.*``, ``web_*`` knobs, ``bash.shell``) and needs no apply here.
@@ -26663,6 +27461,23 @@ class Session:
         # transcript follow in the same breath.
         if getattr(self, "_aida_duty", False) and any(key.startswith("aida.") for key in changed):
             self._spawn_background(self._aida_reconcile_now())
+        # THE LIBRARIAN'S LIVE-CONFIG SEAM, the same registry-key diff: a pause
+        # or resume written by the desktop route in another process reaches
+        # this session's own reconcile within the watcher's tick.
+        if getattr(self, "_librarian_duty", False) and any(
+            key.startswith("librarian.") for key in changed
+        ):
+            self._spawn_background(self._aida_reconcile_now())
+        if "asks.lapsed_visible_for" in changed and self._ask_queue is not None:
+            # The window is applied at publish time (``frontend_state.ask_wire``
+            # reads it per call), so republishing IS the apply: a narrower
+            # window hides a lapsed row on every attached surface now rather
+            # than at the next turn. ``rearm`` REPLACES the timer task, because a
+            # sleeping one holds a delay planned with the old window (QA round 1,
+            # Q2); its next wake is the new ``expires_at + window`` (decision D9).
+            # No queue built yet means nothing has been published to correct.
+            self.publish_ask_state()
+            self._ask_queue.rearm()
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.
@@ -26788,13 +27603,10 @@ class Session:
             # The model default itself moved: the #785 notice, unchanged.
             self._spawn_background(
                 self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"keeping {self.model_label}; default changed for new sessions. "
-                            "/model saved adopts it here"
-                        ),
+                    _notice(
+                        _nt.model_default_changed(model=self.model_label),
                         kind="info",
-                        headline="Model unchanged",
+                        headline=_text(_nt.model_default_changed_headline()),
                     )
                 )
             )
@@ -26818,13 +27630,10 @@ class Session:
         stored_effort = str(values.get("model_effort") or "")
         self._spawn_background(
             self._emit(
-                NoticeEvent(
-                    text=(
-                        "reasoning effort default changed for new sessions "
-                        f"({stored_effort or 'auto'}); /model saved adopts it here"
-                    ),
+                _notice(
+                    _nt.effort_default_changed(effort=stored_effort or "auto"),
                     kind="info",
-                    headline="Effort default changed",
+                    headline=_text(_nt.effort_default_changed_headline()),
                 )
             )
         )
@@ -27246,13 +28055,19 @@ class Session:
                 failure = task.exception()
         complete = task in done and not cancelled and failure is None
         if task not in done:
-            errors.append(f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)")
+            errors.append(
+                f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if cancelled:
             # Cancellation proves NOTHING about resource state: keep it
             # incomplete and uncached (R3).
-            errors.append("cleanup task was cancelled; owned work state unverified")
+            errors.append(
+                "cleanup task was cancelled; owned work state unverified"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if failure is not None:
-            errors.append(f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}")
+            errors.append(
+                f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         hook_failures = tuple(self._disposal_hook_failures)
         if hook_failures:
             # Ordinary disposal logs-and-continues past a failing hook; the
@@ -27274,10 +28089,14 @@ class Session:
         in_flight = bool(getattr(self._stream_fn, "child_model_requests_in_flight", False))
         if complete and pending_jobs:
             complete = False
-            errors.append(f"{len(pending_jobs)} owned job(s) still running after cleanup")
+            errors.append(
+                f"{len(pending_jobs)} owned job(s) still running after cleanup"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if complete and in_flight:
             complete = False
-            errors.append("a descendant provider stream was still in flight after cleanup")
+            errors.append(
+                "a descendant provider stream was still in flight after cleanup"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         # The observer holder lives on the ROOT stream; a child's stream only
         # REFERENCES it. Reading the child's own attribute would report a
         # local zero while subscriptions and delivery count on the shared
@@ -27362,11 +28181,14 @@ class Session:
         task = self._disposal_task
         if task is not None and task.done():
             if task.cancelled():
-                reasons.append("cleanup task was cancelled; owned work state unverified")
+                reasons.append(
+                    "cleanup task was cancelled; owned work state unverified"
+                )  # i18n: ignore structured eval-harness error (no product UI)
             else:
                 failure = task.exception()
                 if failure is not None:
                     reasons.append(
+                        # i18n: ignore structured eval-harness error (no product UI)
                         f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
                     )
         reasons.extend(self._disposal_hook_failures)
@@ -27386,6 +28208,7 @@ class Session:
         """
         for error in errors:
             self._descendant_cleanup_failures.append(
+                # i18n: ignore structured eval-harness error (no product UI)
                 f"descendant {session_id} cleanup unverified: {error}"
             )
 
@@ -27742,7 +28565,10 @@ class Session:
             # last-resort pass keeps disposal durable if teardown reached here
             # through a host path without a turn task.
             if self._pending_shell_records:
-                await self._flush_shell_records()
+                # The logging flush, not the raising one: a failed write must
+                # stay queued for the report below rather than abort teardown.
+                await self._flush_queued_before_release()
+                await self._report_unlanded_records()
             # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
             # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
             # this is what keeps the next cold open bounded rather than O(file).

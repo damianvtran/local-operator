@@ -835,6 +835,10 @@ def _stage_reason(stage_text: str) -> str | None:
         return _find_reason(rest)
     if command == "git":
         return _git_reason(rest)
+    # GitLab names its merge-request family "mr", not GitHub's "pr".
+    # Keep unrelated legacy forge grammar unchanged in this bounded addition.
+    if command == "glab" and rest[:1] == ["mr"]:
+        return _glab_mr_reason(rest[1:])
     if command in ("gh", "glab"):
         return _gh_reason(command, rest)
     if command == "kubectl":
@@ -1016,6 +1020,52 @@ def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
             f"{' '.join(sorted(verbs))})."
         )
     return _flags_reason(f"{cmd} {family} {verb}", tokens[2:], _GH_FLAGS)
+
+
+# Unlike GitHub's --json field selector, glab's --output is a FORMAT enum,
+# not an output-file destination.
+# Do not reuse these flags for api: -F there changes the HTTP method/body.
+_GLAB_MR_FLAGS = {
+    "view": _flags("", long="comments resolved unresolved system-logs", valued_long="output repo"),
+    "list": _flags("", long="all closed merged draft not-draft", valued_long="output repo"),
+    "diff": _flags("", long="raw", valued_long="color repo"),
+}
+
+
+def _glab_mr_reason(tokens: list[str]) -> str | None:
+    if not tokens or tokens[0] not in _GLAB_MR_FLAGS:
+        return "glab mr permits only view, list or diff; other verbs and aliases are refused."
+    verb, args = tokens[0], tokens[1:]
+    table = _GLAB_MR_FLAGS[verb]
+    operands = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return 'the "--" separator is not accepted for glab mr.'
+        # Bare dash is ambiguous stdin/selection syntax, not an explicit MR read.
+        if token == "-":
+            return 'the lone "-" operand is not accepted for glab mr.'
+        if token.startswith("-"):
+            reason, consumed = _check_flag(f"glab mr {verb}", token, args, index, table)
+            if reason is not None:
+                return reason
+            name, equal, inline = token[2:].partition("=")
+            if name in table["long_valued"]:
+                value = inline if equal else args[index + 1]
+                if not value or value.startswith("-"):
+                    return f'"--{name}" requires an explicit non-option value.'
+                if name == "output" and value not in ("text", "json"):
+                    return '"--output" permits only the text/json format, not a file path.'
+                if name == "color" and value not in ("always", "never", "auto"):
+                    return '"--color" permits only always/never/auto.'
+            index += consumed
+        else:
+            operands.append(token)
+            index += 1
+    if len(operands) > (0 if verb == "list" else 1):
+        return f"glab mr {verb} has too many positional operands."
+    return None
 
 
 #: kubectl's allow-list, by subcommand. Deliberately three verbs: every other

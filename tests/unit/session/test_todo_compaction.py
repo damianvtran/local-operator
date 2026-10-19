@@ -116,9 +116,10 @@ async def committed_passes(
 
 @pytest.mark.asyncio
 async def test_an_open_todo_does_not_disable_compaction(tmp_path) -> None:
-    """The regression, as a rate: a session with work still open compacts as
-    often as one with none. Before the fix this was 0 committed against 5,
-    every refusal reading ``cut_not_replayable`` and nothing said to the user.
+    """The regression, as a rate: a session with work still open compacts at
+    least as often as one with none. Before the fix this was 0 committed
+    against 5, every refusal reading ``cut_not_replayable`` and nothing said
+    to the user.
     """
     turns = 6
     with_todos = await committed_passes(
@@ -129,7 +130,11 @@ async def test_an_open_todo_does_not_disable_compaction(tmp_path) -> None:
     )
     without_todos = await committed_passes(tmp_path, "todo-compaction-clear", [], turns)
 
-    assert with_todos == without_todos
+    # A todo continuation adds another assistant reply: the opening turn can
+    # now have two summarizable rows and a legal forward cut, while the clear
+    # session still has only two total messages. Earlier legitimate progress
+    # must not fail the guard against reminders DISABLING compaction.
+    assert with_todos >= without_todos
     assert with_todos >= turns - 1  # only the opening turn has nothing to compact
 
 
@@ -184,6 +189,30 @@ async def test_the_nudge_still_reaches_the_model_on_a_compacting_session(tmp_pat
         assert len(stream.requests) == 2  # the loop re-entered
         blocks = stream.reminder_blocks()
         assert len(blocks) == 1 and "add the columns" in blocks[0]
+    finally:
+        await session.dispose()
+        builtin.TODO_STORE.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_extra_opening_todo_pass_has_a_useful_real_prefix(tmp_path):
+    from local_operator.compaction.cutpoint import find_cut_point
+    from local_operator.compaction.tokens import estimate_tokens
+
+    session_id = "synthetic-todo-useful-prefix"
+    builtin.TODO_STORE[session_id] = [{"text": "work", "status": "pending"}]
+    session = make_session(tmp_path, ReplyingStream(), session_id)
+    try:
+        await session.prompt("question " + "detail " * 30)
+        history = session._render_for_compaction()
+        cut = find_cut_point(history, KEEP_RECENT)
+        assert cut is not None
+        # Pin WHY the extra opening pass is valid, not just the direction of
+        # the rate inequality: two real rows, enough prefix to buy headroom.
+        assert len(history[:cut]) >= 2
+        assert all(message.role in ("user", "assistant") for message in history[:cut])
+        assert sum(estimate_tokens(message) for message in history[:cut]) >= KEEP_RECENT
+        assert (await session.compact_now()).ran
     finally:
         await session.dispose()
         builtin.TODO_STORE.pop(session_id, None)

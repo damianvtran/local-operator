@@ -32,7 +32,13 @@ from local_operator.compaction.pruning import (
 )
 from local_operator.compaction.thresholds import CompactionSettings
 from local_operator.compaction.tokens import estimate_messages_tokens
-from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
+from local_operator.harness.types import (
+    ImageContent,
+    Message,
+    ModelSpec,
+    TextContent,
+    ToolCall,
+)
 
 NOW = 10_000_000
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
@@ -623,3 +629,375 @@ def test_shed_stale_frames_treats_pruned_notices_as_stale_turns() -> None:
     # Both pruned turns went; the current framed observation never does.
     assert removed == 4
     assert [_texts(m)[0] for m in out] == ["<previous-context-summary>...", "t3"]
+
+
+@pytest.mark.asyncio
+async def test_interleaved_tool_result_compacts_and_continues() -> None:
+    call = Message.assistant("calling")
+    call.tool_calls = [ToolCall(id="interleaved", name="bash", arguments={})]
+    result_message = Message(
+        role="tool",
+        content=[TextContent(text="result " * 100)],
+        tool_call_id="interleaved",
+        tool_name="bash",
+    )
+    history = [
+        Message.user("older " * 200),
+        Message.assistant("earlier " * 200),
+        call,
+        Message.user("delivery"),
+        result_message,
+        Message.assistant("done"),
+    ]
+    from local_operator.compaction.tokens import estimate_tokens
+
+    summarizer = _Summarizer("Prior work summarized.")
+    settings = CompactionSettings(keep_recent_tokens=sum(estimate_tokens(m) for m in history[3:]))
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=settings,
+        summarize=summarizer,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert result.ran, result.reason
+    assert len(summarizer.prompts) == 1
+    assert call in result.messages and result_message in result.messages
+    # Continue the same real pipeline with new work, rather than only asserting
+    # the first selector returned a legal integer.
+    continued = await run_compaction_pass(
+        [
+            *result.messages,
+            Message.user("new task " * 200),
+            Message.assistant("new answer " * 200),
+            Message.user("latest"),
+        ],
+        model=_model(),
+        settings=settings,
+        summarize=summarizer,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert continued.ran, continued.reason
+    assert len(summarizer.prompts) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preserved_prefix", [False, True])
+async def test_large_interleaved_pair_compacts_again_after_rebuild(preserved_prefix):
+    call = Message.assistant("calling")
+    call.tool_calls = [ToolCall(id=cid, name="bash", arguments={}) for cid in ("a", "b")]
+
+    def result(cid):
+        return Message(
+            role="tool",
+            content=[TextContent(text="result " * 15000)],
+            tool_call_id=cid,
+            tool_name="bash",
+        )
+
+    history = [
+        Message.user("older " * 8000),
+        Message.assistant("earlier " * 4000),
+        call,
+        result("a"),
+        Message.user("delivery"),
+        result("b"),
+        Message.assistant("answer " * 1600),
+        Message.user("latest " * 1600),
+    ]
+    from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+    from local_operator.compaction.tokens import estimate_tokens
+
+    settings = CompactionSettings(keep_recent_tokens=sum(estimate_tokens(m) for m in history[4:]))
+    summarize = _Summarizer("Short summary.")
+    first = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert first.ran, first.reason
+    assert first.tokens_before - first.tokens_after > 3000
+    rebuilt = list(first.messages)
+    if preserved_prefix:
+        prompt = Message.user("preserved operator constraint")
+        prompt.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+        rebuilt.insert(1, prompt)
+    second = await run_compaction_pass(
+        rebuilt,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert second.ran, second.reason
+    assert second.tokens_before - second.tokens_after > 25000
+    assert len(summarize.prompts) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep", [5000, 20000])
+@pytest.mark.parametrize("pending_tail", [False, True])
+async def test_oversized_interleaved_tail_must_compact_when_safe_cut_exists(keep, pending_tail):
+    from local_operator.compaction.cutpoint import find_cut_point
+
+    # No terminal assistant/user escape: the tools are still running. A bound
+    # may prefer a forward cut, but must never veto the only useful legal cut.
+    history = []
+    for _ in range(20):
+        history.extend([Message.user("older " * 3000), Message.assistant("answer " * 3000)])
+    call = Message.assistant("parallel reads")
+    call.tool_calls = [ToolCall(id=cid, name="read", arguments={}) for cid in ("a", "b", "c")]
+    history.append(call)
+    for cid in ("a", "b", "c"):
+        history.append(
+            Message(
+                role="tool",
+                content=[TextContent(text="result " * (keep * 3 // 4))],
+                tool_call_id=cid,
+                tool_name="read",
+            )
+        )
+        if cid != "c":
+            history.append(Message.user("interleaved delivery"))
+    if pending_tail:
+        pending = Message.assistant("next read")
+        pending.tool_calls = [ToolCall(id="pending", name="read", arguments={})]
+        history.append(pending)
+    # Every budget below stops inside this indivisible tail. Cut 40 is legal
+    # throughout, so no one of these requests may silently decline to compact.
+    for budget in range(keep // 4, 2 * keep, keep // 4):
+        assert find_cut_point(history, budget) == 40
+    result = await run_compaction_pass(
+        history,
+        model=_model(window=128000),
+        settings=CompactionSettings(keep_recent_tokens=keep),
+        summarize=_Summarizer("Older work summarized."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert result.ran, result.reason
+    assert result.tokens_before - result.tokens_after > 100000
+    assert result.tokens_after < 115200
+    assert call in result.messages
+
+
+@pytest.mark.asyncio
+async def test_tiny_prefix_with_oversized_tail_must_not_grow_or_strand_next_pass():
+    call = Message.assistant("reads")
+    call.tool_calls = [
+        ToolCall(id=cid, name="read", arguments={}) for cid in ("answered", "pending")
+    ]
+    history = [
+        Message.user("hi"),
+        Message.assistant("hello"),
+        Message.user("ok"),
+        call,
+        Message.user("delivery"),
+        Message(
+            role="tool",
+            content=[TextContent(text="result " * 50000)],
+            tool_call_id="answered",
+            tool_name="read",
+        ),
+    ]
+    summarize = _Summarizer("Summary here.")
+    settings = CompactionSettings(keep_recent_tokens=20000, threshold_tokens=40000)
+    first = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert first.tokens_after <= first.tokens_before
+    # An honest initial refusal leaves the original work intact and does not
+    # pay for a larger marker only to refuse permanently on the next attempt.
+    second = await run_compaction_pass(
+        first.messages,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert second.tokens_after <= second.tokens_before
+    assert not first.ran and not second.ran
+    assert not summarize.prompts
+    assert first.messages == history and second.messages == history
+
+
+@pytest.mark.asyncio
+async def test_giant_second_message_uses_legal_forward_cut():
+    history = [
+        Message.user("older " * 7426),
+        Message.user("paste " * 153999),
+        Message.assistant("recent " * 18562),
+    ]
+    result = await run_compaction_pass(
+        history,
+        model=_model(window=128000),
+        settings=CompactionSettings(keep_recent_tokens=20000),
+        summarize=_Summarizer("Prior work summarized."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert result.ran, result.reason
+    assert result.tokens_after <= result.tokens_before
+    assert result.tokens_after < 20000
+    assert result.messages[-1] is history[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep", [64, 256, 1024, 5000])
+@pytest.mark.parametrize("shape", ["giant-second", "answered-tail", "pending-tail"])
+async def test_pair_safe_prefix_budget_invariant_compacts_without_growth(keep, shape):
+    from local_operator.compaction.cutpoint import find_cut_point
+    from local_operator.compaction.tokens import estimate_tokens
+
+    # Contract: a useful legal pair-safe cut whose prefix reaches the keep
+    # budget must be found; every successful pass must be non-growing.
+    if shape == "giant-second":
+        history = [
+            Message.user("hi"),
+            Message.user("paste " * (3 * keep)),
+            Message.assistant("recent " * (keep // 2)),
+        ]
+    else:
+        call = Message.assistant("reads")
+        ids = ("answered", "pending") if shape == "pending-tail" else ("answered",)
+        call.tool_calls = [ToolCall(id=cid, name="read", arguments={}) for cid in ids]
+        history = [
+            Message.user("older " * keep),
+            Message.assistant("hello"),
+            Message.user("ok"),
+            call,
+            Message.user("delivery"),
+            Message(
+                role="tool",
+                content=[TextContent(text="result " * (3 * keep))],
+                tool_call_id="answered",
+                tool_name="read",
+            ),
+        ]
+    assert sum(estimate_tokens(m) for m in history[:2]) >= keep
+    # Cut 2 is pair-safe by construction and contains two real prefix rows.
+    cut = find_cut_point(history, keep)
+    assert cut is not None
+    assert sum(estimate_tokens(m) for m in history[:cut]) >= keep
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=CompactionSettings(keep_recent_tokens=keep),
+        summarize=_Summarizer("Short summary."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert result.ran, result.reason
+    assert result.tokens_after <= result.tokens_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("words", [21000, 810000])
+async def test_primary_tiny_prefix_refuses_nonshrinking_rebuild_without_stranding(words):
+    history = [Message.user("hi"), Message.assistant("hello"), Message.user("paste " * words)]
+    summarizer = _Summarizer("Short summary.")
+    settings = CompactionSettings(keep_recent_tokens=20000, threshold_tokens=800000)
+    for _ in range(2):
+        result = await run_compaction_pass(
+            history,
+            model=_model(window=1000000),
+            settings=settings,
+            summarize=summarizer,
+            now_ms=NOW,
+            last_activity_ms=NOW,
+            respect_threshold=words == 810000,
+        )
+        assert not result.ran
+        assert result.reason == "no-token-reduction"
+        assert result.tokens_after == result.tokens_before
+        assert all(a is b for a, b in zip(result.messages, history))
+        assert len(result.messages) == len(history)
+        history = result.messages
+    assert len(summarizer.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_pair_opening_tiny_prefix_also_refuses_nonshrinking_rebuild():
+    call = Message.assistant("reads")
+    call.tool_calls = [ToolCall(id=cid, name="read", arguments={}) for cid in ("a", "b")]
+    history = [Message.user("hi"), Message.assistant("hello"), call]
+    history.extend(
+        Message(
+            role="tool",
+            content=[TextContent(text="result " * 10000)],
+            tool_call_id=cid,
+            tool_name="read",
+        )
+        for cid in ("a", "b")
+    )
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=CompactionSettings(keep_recent_tokens=20000),
+        summarize=_Summarizer("Short summary."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert not result.ran and result.reason == "no-token-reduction"
+    assert result.tokens_before == result.tokens_after
+    assert result.messages == history
+
+
+@pytest.mark.asyncio
+async def test_equal_size_rebuild_is_refused_not_reported_as_success():
+    from local_operator.compaction.marker import (
+        build_compaction_marker,
+        render_compaction_marker,
+    )
+
+    history = [
+        Message.user("older " * 100),
+        Message.assistant("prior " * 100),
+        Message.user("tail"),
+    ]
+    before = estimate_messages_tokens(history)
+    # Construct a genuinely equal-token marker using the real renderer/ruler,
+    # not mocked token counts: equality must refuse just like actual growth.
+    summary = next(
+        text
+        for count in range(300)
+        if estimate_messages_tokens(
+            [
+                render_compaction_marker(
+                    build_compaction_marker(text := "summary " * count + "end")
+                ),
+                history[-1],
+            ]
+        )
+        == before
+    )
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=CompactionSettings(keep_recent_tokens=10),
+        summarize=_Summarizer(summary),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert not result.ran and result.reason == "no-token-reduction"
+    assert result.tokens_after == result.tokens_before == before
+    assert result.messages == history

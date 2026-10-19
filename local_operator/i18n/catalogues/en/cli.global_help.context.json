@@ -1,0 +1,87 @@
+{
+  "cli.global_help.debug": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Inherited --debug flag enables verbose diagnostics; flag token remains in argparse."
+  },
+  "cli.global_help.agent": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Inherited --agent/--agent-name chooses the legacy named-agent model, not an exec role. Preserve --train and exec --profile tokens and the separate persisted-session distinction."
+  },
+  "cli.global_help.train": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Inherited --train chooses legacy history/autosave storage. Ordinary sessions still persist; --resume takes precedence. Preserve the flag token."
+  },
+  "cli.global_help.description": {
+    "role": "root CLI description",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Top-level CLI paragraph. Preserve leading/trailing newlines and paragraph whitespace, hosting/model brand names, and literal ~/.local-operator/config.yml path; translate explanatory prose, not executable/config identifiers."
+  },
+  "cli.global_help.resume": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --resume accepts a session id or no id for latest; preserve Ctrl+C twice, ~/.local-operator/sessions and --resume technical tokens."
+  },
+  "cli.global_help.version": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --version prints the version and exits; the actual v-prefixed version string remains code-owned."
+  },
+  "cli.global_help.hosting": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --hosting overview lists literal provider choices. Preserve their spellings and the original display order, even where parser-choice ordering differs."
+  },
+  "cli.global_help.model": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --model examples are literal model IDs/provider routes. Preserve every ID and punctuation; omitted model uses the provider suggestion."
+  },
+  "cli.global_help.run_in": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --run-in requires a valid working directory. Preserve the exact double space before Must for byte fidelity."
+  },
+  "cli.global_help.yolo": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Shared root/propagated --yolo auto-approves tool tiers without prompts. This is the ordinary promise, separate from conditional peer-create consent."
+  },
+  "cli.global_help.no_tui": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --no-tui chooses the plain headless REPL instead of the full-screen TUI; preserve those interface abbreviations."
+  },
+  "cli.global_help.tui": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Root --tui forces full-screen mode even for non-tty stdout and reports failure if that is impossible; preserve tty/stdout technical terms."
+  },
+  "cli.global_help.yolo_conditional": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Propagated --yolo on a grant-gated peer-create verb is conditional on the target granting the literal unattended capability; preserve this safety distinction and capability token."
+  },
+  "cli.global_help.propagated_resume": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Propagated --resume help is deliberately shorter than root help; omitted id selects the most recent session."
+  },
+  "cli.global_help.propagated_hosting": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Propagated --hosting help lists literal example provider IDs; preserve anthropic/openai/openrouter spellings."
+  },
+  "cli.global_help.propagated_model": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Propagated --model selects the model for this run, not the legacy agent."
+  },
+  "cli.global_help.propagated_run_in": {
+    "role": "global/root CLI flag help",
+    "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
+    "note": "Propagated --run-in changes the operator working directory; flag spelling stays in code."
+  }
+}

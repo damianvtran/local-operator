@@ -59,7 +59,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from local_operator.paths import config_dir
 
@@ -142,6 +142,17 @@ class AttachmentStore:
 
     def _meta_path(self, digest: str) -> Path:
         return self.root / f"{digest}.json"
+
+    def _peaks_path(self, digest: str) -> Path:
+        """The waveform sidecar's path: ``<root>/<digest>.peaks.json``.
+
+        ONE sidecar per digest, exactly like the meta JSON: peaks are a pure
+        function of the content the digest names (see
+        ``audiogen.peaks``), so two writers of the same digest write
+        identical payloads and the exists()-then-write race is a wasted write,
+        never a torn file.
+        """
+        return self.root / f"{digest}.peaks.json"
 
     def path_for(self, digest: str) -> Path:
         """The content file ``digest`` names — ``<root>/<digest>.bin``.
@@ -237,6 +248,74 @@ class AttachmentStore:
         if self.get_bytes(digest) is None:
             return None
         return AttachmentRef(digest=digest, mime_type=mime_type, bytes=len(raw))
+
+    # -- waveform peaks ----------------------------------------------------
+
+    def get_peaks(self, digest: str) -> dict[str, Any] | None:
+        """The waveform payload for ``digest``, or ``None``.
+
+        Reads the ``<digest>.peaks.json`` sidecar and validates its shape
+        (``{version, bars, peaks}`` with exactly ``bars`` finite numbers).
+        ``None`` means "this artifact has no waveform on this machine" — a
+        BYOK-era artifact stored before peaks existed, a host without the
+        optional decoder at creation time, or a damaged sidecar — and every
+        consumer degrades to its no-waveform state rather than raising, the
+        same contract ``get`` states for bytes. Does NOT compute a waveform:
+        decoding belongs to artifact creation, never to a render/read loop
+        (see ``audiogen.peaks``).
+        """
+        try:
+            payload = json.loads(self._peaks_path(digest).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        peaks = payload.get("peaks")
+        bars = payload.get("bars")
+        version = payload.get("version")
+        if not isinstance(peaks, list) or not isinstance(bars, int) or isinstance(bars, bool):
+            return None
+        if bars <= 0 or len(peaks) != bars or not isinstance(version, int):
+            return None
+        values: list[float] = []
+        for value in peaks:
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return None
+            number = float(value)
+            if number != number or number in (float("inf"), float("-inf")):
+                return None
+            values.append(number)
+        return {"version": version, "bars": bars, "peaks": values}
+
+    def put_peaks(self, digest: str, peaks: list[float]) -> bool:
+        """Write the ``<digest>.peaks.json`` sidecar for ``digest``.
+
+        The caller supplies the raw bar list; the payload envelope
+        (``{version, bars, peaks}``) comes from ``audiogen.peaks`` — one
+        spelling for the sidecar and the waveform route. Idempotent (the
+        digest names the content the peaks summarise) and never raises: a
+        read-only home or a full disk degrades to "no waveform", exactly
+        like ``put_bytes``'s own failure contract. Returns whether the
+        sidecar is now on disk.
+        """
+        path = self._peaks_path(digest)
+        if path.exists():
+            return True
+        try:
+            from local_operator.audiogen.peaks import (
+                peaks_payload,  # lazy: keep this module lean
+            )
+
+            payload = peaks_payload(list(peaks))
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Same write order rule as ``put_bytes``: the sidecar is written
+            # whole (one small JSON blob), so a crash leaves either the file
+            # or nothing, never a truncated read worth guarding against.
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError as exc:
+            logger.debug("attachment store: cannot write peaks for %s: %s", digest, exc)
+            return False
+        return True
 
     # -- read --------------------------------------------------------------
 
@@ -339,6 +418,17 @@ def cache_media(
     trusted as given — unlike the mobile ingest path, which re-sniffs
     everything — because the caller here is a tool holding provider bytes,
     an authority the phone's wire payload does not have.
+
+    AUDIO also gets its waveform PEAKS here, computed once at creation and
+    stored as the ``<digest>.peaks.json`` sidecar (``audiogen.peaks``; the
+    server contract emits no waveform, so this is the default source). The
+    decoder ships in the base runtime, with a guarded import so a damaged or
+    older install still preserves audio bytes without a sidecar. The waveform
+    route can repair small legacy artifacts within bounded server-side limits;
+    otherwise it returns 404/no-waveform. Creation decodes ONLY when the digest
+    has none yet, so re-registering identical bytes pays no second decode.
+    Peaks are NOT part of the returned block: they are a rendering
+    sidecar fetched by digest, never a field every attachment row carries.
     """
     if not raw:
         return None
@@ -360,9 +450,16 @@ def cache_media(
         if info is not None:
             width = width if width is not None else info.width
             height = height if height is not None else info.height
-    ref = AttachmentStore().put_bytes(raw, content_type)
+    store = AttachmentStore()
+    ref = store.put_bytes(raw, content_type)
     if ref is None:
         return None
+    if resolved == "audio" and store.get_peaks(ref.digest) is None:
+        from local_operator.audiogen.peaks import compute_peaks  # lazy: optional engine
+
+        peaks = compute_peaks(raw)
+        if peaks is not None:
+            store.put_peaks(ref.digest, peaks)
     from local_operator.harness.types import AttachmentContent  # lazy: import weight
 
     return AttachmentContent(

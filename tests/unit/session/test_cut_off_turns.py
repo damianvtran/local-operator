@@ -121,6 +121,34 @@ def test_classify_cut_off_adopts_a_cause_stamped_on_the_event(tmp_path: Path) ->
     assert session._cut_off_cause == cause
 
 
+def test_the_loops_output_limit_end_classifies_as_an_error(tmp_path: Path) -> None:
+    """The router-route cut-off, end to end through the LIVE classifier.
+
+    This is the shape a delegated CHILD produces (it runs the same loop and the
+    same parent-resolved model): the loop stamps ``aborted=True`` and
+    ``cut_off_cause="output-limit"`` on the end event and arms nothing, so the
+    event is the only record (RC1's adoption path). Without the adoption the end
+    would keep ``aborted=True, error=None`` and read as a DELIBERATE stop on
+    every surface, which is how a truncated child told its parent it had
+    finished.
+    """
+    from local_operator.incidents import OUTPUT_LIMIT_CAUSE, is_cut_off_cause
+
+    session = _make_session(tmp_path / "sess")
+    classed = session._classify_cut_off(
+        AgentEndEvent(messages=[], aborted=True, cut_off_cause=OUTPUT_LIMIT_CAUSE)
+    )
+    assert is_cut_off_cause(OUTPUT_LIMIT_CAUSE)
+    assert classed.aborted is False
+    assert classed.error == format_cut_off_notice(OUTPUT_LIMIT_CAUSE)
+    assert classed.cut_off_cause == OUTPUT_LIMIT_CAUSE
+    assert classed.cut_off == render_cut_off_reason(OUTPUT_LIMIT_CAUSE)
+    assert session._cut_off_cause == OUTPUT_LIMIT_CAUSE
+    # The sentence is the one an operator and a resuming parent read.
+    assert classed.error is not None
+    assert "output limit" in classed.error
+
+
 def test_a_deliberate_stop_outranks_a_cause_stamped_on_the_event(tmp_path: Path) -> None:
     """The negative arm of the adoption: positive evidence of a user's own stop wins.
 

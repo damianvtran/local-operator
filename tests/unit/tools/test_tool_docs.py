@@ -230,11 +230,14 @@ _WALK_DEPTH_CAP = 2
 # Re-measured 2026-10-15 through both isolated render arms: the shared intent
 # shape stays "2-6 words, present participle"; only its repeated pointer shrank.
 # Native personal-memory docs are newly accounted for; URL docs remain opt-in.
+# 782 -> 804 (#2509): the tools/effort/delegate descriptions now say WHICH
+# kind may carry them, so the agent doc's rendered schema grew by those
+# qualifiers (the tier arm below moves with it).
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 782,
+    "agent": 804,
     "ask": 1001,
     "ask_withdraw": 314,
-    "bash": 300,
+    "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
     # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every
@@ -249,7 +252,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # by this test's own printed table (the ``count_text_tokens`` ledger path)
     # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
     "bridge": 559,
-    "browser": 1308,
+    # Re-measured with this test's canonical isolated renderer: the read-only
+    # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
+    # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
+    # the field's own description to the doc — the deliberate cost of the value
+    # never appearing in the transcript (incident: a literal password in `type`
+    # reached a subagent's transcript, where no shape pass could see it).
+    "browser": 1424,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -280,6 +289,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
     # shows an estimated figure when the response carries usage.
     "generate_image": 931,
+    # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
+    # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
+    # what it costs, the estimate rules and the honest cancel paragraphs.
+    # The wire description carries one sentence; this holds the rest. Both
+    # audio entries were measured by this test's own printed table (the
+    # ``count_text_tokens`` ledger path) in the canonical arm.
+    # RE-MEASURED 2026-10-18 (#2595, B1/Q-1): reviewed batch schema was
+    # 487 (+56 from 431). Round-1 M4/M5 clarifies the exclusive single/batch
+    # fields and caps names at 100 chars: final render is 494 (+7 from 487).
+    # Both measurements use render_tool_doc + count_text_tokens in this test's
+    # canonical isolated arm, not a copied or guessed token allowance.
+    "generate_sound_effect": 494,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -290,8 +311,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # same fact twice); re-measured deliberately, and it is the ONLY entry
     # this remediation moved.
     "generate_video": 790,
+    # NEW (sound-generation wave, 2026-10-17): the ``generate_voiceover`` doc
+    # — the three rungs and the failover rule, cost and estimates, the
+    # language-on-flash limit (no pronunciation dictionaries), MP3-only and
+    # the honest cancel paragraphs.
+    "generate_voiceover": 628,
     "glob": 87,
     "grep": 333,
+    # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
+    # actions plus the preview-first/confirm/selection contract. Measured with
+    # this test's canonical isolated renderer; no existing entry moved. Round-1
+    # remediation trimmed the wire schema descriptions: 297 -> 182.
+    "harness_import": 182,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
     # rewritten to say that pause/cancel RECORD it as the stop reason. The new
     # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
@@ -307,8 +338,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``op='list'`` shows. One token, re-measured.
     "jobs": 347,
     "list_variables": 54,
+    # NEW (Library): the six-op catalog tool's reference — filters, tag and
+    # provenance rules, and the read-tier rationale. Measured through this
+    # file's own renderer; no other entry moved.
+    "library": 683,
     "lsp": 272,
-    "memory": 116,
+    # 116 -> 127 (memory move, round 1): the description now names
+    # ``edit new_text={"move":"scope"}``, which makes the verb discoverable
+    # without a guide lookup. Re-measured deliberately via this test's print.
+    "memory": 127,
     "monitor": 353,
     "network": 870,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
@@ -325,7 +363,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
-    "sessions": 798,
+    # Spawn's tags field/description deliberately adds 21 reference tokens.
+    "sessions": 819,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
@@ -333,7 +372,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
     "task": 616,
-    "team": 485,
+    # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
+    # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
+    # prose — the same arm renders the doc back at 485 when that property and its
+    # ``$defs.TeamOverride`` entry are stripped, i.e. the cost is the nested
+    # list-of-objects shape and its three field descriptions, not added
+    # sentences. It is the ONLY entry that moved. Re-measured deliberately
+    # through this test's own printed table; the tier arm below is unmoved
+    # because this doc does not read config.
+    "team": 779,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -359,7 +406,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: intent-description cut as the canonical table above.
 #: 639 -> 635 (and `task` 488 -> 484 above): the sentence the depth gate added to
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 811, "task": 764}
+#: 811 -> 833 (#2509): the same +22 the canonical table above takes, because
+#: the qualified tools/effort/delegate descriptions render on both arms.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 833, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

@@ -597,6 +597,120 @@ def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | 
     )
 
 
+def _tags_stats(root: Path) -> tuple[Any, ...]:
+    """A fingerprint of the two places a tag write lands, carried by every
+    shape of :func:`_tags_marker` (see there for why the token alone is not
+    enough). STATS ONLY: this runs on the scan tick and must never walk the
+    assignment directory.
+
+    The directory's own ``st_mtime_ns`` moves when a same-directory
+    ``os.replace`` lands in it, which is how every assignment write in the
+    store is performed; the inode and size of ``categories.json`` cover a
+    rewrite that lands inside one clock tick. The residue is the same one
+    ``_refresh_pins_if_changed`` states for the pin file: two same-size
+    replaces inside a single mtime tick on a filesystem that recycles inodes
+    can fingerprint equal, and the next write that moves size or inode is what
+    picks the change up. Bounded to that burst, never unbounded.
+    """
+
+    def stat(path: Path) -> tuple[int, int, int] | None:
+        try:
+            value = path.stat()
+        except OSError:
+            return None
+        return (value.st_ino, value.st_size, value.st_mtime_ns)
+
+    return (stat(root / "tags" / "session"), stat(root / "tags" / "categories.json"))
+
+
+def _tags_marker(root: Path) -> tuple[Any, ...]:
+    """The equality marker for the shared tag store on this tick.
+
+    Two shapes, and the stats component exists in BOTH because older readers
+    and writers coexist with this build:
+
+    * ``("revision", token, stats)`` -- the store's own change token, bumped
+      by every real ``write_categories``/``set_entity_tags`` mutation (see
+      ``session.session_tags``). No false move from a no-op rewrite.
+    * ``("stats", stats)`` -- a store with no revision file yet, which is
+      either one no build with the marker has written or one another build
+      is writing.
+
+    THE STATS ARE COMPARED EVEN WHEN THE TOKEN EXISTS. An older build that
+    replaces an assignment without knowing about the token would otherwise be
+    invisible forever once any marker-aware write created the file -- the
+    fallback would end at the first marker. Two stats per scan tick, and still
+    no directory walk; a no-op write moves neither the token nor the stats.
+
+    Either shape is compared for equality only: a marker is never an order and
+    never a timestamp a reader may reason about.
+    """
+    from local_operator.session.session_tags import read_tags_revision
+
+    stats = _tags_stats(root)
+    token = read_tags_revision(root)
+    if token is not None:
+        return ("revision", token, stats)
+    return ("stats", stats)
+
+
+def _read_tags_projection(root: Path) -> dict[str, dict[str, Any]]:
+    """One snapshot of every conversation's tag assignment, names resolved.
+
+    The registry is read ONCE and every assignment file is projected against
+    that same list, so two names on a row can never come from two different
+    registry generations. Unknown/deleted category ids are pruned by
+    ``read_entity_tags`` rather than surfaced, which is why an operator who
+    deletes a category never sees an error on the phone.
+
+    Bounded by the store's own cap: at most 32 categories, and a session
+    directory grows one assignment file per TAGGED conversation, so this walk
+    is far smaller than the session listing it decorates. It runs ONLY when
+    the marker moved; ``SessionTable.tags_snapshot`` owns that cache.
+    """
+    from local_operator.session.session_tags import read_categories, read_entity_tags
+
+    categories = read_categories(root)
+    lookup = {tag["id"]: tag["name"] for tag in categories}
+    snapshot: dict[str, dict[str, Any]] = {}
+    for path in (root / "tags" / "session").glob("*.json"):
+        session_id = path.stem
+        # The store's own id contract; a stray file was not written by it and
+        # must not become a row's decoration.
+        if not re.fullmatch(r"[a-f0-9]{12}", session_id):
+            continue
+        try:
+            state = read_entity_tags(root, "session", session_id, categories=categories)
+        except ValueError:
+            continue
+        snapshot[session_id] = {
+            "tags": [{"id": key, "name": lookup[key]} for key in state["tags"]],
+            "primary": state["primary"],
+        }
+    return snapshot
+
+
+#: The body-shape refusal, shared by the two malformed-body branches of the tag
+#: assignment route so a client cannot tell which check fired. Store-level
+#: refusals use the STORE's sentences instead (see ``session.session_tags``),
+#: because those are the ones the desktop surface shows and the two remain one
+#: vocabulary.
+_TAG_BODY_ERROR = "tags (a list of category ids) and primary (an id or null) are required"
+
+
+def _tag_fields(projection: dict[str, dict[str, Any]], session_id: str) -> dict[str, Any]:
+    """The two ALWAYS-PRESENT row fields for one conversation.
+
+    ``[]``/``None`` is the untagged answer on every path -- a durable row, a
+    live-only row, a past/search row -- so a client never needs a presence
+    check to decide whether the conversation has tags.
+    """
+    assignment = projection.get(session_id)
+    if assignment is None:
+        return {"tags": [], "primary": None}
+    return {"tags": list(assignment["tags"]), "primary": assignment["primary"]}
+
+
 class SessionTable:
     """The daemon's whole runtime state. One instance, owned by the loop."""
 
@@ -671,6 +785,48 @@ class SessionTable:
         #: would swallow the wake; see the invariant in
         #: ``_refresh_pins_if_changed``.
         self.pins: tuple[str, ...] = ()
+        #: The tag projection for every conversation, from ONE store snapshot:
+        #: ``{session_id: {"tags": [{"id", "name"}], "primary": str | None}}``.
+        #: Kept here rather than read per row for the same reason ``pins`` is --
+        #: one read decorates the whole listing, and ``_merge_summaries`` stays
+        #: in-memory -- and rebuilt ONLY when ``_tags_token`` (the store's
+        #: equality marker, see ``_tags_marker``) moves, so the 2 s scan tick
+        #: costs one small file read rather than a directory walk.
+        self._tags_snapshot: dict[str, dict[str, Any]] | None = None
+        #: The marker the projection above was built from. ``None`` means "no
+        #: marker has ever been read", which is distinct from every real marker
+        #: (both shapes are tuples), so the first read always builds.
+        self._tags_token: tuple[Any, ...] | None = None
+
+    def tags_snapshot(self, marker: tuple[Any, ...] | None = None) -> dict[str, dict[str, Any]]:
+        """The tag projection, rebuilt only when the store's marker moved.
+
+        BLOCKING WORK: one marker read on every call, plus ONE categories read
+        and one assignment walk only when the marker changed -- which is why
+        every async caller runs this through ``asyncio.to_thread``. The cached
+        object is returned BY IDENTITY on an unchanged marker; that identity is
+        the test that no tick rescanned the store.
+
+        The projection is keyed by session id and holds plain JSON-ready
+        values. Values are SHARED between rows and frames and must never be
+        mutated by a reader (``_tag_fields`` copies what a row carries).
+
+        ``marker`` lets the scan watcher hand over a marker it already read,
+        so one tick costs ONE marker read rather than two; every other caller
+        omits it and this reads its own.
+        """
+        from local_operator.paths import config_dir
+
+        root = config_dir()
+        if marker is None:
+            marker = _tags_marker(root)
+        cached = self._tags_snapshot
+        if cached is not None and marker == self._tags_token:
+            return cached
+        snapshot = _read_tags_projection(root)
+        self._tags_snapshot = snapshot
+        self._tags_token = marker
+        return snapshot
 
     def invalidate_summaries_cache(self) -> None:
         """Drop both summaries caches so the next read rescans.
@@ -914,7 +1070,11 @@ class SessionTable:
                 revision = None
             else:
                 self._attention_listing_degraded = False
-            out = self._merge_summaries(rows)
+            # Warm the tag projection OFF the loop (one marker read, and the
+            # one store walk only when something really changed); the merge
+            # below is then in-memory for tags like it is for pins.
+            tags = await asyncio.to_thread(self.tags_snapshot)
+            out = self._merge_summaries(rows, tags)
             # The rows and the aggregate leave the build TOGETHER and are
             # published by the caller in ONE assignment (review round 1,
             # MINOR-1): a caller that resumes late must never publish build A's
@@ -1138,7 +1298,9 @@ class SessionTable:
         self.invalidate_summaries_cache()
         return session_id in self.pins
 
-    def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
+    def _merge_summaries(
+        self, durable: dict[str, Any], tags: dict[str, dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """Merge cached durable rows with fresh live state into summary rows.
 
         Split out of ``summaries`` so the cache layer and the row shape are
@@ -1152,7 +1314,16 @@ class SessionTable:
         skips the check: it is user-facing by the scan's own verdict, and
         re-reading its marker would be a second syscall for an answer already
         in hand.
+
+        ``tags`` is the projection to decorate rows with; the caller passes the
+        table's cached snapshot (warming it off the loop first), while the
+        default is for direct callers and does the marker read itself. Either
+        way a row ALWAYS carries ``tags``/``primary`` -- untagged is ``[]`` and
+        ``None`` -- so a client never has to distinguish "no tags" from "this
+        build does not send them".
         """
+        if tags is None:
+            tags = self.tags_snapshot()
         active: dict[str, SessionEntry] = {}
         for entry in self.entries.values():
             if entry.ended:
@@ -1247,6 +1418,9 @@ class SessionTable:
                     # in two different lists depending on where you looked.
                     "section": "active" if is_active else "previous",
                     "pinned": session_id in self.pins,
+                    # Tag decoration, from the same registry snapshot for every
+                    # row in this listing. Always present (see the docstring).
+                    **_tag_fields(tags, session_id),
                     "conversation_name": (p.conversation_name if p else "")
                     or (entry.record.conversation_name if entry else "")
                     or (row.name if row else ""),
@@ -1632,7 +1806,9 @@ def _live_generation_is_user_facing(session_id: str) -> bool:
 _COLD_TODO_CHILD_LIMIT = 96
 
 
-def _durable_projection(session_id: str) -> SessionProjection | None:
+def _durable_projection(
+    session_id: str, *, lapsed_visible_ms: int | None = None
+) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk.
 
     Reads through the daemon's incremental fold cache (:mod:`.durable`): the
@@ -1807,6 +1983,45 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             todos=fold._todo_phases(raw_todos),
         )
         projection.subagents.append(row)
+    # A STOPPED CONVERSATION'S ASKS, from the index that outlives its runtime.
+    # The phone's asks sheet lists only the conversation it was opened from, so
+    # this screen is the one place a stopped conversation's asks can appear —
+    # and with no runtime folding them, the derived index (``asks/store``) is the
+    # only source. Same rows the aggregate serves for this session, capped like
+    # a live runtime's projection, with the tally counted over every row rather
+    # than the cap (the live fold's contract, see ``ProjectionFold.set_asks``).
+    # No index entry at all leaves BOTH fields absent: ``asks_open: 0`` would
+    # claim a live, empty queue, which a stopped conversation does not have. An
+    # entry whose rows are all hidden is the other case, handled below.
+    #
+    # ``asks.lapsed_visible_for`` applies here too (decision D8): a stopped
+    # conversation's lapsed ask leaves its screen when the window says so. Read
+    # off the process watcher's snapshot when the caller did not pass it —
+    # ``service.amain`` starts that watcher at boot, so it follows another
+    # process's write within one poll — and never polled from here, because
+    # this runs in a worker thread and a poll fans out to loop-thread listeners.
+    from local_operator.asks import store as ask_store
+    from local_operator.asks.policy import PROJECTION_CAP
+    from local_operator.asks.visibility import lapsed_visible_ms as _lapsed_visible_ms
+    from local_operator.paths import config_dir
+
+    window = (
+        lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(config_dir())
+    )
+    ask_rows = ask_store.session_asks(config_dir(), session_id, lapsed_visible_ms=window)
+    if ask_rows:
+        outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
+        fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
+    elif ask_store.read_entry(config_dir(), session_id) is not None:
+        # AN ENTRY WHOSE ROWS ARE ALL HIDDEN still installs its (empty) fold.
+        # Skipping ``set_asks`` here left this frame one version BELOW the frame
+        # a viewed screen retained when it still had rows, and
+        # ``capture_subagent_details`` re-served that retained frame as the
+        # newer one — so a window that hid every row never reached a screen the
+        # phone had already opened (QA round 1, Q1). Rows ``[]`` and a 0 tally
+        # say "nothing left to show here"; with no entry at all both fields stay
+        # absent, as before.
+        fold.set_asks([], 0)
     projection.ended = False
     projection.degraded = False
     return projection
@@ -1970,6 +2185,28 @@ def _operator_handshake(entry: SessionEntry, op: str) -> str | None:
     return handshake_proof(
         entry.operator_cap, client_nonce=entry.operator_nonce, server_salt=entry.operator_salt
     )
+
+
+def _optional_capabilities() -> dict[str, Any]:
+    """Capabilities a build may or may not carry, keyed for the phone.
+
+    ``library`` is the global asset catalog; ``librarian`` is the organizing
+    agent that lives on top of it. Both are read from the installed tree rather
+    than a constant so a packaged build without the module advertises nothing —
+    the web's footer then hides the destination instead of rendering a screen
+    whose every request would 404.
+    """
+    flags: dict[str, Any] = {}
+    try:
+        from local_operator.mobile.library import is_available, librarian_available
+
+        if is_available():
+            flags["library"] = 1
+        if librarian_available():
+            flags["librarian"] = 1
+    except Exception:  # noqa: BLE001 - an absent module is "no capability"
+        pass
+    return flags
 
 
 def _feature_flags() -> dict[str, Any]:
@@ -2383,16 +2620,19 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     return data
 
 
-#: The ops that ANSWER a queued ask (design §2.4). They are answered by id and
-#: OUTLIVE the runtime that queued them — durability is the feature — so a relay
-#: with no live entry must ENGAGE rather than refuse: `ask_respond`/`ask_revise`/
-#: `ask_decline`/`ask_dismiss` all settle a durable question whose reader is the
-#: model, and "session not connected" (the pre-engage answer) left the phone
-#: accepting an answer nobody would ever read.
+#: The ops that settle a queued ask on a session with NO live runtime (design
+#: §2.4). They are answered by id and OUTLIVE the runtime that queued them —
+#: durability is the feature — so a relay with no live entry takes the COLD ARM for
+#: them rather than refusing: `ask_respond`/`ask_revise`/`ask_decline` all settle a
+#: durable question whose reader is the model, and "session not connected" (the
+#: pre-engage answer) left the phone accepting an answer nobody would ever read.
 #:
-#: `ask_dismiss` is deliberately in the set: it injects nothing, but it is still
-#: a view change against the durable log, and a session that cannot be engaged
-#: to record it must say so rather than paint a settled row that never landed.
+#: The COLD ARM is not one behaviour, though, and `ask_dismiss` is why (fork A,
+#: §14). It is in this set because it is still a settle op on the durable log, and it
+#: takes the same arm — the same gates, the same `ask_session_gone` refusal — but
+#: inside it, a dismissal goes to `asks/dismiss.py` and BOOTS NOTHING: it has no
+#: reader, so engaging for it started a session (a boot reconcile, the deadline
+#: notice and a paid turn) behind a button labelled "send no reply".
 _ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
 
 
@@ -2902,6 +3142,13 @@ class MobileDaemon:
         # and subscriber ownership are all gone.
         self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+        #: The tag marker this daemon last PUBLISHED to the list stream (or
+        #: adopted on its first scan pass). Deliberately separate from the
+        #: table's ``_tags_token``, which any read path may advance by
+        #: rebuilding the projection: a read that consumed a change must not
+        #: make the watcher believe the change was already announced
+        #: (QA round 1, Q-1). ``None`` until the first pass.
+        self._tags_notified: tuple[Any, ...] | None = None
         self._phone_attaches: dict[str, AttachClient] = {}
         self._phone_generations: dict[str, tuple[int, str]] = {}
         self._phone_attach_tasks: dict[str, asyncio.Task[None]] = {}
@@ -2910,6 +3157,11 @@ class MobileDaemon:
         # The daemon's display-settings subscription (see
         # :meth:`watch_display_settings`); ``None`` until attached.
         self._display_watch_unsubscribe: Callable[[], None] | None = None
+        # The ``asks.lapsed_visible_for`` subscription (see
+        # :meth:`watch_ask_visibility`) and the repaints it has in flight, held
+        # so a task is never garbage-collected mid-fold.
+        self._ask_visibility_unsubscribe: Callable[[], None] | None = None
+        self._ask_visibility_repaints: set[asyncio.Task[None]] = set()
         # The display-state generation: bumped by the follower's clear for
         # every ``display.*`` change a running daemon sees (see
         # ``watch_display_settings``). A fold site reads it BEFORE its fold
@@ -3012,6 +3264,109 @@ class MobileDaemon:
             )
         except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
             logger.warning("display settings follower could not be attached", exc_info=True)
+
+    def watch_ask_visibility(self) -> None:
+        """Repaint open STOPPED-conversation screens when ``asks.lapsed_visible_for``
+        changes (decision D9; QA round 1, Q1/Q3).
+
+        A live session repaints itself: its runtime republishes on the change
+        (``Session._apply_config_change``). A stopped one has no runtime, so its
+        screen is a durable fold this daemon built, and nothing re-folded it on a
+        setting change — an open screen kept the old rows until it reconnected.
+        This follower re-folds each WATCHED stopped screen (a route with an SSE
+        subscriber and no live entry) through the stamped capture and pushes the
+        frame, the same path the scan uses for a session that just ended.
+        Unwatched routes need nothing: their next open folds fresh.
+
+        Called once at boot from ``service.amain`` beside
+        :meth:`watch_display_settings`, on the daemon's loop. Idempotent; a
+        watcher that cannot start leaves the old behaviour (correct on reopen).
+        Not covered, deliberately: a window EDGE passing with no setting change
+        while a stopped screen stays open (no daemon-side timer; the same gap as
+        a deadline passing there, deferred on #2465 as R6).
+        """
+        if self._ask_visibility_unsubscribe is not None:
+            return
+        try:
+            from local_operator.config_watch import process_watcher
+            from local_operator.paths import config_dir
+
+            watcher = process_watcher(config_dir())
+            watcher.start(asyncio.get_running_loop())
+
+            def _on_change(change: Any) -> None:
+                changed = getattr(change, "changed_keys", None) or ()
+                if "asks.lapsed_visible_for" not in changed:
+                    return
+                # Listener fan-out runs on the loop thread (ConfigWatcher's
+                # contract), so these tables are read and mutated here unlocked
+                # and the folds hop off-loop inside the capture.
+                #
+                # DROP EVERY STOPPED ROUTE'S RETAINED PAYLOAD FIRST, watched or
+                # not (review round 2, R2-1). A conversation this daemon watched
+                # die carries a TERMINAL ledger from the scan's capture, and
+                # ``capture_subagent_details`` re-serves the retained frame for
+                # every later non-terminal capture of it (``state.terminal and
+                # not terminal``) — the old rows, on the open stream and on
+                # reopen alike. With the payload gone, the same capture takes
+                # the ``durable_rematerialize`` branch: the fresh fold at the
+                # retained epoch, ended receipt kept. Live routes are left
+                # alone; their runtime republishes on the change itself.
+                for session_id in list(self.session_projections):
+                    if _entry_for_session(self, session_id) is None:
+                        self.session_projections.pop(session_id, None)
+                # Stamp the drop, as the display follower does: a durable fold
+                # already in flight was folded with the OLD window, and its
+                # capture must not land as the retained payload just dropped.
+                self.display_generation += 1
+                for session_id in list(self.table.session_subscribers):
+                    if _entry_for_session(self, session_id) is not None:
+                        continue
+                    task = asyncio.ensure_future(self._repaint_stopped_screen(session_id))
+                    self._ask_visibility_repaints.add(task)
+                    task.add_done_callback(self._ask_visibility_repaints.discard)
+
+            self._ask_visibility_unsubscribe = watcher.subscribe(_on_change)
+        except Exception:  # noqa: BLE001 — a missing follower costs a reopen, not the boot
+            logger.warning("ask visibility follower could not be attached", exc_info=True)
+
+    async def _repaint_stopped_screen(self, session_id: str) -> None:
+        """Re-fold one watched stopped screen and push the frame to its subscribers."""
+        try:
+            # A RETAINED PAYLOAD PREDATES THE CHANGE THAT ASKED FOR THIS REPAINT, and
+            # the generation fence serves it straight back: for a session whose death
+            # this daemon already captured, ``capture_subagent_details`` answers
+            # ``state.terminal and not terminal`` with the retained frame rather than
+            # a fold — correct for a repaint that is only a re-send, wrong for one
+            # that follows a write, where that frame is the frame from BEFORE the
+            # write. The visibility follower drops the payload for the same reason
+            # before it schedules this repaint; doing it here makes the repaint mean
+            # what its name says for every caller. The generation LEDGER stays (it is
+            # what republishes the fresh fold at the retained epoch, and what a live
+            # owner's next frame advances).
+            self.session_projections.pop(session_id, None)
+            # The SSE route's own rule for the ended receipt (U7): a stopped
+            # screen is ended iff an ended entry for it exists.
+            ended = any(
+                candidate.ended and candidate.record.session_id == session_id
+                for candidate in self.table.entries.values()
+            )
+            projection = await self._capture_durable_projection(session_id, ended=ended)
+        except Exception:  # noqa: BLE001 — a failed repaint leaves the reopen path correct
+            logger.debug("ask visibility repaint failed for %s", session_id, exc_info=True)
+            return
+        if projection is None:
+            return
+        frame = _projection_frame(projection)
+        for queue in self.table.session_subscribers.get(session_id, set()):
+            try:
+                queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(frame)
+                except asyncio.QueueEmpty:
+                    pass
 
     # -- the relay's config channel (wave-5 slice D) -----------------------
 
@@ -3357,6 +3712,7 @@ class MobileDaemon:
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
+        await self.refresh_tags_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
             self._attention_revision = revision
@@ -3645,6 +4001,53 @@ class MobileDaemon:
         self.table._summaries_at = 0.0
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
         self.table.notify_list_changed()
+
+    async def refresh_tags_if_changed(self) -> None:
+        """Wake the list stream when another surface changed a conversation's tags.
+
+        THE SAME HOLE THE PINS HAD, for the same reason: assignment lives in a
+        store shared with the desktop app, the TUI and agents/auto-tagging
+        (``session.session_tags``), while the table's projection was built only
+        when something asked for the listing -- and the list stream asks only
+        after ``notify_list_changed``. So a tag written outside this daemon's
+        route would stay invisible on an open phone until an unrelated event
+        (a session registering, a completion) happened to repaint.
+
+        ONE MARKER READ PER SCAN TICK, riding the pass that already runs every
+        ``SCAN_INTERVAL_S``; the assignment directory is walked only when the
+        marker moved (see ``_tags_marker`` for both shapes and their bound).
+        The rebuild happens HERE, off the loop, rather than lazily on the next
+        repaint: that keeps a store walk out of a request's path and warms the
+        identity cache the repaint will read. On a real move it drops only the
+        MERGED summaries cache -- tags are decoration the merge recomputes, so
+        re-walking every session directory for them would be waste -- and rings
+        the list bell on the loop, where ``put_nowait`` is safe.
+
+        A NO-OP WRITE OWES NO REPAINT: the store bumps its token only on a real
+        mutation, so an identical rewrite (the TUI saving the same assignment,
+        an agent retrying a dropped response) leaves the marker still and this
+        pass silent.
+
+        THE WAKE IS NOT CONSUMED BY A READER. ``table.tags_snapshot`` advances
+        the table's cache token whenever any request path rebuilds the
+        projection, so comparing against that token let a concurrent
+        ``GET /api/sessions`` spend an external write's change and leave an
+        open SSE-only client unrepainted (QA round 1, Q-1). This pass compares
+        against ``_tags_notified`` instead -- the marker the daemon last
+        PUBLISHED -- which only this pass and the daemon's own route write.
+        """
+        from local_operator.paths import config_dir
+
+        table = self.table
+        marker = await asyncio.to_thread(_tags_marker, config_dir())
+        if marker == self._tags_notified:
+            return
+        await asyncio.to_thread(table.tags_snapshot, marker)
+        self._tags_notified = marker
+        table._summaries_cache = None
+        table._summaries_at = 0.0
+        # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
+        table.notify_list_changed()
 
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""
@@ -4619,7 +5022,9 @@ def build_app(daemon: MobileDaemon):
         that module so this payload's repaint cadence never becomes a
         credential-store read cadence. An OLD daemon omits the key entirely, and
         the web's rule for absence is the same as for ``available: false``:
-        hide the mic.
+        hide the mic. ``session_tags`` is the same shape for the tag routes:
+        ``{"available": true}`` because they exist in this build, absent on an
+        older relay, and never a substitute for ``features.session_tags``.
 
         ``unread`` rides beside ``degraded`` for the same single-source reason
         (push/ack-sync S1 [ADR 0006 §1.1 @22e2cce2]): it is the SAME aggregate
@@ -4637,13 +5042,20 @@ def build_app(daemon: MobileDaemon):
         # this request's answer, not the table's state.
         sessions = list(await daemon.table.summaries())
         if include_peers:
-            sessions.extend(
-                await asyncio.to_thread(
-                    mobile_mesh.remote_session_rows,
-                    config_dir(),
-                    pinned=set(daemon.table.pins),
-                )
+            peers = await asyncio.to_thread(
+                mobile_mesh.remote_session_rows,
+                config_dir(),
+                pinned=set(daemon.table.pins),
             )
+            for row in peers:
+                # Remote rows carry the local row's ALWAYS-PRESENT shape with
+                # the empty values, not an omitted key. Their assignment lives
+                # in the other device's store, so this relay has nothing to
+                # read -- and nothing to write, which is why the route below
+                # refuses a remote id with 404 rather than needing a flag.
+                row["tags"] = []
+                row["primary"] = None
+            sessions.extend(peers)
         return {
             "sessions": sessions,
             "degraded": daemon.table.listing_degraded(),
@@ -4655,6 +5067,18 @@ def build_app(daemon: MobileDaemon):
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
+                # A RELAY capability, like ``i18n``: it says this build actually
+                # serves ``GET /api/tags`` and ``PUT /api/sessions/{id}/tags``,
+                # so a client may render assignment controls only when the
+                # routes are there to back them. Deliberately NOT
+                # ``features.session_tags``: that dict describes core's
+                # contract, not this app's routing table (see the i18n note
+                # above), and the two must not be conflated.
+                "session_tags": {"available": True},
+                # Conditional because this build may predate the Library module:
+                # the phone's footer shows the destination iff the key is here,
+                # and a missing key means "this relay cannot serve it".
+                **_optional_capabilities(),
             },
         }
 
@@ -4859,6 +5283,47 @@ def build_app(daemon: MobileDaemon):
                 "X-Accel-Buffering": "no",
             },
         )
+
+    async def api_account_routing(request: Request) -> Response:
+        """The authenticated phone may edit ONE non-security routing setting.
+
+        Keep this projection narrow: adding a settings key later requires an
+        explicit server change, never a caller-supplied arbitrary config path.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile.account_routing import (
+            AccountRoutingError,
+            policy_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                from local_operator.i18n.keys import wire_settings_account_policy as _ap
+
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope()["text"],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     async def api_config_events(request: Request) -> Response:
         """SSE for the RESOLVED language: a settings change reaches the phone live.
@@ -5297,6 +5762,152 @@ def build_app(daemon: MobileDaemon):
         # The caller gets the state the list will show (the read-back), so a retry
         # is idempotent and the answer cannot claim a pin the reader pruned.
         return JSONResponse({"ok": True, "pinned": state})
+
+    async def api_tags(request: Request) -> Response:
+        """``GET /api/tags`` -- the shared catalogue, READ-ONLY on the phone.
+
+        THE SAME STORE, the same wire shape as ``GET /v1/desktop/tags``: id,
+        name, registry order, and the number of conversations assigned. That
+        read is deliberately served rather than reimplemented, and there is
+        deliberately no phone-side create/rename (``PUT /api/tags``): identity
+        is a cross-surface contract, so forking category logic is how the phone
+        ends up with a tag the desktop cannot see or cannot name. Creating and
+        renaming stay where they already live -- desktop and agent callers --
+        and the phone renders what they publish.
+
+        ``conversations`` is the store's own ``usage_counts``: distinct session
+        DIRECTORIES with an assignment, archived/hidden included (they still
+        hold the assignment) and deleted excluded (an assignment file left
+        below a deleted conversation is not a conversation). The count is not
+        "rows on this phone's page", so it cannot disagree with the desktop's
+        count for the same category.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+        from local_operator.session.session_tags import read_categories, usage_counts
+
+        def read() -> dict[str, Any]:
+            counts = usage_counts(config_dir())
+            return {
+                "tags": [
+                    {**tag, "order": order, "conversations": counts.get(tag["id"], 0)}
+                    for order, tag in enumerate(read_categories(config_dir()))
+                ]
+            }
+
+        return JSONResponse(await asyncio.to_thread(read))
+
+    async def api_session_tags(request: Request) -> Response:
+        """``PUT /api/sessions/{session_id}/tags`` -- set ONE conversation's tags.
+
+        DESIRED STATE, like the pin route above and like ``PUT
+        /v1/desktop/sessions/{session_id}/tags``: the body names the whole
+        assignment (``{"tags": [ids], "primary": id | null}``) and is applied
+        atomically, so a dropped response can be retried and lands on the same
+        state. ``tags: [], primary: null`` clears, which is the one shape that
+        has to be expressible without inventing a separate verb.
+
+        Refusals, each with NO file change:
+        * 422 from the STORE's own validation -- unknown id, duplicate ids,
+          more than 8, or a primary outside ``tags`` -- using the store's
+          sentence verbatim. That sentence is what the desktop surface shows;
+          re-wording it here would be a second vocabulary for one rule.
+        * 422 for a malformed body: exactly two keys, ``tags`` (a list of
+          category ids) and ``primary`` (an id or null), are required -- an
+          absent ``primary`` or an unknown/extra key is refused rather than
+          defaulted, because a defaulted ``primary`` silently re-primaries
+          the conversation (review round 1, MINOR-1). Types only, so the
+          store is never handed a value it would raise ``TypeError`` on.
+        * 404 for an id this machine has no conversation for: bad shape,
+          unknown, or a REMOTE/mesh id. The rule is the desktop route's own --
+          a folder under ``sessions/`` -- not merely a live entry, because a
+          live generation in the window before its folder materialises would
+          leave an assignment no surface lists (review round 1, MINOR-2). A
+          remote row is listed (see ``_list_frame``) but its assignment lives
+          in the other device's store and this relay has no directory to
+          write; refusing is what keeps a tag from binding to a conversation
+          this surface cannot see.
+
+        The read-back is canonical: names resolved from ONE registry snapshot
+        AFTER the write, orphan ids pruned, and the settled primary -- so the
+        client renders the answer instead of re-deriving it, and a concurrent
+        category deletion answers the assignment the store actually kept.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        # The store's own id contract. Checked before the store so a shape it
+        # would reject as ``ValueError`` is the ROUTE's documented 404 rather
+        # than a 422 about a category.
+        if not re.fullmatch(r"[a-f0-9]{12}", session_id):
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        # The desktop route's own admission rule: the conversation must have a
+        # durable directory. A live entry alone is not enough -- the tag store
+        # has no directory prune (unlike ``read_pins``), so accepting one would
+        # store an assignment that no listing ever resolves against.
+        if not await asyncio.to_thread(_session_folder_exists, session_id):
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
+        # EXACTLY TWO KEYS. An absent ``primary`` cannot default to null: that
+        # turns a malformed request into a real, user-visible re-primary, and
+        # an unknown key would be silently ignored where the desktop model
+        # refuses it (``extra="forbid"``).
+        if not isinstance(body, dict) or set(body) != {"tags", "primary"}:
+            return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
+        tag_ids = body["tags"]
+        primary = body["primary"]
+        # TYPES ONLY: every value-level rule (cap, duplicates, unknown ids,
+        # primary membership) is the store's, in the store's words.
+        if (
+            not isinstance(tag_ids, list)
+            or any(not isinstance(key, str) for key in tag_ids)
+            or (primary is not None and not isinstance(primary, str))
+        ):
+            return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
+        from local_operator.paths import config_dir
+        from local_operator.session.session_tags import (
+            read_categories,
+            read_entity_tags,
+            set_entity_tags,
+        )
+
+        def apply() -> dict[str, Any]:
+            root = config_dir()
+            # ``set_entity_tags`` validates EVERYTHING before it writes, so the
+            # 422 paths below leave the store byte-identical.
+            set_entity_tags(root, "session", session_id, list(tag_ids), primary)
+            categories = read_categories(root)
+            state = read_entity_tags(root, "session", session_id, categories=categories)
+            lookup = {tag["id"]: tag for tag in categories}
+            return {
+                "session_id": session_id,
+                "tags": [lookup[key] for key in state["tags"] if key in lookup],
+                "primary": state["primary"],
+            }
+
+        try:
+            state = await asyncio.to_thread(apply)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        # PUBLISH THIS WRITE'S MARKER BEFORE WAKING. The scan watcher compares
+        # against ``_tags_notified`` rather than the table's cache token, so
+        # recording the marker this route just produced keeps the next tick
+        # from repainting the same change twice -- while an external write in
+        # the window still differs and still wakes (QA round 1, Q-1).
+        daemon._tags_notified = await asyncio.to_thread(_tags_marker, config_dir())
+        # THE STREAM WAKE IS THE LOOP'S, never the worker's (same rule the pin
+        # route states): ``notify_list_changed`` puts onto asyncio queues. Every
+        # connected client repaints with this row's new tags, and the writer's
+        # own optimistic render is replaced by the canonical read-back above.
+        daemon.table.invalidate_summaries_cache()
+        daemon.table.notify_list_changed()
+        return JSONResponse(state)
 
     async def api_transfer_session(request: Request) -> Response:
         """``POST /api/sessions/{session_id}/transfer`` — move (or copy) one conversation.
@@ -6065,9 +6676,10 @@ def build_app(daemon: MobileDaemon):
                 # after its runtime exited must ENGAGE that session rather than
                 # refuse: the pre-engage "session not connected" was a queue with
                 # no reader — the phone accepted the answer and no model ever saw
-                # it. `ask_respond`/`ask_revise`/`ask_decline`/`ask_dismiss` all
-                # take this arm; a decline and a dismiss settle the ask just as an
-                # answer does, so they engage too.
+                # it. `ask_respond`/`ask_revise`/`ask_decline` take the DIAL below;
+                # `ask_dismiss` takes the arm and then the no-boot door inside it
+                # (fork A, §14) — it settles the ask without a runtime because it
+                # tells the runtime nothing.
                 #
                 # THE CONDITION IS ``_session_is_live``, THE SAME PREDICATE THE
                 # CARD READS. `entry is None` was too narrow: an entry whose dial
@@ -6094,6 +6706,54 @@ def build_app(daemon: MobileDaemon):
                         {"error": _ask_gone_copy(op), "code": "ask_session_gone"},
                         status_code=409,
                     )
+                if op == "ask_dismiss":
+                    # THE NO-BOOT DISMISSAL (fork A, §14). A dismissal has no reader:
+                    # it is one append plus an index rewrite, decided by the fold.
+                    # The engage arm below would BOOT the conversation for it — and
+                    # that boot's own reconcile would deliver the deadline notice the
+                    # dismissal had not cancelled yet, running a paid turn the card
+                    # promised would not happen ("dismiss — send no reply").
+                    from local_operator.asks.dismiss import dismiss_cold
+
+                    outcome = await dismiss_cold(
+                        config_dir(),
+                        session_id,
+                        str(body.get("ask_id") or ""),
+                        # The phone's body carries no ``by``; the empty word is the
+                        # remote door, which is what ``dismiss_cold`` records for it
+                        # (the same word the live op's own door defaults to).
+                        by=str(body.get("by") or ""),
+                    )
+                    if outcome.get("ok"):
+                        # THE SCREEN IS REPAINTED HERE BECAUSE NOTHING ELSE WILL (UX
+                        # round 1, U1): no runtime means no fold publishing a frame,
+                        # and the dock/chip read ``projection.asks``. The same detail
+                        # the live op answers with, because it IS the same op: only
+                        # the door differs.
+                        #
+                        # IT IS THE DAEMON'S OWN STOPPED-SCREEN REPAINT, not a
+                        # second publish spelling (agent review round 2, M-3/M-4).
+                        # Two properties ride on that reuse and both were missing
+                        # from the spelling this replaced:
+                        #
+                        # * the ENDED RECEIPT. ``_repaint_stopped_screen`` computes
+                        #   ``ended`` from the table the way the SSE route does, and
+                        #   the composer reads ``projection.ended`` — a conversation
+                        #   this daemon has watched die must not come back to life on
+                        #   the phone because a dismissal repainted it;
+                        # * the failure is the PAINT's, not the dismissal's. The
+                        #   dismissal is durable before this line, so a fold that
+                        #   raises is logged and the user is still told what they
+                        #   asked for, rather than served a 422/502 for a settled
+                        #   ask.
+                        await daemon._repaint_stopped_screen(session_id)
+                        return JSONResponse({"ok": True, "detail": "dismissed"})
+                    # ONLY a live owner falls back to the dial, and only because that
+                    # owner settles the ask itself. Every other refusal is the ANSWER
+                    # (an unknown ask, an ask that is not lapsed), and engaging to ask
+                    # a runtime the same question would spend a boot to be told it.
+                    if outcome.get("code") != "ask_owner_present":
+                        raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
                 if not daemon.dial_registrants:
                     raise RuntimeError("observer daemon cannot wake sessions")
                 from local_operator.mobile.attach_client import engage_session_client
@@ -6403,9 +7063,15 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         from local_operator.asks.store import index_asks
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
-        rows = await asyncio.to_thread(index_asks, config_dir())
+        # ``asks.lapsed_visible_for`` (decision D8), read HERE on the loop with
+        # a fresh poll — the boundary the phone reads, and the one thread a
+        # poll's listener fan-out may run on — then handed into the off-loop
+        # index walk as a plain int.
+        window = lapsed_visible_ms(config_dir(), poll_now=True)
+        rows = await asyncio.to_thread(index_asks, config_dir(), lapsed_visible_ms=window)
         # PER-ROW LIVENESS (design round 1, D1/D4 = UX U1/U3/U4). The index knows
         # an ask is durable; it does not know whether answering it will be a warm
         # round trip or a ~30 s engage. That fact lives in this process's dial
@@ -6574,7 +7240,11 @@ def build_app(daemon: MobileDaemon):
             limit = max(1, min(int(request.query_params.get("limit", "40")), 200))
         except ValueError:
             limit = 40
-        rows, degraded = await asyncio.to_thread(_search_sessions, query, limit)
+        # The tag projection is the table's cached one, passed through the
+        # thread boundary as plain values: one store read decorates the whole
+        # page, under the same marker cache the home listing uses.
+        tags = await asyncio.to_thread(daemon.table.tags_snapshot)
+        rows, degraded = await asyncio.to_thread(_search_sessions, query, limit, tags)
         return JSONResponse({"sessions": rows, "query": query, "degraded": degraded})
 
     async def api_directories(request: Request) -> Response:
@@ -6770,7 +7440,8 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        rows, degraded = await asyncio.to_thread(_past_sessions)
+        tags = await asyncio.to_thread(daemon.table.tags_snapshot)
+        rows, degraded = await asyncio.to_thread(_past_sessions, 20, tags)
         # The same marker the home listing carries, for the same reason: this is
         # another list of the operator's conversations, and a read that failed
         # must not reach it as "there are none".
@@ -6875,6 +7546,18 @@ def build_app(daemon: MobileDaemon):
             stt_availability,
             transcribe_audio,
         )
+        from local_operator.paths import config_dir
+        from local_operator.stt.cleanup import configured_cleanup
+
+        # The /settings key supplies the mode when the request names none; the
+        # request field wins, so the YAML read is skipped entirely when one is
+        # present. The read runs off the loop.
+        requested_cleanup = _optional_field("cleanup")
+        default_cleanup = (
+            "auto"
+            if requested_cleanup is not None
+            else await asyncio.to_thread(configured_cleanup, config_dir())
+        )
 
         # Read availability HERE and hand it to the dispatch, so the answer the
         # provider label and the dispatch both use is the SAME read (the module
@@ -6887,6 +7570,7 @@ def build_app(daemon: MobileDaemon):
                 language=_optional_field("language"),
                 prompt=_optional_field("prompt"),
                 model=_optional_field("model"),
+                cleanup=requested_cleanup or default_cleanup,
                 availability=answer,
             )
         except SttBackendUnavailable:
@@ -6923,6 +7607,19 @@ def build_app(daemon: MobileDaemon):
                 "provider": outcome.provider,
                 "model": outcome.model,
                 "path": outcome.path,
+                "cleanup": outcome.cleanup,
+                "raw_text": outcome.raw_text,
+                "raw_unavailable": outcome.raw_unavailable,
+                "language": outcome.language,
+                "removed": [
+                    {
+                        "start": span.start,
+                        "end": span.end,
+                        "kind": span.kind,
+                        "token": span.token,
+                    }
+                    for span in outcome.removed
+                ],
             }
         )
 
@@ -7371,6 +8068,303 @@ def build_app(daemon: MobileDaemon):
             str(request.path_params["device_id"]),
         )
 
+    # -- library --------------------------------------------------------------
+    #
+    # Transport only: every handler below calls ``local_operator.mobile.library``
+    # which projects the shared service with ``display=True``. The module is
+    # imported per handler (not at module scope) so an older build without it
+    # still serves its whole route table — the same laziness the projects and
+    # schedules handlers use for server-tier imports.
+
+    async def _library_call(name: str, *args: Any) -> Response:
+        from local_operator.mobile import library as mobile_library
+
+        try:
+            payload = await asyncio.to_thread(getattr(mobile_library, name), *args)
+        except mobile_library.LibraryRouteError as error:
+            return JSONResponse(
+                {"error": error.message, "code": error.code}, status_code=error.status
+            )
+        if isinstance(payload, Response):
+            return payload
+        return JSONResponse(payload)
+
+    async def _library_body(request: Request) -> dict[str, Any] | None:
+        try:
+            body = await request.json()
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+
+    async def api_library_list(request: Request) -> Response:
+        """One list frame. The server sorts and filters; the phone groups."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call("list_payload", config_dir(), dict(request.query_params))
+
+    async def api_library_facets(request: Request) -> Response:
+        """Counts, tags and build state without a page of rows."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call("facets_payload", config_dir())
+
+    async def api_library_detail(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "detail_payload", config_dir(), str(request.path_params["asset_id"])
+        )
+
+    async def api_library_patch(request: Request) -> Response:
+        """Editable metadata: name, description, favorite, locked, archived."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "patch_payload",
+            config_dir(),
+            str(request.path_params["asset_id"]),
+            body,
+        )
+
+    async def api_library_tags(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call("tags_payload", config_dir())
+
+    async def api_library_tag_create(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call("create_tag_payload", config_dir(), body)
+
+    async def api_library_tag_patch(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "rename_tag_payload",
+            config_dir(),
+            str(request.path_params["tag_id"]),
+            body,
+        )
+
+    async def api_library_tag_merge(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "merge_tag_payload",
+            config_dir(),
+            str(request.path_params["tag_id"]),
+            body,
+        )
+
+    async def api_library_set_tags(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "set_tags_payload",
+            config_dir(),
+            str(request.path_params["asset_id"]),
+            body,
+        )
+
+    async def api_library_chat(request: Request) -> Response:
+        """Record an asset↔session link AFTER the phone created the session."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "chat_payload",
+            config_dir(),
+            str(request.path_params["asset_id"]),
+            body,
+        )
+
+    async def api_library_chat_clear(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "clear_chat_payload", config_dir(), str(request.path_params["asset_id"])
+        )
+
+    def _library_response_headers(ref: Any, *, download: bool) -> dict[str, str]:
+        """Policy for one content response, applied to errors by omission.
+
+        ``nosniff`` is non-negotiable: the service's ``content_type`` comes from
+        the classifier, never from the bytes, so a ``.txt`` holding HTML must
+        render as text. ``inline`` (the default) is what makes a tap open the
+        file in the phone's viewer; ``?download=1`` asks the browser to save it.
+        HTML is additionally sandboxed by a response CSP: inline HTML from this
+        same origin would otherwise run script with the relay's cookies, which
+        is the one class of asset this route must not turn into a page.
+        """
+        from urllib.parse import quote
+
+        name = (ref.name or "asset").replace("\r", "").replace("\n", "")
+        ascii_name = (
+            "".join(
+                character
+                for character in name
+                if character not in '"\\' and 31 < ord(character) < 127
+            )
+            or "asset"
+        )
+        disposition = "attachment" if download else "inline"
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": (
+                f'{disposition}; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(name, safe='')}"
+            ),
+            "Cross-Origin-Resource-Policy": "same-origin",
+        }
+        content_type = (ref.content_type or "").lower()
+        if content_type in ("text/html", "application/xhtml+xml"):
+            headers["Content-Security-Policy"] = "sandbox"
+        elif content_type in ("image/svg+xml", "image/svg"):
+            # SVG is a document that can carry script. CSP sandbox neutralises
+            # it on a direct navigation, and `default-src 'none'` denies every
+            # subresource it might try to load; keeping the disposition inline
+            # preserves the phone's image preview (an <img> never executes it).
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+        if download:
+            headers["Cache-Control"] = "no-store"
+        else:
+            headers["Cache-Control"] = "private, max-age=300"
+        return headers
+
+    async def api_library_bytes(request: Request) -> Response:
+        """One asset's bytes. Addressed by id, Range-capable, never a path."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        config = config_dir()
+        try:
+            from local_operator.mobile import library as mobile_library
+
+            ref = await asyncio.to_thread(
+                mobile_library.content_ref, config, str(request.path_params["asset_id"])
+            )
+        except Exception as error:  # noqa: BLE001 - mapped below
+            from local_operator.mobile import library as mobile_library
+
+            if isinstance(error, mobile_library.LibraryRouteError):
+                return JSONResponse(
+                    {"error": error.message, "code": error.code},
+                    status_code=error.status,
+                )
+            raise
+        download = _query_flag(request, "download")
+        return FileResponse(
+            ref.path,
+            media_type=ref.content_type or "application/octet-stream",
+            headers=_library_response_headers(ref, download=download),
+        )
+
+    async def api_library_thumb(request: Request) -> Response:
+        """A bounded image thumbnail; non-images are refused, not faked."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        raw = request.query_params.get("w", "480")
+        try:
+            width = int(raw)
+        except ValueError:
+            return JSONResponse({"error": "bad width", "code": "bad_width"}, status_code=400)
+        try:
+            from local_operator.mobile import library as mobile_library
+
+            ref = await asyncio.to_thread(
+                mobile_library.thumb_ref,
+                config_dir(),
+                str(request.path_params["asset_id"]),
+                width,
+            )
+        except Exception as error:  # noqa: BLE001 - mapped below
+            from local_operator.mobile import library as mobile_library
+
+            if isinstance(error, mobile_library.LibraryRouteError):
+                return JSONResponse(
+                    {"error": error.message, "code": error.code},
+                    status_code=error.status,
+                )
+            raise
+        # Thumbnail follows the same policy as content: an SVG thumbnail is
+        # served original by the service, so it needs the same sandbox header.
+        headers = _library_response_headers(ref, download=False)
+        headers["Cache-Control"] = "private, max-age=3600"
+        return FileResponse(ref.path, media_type=ref.content_type, headers=headers)
+
     routes: list[BaseRoute] = [
         Route("/healthz", healthz),
         Route("/login", login_page, methods=["GET"]),
@@ -7405,6 +8399,10 @@ def build_app(daemon: MobileDaemon):
         # verdict buckets out, a no-op batch still 2xx.
         Route("/api/attention/seen", api_attention_seen_many, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
+        # Read-only catalogue + per-conversation desired-state assignment; see
+        # the handlers for why creation/rename does not exist on this surface.
+        Route("/api/tags", api_tags),
+        Route("/api/sessions/{session_id:str}/tags", api_session_tags, methods=["PUT"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(
             "/api/sessions/{session_id:str}/agents/{job_id:str}/history",
@@ -7461,6 +8459,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/models", api_models),
         Route("/api/usage", api_usage),
         Route("/api/config/events", api_config_events),
+        Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),
@@ -7479,6 +8478,40 @@ def build_app(daemon: MobileDaemon):
             api_project_unlink,
             methods=["DELETE"],
         ),
+        # -- library -------------------------------------------------------
+        # Asset routes live under ``/api/library/assets``; the vocabulary routes
+        # (``facets``, ``tags``) are its siblings. The Expo client's schemas
+        # already name this shape, so the relay follows it rather than growing a
+        # second spelling for the same catalog.
+        Route("/api/library/assets", api_library_list),
+        Route("/api/library/facets", api_library_facets),
+        Route("/api/library/tags", api_library_tags),
+        Route("/api/library/tags", api_library_tag_create, methods=["POST"]),
+        Route("/api/library/tags/{tag_id:str}", api_library_tag_patch, methods=["PATCH"]),
+        Route(
+            "/api/library/tags/{tag_id:str}/merge",
+            api_library_tag_merge,
+            methods=["POST"],
+        ),
+        Route("/api/library/assets/{asset_id:str}", api_library_detail),
+        Route("/api/library/assets/{asset_id:str}", api_library_patch, methods=["PATCH"]),
+        Route(
+            "/api/library/assets/{asset_id:str}/tags",
+            api_library_set_tags,
+            methods=["PUT"],
+        ),
+        Route(
+            "/api/library/assets/{asset_id:str}/chat",
+            api_library_chat,
+            methods=["PUT"],
+        ),
+        Route(
+            "/api/library/assets/{asset_id:str}/chat",
+            api_library_chat_clear,
+            methods=["DELETE"],
+        ),
+        Route("/api/library/assets/{asset_id:str}/content", api_library_bytes),
+        Route("/api/library/assets/{asset_id:str}/thumbnail", api_library_thumb),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
@@ -7519,7 +8552,9 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
+def _past_sessions(
+    limit: int = 20, tags: dict[str, dict[str, Any]] | None = None
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Resumable past sessions for the phone's history list.
 
     ``forked`` rides along for the same reason the TUI picker draws it: a fork
@@ -7546,17 +8581,30 @@ def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
     from local_operator.resume import recent_session_rows
     from local_operator.session.errors import SessionStoreUnavailable
 
+    # ``tags`` is the caller's cached projection, handed through the thread
+    # boundary as plain values. The default exists for direct callers/tests and
+    # reads the store here, under this function's own thread hop.
+    projection = tags if tags is not None else _read_tags_projection(config_dir())
     try:
         rows = recent_session_rows(config_dir(), limit=limit, strict=True)
     except SessionStoreUnavailable:
         logger.warning("phone history listing could not read the session store", exc_info=True)
         return [], [DEGRADED_DURABLE_LISTING]
     return [
-        {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked} for row in rows
+        {
+            "id": row.id,
+            "name": row.name,
+            "mtime": row.mtime,
+            "forked": row.forked,
+            **_tag_fields(projection, row.id),
+        }
+        for row in rows
     ], []
 
 
-def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]], list[str]]:
+def _search_sessions(
+    query: str, limit: int = 40, tags: dict[str, dict[str, Any]] | None = None
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Past sessions matching ``query`` by name, id, or conversation body.
 
     One call into ``session_search.search_store``, which is the SAME admission,
@@ -7588,6 +8636,9 @@ def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]],
     from local_operator.session.errors import SessionStoreUnavailable
     from local_operator.session.session_search import search_store
 
+    # Same snapshot contract as ``_past_sessions`` above: the route passes the
+    # table's cached projection; the default is for direct callers.
+    projection = tags if tags is not None else _read_tags_projection(config_dir())
     try:
         matches = search_store(config_dir(), query, limit=limit, strict=True)
     except SessionStoreUnavailable:
@@ -7600,6 +8651,7 @@ def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]],
             "mtime": match.row.mtime,
             "body_match": match.body_match,
             "forked": match.row.forked,
+            **_tag_fields(projection, match.row.id),
         }
         for match in matches
     ], []

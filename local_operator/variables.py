@@ -52,6 +52,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -294,6 +295,76 @@ def _is_secret(name: str) -> bool:
     return bool(_SECRET_RE.search(unicodedata.normalize("NFKC", name)))
 
 
+#: Markers a render site wraps around an IDENTIFIER it is about to print (LOH-28).
+#: Private-use code points, so ordinary text does not contain them; the redaction
+#: pass replaces a marked span with a placeholder before either scrubber runs and
+#: puts the identifier back afterwards. The span is scoped to the bytes the
+#: renderer marks — never a session-wide set — so a project key named ``token``
+#: cannot exempt a later ``token: <secret>`` line.
+IDENTIFIER_SPAN_OPEN = "\ue000"
+IDENTIFIER_SPAN_CLOSE = "\ue001"
+
+#: The range span placeholders are drawn from: one character per span, below every
+#: shape rule's value floor (4), so a placeholder is never credential-shaped on its
+#: own. A mask that swallows one keeps the run masked; the identifier is not
+#: partially restored.
+_IDENTIFIER_PLACEHOLDER_FIRST = 0xF000
+_IDENTIFIER_PLACEHOLDER_LAST = 0xF8FF
+_IDENTIFIER_PLACEHOLDER_SPAN = _IDENTIFIER_PLACEHOLDER_LAST - _IDENTIFIER_PLACEHOLDER_FIRST + 1
+
+#: The visible replacement for marker/placeholder code points found in
+#: user-controlled text. U+FFFD, not deletion: one-for-one keeps a name from
+#: being silently joined to its neighbours, and the reader can see something
+#: was removed without seeing what it was.
+_IDENTIFIER_NEUTRAL = "\ufffd"
+
+
+def _is_identifier_control(char: str) -> bool:
+    """Whether ``char`` is one of the span/placeholder code points."""
+    code = ord(char)
+    return (
+        char == IDENTIFIER_SPAN_OPEN
+        or char == IDENTIFIER_SPAN_CLOSE
+        or _IDENTIFIER_PLACEHOLDER_FIRST <= code <= _IDENTIFIER_PLACEHOLDER_LAST
+    )
+
+
+#: Exactly the break set ``str.splitlines`` uses, and therefore the set
+#: ``SpillStore`` numbers lines by. Position tracking MUST agree with it: a
+#: lone ``\r``/form-feed/``\u2028`` counted as content shifts every later
+#: spill range one line early, and a range landing on an aligned credential
+#: would exempt it (R4-1).
+_LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _strip_line_ending(part: str) -> tuple[str, str]:
+    """``(body, ending)`` for one ``splitlines(keepends=True)`` part."""
+    if part.endswith("\r\n"):
+        return part[:-2], "\r\n"
+    if part and part[-1] in _LINE_BREAKS:
+        return part[:-1], part[-1]
+    return part, ""
+
+
+def _neutralize_identifier_chars(text: str) -> str:
+    """Replace marker/placeholder code points in user-controlled text with U+FFFD."""
+    if not any(_is_identifier_control(char) for char in text):
+        return text
+    return "".join(_IDENTIFIER_NEUTRAL if _is_identifier_control(char) else char for char in text)
+
+
+def _next_identifier_placeholder(taken: set[str], start: int) -> str | None:
+    """The next free placeholder at or after ``start``, wrapping in its range."""
+    for offset in range(_IDENTIFIER_PLACEHOLDER_SPAN):
+        code = _IDENTIFIER_PLACEHOLDER_FIRST + (
+            (start - _IDENTIFIER_PLACEHOLDER_FIRST + offset) % _IDENTIFIER_PLACEHOLDER_SPAN
+        )
+        candidate = chr(code)
+        if candidate not in taken:
+            return candidate
+    return None
+
+
 class VariableStore:
     """Named, lazily-read, denylist-filtered variables for one session."""
 
@@ -330,6 +401,14 @@ class VariableStore:
         # scrubbing must never make it readable or injectable, which is why
         # this is a separate set rather than another entry in `_credentials`.
         self._redactions: set[str] = set()
+        # PER-SESSION span authority (LOH-28). A static OPEN/CLOSE pair is
+        # forgeable: a tool result or a prompt could print the bare markers
+        # around a credential and suppress its mask. The render prefix carries
+        # this token, so only spans this store minted are exempt; anything else
+        # is neutralized and redacts normally. Random per store, never derived
+        # from input, and stripped before a spill file or model result is
+        # written (see strip_identifier_spans).
+        self._span_token = secrets.token_hex(16)
 
     # -- sources -----------------------------------------------------------
     def _project_file(self) -> dict[str, str]:
@@ -471,6 +550,299 @@ class VariableStore:
         """
         return [*self._credentials.values(), *self._redactions]
 
+    def identifier_span(self, value: str) -> str:
+        """Wrap ``value`` in the markers that make it a redaction-exempt span.
+
+        WHY A SPAN RATHER THAN A REGISTERED VALUE: a render site knows which
+        bytes it is printing as an IDENTIFIER, but a session-wide value set
+        answers "is this string a name?" for every later result too — so a
+        project key named ``token`` exempted the word everywhere, and an
+        unrelated ``token: <secret>`` line came back unmasked. A span is scoped
+        to the exact occurrence the renderer marked.
+
+        A marker or placeholder character INSIDE ``value`` is user-controlled
+        and is neutralized to U+FFFD here, so an identifier can never smuggle a
+        live placeholder or an early close into the span protocol. The
+        per-session TOKEN after OPEN is what makes the prefix unforgeable: a
+        bare ``OPEN ... CLOSE`` pair in any other text is not a span and its
+        content redacts normally. The token is minted from ``secrets`` per
+        store and the placeholder start per render; neither is derived from
+        input. Restoration removes the token from every result, and
+        :meth:`strip_identifier_spans` removes it from a spill, so it never
+        reaches a model-visible result or a spill file.
+        """
+        if not value:
+            return value
+        return (
+            IDENTIFIER_SPAN_OPEN
+            + self._span_token
+            + ":"
+            + _neutralize_identifier_chars(value)
+            + IDENTIFIER_SPAN_CLOSE
+        )
+
+    def _truncated_prefix_bytes(self, text: str, index: int) -> int:
+        """Bytes after an OPEN that belong to this store's (truncated) prefix.
+
+        A row truncator can cut inside the per-session token, leaving
+        ``OPEN + token[:n]`` with no colon or close. Those bytes are a
+        fragment of the span protocol, not content: neutralizing only the
+        OPEN would print part of the session token into a model-visible
+        result. Forged OPENs with an unrelated tail match nothing here.
+        """
+        rest = text[index + 1 :]
+        matched = 0
+        for length in range(1, len(self._span_token) + 1):
+            if rest.startswith(self._span_token[:length]):
+                matched = length
+            else:
+                break
+        if matched and rest[matched : matched + 1] == ":":
+            matched += 1
+        return matched
+
+    def _extract_identifier_spans(self, text: str) -> tuple[str, dict[str, str]]:
+        """Replace marked identifier spans with per-call random placeholders.
+
+        Runs BEFORE both redaction passes. Markers are private-use code points
+        only a render site inserts; any OTHER marker/placeholder code point in
+        the text is user-controlled and is neutralized in the same walk, so it
+        can never be confused with a placeholder this call created.
+
+        Placeholders are drawn from one range at a PER-CALL random start
+        (``secrets``), one character per span, and are absent from the text.
+        An output that happens to contain a placeholder-shaped character
+        therefore cannot collide with — or be restored as — an identifier this
+        pass did not create. A placeholder that a mask swallows is not restored.
+
+        FORGERY: an OPEN is a span only when the text at that offset carries
+        THIS store's ``OPEN + token + ":"`` prefix. A static or wrong-token
+        pair is not a span: the OPEN is neutralized, the content stays ordinary
+        text, and any credential inside it masks normally. An own-token prefix
+        with no following CLOSE is likewise neutralized whole rather than
+        treated as an exemption.
+
+        BOUNDARY OVERLAP (review R2-1 / QA Q2-2): spans are NOT extracted when
+        their ``[content_start, close)`` interval overlaps ANY occurrence of a
+        KNOWN secret in the LOGICAL text (span contents inlined). Measuring the
+        raw text misses a secret split by the marker prefix — ``vorn-`` before
+        the OPEN and ``kell-tarn`` inside the span is one printed value. The
+        interval check catches exact, prefix, suffix and partial boundary
+        overlaps, so the exact-value pass can still mask the secret whole.
+        """
+        if IDENTIFIER_SPAN_OPEN not in text:
+            return text, {}
+        known_secrets = self.redaction_values()
+        prefix = IDENTIFIER_SPAN_OPEN + self._span_token + ":"
+        # PASS 1: find own spans and build the LOGICAL text (span contents
+        # inlined). Secret overlap must be measured here, not on the raw text:
+        # a marker prefix between ``vorn-`` and ``kell-tarn`` hides the secret
+        # from ``str.find`` even though the renderer printed it as one value.
+        #
+        # SEGMENTS, not characters: ``find(OPEN)`` walks span to span and each
+        # raw run between markers is appended once. The first cut built a
+        # 3-tuple per character (1 MB -> 21 s and 93 MB, 4 MB -> 70 s and
+        # 376 MB); the structure is O(spans) pieces now.
+        pieces: list[tuple[str, str, int]] = []
+        unmarked_parts: list[str] = []
+        regions: list[tuple[int, int]] = []
+        logical_len = 0
+        index = 0
+        length = len(text)
+        while True:
+            start = text.find(IDENTIFIER_SPAN_OPEN, index)
+            if start < 0:
+                if index < length:
+                    segment = text[index:]
+                    pieces.append(("raw", segment, -1))
+                    unmarked_parts.append(segment)
+                    logical_len += len(segment)
+                break
+            if start > index:
+                segment = text[index:start]
+                pieces.append(("raw", segment, -1))
+                unmarked_parts.append(segment)
+                logical_len += len(segment)
+            if not text.startswith(prefix, start):
+                consumed = 1 + self._truncated_prefix_bytes(text, start)
+                neutral = _IDENTIFIER_NEUTRAL * consumed
+                pieces.append(("raw", neutral, -1))
+                unmarked_parts.append(neutral)
+                logical_len += consumed
+                index = start + consumed
+                continue
+            content_start = start + len(prefix)
+            close = text.find(IDENTIFIER_SPAN_CLOSE, content_start)
+            if close < 0:
+                neutral = _IDENTIFIER_NEUTRAL * len(prefix)
+                pieces.append(("raw", neutral, -1))
+                unmarked_parts.append(neutral)
+                logical_len += len(neutral)
+                index = content_start
+                continue
+            content = text[content_start:close]
+            regions.append((logical_len, logical_len + len(content)))
+            pieces.append(("span", content, len(regions) - 1))
+            unmarked_parts.append(content)
+            logical_len += len(content)
+            index = close + 1
+
+        unmarked = "".join(unmarked_parts)
+        secret_intervals: list[tuple[int, int]] = []
+        for secret in known_secrets:
+            if not secret:
+                continue
+            found = unmarked.find(secret)
+            while found != -1:
+                secret_intervals.append((found, found + len(secret)))
+                found = unmarked.find(secret, found + 1)
+        overlapping = [
+            any(
+                region_start < interval_end and interval_start < region_end
+                for interval_start, interval_end in secret_intervals
+            )
+            for region_start, region_end in regions
+        ]
+
+        # PASS 2: placeholders for spans clear of every known secret; content
+        # alone for a span whose logical interval overlaps one (the exact-value
+        # pass then masks the secret whole).
+        spans: dict[str, str] = {}
+        parts: list[str] = []
+        taken: set[str] = set(text)
+        cursor = _IDENTIFIER_PLACEHOLDER_FIRST + secrets.randbelow(_IDENTIFIER_PLACEHOLDER_SPAN)
+        for kind, value, span_index in pieces:
+            if kind == "raw":
+                parts.append(_neutralize_identifier_chars(value))
+                continue
+            content = _neutralize_identifier_chars(value)
+            if overlapping[span_index]:
+                parts.append(content)
+                continue
+            placeholder = _next_identifier_placeholder(taken, cursor)
+            if placeholder is None:
+                parts.append(content)
+            else:
+                taken.add(placeholder)
+                spans[placeholder] = content
+                parts.append(placeholder)
+                cursor = ord(placeholder) + 1
+        return "".join(parts), spans
+
+    def _restore_identifier_spans(self, text: str, spans: Mapping[str, str]) -> str:
+        """Put surviving identifiers back and neutralize any stray markers.
+
+        Only the exact placeholder characters this call created are restored,
+        and only where they survived both passes: a mask that swallowed one
+        leaves the whole run masked (all-or-none), and a placeholder-shaped
+        byte in the input was neutralized before the passes — so nothing here
+        can restore an identifier the pass did not create. Any marker left in
+        the output (a malformed pair, or a fast-path lone close) is neutralized
+        so it never reaches the model.
+        """
+        for placeholder, identifier in spans.items():
+            if placeholder in text:
+                text = text.replace(placeholder, identifier)
+        return _neutralize_identifier_chars(text)
+
+    def strip_identifier_spans(self, text: str) -> str:
+        """Remove this session's span markers from a persisted/streamed copy.
+
+        THE TOKEN NEVER OUTLIVES THE RESULT IT PROTECTED. A marked value exists
+        only between the render site and the redaction pass; a spill file keeps
+        the full output, so it must not keep a token that could be lifted and
+        replayed (even though a token from another result cannot authenticate a
+        span in this one, there is no reason to store it). Own spans are
+        replaced by their content; any marker or placeholder byte left over is
+        neutralized. A span minted by ANOTHER store is not ours: its markers are
+        neutralized and its token is treated as ordinary text, never as an
+        authority.
+        """
+        return self.strip_identifier_spans_with_ranges(text)[0]
+
+    def strip_identifier_spans_with_ranges(
+        self, text: str
+    ) -> tuple[str, list[tuple[int, int, int]]]:
+        """``(plain, [(line, start, end), ...])`` for a persisted copy.
+
+        Ranges are how a spill read-back re-protects an identifier WITHOUT a
+        marker or token on disk: the sidecar keeps only integer positions in
+        the plain text, and the reading store mints its own span around those
+        substrings before the read result is redacted (LOH-28 R3-2). Line is
+        1-based; start/end are character offsets within that line. A span that
+        crosses a newline yields one range per line, because read-back serves
+        whole lines.
+        """
+        if not text:
+            return text, []
+        prefix = IDENTIFIER_SPAN_OPEN + self._span_token + ":"
+        parts: list[str] = []
+        ranges: list[tuple[int, int, int]] = []
+        line = 1
+        column = 0
+
+        def advance(value: str) -> None:
+            nonlocal line, column
+            if not value:
+                return
+            breaks = 0
+            tail = ""
+            for part in value.splitlines(keepends=True):
+                body, ending = _strip_line_ending(part)
+                if ending:
+                    breaks += 1
+                    tail = ""
+                else:
+                    tail = body
+            if breaks:
+                line += breaks
+                column = len(tail)
+            else:
+                column += len(value)
+
+        def append_raw(value: str) -> None:
+            neutral = _neutralize_identifier_chars(value)
+            parts.append(neutral)
+            advance(neutral)
+
+        def append_span(content: str) -> None:
+            nonlocal line, column
+            parts.append(content)
+            for part in content.splitlines(keepends=True):
+                body, ending = _strip_line_ending(part)
+                if body:
+                    ranges.append((line, column, column + len(body)))
+                if ending:
+                    line += 1
+                    column = 0
+                else:
+                    column += len(body)
+
+        index = 0
+        length = len(text)
+        while True:
+            start = text.find(IDENTIFIER_SPAN_OPEN, index)
+            if start < 0:
+                if index < length:
+                    append_raw(text[index:])
+                break
+            if start > index:
+                append_raw(text[index:start])
+            if not text.startswith(prefix, start):
+                consumed = 1 + self._truncated_prefix_bytes(text, start)
+                append_raw(_IDENTIFIER_NEUTRAL * consumed)
+                index = start + consumed
+                continue
+            content_start = start + len(prefix)
+            close = text.find(IDENTIFIER_SPAN_CLOSE, content_start)
+            if close < 0:
+                append_raw(_IDENTIFIER_NEUTRAL * len(prefix))
+                index = content_start
+                continue
+            append_span(text[content_start:close])
+            index = close + 1
+        return "".join(parts), ranges
+
     def unregister_redaction(self, value: str) -> bool:
         """Stop scrubbing a §6 registration; returns whether anything was dropped.
 
@@ -520,6 +892,13 @@ class VariableStore:
         :meth:`_register_shape_hits` — so the same secret is contained for the
         rest of the session even in a later form the table does not know.
 
+        Declared DISPLAY identifiers are protected by MARKED SPANS
+        (:meth:`identifier_span`): a render site wraps the exact bytes it prints,
+        the span becomes a placeholder before both passes, and the identifier is
+        restored after them. The exemption is scoped to that occurrence, so it
+        cannot release the same word in a later result — see
+        :meth:`_extract_identifier_spans` for the threat model.
+
         WHAT THIS STILL DOES NOT GUARANTEE: an opaque value with none of the
         table's spellings around it (a bare tenant id, a pasted fragment, a
         secret whose name the table does not recognise) passes through. That
@@ -553,15 +932,24 @@ class VariableStore:
         outside this tree that offers only the labels-only view keeps whatever
         behaviour it has — ``tools/builtin._redact_tool_text`` reads that view as
         the ESCALATED case, and says why in place.
+
+        Declared identifiers ride through untouched: a render site marks them
+        (:meth:`identifier_span`), they are replaced by private-use placeholders
+        before either pass, and restored after both. The markers are scoped to
+        the exact occurrence, so an identifier named ``token`` cannot exempt a
+        later ``token: <secret>`` line; a mask that swallows a placeholder keeps
+        the whole run masked (see :meth:`_extract_identifier_spans`).
         """
+        protected, spans = self._extract_identifier_spans(text)
         values = self.redaction_values()
-        scrubbed, hits = scrub_secrets_with_hits(text, values)
+        scrubbed, hits = scrub_secrets_with_hits(protected, values)
         if hits:
             self._register_shape_hits(hits)
         # The original shape judgement must run FIRST: a short known value can
         # occur inside an unknown credential, and pre-masking it would break the
         # shape that contains the rest. Decode only the surviving published copy.
         scrubbed = scrub_known_json_string_values(scrubbed, self.redaction_values())
+        scrubbed = self._restore_identifier_spans(scrubbed, spans)
         if not hits:
             return scrubbed, ShapeReport()
         # Containment takes EVERY hit (above, unconditionally); the REPORT takes

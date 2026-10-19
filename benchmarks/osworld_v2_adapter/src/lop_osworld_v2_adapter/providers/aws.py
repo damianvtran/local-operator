@@ -58,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from lop_osworld_v2_adapter import guest_disk, scoring
+from lop_osworld_v2_adapter import guest_disk, guest_loss, scoring
 from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_INSTANCE_ABSENT,
     EVIDENCE_INSTANCE_TERMINATED,
@@ -112,6 +112,10 @@ _READY_PATH = "/terminal"
 # directly, so a pipeline arrives as an explicit ``bash -c`` -- the same shape
 # upstream's own SetupController posts (setup.py:418).
 _EXECUTE_PATH = "/execute"
+# Bound recovery within one statement: earlier guest input must never be replayed.
+_EXECUTE_ATTEMPTS = 3
+_EXECUTE_RETRY_DELAY_S = 0.25
+_EXECUTE_READINESS_TIMEOUT_S = 2.0
 
 # Where the episode's guest-preparation evidence is written, inside the
 # episode-owned cache root the adapter mints in ``reset_start``. It sits there
@@ -125,7 +129,19 @@ class AllocationError(RuntimeError):
 
 
 class GuestExecutionError(RuntimeError):
-    """Input may have partially committed; never replay the failed batch."""
+    """Input may have partially committed; never replay the failed batch.
+
+    ``delivery`` is set only for a TRANSPORT failure and is one of
+    ``guest_loss.DELIVERY_NOT_SENT`` / ``DELIVERY_AMBIGUOUS``: whether the
+    failing request provably never left this host. It is for in-process readers
+    and tests; across the worker boundary only the message text travels (the
+    ``delivery=`` token in it), because the RPC error envelope has no adapter
+    field for it and the harness must stay benchmark-neutral.
+    """
+
+    def __init__(self, message: str, *, delivery: str | None = None) -> None:
+        super().__init__(message)
+        self.delivery = delivery
 
 
 def _exit_description(returncode: int) -> str:
@@ -220,12 +236,24 @@ def build_clients(credentials: AwsCredentials, region: str) -> _Clients:
         return int(requests.get(url, timeout=timeout).status_code)
 
     def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        # ``allow_redirects=False``: a guest command is a non-idempotent POST.
+        # Following a 3xx would re-send it to a host the guest chose, and when
+        # THAT hop refused the connection ``requests`` raised a bare connect
+        # error that hid the first, delivered request (``guest_loss``, review
+        # round 1 C1). The control server never redirects, so a 3xx is already
+        # an anomaly; it is surfaced as an HTTP error, which classifies as
+        # ``ambiguous`` because the server answered.
         response = requests.post(
             url,
             json=payload,
             timeout=timeout,
             headers={"Content-Type": "application/json"},
+            allow_redirects=False,
         )
+        if 300 <= response.status_code < 400:
+            # ``raise_for_status`` passes 3xx; without this the body would be
+            # parsed as if it were an answer.
+            raise requests.HTTPError("guest control server answered a redirect", response=response)
         response.raise_for_status()
         decoded = response.json()
         if not isinstance(decoded, dict):
@@ -510,10 +538,25 @@ class _ScreenshotFailureCapture(logging.Handler):
     words are surfaced by the HARNESS instead, as the worker's stderr tail.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, origin: str | None = None) -> None:
         super().__init__(level=logging.ERROR)
+        #: ``scheme://host:port`` of the guest, handed to the classifier so a
+        #: failure on a REDIRECT target is not read as "never connected". The
+        #: screenshot GET is upstream's own call (it follows redirects and is
+        #: idempotent), so its semantics are deliberately left alone; only the
+        #: diagnostic claim is kept honest.
+        self.origin = origin
         #: (kind, status_or_None, monotonic_seconds) per failed attempt.
         self.records: list[tuple[str, int | None, float]] = []
+        #: For each ``transport`` record whose exception PROVES the connection was
+        #: never established, the closed sub-kind (``refused`` / ``timeout`` /
+        #: ``dns`` / ``connect_failed``, from ``guest_loss``). Read from the
+        #: exception OBJECT upstream passed as the log argument, never from its
+        #: text, so the value-free guarantee above is unchanged. It is what
+        #: separates "nothing is listening" (refused: the control server is
+        #: GONE) from "listening but too slow" (a read timeout) -- the 043 loss
+        #: read as plain ``transport`` for nine attempts.
+        self.not_sent_kinds: list[str] = []
         self.started = time.monotonic()
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -532,6 +575,13 @@ class _ScreenshotFailureCapture(logging.Handler):
                 # A malformed code is not a reason to drop the record: the KIND
                 # is still known, only the OPTIONAL number is lost.
                 status = int(tail) if tail.isdigit() else None
+            arguments = record.args
+            if kind == "transport" and isinstance(arguments, tuple) and arguments:
+                cause = arguments[0]
+                if isinstance(cause, BaseException):
+                    verdict = guest_loss.classify_transport_failure(cause, origin=self.origin)
+                    if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
+                        self.not_sent_kinds.append(verdict.kind)
             self.records.append((kind, status, time.monotonic()))
             return
 
@@ -557,6 +607,14 @@ class _ScreenshotFailureCapture(logging.Handler):
         codes = [str(status) for _, status, _ in records if status is not None]
         if codes:
             parts.append("codes=" + ",".join(codes))
+        if self.not_sent_kinds:
+            # Placed beside ``kinds`` (the head of the line) because the harness
+            # keeps only the head of a wire message. ``n:kind[+kind]`` -- how
+            # many failed reads never connected, and why -- so a refused guest
+            # is recognisable on the FIRST retry record instead of after nine.
+            parts.append(
+                f"not_sent={len(self.not_sent_kinds)}:" + "+".join(sorted(set(self.not_sent_kinds)))
+            )
         parts.append(f"first_ms={_since_ms(self.started, records[0][2])}")
         gaps = [
             _since_ms(records[index - 1][2], records[index][2]) for index in range(1, len(records))
@@ -666,6 +724,25 @@ class AwsProvider:
         # (teardown-only) provider never allocates and never needs one.
         self._cache_root: Path | None = None
         self._schedule_created = False
+        # The provider's OWN secret values, for the exact-value half of the
+        # console scrub (``guest_loss``): console text is the one guest-authored
+        # artifact this module persists, and the AWS credentials, the session
+        # token and the guest client password are the values it holds that the
+        # shape table could not recognise by spelling alone. ``allocate`` adds
+        # the client password; a teardown-only provider never sees it.
+        self._known_secret_values: tuple[str, ...] = tuple(
+            value
+            for value in (
+                credentials.access_key_id,
+                credentials.secret_access_key,
+                credentials.session_token,
+            )
+            if value
+        )
+        # Stages whose console evidence is already on disk. Each stage is taken
+        # at most once per provider, and only on a lost-guest path (see
+        # ``_capture_guest_console``): a healthy episode never spends the calls.
+        self._console_stages_done: set[str] = set()
         # Reset-retry tracking for ``_seal_upstream``. Upstream's ``reset``
         # loop writes ``is_environment_used = True`` before task-specific
         # setup and does not clear it when an attempt fails, so its OWN retry
@@ -717,6 +794,8 @@ class AwsProvider:
                 "without it upstream writes land in the digest-pinned workspace"
             )
         self._cache_root = cache_root
+        if plan.client_password:
+            self._known_secret_values = (*self._known_secret_values, plan.client_password)
         if plan.region != self._region:
             raise AllocationError(
                 f"plan region {plan.region!r} differs from provider region {self._region!r}"
@@ -1356,7 +1435,7 @@ class AwsProvider:
         # ``evaluate`` captures judge errors. The records are the ONLY trace of
         # why a capture failed (``get_screenshot`` logs and returns None), and
         # this call is the last place they exist.
-        capture = _ScreenshotFailureCapture()
+        capture = _ScreenshotFailureCapture(self._guest_origin())
         screenshot_logger = logging.getLogger(_SCREENSHOT_LOGGER)
         screenshot_logger.addHandler(capture)
         started = time.monotonic()
@@ -1379,7 +1458,48 @@ class AwsProvider:
             cause = capture.cause(elapsed_ms=_since_ms(started, time.monotonic()))
             if cause is not None:
                 observation[SCREENSHOT_CAUSE_KEY] = cause
+            # The guest is failing to show its screen: the first moment a lost
+            # guest is visible. Take the console now, while the instance exists
+            # and BEFORE the harness spends minutes retrying; the read below
+            # never raises and runs once. It does not change what this method
+            # returns, so the committed-action / re-read handling is untouched.
+            await asyncio.to_thread(
+                self._capture_guest_console, guest_loss.STAGE_OBSERVE, "observe-frameless"
+            )
         return observation
+
+    def _guest_origin(self) -> str | None:
+        """``scheme://host:port`` the guest transport targets, or None before allocate."""
+
+        if self._public_ip is None:
+            return None
+        return f"http://{self._public_ip}:{GUEST_PORT}"
+
+    def _capture_guest_console(self, stage: str, trigger: str) -> None:
+        """Persist the guest's console tail and screenshot, once per stage. Never raises.
+
+        Called only from lost-guest paths, BEFORE anything terminates the
+        instance (see ``guest_loss`` for what is captured, why it is safe to
+        persist, and why it cannot block). Needs the instance id and the episode
+        cache root; a teardown-only provider has neither and does nothing.
+        """
+
+        if stage in self._console_stages_done:
+            return
+        self._console_stages_done.add(stage)
+        if self._instance_id is None:
+            return
+        try:
+            guest_loss.capture_guest_console(
+                self._clients.ec2,
+                self._instance_id,
+                self._cache_root,
+                stage=stage,
+                trigger=trigger,
+                known_values=self._known_secret_values,
+            )
+        except Exception:  # pragma: no cover - capture_guest_console never raises
+            logger.warning("guest console capture failed unexpectedly")
 
     async def execute(self, statements: list[str], *, settle: bool = True) -> None:
         env = self._require_env()
@@ -1390,18 +1510,63 @@ class AwsProvider:
                 # A lost response can already have typed text, so reuse our
                 # single-shot transport, preserving the controller's input patch.
                 script = env.controller.pkgs_prefix.format(command=statement)
-                try:
-                    from local_operator.computer_input import python_source_argv
+                from local_operator.computer_input import python_source_argv
 
-                    result = self._run_guest_command(
-                        python_source_argv(script), timeout=GUEST_COMMAND_TIMEOUT_S
-                    )
-                except Exception:
-                    # Neither transport exceptions nor guest stderr are safe to
-                    # expose: they may echo the command, credentials or UI text.
-                    raise GuestExecutionError(
-                        f"guest action {index + 1} outcome is unknown; batch not retried"
-                    ) from None
+                command = python_source_argv(script)
+                ready: bool | None = None
+                for attempt in range(1, _EXECUTE_ATTEMPTS + 1):
+                    try:
+                        result = self._run_guest_command(command, timeout=GUEST_COMMAND_TIMEOUT_S)
+                        break
+                    except Exception as error:
+                        # Only positive connect-phase evidence permits another
+                        # attempt. A lost response may already have typed text.
+                        verdict = guest_loss.classify_transport_failure(
+                            error, origin=self._guest_origin()
+                        )
+                        if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
+                            if ready is None:
+                                ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
+                            if ready and attempt < _EXECUTE_ATTEMPTS:
+                                # Values only: exception text can leak the command
+                                # or credentials. Attempt names the upcoming send.
+                                logger.warning(
+                                    "guest transport retry attempt=%d delivery=%s "
+                                    "error_class=%s readiness_passed=%s",
+                                    attempt + 1,
+                                    verdict.delivery,
+                                    type(error).__name__,
+                                    ready,
+                                )
+                                self._sleep(_EXECUTE_RETRY_DELAY_S)
+                                continue
+                        # Capture only on terminal failure, before termination;
+                        # a recovered refusal is not a lost-guest incident.
+                        self._capture_guest_console(
+                            guest_loss.STAGE_EXECUTE, f"execute-{verdict.delivery}"
+                        )
+                        message = guest_loss.describe_failed_action(index, verdict)
+                        if ready is False:
+                            cause = "readiness check failed"
+                            try:
+                                if self._instance_id is not None:
+                                    health = guest_loss.capture_guest_health(
+                                        self._clients.ec2,
+                                        self._instance_id,
+                                        self._cache_root,
+                                        self._run_guest_command,
+                                    )
+                                    cause = health["cause"]
+                            except Exception:
+                                # Keep the original delivery verdict even if a
+                                # diagnostics hook itself violates fail-open.
+                                logger.warning("guest health capture failed unexpectedly")
+                            message += f"; guest down: {cause}; no transport retry"
+                        raise GuestExecutionError(message, delivery=verdict.delivery) from None
+                else:
+                    # The last failed attempt raises above; falling through
+                    # would mean the configured budget allowed no initial send.
+                    raise AssertionError("guest execution requires at least one attempt")
                 if result.returncode != 0:
                     raise GuestExecutionError(
                         f"guest action {index + 1} failed "
@@ -1421,6 +1586,45 @@ class AwsProvider:
                 self._sleep(self._action_delay_s)
 
         await asyncio.to_thread(run)
+
+    async def probe_control_server(self, timeout: float) -> bool:
+        """One bounded GET to the guest's readiness endpoint; never raises.
+
+        The same endpoint, and the same meaning, as the allocation readiness
+        check (``_READY_PATH``, upstream's own ``ensure_ready`` probe), asked
+        again in the one state where the answer changes what the harness does:
+        after an ambiguous delivery (see ``guest_loss``), where a control
+        server that answers is the difference between continuing the episode
+        with an UNKNOWN-outcome warning and ending it exactly as before. Read-
+        only by construction: a GET, no statement, no observation build.
+
+        Bounded on both ends: ``requests`` gets ``timeout`` (applied to the
+        connect and read phases separately, so this call's own worst case
+        is roughly twice it), and the RPC layer's outer deadline cancels
+        whatever remains -- see ``_PROBE_TIMEOUT_S`` in ``adapter.py`` for
+        the chosen arithmetic -- while the call runs on a worker thread so
+        a hung connect cannot block the worker's event loop (and with it
+        the cancel path).
+
+        Deliberately boolean: refused, timed out, a DNS failure and a non-200
+        status all collapse into False because the caller's decision is fail
+        closed and nothing acts on the taxonomy. The URL is never surfaced --
+        it names the guest's address.
+        """
+
+        return await asyncio.to_thread(self._probe_control_server, timeout)
+
+    def _probe_control_server(self, timeout: float) -> bool:
+        """Shared read-only probe for the worker thread and async RPC path."""
+
+        origin = self._guest_origin()
+        if origin is None:
+            return False
+        try:
+            return int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout)) == 200
+        except Exception:
+            # Discard exception text: it may contain guest addresses or state.
+            return False
 
     async def evaluate(self) -> Any:
         env = self._require_env()

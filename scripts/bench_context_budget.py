@@ -1529,7 +1529,53 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: one). The ceiling is head + the existing 55-token band on both arms —
 #: 29,680 / 26,724 — and that raise is NOT self-approved: it is stated here
 #: and in the PR thread for a reviewer to verify before it settles.
-BUDGET_BILLED_TOKENS = 29_680
+# RAISED 29,680 -> 30,000 for the ``harness_import`` agent tool (LOH-14 agent
+# slice), after trimming it first: removing every per-field description and the
+# action list from its wire description took tool_schemas 56,700 -> 56,036
+# chars (-664 chars, -239 billed tokens). The remainder is the published schema
+# and its one inventory line, which cannot shrink further without removing the
+# capability. Measured on THIS head with this script:
+#   top    83,198 chars = ~29,927 billed  (73 tokens under 30,000)
+#   child  75,057 chars = ~26,999 billed  (101 tokens under 27,100)
+# The tool is a setup-time capability, not an every-session one, but it is in
+# the default surface today; the raise is the explicit decision the guard exists
+# to force, not an unrelated budget increase.
+# RAISED 30,000 -> 31,000 for the sound-generation wave's audio pair
+# (``generate_voiceover`` + ``generate_sound_effect``, 2026-10-17). Both tools'
+# schemas were trimmed as far as the frozen contract allows (terse per-field
+# descriptions, one-sentence wire descriptions) and the remainder is the
+# published field list itself, which cannot shrink without removing a field the
+# contract fixes. Attribution measured on THIS head with this script:
+#   without the pair  29,707 billed  (293 tokens under the old 30,000)
+#   with the pair     30,616 billed  (+909: +2,482 tool_schemas chars = ~893
+#                                     billed, plus the two inventory lines)
+#   child arm         27,688 billed  (+588 over the old 27,100)
+# Deferring the pair instead was refused on the image lane's measured
+# adoption regression for a brand-new capability (``image_tool``'s D3 note:
+# deferring a new tool whose description carries its "when to use it" text
+# regressed adoption on #2066). The raise is stated here AND in the PR thread
+# for a reviewer to verify before it settles — it is the explicit decision this
+# guard exists to force, not an unrelated budget increase.
+# RAISED 31,000 -> 31,025 for the memory move hint (#2616), stated with the
+# arithmetic because this guard exists to make that an explicit decision, not an
+# unrelated budget increase. Measured by THIS script on an isolated HOME at each
+# tree, same machine:
+#   673cb4de62  true first parent of #2616's merge  86,162 chars = ~30,994 billed  PASS, 6 headroom
+#   20f23b8b73  #2616 merged                        86,204 chars = ~31,009 billed  FAIL by 9
+#   = +42 chars of ``tool_schemas``, and all of it is ONE clause in
+#     ``build_memory_tool``'s description: 'move with edit
+#     new_text={"move":"scope"}' (+15 billed). #2616's review round 1 raised as a
+#     NIT that the memory tool description did not name the move payload; its
+#     remediation chose to address that nit, and the clause landed on a tree
+#     with 6 tokens of headroom.
+# Trimming was MEASURED on the head tree with this script, not assumed:
+#   bare 'move with edit'                    86,178 chars = ~30,999  PASS by 1 at 31,000
+#   payload-keeping 'move {"move":"scope"}'  86,185 chars = ~31,002  FAIL by 2 at 31,000
+# So a trim that clears the old ceiling does exist — but only by dropping the
+# payload shape the nit asked for, and every variant that keeps it fails. The
+# raise is chosen to keep the payload clue AND leave margin, not to fit by
+# deleting the thing the nit was about.
+BUDGET_BILLED_TOKENS = 31_025
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1630,7 +1676,11 @@ BUDGET_BILLED_TOKENS = 29_680
 #:   delta                             +249 chars = ~+90
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 26_724
+# RAISED 27,100 -> 28,100 with ``BUDGET_BILLED_TOKENS`` above, for the same
+# audio pair and on the same measurement pass (child arm measured 27,688 billed
+# on this head). The two ceilings move together because the pair is in every
+# session's surface, child included; the difference between them is unchanged.
+BUDGET_CHILD_BILLED_TOKENS = 28_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

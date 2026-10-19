@@ -1,7 +1,8 @@
 """One scoped engine behind the tiny memory tool and memory:// read/write/edit.
 
 File edit hunks are not a safe optimistic memory protocol. For this scheme only,
-old_text is the revision token and new_text is a JSON replacement/forget command.
+old_text is the revision token and new_text is a JSON replacement/forget/move
+command (``{"move":"session"}`` moves the fact to that scope).
 Routing precedes the filesystem resolver, so a typo cannot create memory:/ files.
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -26,9 +28,15 @@ from local_operator.memory import (
     guard,
     parse_url,
     safe_segment,
+    structural_reference,
     valid_memory_tool_arguments,
 )
 from local_operator.paths import config_dir
+
+#: The one ``q`` parameter of a read URL, matched at a parameter boundary so that only
+#: its VALUE is ever left out of the text the free-text guards inspect — never the
+#: scheme, the scope or another parameter.
+_QUERY_VALUE = re.compile(r"(?<=[?&])q=[^&]*")
 
 
 def store_for(context: ToolContext | None) -> MemoryStore:
@@ -41,11 +49,78 @@ def store_for(context: ToolContext | None) -> MemoryStore:
     )
 
 
+def _recall_reference(name: str, path: Any) -> str | None:
+    """The read call's ``q`` VALUE when it IS a structural reference, else ``None``.
+
+    The ONE exemption the agent read path has, and only ever a read: ``_run`` guards
+    its whole argument dict, so the q value was refused here before the store saw it,
+    and a benign identifier lookup failed on both layers. Every other argument of the
+    same call — and the same value on a write or an edit, where a value is being
+    STORED rather than looked up — keeps the refusal it has today.
+
+    A path that does not parse is left to the caller's own ``parse_url``, which refuses
+    it in the same order as before this exemption existed: ``ValueError`` here means
+    only "not classifiable as a reference", so the caller's guard still speaks first.
+    """
+    if name != "read" or not isinstance(path, str):
+        return None
+    try:
+        _, _, query = parse_url(path.strip())
+    except (MemoryError, ValueError):
+        # ValueError: ``parse_url`` parses its query with strict_parsing=True, which
+        # rejects a field with no "=". Both are that same refusal by the caller's own
+        # parser — catching them here keeps the guard ahead of it, as it was before.
+        return None
+    value = query.get("q")
+    return value if structural_reference(value) else None
+
+
+def _guarded_path(path: str) -> str:
+    """``path`` with its exempt recall-query value left out of the guard's text.
+
+    Only the exempt VALUE is removed — the parameter itself stays, empty, so every
+    other character of the call (scheme, scope, entity, any other parameter) still
+    reaches ``guard``/``guard_encoded`` unchanged. The value needs no placeholder: it
+    was classified as a minted reference, so there is nothing in it to inspect.
+    """
+    return _QUERY_VALUE.sub("q=", path, count=1)
+
+
+def _guarded_fact_args(args: Any) -> Any:
+    """``args`` with a recall's ``text`` VALUE left out of the free-text guard.
+
+    ``execute_fact_memory`` guards its WHOLE argument dict before it validates or
+    delegates, so ``recall(<minted reference>)`` was refused HERE even after the read
+    path below admitted the same value: its own store-oriented refusal spoke first.
+    The exemption is that one VALUE of that one op — a ``store`` WRITES the same string
+    and keeps the guard, because storing a value is not the same act as looking one up,
+    and every sibling argument of the same call is inspected unchanged. The parameter
+    itself stays, emptied, exactly as the read path keeps its ``q`` and drops only the
+    value; there is nothing in an admitted reference to inspect.
+
+    Only the guard is handed this copy. Validation, the store delegation and the
+    retained-copy path all still see the caller's original arguments, and
+    ``memory_privacy.retained_arguments`` guards those independently and fails closed.
+
+    A non-dict, a call that is not a recall and a text that is not a reference all
+    return ``args`` untouched, so their refusals — the contract error included — are
+    unchanged.
+    """
+    if not isinstance(args, dict) or args.get("op") != "recall":
+        return args
+    return {**args, "text": ""} if structural_reference(args.get("text")) else args
+
+
 def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     from local_operator.memory_privacy import guard_encoded
 
-    guard(args)
-    guard_encoded(args)
+    # Both guards below inspect the whole argument dict, so the single exemption this
+    # path has is applied to the dict they receive rather than to the call. See
+    # _recall_reference for why it exists and what it covers.
+    reference = _recall_reference(name, args.get("path"))
+    guarded = args if reference is None else {**args, "path": _guarded_path(args["path"])}
+    guard(guarded)
+    guard_encoded(guarded)
     allowed = {"path", "i", "raw"} if name == "read" else {"path", "i", "content"}
     if name == "edit":
         allowed = {"path", "i", "old_text", "new_text", "edits", "replace_all", "anchor_line"}
@@ -54,7 +129,9 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
             "Unsupported memory argument; file ranges and filesystem controls do not apply."
         )
     scope, entity, query = parse_url(args["path"].strip())
-    guard_encoded(query)
+    # The parsed query carries the same single exemption, on its value: the q value is
+    # emptied and no other key of this call is affected.
+    guard_encoded(query if reference is None else {**query, "q": ""})
     for key in ("version", "cursor"):
         if query.get(key):
             safe_segment(query[key])
@@ -135,6 +212,27 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
                     "file hunks are not supported."
                 )
             replacement = json.loads(args.get("new_text") or "null")
+            # A move is an EDIT command rather than a new verb: the fact is being
+            # mutated, so it keeps the same optimistic revision guard as correction/
+            # forget, and no new tool surface has to be discovered. Its one target is
+            # the path's ID; {"move":"scope"} is the whole payload.
+            move = replacement.get("move") if isinstance(replacement, dict) else None
+            if move is not None:
+                if set(replacement) != {"move"} or not isinstance(move, str):
+                    raise MemoryError(
+                        'Move requires exactly {"move":"session|team|agent|global"} and a revision.'
+                    )
+                if not scope or not entity:
+                    raise MemoryError("Move needs memory://SCOPE/ID, not a bare scope.")
+                store.import_session()
+                value = store.move(
+                    f"{scope}/{entity}",
+                    move,
+                    expected_version=args.get("old_text"),
+                )
+                # A write is not budgeted like a read: return the move receipt
+                # directly rather than falling through to the recall-budget loop.
+                return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             forget = replacement == {"forget": True, "confirm": True}
             if isinstance(replacement, dict) and "forget" in replacement and not forget:
                 raise MemoryError(
@@ -213,7 +311,9 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
     from local_operator.memory_privacy import guard_encoded
 
     try:
-        guard_encoded(args)
+        # The one exemption this tool has is applied to the dict the guard receives
+        # rather than to the call; see _guarded_fact_args for why and what it covers.
+        guard_encoded(_guarded_fact_args(args))
         if not valid_memory_tool_arguments(args):
             raise MemoryError(MEMORY_TOOL_CONTRACT_ERROR)
         text = args["text"]
@@ -278,7 +378,7 @@ def build_memory_tool():
         description=(
             "Store/recall durable personal facts across sessions: user/colleague names, "
             "locations, contacts. Temporary work: read/write/edit memory://session "
-            "(or team/agent). "
+            '(or team/agent); move with edit new_text={"move":"scope"}. '
             "Secrets/IDs: use secret; NAMEs only here."
         ),
         parameters={

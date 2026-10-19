@@ -27,7 +27,6 @@ from local_operator.memory import (
     MemoryIdentity,
     MemoryStore,
     _dump,
-    guard,
     safe_segment,
     validate_op,
 )
@@ -53,7 +52,10 @@ def settings(root: Path) -> tuple[bool, list[str], list[str]]:
     if not isinstance(excluded, list) or len(excluded) > 256:
         raise MemoryError("Memory peer exclusions must be bounded device IDs.")
     for device in excluded:
-        safe_segment(device)
+        # Exclusion entries are device ids (``d_`` + hex), i.e. structural:
+        # a hex tail can collide with the IBAN/card shapes, so they are
+        # checked for the safe-segment shape, not the free-text guard.
+        safe_segment(device, structural=True)
     enabled = memory.get("enabled", MEMORY_DEFAULT_ENABLED) is True and policy(root)["enabled"]
     return enabled, sorted(set(scopes)), excluded
 
@@ -67,7 +69,7 @@ def _epoch(scopes: list[str]) -> str:
 
 
 def _key(peer: str, scopes: list[str]) -> str:
-    return "memory-cursor:" + safe_segment(peer) + ":" + _epoch(scopes)
+    return "memory-cursor:" + safe_segment(peer, structural=True) + ":" + _epoch(scopes)
 
 
 def cursor(
@@ -95,7 +97,11 @@ def _checked_vector(value: Any) -> dict[str, int]:
     if not isinstance(value, dict) or len(value) > 256:
         raise MemoryError("Invalid bounded memory vector.")
     for origin, seq in value.items():
-        safe_segment(origin)
+        # Vector origins are device ids (``d_`` + hex): structural, so a hex
+        # tail that happens to satisfy the IBAN/card shape must not refuse an
+        # otherwise valid sync vector (the permanent-refusal class fixed in
+        # MemoryStore.put; see safe_segment).
+        safe_segment(origin, structural=True)
         if type(seq) is not int or not 0 <= seq <= 2**63 - 1:
             raise MemoryError("Invalid memory sequence vector.")
     return value
@@ -181,7 +187,17 @@ def receive(
 ) -> dict[str, Any]:
     if not isinstance(payload, dict) or len(_dump(payload).encode()) > MAX_BATCH_BYTES:
         raise MemoryError("Invalid or oversized memory payload.")
-    guard(payload)
+    # Do NOT guard() the whole payload: its structural identifiers (the origin
+    # keys of the ``after`` vector, ``skips`` origins and each op's
+    # origin_device/owner_key/op_id) are minted device/UUID shapes that can
+    # legitimately collide with the free-text IBAN/card patterns — the same
+    # permanent-refusal class MemoryStore.put fixed, reached here over the
+    # mesh so an affected install could write locally yet never sync. They are
+    # validated structurally instead (_checked_vector →
+    # safe_segment(structural=True), and validate_op below). Every USER-TEXT
+    # payload field still passes the free-text guard: each op's fact is
+    # validated by validate_op → validate_fact, which refuses a real secret in
+    # a synced body exactly as an admitted local write does.
     if type(payload.get("v")) is not int or payload["v"] != 1 or payload.get("scopes") != scopes:
         raise MemoryError("Memory payload version/scopes differ; update both peers.")
     source_generation = payload.get("generation")
@@ -300,8 +316,11 @@ def make_handler(server: Any) -> Any:
 
 
 def _safe_ref(value: Any) -> str:
+    # An op-id reference is structural (minted UUID/hex), so it is shape-checked
+    # rather than free-text guarded — consistent with validate_op's structural
+    # fields, and it keeps a legitimate hex id from being blanked as "sensitive".
     try:
-        return safe_segment(value)
+        return safe_segment(value, structural=True)
     except MemoryError:
         return "invalid-operation-id"
 
@@ -318,6 +337,35 @@ def _peer_code(value: Any, fallback: str) -> str:
         "peer_too_old",
     }
     return value if isinstance(value, str) and value in allowed else fallback
+
+
+#: Receipt codes that mean the peer is receiving normally. Everything else is shown
+#: as a failing peer in `lop memory status`; a code this module has never heard of is
+#: treated as failing too, because claiming "synced" is the failure mode we are fixing.
+HEALTHY_PEER_CODES = frozenset(
+    {
+        "in_sync",
+        "catching_up",
+        # Some origins are withheld from this scope (an unknown device); the peer is
+        # receiving everything authorised, so this is not a stalled stream.
+        "withheld",
+        # Nothing is shared BY CONFIGURATION; there is no failure to report.
+        "no_shared_scopes",
+    }
+)
+
+
+def _peer_message(value: Any) -> str:
+    """A peer's sentence, flattened and bounded for a receipt/status line.
+
+    Peer text is UNTRUSTED display input, not a protocol field: a newline would
+    break the one-line status receipt, and an unbounded sentence would bloat the
+    meta row rewritten on every tick. The peer's refusal sentences are value-free
+    by construction (MemoryError paths), but this bounds them anyway.
+    """
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:500]
 
 
 def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
@@ -366,6 +414,9 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                 if isinstance(state, dict)
                 else "state_failed"
             ),
+            # The only actionable sentence in a refusal is the PEER's; dropping it
+            # here left the operator with a code and no remedy (round-2 MAJOR).
+            "message": _peer_message(state.get("message")) if isinstance(state, dict) else "",
         }
     remote = state.get("detail", state)
     if (
@@ -411,6 +462,7 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                     if isinstance(answer, dict)
                     else "push_failed"
                 ),
+                "message": _peer_message(answer.get("message")) if isinstance(answer, dict) else "",
                 "batches": batches,
             }
         reply = answer.get("detail", answer)
@@ -447,7 +499,7 @@ def push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
     memory = _store(server.root)
     if memory.path.exists() and result.get("code") != "disabled_or_excluded":
         try:
-            safe_segment(device_id)
+            safe_segment(device_id, structural=True)
             with memory.connection() as db:
                 key = "sync-status:" + device_id
                 present = db.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone()
@@ -466,6 +518,10 @@ def push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                         "batches": result.get("batches", 0),
                         "last_withheld": result.get("withheld")
                         or previous_receipt.get("last_withheld", []),
+                        # A healthy answer has no message, which CLEARS a stale
+                        # refusal sentence from the previous receipt; otherwise a
+                        # recovered peer would keep showing its old failure reason.
+                        "message": _peer_message(result.get("message")),
                     }
                     db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, _dump(receipt)))
                     db.commit()

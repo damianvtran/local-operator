@@ -1,0 +1,703 @@
+{
+  "tui.small.approval.allow_verb": {
+    "role": "approval prompt verb",
+    "tone": "plain, instructional",
+    "note": "The live approval card's verb, shown after the tool name so the row reads 'allow <tool>'. The message IS the verb: it has zero ICU arguments and is appended to a Rich Text row that then supplies the target, so the value's TRAILING SPACE is load-bearing — do not trim it. No maxCells: the card's own scored ladder sheds clauses by width rather than capping this word. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy.code_count": {
+    "role": "copy-picker message hint count",
+    "tone": "plain count",
+    "note": "The code-block tally in a /copy message hint, e.g. '3 code' appended after the line count and joined with ' · '. The pre-extraction f-string used the bare word 'code' at EVERY count including 1 ('1 code'), so this key deliberately has NO plural branch — adding one would change bytes. {shown} is str(code_count), a raw digit string: a number/plural '#' slot would group 1200 as '1,200' where the original printed '1200'. No maxCells: the hint is right-aligned and the label truncates beside it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy.quote_count": {
+    "role": "copy-picker message hint count",
+    "tone": "plain count",
+    "note": "The quote-block tally in a /copy message hint, e.g. '2 quote' appended after the line count and joined with ' · '. The pre-extraction f-string used the bare word 'quote' at EVERY count including 1 ('1 quote'), so this key deliberately has NO plural branch — adding one would change bytes. {shown} is str(quote_count), a raw digit string: a number/plural '#' slot would group 1200 as '1,200' where the original printed '1200'. No maxCells: the hint is right-aligned and the label truncates beside it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.draft.attachment_count": {
+    "role": "restored-draft clause",
+    "tone": "plain count",
+    "note": "The parenthesised image tally appended to a recovered draft's notice row, e.g. '(1 image)' / '(3 images)'. ICU plural on the raw count: zero never reaches this key (the caller guards `if images`), so the other branch is the only one that renders in practice and one covers the singular. The parentheses are INSIDE the branches, and {shown} carries the digit: the pre-extraction code used the bare integer (f'{images} image...'), so {shown} must be str(images) — a {images, number}/`#` slot would group 1200 as '1,200' and break byte identity. No maxCells: the notice row wraps/clips through the transcript block's own budget. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.model_picker.window_position": {
+    "role": "picker footer position counter",
+    "tone": "plain count",
+    "note": "The catalogue-position summary in the /model footer, e.g. '14 of 300' — the visible window's size against the full match count, drawn only when the window cannot show the whole list. {shown} and {total} are RAW digit strings, exactly as the pre-extraction f-string printed them; both are typed as plain args (not {x, number}/plural) because grouping them into '1,200 of 3,000' would be a visible change the catalogue slice must not smuggle in, matching tui.analytics.totals.calls_meta's raw-count convention. The footer joins this with ' · ' separators in code, so the value carries no separator. No maxCells: the footer is fitted by the picker's clause-fit pass. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.picker.showing_prefix": {
+    "role": "picker window counter prefix",
+    "tone": "plain, factual",
+    "note": "The word opening the 'showing 1–9 of 42' window counter shared by the ask and move pickers, drawn as a separate Rich Text fragment so the numerals can carry a brighter style than the grammar. The TRAILING SPACE is load-bearing — it is the only separator before the span fragment — so do not trim it. The full phrase is assembled in code from this prefix, the span, tui.small.picker.of_separator and the total, preserving each fragment's style. No maxCells: the ask picker drops this word first when the row cannot fit. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.picker.of_separator": {
+    "role": "picker window counter separator",
+    "tone": "plain, factual",
+    "note": "The ' of ' between the visible span and the total in the 'showing 1–9 of 42' window counter shared by the ask and move pickers, drawn as a separate Rich Text fragment so the numerals can carry a brighter style than the grammar. BOTH spaces are load-bearing — they are the only separators around the span/total fragments — so do not trim them. No maxCells: the ask picker drops the 'showing' prefix first when the row cannot fit, never this separator. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session.resume_hint": {
+    "role": "post-exit scrollback line",
+    "tone": "plain, helpful",
+    "note": "Printed AFTER the TUI has released the terminal, so it lands in the user's scrollback where the command can be copied. {hint} is a ready-made 'lop --resume <id>' command string, kept verbatim (a command is syntax, never translated). The LEADING and TRAILING newlines are part of the value and are load-bearing: the leading one detaches the block from the frame above it and the trailing one is followed by print()'s own newline, so the caller must keep a plain print(). The em dash is literal text, not ICU syntax. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.channel_not_itemised": {
+    "role": "session-spend channel note",
+    "tone": "plain, factual",
+    "note": "The note appended to a spend row whose channel is the residual 'other' bucket, so the row's money figure is not itemised per channel. 'itemised' is the British spelling used across this panel; keep it. Zero ICU arguments, one line; the row's note budget is applied by the caller. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.no_charge": {
+    "role": "session-spend money cell",
+    "tone": "plain, factual",
+    "maxCells": 9,
+    "note": "Drawn in the fixed nine-cell money column for a spend row whose every unpriced record is a FAILED attempt, where the ledger's documented presumption is that an unreported failure was not charged. It replaces the `$—` that would read as 'price unknown', and it must never read as a measured zero. Nine cells exactly: the money column is fixed (see _SPEND_MONEY_CELL). Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_wide": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 30,
+    "note": "The widest rung explaining why a failed spend row states no amount: the request failed and the ledger presumes it was not billed. It is chosen only when the table-wide note budget can fit it (30 cells); narrower cards fall to `unpriced_failed`. Zero ICU arguments; the middle dot is literal. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The middle rung for a failed-only spend row (or a row mixing a priced call with a failed attempt): the attempt failed and the ledger presumes it was not billed. It replaces the generic 'price not stated' disclosure; the money cell says 'no charge' when the whole group failed. The middle dot is literal. Zero ICU arguments; the table-wide note budget sheds this whole string rather than cropping it. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The narrow rung of `unpriced_failed`, used when the table's note budget cannot fit the widest spelling. It must still state the billing consequence on its own, without the failure clause. Zero ICU arguments; one short fragment, never a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_mixed": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 30,
+    "note": "The widest rung for a MIXED spend row: stated money plus one or more failed attempts. It must say the failed attempt added NO CHARGE as an increment, not that the priced group was unbilled (design round 1, D-1). It is never used on a failed-only row, whose own ladder says the request failed and was not billed. Zero ICU arguments; the middle words are literal and must not be reordered into a whole-row claim. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_mixed_mid": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The 24-cell rung of `unpriced_failed_mixed`: the failed attempt's incremental charge is zero, shown as `+$0`. The `+` is deliberate — it names the increment, not a measured total — and the row's own money cell still shows the stated amount. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_mixed_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 12,
+    "note": "The 12-cell rung of `unpriced_failed_mixed`, for an 80x24 terminal's 12-cell note budget. It must fit whole and still attribute the zero to the failed attempt rather than the priced group. Zero ICU arguments; one short fragment. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled_wide": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 38,
+    "note": "The widest rung for a cancelled spend row: the response was lost and the amount may have been billed. Chosen only when the table-wide note budget can fit it (the canonical 83-cell card cannot); narrower cards fall to `unpriced_cancelled` or `unpriced_cancelled_short`. Zero ICU arguments; the middle dot is literal. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 30,
+    "note": "The note for a spend row whose unstated record was CANCELLED mid-request (a timeout, dispose or caller cancel): unlike a refusal, it may already have been billed, so the row keeps `$—` and says so. It replaces the generic 'price not stated' disclosure. The middle dot is literal. Zero ICU arguments; the note budget sheds the whole string rather than cropping it. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The narrow rung of `unpriced_cancelled`, used when the table's note budget cannot fit the wider spelling. It must still state the possible charge on its own. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled_shortest": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 12,
+    "note": "The 12-cell rung for a cancelled spend row: the amount that would have been billed is unknown. It exists so the cancellation reason survives an 80x24 terminal's 12-cell note budget instead of shedding entirely (design round 1, D-2). It must not read as a measured zero; the money cell keeps `$—`. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_ok": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The note for a 200 response that stated no amount: the request was served, so this is not a failure, but the server published no price. It replaces the generic 'price not stated' disclosure and keeps `$—` (never a fabricated zero). Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_ok_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 15,
+    "note": "The narrow rung of `unpriced_ok`, used when the table's note budget cannot fit the wider spelling. It must say the same thing without the actor clause. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_partial": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The note for a spend row that mixes a stated amount with an unstated 200 response: the figure shown is a lower bound. The row keeps its money figure and its `+` mark; this note replaces the generic not-tracked basis tag. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_partial_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 15,
+    "note": "The narrow rung of `unpriced_partial`, used when the table's note budget cannot fit the wider spelling. It must still say some spend has no figure. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_partial_shortest": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 12,
+    "note": "The 12-cell rung for a partial spend row: some of the row's requests have no stated figure, so the money shown is a lower bound. It exists so the partial reason survives an 80x24 terminal's 12-cell note budget (design round 1, D-2). The row keeps its `+` mark; this is not a zero. Zero ICU arguments; one short fragment. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.timing.no_samples": {
+    "role": "session timing table cell",
+    "tone": "plain, factual",
+    "note": "The dim cell drawn in the timing table where a row has no bar because no sample was recorded (timing is None, empty, or the scale is degenerate). It must NOT read as a measured zero: an absent sample is not a fast one, which is why the words are drawn and the zero in parentheses is the literal sample count rather than a measurement — the whole string is one fixed value with no ICU arguments and no substitution. 'samples' is the plural noun for the table's unit; do not pluralise a count into it. No maxCells. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.aside.title": {
+    "role": "aside card title",
+    "tone": "plain, factual",
+    "note": "The name of the off-the-record aside card, drawn first in the card's title row in foreground ink. One short word naming the surface, not a sentence; the row truncates with an ellipsis at narrow widths. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.aside.off_the_record": {
+    "role": "aside card subtitle",
+    "tone": "plain, reassuring",
+    "note": "The contract stated beside the aside card's title: exchanges here are NOT added to the chat history. The TWO LEADING SPACES are load-bearing — this fragment is appended to the same Rich Text row as the title, so the spaces are the only gap between them — do not trim. The em dash is literal text. The one deliberate exception (forking a settled exchange into the chat) is a deliberate user act, which is why the clause says nothing HERE joins the chat. The row truncates with an ellipsis. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.aside.superseded": {
+    "role": "aside answer status marker",
+    "tone": "plain, factual",
+    "note": "Drawn dim after an aside answer that was cancelled (superseded by a newer question), so the reader knows the text above is not the live answer. The caller prefixes the card's two-space answer indent, which is layout, not copy. Parentheses are part of the marker; one short fragment, never a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagents.title": {
+    "role": "subagent panel header title",
+    "tone": "plain, factual",
+    "note": "The header word of the subagent roster panel, naming the direct child subagents listed below it. One plural noun; the header row is no-wrap and truncates with an ellipsis, and the scope suffix and hotkey hint that may follow are separate fragments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagents.of_scope": {
+    "role": "subagent panel header scope suffix",
+    "tone": "plain, factual",
+    "note": "The scope suffix appended to the subagent header when drilled into one child: 'Subagents of <label>', so the reader knows these rows are that child's children, not the top-level roster. {scope} is the already-truncated selected label (model-authored, kept verbatim). The LEADING SPACE is load-bearing — it is the only break within the sentence and borrows no other separator — do not trim it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.waiting_clause": {
+    "role": "ask bar compact count clause",
+    "tone": "plain count",
+    "note": "The '<N> waiting' clause of the SOC (Space-Optimised Copy) of compact_headline. This is the emergency copy used when the full headline does not fit in the bar's width: it carries NO noun (never 'question'/'questions'), because the clause is dropped whole, not re-worded, when space runs out, and a noun here would be a THIRD count of the same thing the full headline states. '{shown}' is the RAW count as digits, never grouped or pluralised, so it prints '1', '11' and '1200' exactly as the pre-extraction f-string did. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.timed_out_clause": {
+    "role": "ask bar compact count clause",
+    "tone": "plain count",
+    "note": "The '<N> timed out' clause of compact_headline, joined to waiting_clause with ' · ' in code. No noun by design (see waiting_clause): the clause is a whole unit that the bar drops or keeps, and a bare count reads correctly beside the full headline's noun-bearing sentence. '{shown}' is the raw digit string, never grouped or pluralised. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.urgent_clause": {
+    "role": "ask bar / drawer urgency clause",
+    "tone": "plain count",
+    "note": "The '<N> urgent' clause stating URGENCY IN WORDS rather than only as the amber glyph ray (design round 2, D13): colour is not a channel a reader without colour has. '{shown}' is the raw digit string, never grouped or pluralised, matching the sibling clauses. It is appended to a mixed clause with ' · ' in code so the half-counts stay a prefix. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.question_waiting": {
+    "role": "ask queue headline (bar + list header)",
+    "tone": "plain count",
+    "note": "The bar/header count in the chip register, e.g. '2 questions waiting', carried as an ICU PLURAL singular/plural pair so the noun agrees with the count where the pre-extraction code wrote 'question' or 'questions' by hand. 'count' is the same number as '{shown}' and exists ONLY to SELECT the branch: '{shown}' is a separate RAW digit string, so the rendered number is never re-grouped or re-formatted ('1200' stays '1200', not '1,200'). Both halves carry the same value at the call site; a locale may reorder or rephrase the sentence but must keep both arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.question_timed_out": {
+    "role": "ask queue headline (bar + list header)",
+    "tone": "plain count",
+    "note": "The '<N> questions timed out' clause of queue_headline, the chip register's word for the moved-on half (the list header says 'moved on' instead — see drawer_headline). ICU plural on 'count' selects 'question'/'questions'; '{shown}' is the raw digit string and must not be grouped. The two arguments are the same at the call site. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy_picker.title": {
+    "role": "copy picker card title",
+    "tone": "plain, instructional",
+    "note": "The /copy picker card's title row, drawn first in label ink. One short phrase naming the surface and the key action, not a sentence; it is a fixed value with zero ICU arguments. It shares the literal that the card's own width measurement also reads, so the two cannot disagree. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy_picker.from_line": {
+    "role": "copy picker preview header position marker",
+    "tone": "plain, factual",
+    "note": "The preview pane's position marker appended to the header once the pane is scrolled: ' · from line 3'. The LEADING ' · ' and its spaces are load-bearing — this fragment is appended to the same Rich Text row as the line count, so the separator is the only gap between them; do not trim. '{line}' is a RAW digit string (offset + 1), never grouped or formatted as a number, so a long document's marker reads 'from line 1200'. The header claims no position while unscrolled, so this key is only resolved when offset > 0. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy_picker.more_lines": {
+    "role": "copy picker preview overflow marker",
+    "tone": "plain count",
+    "note": "The '… N more lines' overflow marker on the preview's last drawn row, stating how many SOURCE lines sit below the pane. ICU plural on 'count' gives the singular '… 1 more line' the pre-extraction code wrote by hand; '{shown}' is the RAW digit string and is deliberately NOT the same formatting path as 'count' (no grouping, no locale number formatting), so 1200 prints '1200'. The leading ellipsis '…' and the space after it are part of the value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.link_picker.title": {
+    "role": "link picker card title",
+    "tone": "plain, instructional",
+    "note": "The /links picker card's title row, drawn first in foreground ink: one short phrase naming the surface and the key action, not a sentence, with zero ICU arguments. The card's own width measurement reads the same literal via this key, so the title and the timing that reserves its row cannot disagree. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.last_heartbeat_ago": {
+    "role": "info panel session row heartbeat age clause",
+    "tone": "plain, factual",
+    "note": "The 'last heartbeat <age> ago' clause on a wedged session row in /info, stating how long since that runtime last reported. {age} is the already-formatted duration string from format_duration (e.g. '4m'), passed verbatim; this key adds only the surrounding words, so the digit formatting the pre-extraction f-string printed is unchanged. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.needs_pending": {
+    "role": "info panel session row pending clause",
+    "tone": "plain, factual",
+    "note": "The 'needs <pending>' clause on a session row with work waiting. {pending} is the record's own pending description string, passed verbatim (it already carries its noun and count), so this key is only the leading verb and the single space before it; do not add a noun or a number here. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.busy_word": {
+    "role": "info panel session row busy state word",
+    "tone": "plain, factual",
+    "note": "The single word 'busy' closing a live session row's meta in /info. It is suppressed on wedged and leaving rows by the caller (their words already cover the state), so this key must stay the bare unqualified word with no punctuation or trailing space; the row joins clauses with ' · ' itself. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.deeper_below_depth": {
+    "role": "info panel subagent tree depth overflow marker",
+    "tone": "plain count",
+    "note": "The '  +N deeper (below depth D)' summary row under the /info subagent tree, counting nodes hidden below the drawn depth cap anywhere in the tree. The TWO LEADING SPACES are load-bearing — they are the row's base indent, written because the row is a section summary attached to no parent row — do not trim. {deeper} and {depth} are RAW digit strings, never grouped, so 1200 stays '1200' exactly as the pre-extraction f-string printed it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagent_view.row_name": {
+    "role": "subagent page title row surface name",
+    "tone": "plain, factual",
+    "note": "The word 'Subagent' opening the subagent page's title row, naming the surface; the child's label follows after a ' · ' seam the caller appends separately, so this key is the bare singular noun with no trailing space or punctuation. The same key paints both the swept-job row and the normal title row, so the two cannot drift onto two spellings. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagent_view.no_longer_on_ledger": {
+    "role": "subagent page swept-job status phrase",
+    "tone": "plain, factual",
+    "note": "The status phrase on the title row of a subagent page whose job the ledger has swept: the run's outcome is no longer knowable, so the row carries no glyph, clock or count, only this phrase after the label. Bare fragment, no punctuation; the caller supplies the two-space gap before it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.wakes_title": {
+    "role": "wake panel wakes section header",
+    "tone": "plain, factual",
+    "note": "The header word of the wake half of the wake panel band, naming the scheduled wakes listed below it. One plural noun, no trailing space; the caller appends the ' · ' seam and the scheduled count as separate fragments in their own ink. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.monitors_title": {
+    "role": "wake panel monitors section header",
+    "tone": "plain, factual",
+    "note": "The header word of the monitor half of the wake panel band, naming the armed monitors listed below it. One plural noun, no trailing space; the caller appends the ' · ' seam and the armed/attention count as separate fragments in their own ink. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.monitors_need_attention": {
+    "role": "wake panel monitors broken-count header clause",
+    "tone": "plain count",
+    "note": "The '<broken> of <total> need(s) attention' clause in the monitor section header when some armed monitors are broken. ICU plural on 'count' selects needs/need exactly as the pre-extraction hand-written verb choice did ('1 of 5 needs', '3 of 5 need'); {shown} and {total} are RAW digit strings, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.monitors_armed": {
+    "role": "wake panel monitors armed-count header clause",
+    "tone": "plain count",
+    "note": "The '<N> monitor(s) armed' clause in the monitor section header when no armed monitor is broken. ICU plural on 'count' gives the singular '1 monitor armed' the pre-extraction code wrote by hand; {shown} is the RAW digit string, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.team_heading": {
+    "role": "org chart page title team heading",
+    "tone": "plain, factual",
+    "note": "The opening fragment of the org chart page's title row, e.g. 'team org', in bold foreground ink. {charted} is the charted team's display name from the root node's label, kept verbatim (a name, never translated). The following fragments (' · org chart', the zoom tier) are appended as separate fragments in quieter ink, so this value carries no trailing separator. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.chart_suffix": {
+    "role": "org chart page title chart suffix",
+    "tone": "plain, factual",
+    "note": "The ' · org chart' fragment after the team heading on the org chart page's title row, naming the view. The leading space-dot-space seam is INSIDE the value and load-bearing: it is the only separator between the heading and this fragment. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.zoom_clause": {
+    "role": "org chart page title zoom clause",
+    "tone": "plain, factual",
+    "note": "The ' · zoom: <tier>' fragment on the org chart page's title row, always stated so an auto-collapsed small terminal explains itself. {tier} is one of outline/standard/detailed from the tier table, kept verbatim. The leading seam is inside the value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.expanded_suffix": {
+    "role": "org chart page title expanded suffix",
+    "tone": "plain, factual",
+    "note": "The ' · expanded' fragment appended to the org chart title only while expand-all is on, stating that every node is unfolded. The leading seam is inside the value and load-bearing. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.manager_legend": {
+    "role": "org chart legend manager glyph gloss",
+    "tone": "plain, factual",
+    "note": "The first entry of the org chart's legend row: the diamond glyph and the word it stands for, painted in accent ink. The glyph is part of the value because glyph and gloss are one legend entry; the remaining legend entries are scanner-blind tuple copy left for a follow-up slice. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.search_fetch_hint": {
+    "role": "search result card fetch hint",
+    "tone": "plain, instructional",
+    "note": "The closing line of an expanded search-result card, telling the operator how to get a result's full page. 'web_fetch' and 'read <url>' are tool/command syntax, kept verbatim and never translated; the capitalised 'Ask Operator' address is the pre-slice wording and is preserved exactly. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.http_blocked": {
+    "role": "fetch card confirmed-block error row",
+    "tone": "warning, factual",
+    "note": "The danger row on a fetch card whose refusal was CLASSIFIED as a bot-block: '⚠ HTTP <status> <reason> — <clause>.' {status} and {reason} are raw interpolated strings (the numeric code and its standard reason phrase), {clause} is the shared classified sentence from block_lead with NO trailing period — the period closing the row is inside this value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.http_error_page": {
+    "role": "fetch card generic HTTP error row",
+    "tone": "warning, factual",
+    "note": "The danger row on a fetch card for an UNSIGNED HTTP refusal: '⚠ HTTP <status> <reason> — error/block page, not page content.' It deliberately claims nothing about why the origin refused. {status} and {reason} are raw interpolated strings; the closing period is inside the value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.rendered_row": {
+    "role": "fetch card rendered-evidence row",
+    "tone": "plain, factual",
+    "note": "The 'Rendered: <bits>' row on a fetch card, where {bits} is the pre-joined evidence string (render method, attempt summary, line and byte counts joined with ' · ' in code). Only the 'Rendered: ' label is copy here; the bits are measurements and identifiers that stay verbatim. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.low_quality_hint": {
+    "role": "fetch card low-quality hint",
+    "tone": "plain, instructional",
+    "note": "The hint row on a fetch card whose extraction was sparse or JS-gated, suggesting the browser for the full page. `browser` is a tool name in backticks, kept verbatim; the em dash and wording are the pre-slice bytes. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.all_archived": {
+    "role": "session picker all-archived notice",
+    "tone": "plain, factual",
+    "note": "The notice in the session picker's results pane when every conversation is archived and only the reveal toggle offers them: 'all <N> conversation(s) are archived'. The '(s)' spelling is DELIBERATE at every count — the pre-slice f-string never pluralised, so there is no ICU plural branch. {total} is a raw digit string, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.no_match_filter": {
+    "role": "session picker no-match notice",
+    "tone": "plain, factual",
+    "note": "The notice in the session picker's results pane when the active filter matches nothing. It names the FILTER rather than the store, because archived rows may still exist behind the toggle. Bare sentence, no punctuation. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.no_session": {
+    "role": "session picker empty preview fallback",
+    "tone": "plain, factual",
+    "note": "The preview pane's fallback when no row is selected and no filter is active: 'no session'. Two words, no punctuation; with a filter active the pane instead names the query, so this only ever describes an unfiltered empty selection. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.type_to_filter": {
+    "role": "session picker filter placeholder",
+    "tone": "plain, instructional",
+    "note": "The dim placeholder in the session picker's filter row when no query has been typed, stating how the list is narrowed. It is shed before the keys when the row runs out of room. Bare phrase, no punctuation. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.showing_prefix": {
+    "role": "session picker window counter prefix",
+    "tone": "plain count",
+    "note": "The '   showing ' lead of the session picker's window counter ('showing 1–9 of 42'), drawn as a separate fragment so the numerals can carry their own ink. The THREE leading spaces and the trailing space are load-bearing separators; this differs from tui.small.picker.showing_prefix ('showing ') used by the ask/move pickers, which is why it is its own key. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.preview_mode_key": {
+    "role": "session picker preview-mode key label",
+    "tone": "plain, factual",
+    "note": "The 'ctrl+e' key label in the session picker's footer, naming the chord that toggles the preview mode whose name follows it. A key name is syntax shown to the user, kept verbatim like tui.hub_links.hint.confirm ('ctrl+y'); it is extracted because the footer paints it as user-facing copy. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.goal_panel.settled_heading": {
+    "role": "heading",
+    "tone": "plain",
+    "note": "Section heading over the settled-goal history; a noun, not a verb, and it carries no count because the rows below do."
+  },
+  "tui.small.goal_panel.no_goal_hint": {
+    "role": "empty-state hint",
+    "tone": "plain",
+    "note": "Empty state for the goal card; the literal `/goal <text>` is a command a user types, so it must stay unmodified in every locale."
+  },
+  "tui.small.goal_panel.none_yet": {
+    "role": "empty-state fragment",
+    "tone": "plain",
+    "note": "Prefixed by two spaces as its own indent; a claim about the record, so it is withheld when the record is truncated."
+  },
+  "tui.small.goal_panel.done_suffix": {
+    "role": "row suffix",
+    "tone": "plain",
+    "note": "Trails a finished goal row; keeps its two leading spaces and the em dash, which separates it from the goal text."
+  },
+  "tui.small.goal_panel.judge_absent": {
+    "role": "placeholder",
+    "tone": "plain",
+    "note": "Shown when no judge is attached; the em dash is the absent-value sentinel, and `judge:` is a protocol word kept as-is."
+  },
+  "tui.small.goal_panel.judge_line": {
+    "role": "row label",
+    "tone": "plain",
+    "note": "`judge:` is protocol vocabulary and the state word comes from the generated table, so only the label is copy here."
+  },
+  "tui.small.goal_panel.judge_run": {
+    "role": "counter fragment",
+    "tone": "plain",
+    "note": "Run counter appended to the judge line; both numbers are raw digits with no grouping, matching the pre-slice f-string."
+  },
+  "tui.small.goal_panel.more_settled_indent": {
+    "role": "overflow row",
+    "tone": "plain",
+    "note": "Indented overflow notice carrying the hidden count; raw digits, and the ellipsis is a single character, not three dots."
+  },
+  "tui.small.goal_panel.more_settled": {
+    "role": "overflow row",
+    "tone": "plain",
+    "note": "Unindented overflow notice for the same fact as its indented sibling; a separate key because the indentation differs between the two call sites."
+  },
+  "tui.small.network_panel.relay_checking_indent": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Pending relay row; the trailing newline is part of the row and the two-space indent is its list indent."
+  },
+  "tui.small.network_panel.checking_indent": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Generic pending row shared by the members and identity sections; trailing newline and two-space indent are load-bearing."
+  },
+  "tui.small.network_panel.no_members": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Shown when the payload reports no members; the double-space indent and trailing newline are part of the row."
+  },
+  "tui.small.network_panel.relay_not_running": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Relay-not-running row; the run of spaces aligns its value with the sibling `running, pid …` row, so the padding is layout."
+  },
+  "tui.small.network_panel.stale_tag": {
+    "role": "row tag",
+    "tone": "plain",
+    "note": "Bracketed staleness marker on a member row; the brackets are part of the tag, and it never takes an argument."
+  },
+  "tui.small.network_panel.suspect_tag": {
+    "role": "row warning",
+    "tone": "yellow",
+    "note": "Warning tag for a possibly copied key; keeps its two-space indent and the sentence is deliberately cautious about the inference."
+  },
+  "tui.small.network_panel.member_count": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Member count with knowable singular/plural; the count is carried as a string so the digit stays raw (never `1,200`)."
+  },
+  "tui.small.network_panel.trust_field": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Trust state of a member; the value is protocol vocabulary from the payload and is not translated."
+  },
+  "tui.small.network_panel.installed_row": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "`installed:` is a protocol label whose column padding aligns it with the identity row; the value is a bare yes/no."
+  },
+  "tui.small.network_panel.identity_row": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "`identity:` is a protocol label kept as-is; the value comes from `present`/`missing` and the spacing aligns the column."
+  },
+  "tui.small.network_panel.relay_running": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "Relay-running row; `relay:` and `pid` are protocol words, and the padding after the colon aligns the value column."
+  },
+  "tui.small.approval.decision_allowed": {
+    "role": "row prefix",
+    "tone": "plain",
+    "note": "The live ask's decision row; the trailing space separates it from the tool name that follows, so it is layout."
+  },
+  "tui.small.approval.decision_denied": {
+    "role": "row prefix",
+    "tone": "plain",
+    "note": "The denial variant of the same row; keeps its trailing space and is deliberately a separate key from the allowed form."
+  },
+  "tui.small.info_panel.not_answering": {
+    "role": "state word",
+    "tone": "plain",
+    "note": "Stand-in for a wedged heartbeat, written as a state word rather than a sentence so it sits in the same slot as the real state values."
+  },
+  "tui.small.info_panel.install_info_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading over the install block; the trailing newline is part of the heading and the rule below it is drawn in code, not copy."
+  },
+  "tui.small.panels.scroll_hint": {
+    "role": "affordance suffix",
+    "tone": "plain",
+    "note": "Appended to a panel's hint only when it can actually scroll; the leading space and the arrows are the whole point, so keep both."
+  },
+  "tui.small.model_picker.effort": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Reasoning-effort list on a model row; the value is a slash-joined token list from the catalogue data and must stay untranslated."
+  },
+  "tui.small.model_picker.none_word": {
+    "role": "value word",
+    "tone": "plain",
+    "note": "The value shown when a model reports no reasoning efforts at all; a word, not an em dash, so it reads as a value."
+  },
+  "tui.small.model_picker.default": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "The model's default reasoning effort; the value is a protocol token and stays as-is."
+  },
+  "tui.small.model_picker.released": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Release date on a model row; the value is a date string supplied by the catalogue, not a formatted date."
+  },
+  "tui.small.model_picker.no_matching_models": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Empty state when a filter is active and matched nothing."
+  },
+  "tui.small.model_picker.no_models_available": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Empty state when no filter is active; distinct from the filtered form because the two states need different guidance."
+  },
+  "tui.small.network_panel.mesh_networks_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading of the mesh-networks card; trailing newline included, the rule under it is drawn in code."
+  },
+  "tui.small.session_panel.diagnostics_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading of the diagnostics card; trailing newline included, the rule under it is drawn in code."
+  },
+  "tui.small.subagent_panel.ctrl_g_shrink": {
+    "role": "keybinding hint",
+    "tone": "plain",
+    "note": "Shown while the panel is expanded; `ctrl+g` is the literal chord a user presses and stays verbatim."
+  },
+  "tui.small.subagent_panel.ctrl_g_expand": {
+    "role": "keybinding hint",
+    "tone": "plain",
+    "note": "Shown while the panel is collapsed; the paired state of the shrink hint and a separate key because the wording differs."
+  },
+  "tui.small.wake_panel.scheduled_count": {
+    "role": "header count",
+    "tone": "plain",
+    "note": "Count of scheduled wakes; the singular branch spells the digit into the sentence, matching the pre-split form, and the digit is raw (never grouped)."
+  },
+  "tui.small.settings_view.default_marker": {
+    "role": "marker",
+    "tone": "dim",
+    "note": "Marks a value as the built-in default; the two leading spaces are its indent and the parentheses are the marker itself."
+  },
+  "tui.small.settings_view.hop_count": {
+    "role": "count",
+    "tone": "faint",
+    "note": "Chain hop count; the indent is layout and the digit is raw (never grouped)."
+  },
+  "tui.small.settings_view.reorder_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Key hints under a selected hop; the indent, the arrow glyphs and the chord letters are all load-bearing."
+  },
+  "tui.small.settings_view.press_key": {
+    "role": "prompt",
+    "tone": "accent",
+    "note": "Prompt while capturing a keybinding; the ellipsis is a single character."
+  },
+  "tui.small.settings_view.hop_row_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Detail hint for a hop row; the chords are literal keys a user presses."
+  },
+  "tui.small.settings_view.chain_row_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Detail hint for a chain row; separate key from the hop variant because the wording differs."
+  },
+  "tui.small.settings_view.chain_add_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Hint for adding a chain; the angle-bracket placeholders are the instruction's shape and stay verbatim."
+  },
+  "tui.small.settings_view.hop_add_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Hint for adding a hop; the shorter sibling of the chain-add hint."
+  },
+  "tui.small.settings_view.read_only_pane": {
+    "role": "state label",
+    "tone": "dim",
+    "note": "Standalone read-only marker for a pane; no indent, unlike its sibling read_only_label."
+  },
+  "tui.small.settings_view.overflow_more": {
+    "role": "overflow row",
+    "tone": "dim",
+    "note": "Overflow notice with the hidden row count; ellipsis is one character and the digit is raw."
+  },
+  "tui.small.settings_view.read_only_label": {
+    "role": "state label",
+    "tone": "dim",
+    "note": "The indented form of the read-only marker; a separate key from read_only_pane because the indent differs."
+  },
+  "tui.small.settings_view.title": {
+    "role": "title",
+    "tone": "head",
+    "note": "The screen's title; a single lowercase word, matching the app's other panel titles."
+  },
+  "tui.small.settings_view.bool_on": {
+    "role": "choice label",
+    "tone": "plain",
+    "note": "Boolean TRUE choice label. Deliberately lowercase and lowercase-only: it renders in a value column beside 'off'."
+  },
+  "tui.small.settings_view.bool_off": {
+    "role": "choice label",
+    "tone": "plain",
+    "note": "Boolean FALSE choice label; paired with bool_on and equally short because the column is narrow."
+  },
+  "tui.small.todo_panel.header": {
+    "role": "heading",
+    "tone": "muted",
+    "note": "Panel header; one key for both the flat and the staged header, which carry identical bytes."
+  },
+  "tui.small.todo_panel.resolved": {
+    "role": "count",
+    "tone": "muted",
+    "note": "Resolved-over-total counter in the header; both digits are raw and the slash is layout."
+  },
+  "tui.small.todo_panel.dropped": {
+    "role": "count",
+    "tone": "muted",
+    "note": "Dropped counter appended to the header only when non-zero."
+  },
+  "tui.small.todo_panel.more_todos": {
+    "role": "overflow",
+    "tone": "dim",
+    "note": "Overflow row for items the screen cannot afford; the ellipsis and the noun are both part of the copy."
+  },
+  "tui.small.todo_panel.stage": {
+    "role": "label",
+    "tone": "dim",
+    "note": "Stage counter after the header; the leading separator attaches it to the line it follows."
+  },
+  "tui.small.todo_panel.more_hidden": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Collapsed-count affordance before the collapse hint; the trailing separator is layout."
+  },
+  "tui.small.todo_panel.done_hidden": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Same affordance when the hidden remainder is all done (two-valued switch)."
+  },
+  "tui.small.todo_panel.collapse": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The key name is display vocabulary; only the verb translates."
+  },
+  "tui.small.todo_panel.expand": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The other half of the same two-valued hint."
+  },
+  "tui.small.todo_panel.more_below": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Scroll cue; the digit may arrive pre-padded to pin the column, so it is a string, not a number."
+  },
+  "tui.small.todo_panel.more_below_padded": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "The end-state variant, where a run of spaces of the same width stands in for the count."
+  },
+  "tui.small.todo_panel.blocked": {
+    "role": "status",
+    "tone": "muted",
+    "note": "Status marker appended to a row; the leading space-dash-space is part of the marker."
+  },
+  "tui.small.todo_panel.dropped_row": {
+    "role": "status",
+    "tone": "dim",
+    "note": "The dropped variant of the same marker."
+  },
+  "tui.small.command_picker.projects": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Availability count in the command palette's status line; the plural moves into the message so a translator can inflect it."
+  },
+  "tui.small.command_picker.entries": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Same shape for the entries count, joined to the projects count with a separator in code."
+  },
+  "tui.small.session_sidebar.opened_by": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Names who opened the session; role is a normalised role word and stays a parameter."
+  },
+  "tui.small.session_sidebar.lead_return": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The lead key when the list has the keyboard: the keycap is display vocabulary, the verb translates."
+  },
+  "tui.small.session_sidebar.lead_focus": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The same lead when the list does not have focus; the way in rather than out."
+  },
+  "tui.small.session_sidebar.pin_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Pin affordance glued after the lead; the leading separator is layout and the keycap stays."
+  },
+  "tui.small.session_sidebar.asks_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Ask-door teacher (U13): the chord is display vocabulary, 'asks' is the word."
+  },
+  "tui.small.session_sidebar.hide_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "The sidebar toggle affordance; the keycap is display vocabulary, 'hide' is the word."
+  }
+}

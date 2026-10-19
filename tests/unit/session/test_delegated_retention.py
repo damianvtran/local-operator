@@ -92,19 +92,81 @@ def _kept(result: dr.DelegatedResult) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def test_only_hidden_origins_are_candidates_and_user_origins_never_are(root: Path) -> None:
-    for name, origin in (
-        ("sub", "subagent"),
-        ("shell", "agent-shell"),
-        ("config", "agent-config"),
-        ("future", "some-origin-minted-next-year"),
-    ):
+def test_only_the_reapable_origins_go_and_every_other_class_survives(root: Path) -> None:
+    """Survival, not predicate values: each directory is still on disk.
+
+    The reap set is ``cleanup.deletable_origins()``, an ALLOW-LIST — deliberately
+    not the negation of the visibility predicate. That inversion is the defect
+    this pins: it made every origin minted by a later code path deletable by
+    default, and reaped a hidden-but-operator-owned origin nobody had decided
+    to reap.
+    """
+    for name, origin in (("sub", "subagent"), ("shell", "agent-shell")):
         _mk(root, name, origin)
+    # Hidden, but never reapable: the operator's own configuration run and a
+    # value this build does not know. Both fail CLOSED.
+    _mk(root, "config", "agent-config")
+    _mk(root, "future", "some-origin-minted-next-year")
     for name, origin in (("user", None), ("fork", "fork"), ("ws", "agent-workstream")):
         _mk(root, name, origin, age_h=24 * 300)
     result = _pass(root)
-    assert {c.session for c in result.removed} == {"sub", "shell", "config", "future"}
-    assert _names(root) == {"user", "fork", "ws"}
+    assert {c.session for c in result.removed} == {"sub", "shell"}
+    assert _names(root) == {"config", "future", "user", "fork", "ws"}
+    assert result.kept_by_origin == 2
+    assert set(result.kept_by_origin_names) == {"config", "future"}
+
+
+def test_an_agent_config_run_is_never_reaped(root: Path) -> None:
+    """A stated DISPOSITION, not an inherited one.
+
+    The operator starts configuration runs from the Agents page, so the run is
+    the operator's own chore: reaping it is irreversible, keeping it costs a few
+    kilobytes. It is hidden (not in ``resume.USER_ORIGINS``, so no listing shows
+    it) AND kept (not in ``deletable_origins()``) — two answers on purpose.
+    """
+    _mk(root, "config", "agent-config", age_h=24 * 400)
+    assert _pass(root, dry_run=True).removed == []
+    assert _pass(root).removed == []
+    assert "config" in _names(root)
+
+
+def test_an_agent_config_run_is_not_the_parent_class_either(root: Path) -> None:
+    """Kept by BOTH policies: the parent scan stays blind to it.
+
+    A kept-but-hidden origin must not fall through to the parent class, whose
+    limits could remove it instead. It belongs to neither removal path.
+    """
+    _mk(root, "config", "agent-config", age_h=24 * 400)
+    parent = run_cleanup(
+        root,
+        CleanupPolicy(enabled=True, max_sessions=1, max_total_bytes=1, remove_empty=True),
+        now=NOW,
+        dry_run=True,
+    )
+    assert parent.scanned == 0
+    assert {c.session for c in parent.chosen} == set()
+
+
+def test_an_unknown_origin_is_kept_because_ambiguity_fails_closed(root: Path) -> None:
+    """A value present in ``origin.json`` but not in the reap set is NOT deletable.
+
+    Same direction as an empty marker: it may cost disk, never a session nobody
+    can recover. It is also invisible to the parent class (hidden), so neither
+    policy removes it.
+    """
+    _mk(root, "future", "agent-future-thing", age_h=24 * 400)
+    assert _pass(root).removed == []
+    assert "future" in _names(root)
+    parent = run_cleanup(
+        root, CleanupPolicy(enabled=True, max_total_bytes=1), now=NOW, dry_run=True
+    )
+    assert parent.scanned == 0
+
+
+def test_a_missing_origin_marker_is_the_users_own_and_survives(root: Path) -> None:
+    _mk(root, "plain", origin=None, age_h=24 * 400)
+    assert _pass(root).removed == []
+    assert "plain" in _names(root)
 
 
 def test_an_agent_workstream_ten_times_past_the_cutoff_is_never_delegated(root: Path) -> None:
@@ -191,9 +253,74 @@ def test_an_abandoned_directory_is_clocked_by_created_at_then_mtime(root: Path) 
 
 def test_a_directory_with_no_clock_is_kept(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _mk(root, "noclock", age_h=None)
-    monkeypatch.setattr(dr, "_clock_without_activity", lambda _d: None)
+    monkeypatch.setattr(dr, "_clock_without_activity", lambda *_args: None)
     assert _pass(root).removed == []
     assert "noclock" in _names(root)
+
+
+def test_a_sane_birth_stamp_is_believed(root: Path) -> None:
+    """Positive control for the implausible cases below: the stamp IS the clock."""
+    directory = _mk(root, "sane", "subagent", age_h=None)
+    marker = directory / "created_at.json"
+    marker.write_text(json.dumps(NOW - 400 * HOUR))
+    old = NOW - 400 * HOUR
+    os.utime(marker, (old, old))
+    os.utime(directory, (old, old))
+    assert [c.session for c in _pass(root).removed] == ["sane"]
+    assert "sane" not in _names(root)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [0.0, -1.0, 1.7e8, 1_000_000_000_000.0, 10**400, float("nan"), float("inf")],
+    ids=[
+        "zero",
+        "negative",
+        "truncated-epoch",
+        "far-future",
+        "too-large-for-float",
+        "nan",
+        "inf",
+    ],
+)
+def test_an_implausible_birth_stamp_is_no_clock_and_the_session_survives(
+    root: Path, stamp: float
+) -> None:
+    """A positive-but-garbage ``created_at`` used to rank as MAXIMALLY OLD.
+
+    So a truncated epoch (``1.7e8`` is 1975) was the first thing reaped — the
+    inverse of safe. The stamp is now believed only inside a plausible window
+    (:data:`dr.MIN_PLAUSIBLE_BIRTH` .. now + ``MAX_BIRTH_SKEW_S``); outside it the
+    directory has no clock and is kept.
+
+    The mtimes are pushed OLD deliberately: that is what makes this a real
+    control rather than a coincidence. A fallback to mtime would remove the
+    session, so survival proves the stamp was REJECTED, not merely outranked.
+    """
+    directory = _mk(root, "odd", "subagent", age_h=None)
+    marker = directory / "created_at.json"
+    marker.write_text(json.dumps(stamp))
+    old = NOW - 400 * HOUR
+    os.utime(marker, (old, old))
+    os.utime(directory, (old, old))
+    assert _pass(root).removed == []
+    assert "odd" in _names(root)
+
+
+def test_an_unreadable_birth_marker_still_takes_the_mtime_clock(root: Path) -> None:
+    """Only a PRESENT-but-implausible value is rejected; a corrupt marker is not it.
+
+    A marker that does not parse holds no stamp to contradict the fallback, so
+    the mtime clock stands (an old one still reaps, which is the pre-existing
+    behaviour this change deliberately leaves alone).
+    """
+    directory = _mk(root, "garbled", "subagent", age_h=None)
+    marker = directory / "created_at.json"
+    marker.write_text("{not a number")
+    old = NOW - 400 * HOUR
+    os.utime(marker, (old, old))
+    os.utime(directory, (old, old))
+    assert [c.session for c in _pass(root).removed] == ["garbled"]
 
 
 def test_a_sidecar_write_does_not_move_the_clock(root: Path) -> None:
@@ -754,8 +881,24 @@ def test_a_dry_run_lists_everything_and_removes_nothing(root: Path) -> None:
     _mk(root, "fresh", age_h=1)
     result = _pass(root, dry_run=True, batch_size=2)
     assert len(result.removed) == 7 and len(_names(root)) == 8
-    assert _kept(result)["fresh"].startswith("active within")
+    # The kept row names its bucket honestly: "inside the window" and "no usable
+    # clock" share it (a missing marker and an implausible birth stamp both land
+    # there), so it must not claim the session was recently active.
+    assert _kept(result)["fresh"].startswith("inside the 48h window")
     assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
+
+
+def test_a_dry_run_names_the_sessions_kept_by_origin(root: Path) -> None:
+    """A count the operator cannot act on is not a usable preview.
+
+    These rows are hidden from every listing, so the dry run's kept list is the
+    only place they can be found; the name must ride beside ``kept_by_origin``
+    exactly as ``window_names`` does for the in-window group.
+    """
+    _mk(root, "config", "agent-config")
+    result = _pass(root, dry_run=True)
+    assert result.kept_by_origin == 1
+    assert _kept(result)["config"] == "origin not reapable"
 
 
 def test_a_dry_run_with_the_switch_off_still_lists_and_says_so(root: Path) -> None:
@@ -1202,7 +1345,7 @@ def test_a_merged_clean_clone_past_the_window_is_reclaimed_whole(root: Path) -> 
     assert (root / "sessions" / "reapme").exists(), "only content goes; the record stays"
     assert not tree.exists()
     assert [(row.session, row.reason) for row in result.content] == [
-        ("reapme", "merged-clean clone past the window")
+        ("reapme", "merged-clean clone")
     ]
     row = result.content[0]
     assert row.classes == ("merged-clean clone",) and row.entries >= 1 and row.bytes > 0
@@ -1292,7 +1435,7 @@ def test_a_loose_node_modules_is_reclaimed_whole(root: Path) -> None:
     result = _pass(root)
     assert not (pad / "node_modules").exists()
     assert [(row.session, row.reason, row.classes) for row in result.content] == [
-        ("mods", "build shapes past the window", ("build shapes",))
+        ("mods", "build shapes", ("build shapes",))
     ]
 
 
@@ -1334,7 +1477,7 @@ def test_a_build_named_directory_with_a_gitdir_is_judged_as_a_tree(root: Path) -
     result = _pass(root)
     assert build.exists() and (build / ".git").exists() and (build / "junk.txt").exists()
     assert not loose.exists()
-    assert [row.reason for row in result.content] == ["build shapes past the window"]
+    assert [row.reason for row in result.content] == ["build shapes"]
     assert (
         "treeshape",
         "build: HEAD does not resolve (or the gitdir link is broken)",
@@ -1418,7 +1561,7 @@ def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
     row = rows[0]
     assert row["session"] == "rowy"
     assert row["policy"] == "delegated_scratchpad"
-    assert row["reason"] == "stale output past the window"
+    assert row["reason"] == "stale output"
     assert row["bytes"] == size and row["entries"] == 1
     assert row["title"] == "" and row["actor"] == "startup"
     assert row["classes"] == ["stale output"]
@@ -1482,7 +1625,7 @@ def test_unique_sidebar_refs_are_rescued_into_a_bundle_before_the_tree_goes(
     result = _pass(root)
     assert not tree.exists()
     row = result.content[0]
-    assert row.reason == "merged-clean clone past the window"
+    assert row.reason == "merged-clean clone"
     bundle = Path(row.rescue_bundle)
     assert bundle == pad / "reap-rescue-clone.bundle"
     assert bundle.exists()
@@ -1562,7 +1705,7 @@ def test_a_merged_clean_linked_worktree_is_removed_not_bundled(root: Path) -> No
     listed = _git_stdout("-C", os.fspath(owner), "worktree", "list", "--porcelain")
     assert "lo-before" not in listed, "the registration is pruned by the removal itself"
     assert [(row.session, row.reason) for row in result.content] == [
-        ("wtpad", "merged-clean clone past the window")
+        ("wtpad", "merged-clean clone")
     ]
     row = result.content[0]
     assert row.method == "worktree-remove" and row.rescue_bundle == ""
@@ -1692,7 +1835,7 @@ def test_evidence_paths_are_never_taken_by_the_shape_arm(root: Path) -> None:
     assert (archive / "bundle.tar.gz").exists()
     assert own_name.exists() and (own_name / "keep.bin").exists()
     assert [(row.session, row.reason) for row in result.content] == [
-        ("evidence", "build shapes past the window + stale output past the window")
+        ("evidence", "build shapes + stale output")
     ]
     reasons = [reason for session, reason in result.content_kept if session == "evidence"]
     assert any("session-load-central-cache: evidence path" in r for r in reasons)
@@ -1937,14 +2080,31 @@ def test_the_content_guard_re_stat_mirrors_rule_six(root: Path) -> None:
     assert reason == "active since the scan"
 
 
-def test_content_of_a_young_session_is_never_evaluated(root: Path) -> None:
+def test_content_of_a_young_dead_session_reclaims_shapes_but_keeps_notes(root: Path) -> None:
+    """The policy change of 2026-10-19: AGE IS NOT A CONTENT GUARD.
+
+    This test used to pin the opposite — a pad inside the record window was
+    never evaluated, so a dead 1-hour-old subagent held its build tree for the
+    full 48 hours. Cache-shaped data (a build directory, a stale log) has no
+    reading as scratch, and the desk's authority is merged+clean+stale, not
+    old transcript; the LIVENESS guards are what keep live work safe. So the
+    shape goes while the notes beside it, which are the session's own work,
+    stay — and the RECORD stays too, because it is inside the window.
+    """
     young = _mk(root, "young", age_h=1)
     pad = young / "scratchpad"
     pad.mkdir()
-    _stale_file(pad / "big.log")
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    notes = pad / "notes.md"
+    notes.write_text("keep me\n")
     result = _pass(root)
-    assert result.content == [] and result.content_kept == []
-    assert (pad / "big.log").exists()
+    assert [row.session for row in result.content] == ["young"]
+    assert not shaped.exists()
+    assert notes.read_text() == "keep me\n"
+    assert young.exists(), "the RECORD stays: the age window still governs it"
+    assert result.removed == []
 
 
 def test_content_of_a_live_claimed_session_is_untouched(root: Path) -> None:
@@ -2017,3 +2177,64 @@ def test_the_scratchpad_remover_refuses_outside_paths_and_keeps_its_contract(
     os.symlink(os.fspath(victim), os.fspath(symlinked))
     assert remove_scratchpad_entry(symlinked, config_dir=None, sessions_dir=sessions) is False
     assert piece.exists() and victim.exists() and symlinked.is_symlink()
+
+
+def test_a_parent_users_pad_is_never_content_reclaimed(root: Path) -> None:
+    """The audit reports both classes; the CONTENT layer takes from one.
+
+    A parent (user) directory is not in the delegated pool at all, so its build
+    tree survives however old and however shaped — and that is the promise the
+    module docstring makes about the user's own conversations.
+    """
+    user = _mk(root, "mine", origin=None, age_h=100)
+    pad = user / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "bundle.js").write_bytes(b"x" * 4096)
+    notes = pad / "notes.md"
+    notes.write_text("keep me\n")
+
+    result = _pass(root)
+
+    assert result.content == []
+    assert shaped.exists() and notes.exists()
+    assert user.exists()
+
+
+def test_a_live_subagents_scratchpad_and_record_survive_the_full_pass(root: Path) -> None:
+    """Liveness, not age, is the content gate now — so the full pass (record
+    AND content) must leave a live child's pad and its transcript exactly
+    where they were, even though the record is well past the window."""
+    directory = _mk(root, "livemod", age_h=100)
+    (directory / ".session.pid").write_text(str(os.getpid()))
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    notes = pad / "notes.md"
+    notes.write_text("keep me\n")
+
+    result = _pass(root)
+
+    assert result.removed == []
+    assert directory.exists() and (directory / dr.TRANSCRIPT_FILENAME).exists()
+    assert shaped.exists() and notes.exists()
+    assert ("livemod", "claimed by a live process") in result.content_kept
+
+
+def test_a_spent_budget_stops_even_when_no_pad_has_reclaimable_content(root: Path) -> None:
+    """Minor 1: the pre-fix deadline check ran only at a 100-removal/100-failure
+    batch boundary, so a pool of pads with nothing to reclaim walked to the end
+    and never set ``content_budget_exhausted``. The per-pad check must stop after
+    the one-pad progress guarantee."""
+    for name in ("plain-a", "plain-b", "plain-c"):
+        pad = _kept_pad(root, name)
+        (pad / "notes.md").write_text("keep\n")
+
+    result = _pass(root, batch_size=100, budget_s=0.0)
+
+    assert result.content == []
+    assert result.content_budget_exhausted is True
+    assert result.content_remaining == 2

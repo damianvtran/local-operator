@@ -146,7 +146,7 @@ CATEGORIES = (
 #: inert for the Python jobs — pinned by `test_web_only_is_inert_for_the_python_jobs`.
 PY_INERT_CATEGORIES = frozenset({CAT_DOCS, CAT_WEB})
 
-#: The two test files `filesystem-boundaries-windows` exists to run under
+#: The selected test files `filesystem-boundaries-windows` exists to run under
 #: native Windows semantics (`ci.yml`'s `Verify native filesystem boundaries`
 #: step). It is the only place they run on Windows, so a diff confined to
 #: `tests/**` must NOT blanket-skip the job: the `windows` flag is keyed on the
@@ -155,34 +155,46 @@ WINDOWS_TEST_PATHS = frozenset(
     {
         "tests/unit/test_agent_import_boundary.py",
         "tests/unit/server/test_edit_workspace_boundary.py",
+        "tests/unit/network/test_credentials_private_paths.py",
     }
 )
 
-#: The `conftest.py` chain those two files load. A change to one of them can
+#: The `conftest.py` chain those selected files load. A change to one of them can
 #: change the job's behaviour without touching either test file, so they are
 #: `windows` inputs for the same reason the files are.
 WINDOWS_CONFTEST_PATHS = frozenset(
     {
         "conftest.py",
         "tests/conftest.py",
+        "tests/unit/conftest.py",
         "tests/unit/server/conftest.py",
+        "tests/unit/network/conftest.py",
     }
 )
 
 #: What the job's pytest run imports THROUGH that chain, which the path list
 #: above does not cover. `conftest.py` does `from tests import
 #: shard_stall_watchdog` at module scope, and pytest imports the `__init__.py`
-#: markers for both protected modules — so a change to any of these can change
+#: markers for the selected modules — so a change to any of these can change
 #: the Windows job's behaviour without touching a file it names. Narrow, since
 #: Linux runs `tests/shard_stall_watchdog.py` too, but it is the same "flag
 #: narrower than the guard's real input" pattern this classifier exists to
-#: avoid, and the fix is a name in a set.
+#: avoid, and the fix is a name in a set. The root-path test also imports the
+#: existing software-signing helpers at module scope, even for its three selected
+#: filesystem nodes; their transitive test imports are therefore real inputs, not
+#: a reason to widen this predicate to all tests/**.
 WINDOWS_LOADED_PATHS = frozenset(
     {
         "tests/shard_stall_watchdog.py",
         "tests/__init__.py",
         "tests/unit/__init__.py",
         "tests/unit/server/__init__.py",
+        "tests/unit/network/test_credential_inherit.py",
+        "tests/unit/network/test_credentials_consent.py",
+        "tests/unit/network/test_approvals_store.py",
+        "tests/unit/network/test_credentials_real_link.py",
+        "tests/unit/network/test_credentials_owner.py",
+        "tests/unit/network/test_relay_e2e.py",
     }
 )
 
@@ -378,6 +390,9 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "tui-e2e": ("tui",),
     "cli-sanity": ("cli",),
     "server-sanity": ("server",),
+    "packaging-smoke-build": ("unit",),
+    "packaging-smoke": ("unit",),
+    "source-import-314": ("unit",),
     "i18n": ("i18n",),
 }
 
@@ -531,6 +546,26 @@ LOCAL_EXCLUSIONS: dict[str, str] = {
         "the job may well pass. Excluded rather than left as a gate that cries "
         "wolf; the audit stays a required CI check and this classifier cannot "
         "skip it on any dependency-touching diff."
+    ),
+    "packaging-smoke-build": (
+        "the CI step is `python -m build --wheel`; the shared .venv does not "
+        "carry the `build` package and installing it there is a dependency "
+        "cost paid by every worktree. `uv build --wheel` is the local "
+        "spelling when needed, and scripts/smoke_wheel.py is runnable by hand "
+        "against its output; the gate itself is cheap in CI."
+    ),
+    "packaging-smoke": (
+        "consumes the artifact built by packaging-smoke-build and starts one "
+        "server per interpreter in a throwaway venv; reproducing it locally "
+        "means a wheel build plus up to three installs (~17 MB each) on a "
+        "shared disk. Run scripts/smoke_wheel.py --wheel <wheel> by hand when "
+        "changing the packaging or the server start path."
+    ),
+    "source-import-314": (
+        "the 3.14 interpreter is not guaranteed on every development host; the "
+        "same import is exercised against the built artifact by "
+        'packaging-smoke on 3.14 in CI. Run `python -c "import '
+        'local_operator.server.app"` under 3.14 locally when it is available.'
     ),
 }
 

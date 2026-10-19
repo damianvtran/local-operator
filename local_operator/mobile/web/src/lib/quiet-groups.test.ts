@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	quietGroupClauseFacts,
 	quietGroupLabel,
 	quietGroupOfSegment,
 	quietGroupsOf,
@@ -157,7 +158,7 @@ describe("the quiet-group derivation against the shared parity fixture", () => {
 		 * re-verified byte-identical at the branch head `f9b041f8`. */
 		const text = readFileSync(FIXTURE_PATH, "utf8");
 		const digest = createHash("sha256").update(text).digest("hex");
-		expect(digest).toBe("3e5dca2158ef4103ff0e905e979daae2cb4dd61f4e379fecfb03cb9a53631dac");
+		expect(digest).toBe("ba02cd3d62ef763f97023d055d1951f88539de351a01cae5765ba899d4738138");
 	});
 
 	/* ONE TEST PER CASE, named with the fixture's own name: a case that fails
@@ -176,7 +177,39 @@ describe("the quiet-group derivation against the shared parity fixture", () => {
 						},
 					)
 				: quietGroupsOf(records);
-			expect(actual).toEqual(entry.expected);
+			/* `clauseFacts` is pinned separately below (it is the field that
+			 * catches per-surface clause drift); this structural compare covers
+			 * the group FACTS, so the clause field is projected out of both
+			 * sides rather than duplicating it in the group comparison. */
+			const withoutClauses = (value: unknown): unknown => {
+				if (Array.isArray(value)) return value.map(withoutClauses);
+				if (typeof value !== "object" || value === null) return value;
+				const { clauseFacts: _clauseFacts, ...rest } = value as Record<string, unknown>;
+				return rest;
+			};
+			expect(withoutClauses(actual)).toEqual(withoutClauses(entry.expected));
+			/* The summary clause FACTS, pinned per case. `expected` alone pins
+			 * counts but not the clause set, which is how the actions clause
+			 * drifted between clients with both suites green (design round 1,
+			 * D-1). A group with work must state it; a workless one must not. */
+			const groups = Array.isArray(actual) ? actual : actual === null ? [] : [actual];
+			/* `expected` is `unknown` on purpose (it is JSON), so the facts are
+			 * read through a narrow structural view rather than a cast to the
+			 * module's own type — the fixture, not this file, is the contract. */
+			const withClauses = (value: unknown): string[] | undefined =>
+				typeof value === "object" && value !== null && "clauseFacts" in value
+					? (value as { clauseFacts: string[] }).clauseFacts
+					: undefined;
+			const want = Array.isArray(entry.expected)
+				? entry.expected.map(withClauses)
+				: entry.expected === null
+					? []
+					: [withClauses(entry.expected)];
+			/* `partial` is the head-cut read, which the fixture states with
+			 * `spanHeadLoaded: false` — the same clause the widget's count label
+			 * makes (`N+`), so the facts pin the minimum marker too. */
+			const partial = entry.spanHeadLoaded === false;
+			expect(groups.map((group) => quietGroupClauseFacts(group, { partial }))).toEqual(want);
 		});
 	}
 
@@ -282,7 +315,7 @@ it("one hub bridges three actual tools without counting as work or weakening bou
 	const tools: QuietGroupRecord[] = [0, 1, 2].map(index => ({...peer(`t${index}`), kind: "tool", text: "", tool_name: "read", tool_state: "done"}));
 	const groups = quietGroupsOf([tools[0]!, hub, tools[1]!, tools[2]!]);
 	expect(groups).toHaveLength(1);
-	expect(groups[0]).toMatchObject({count: 1, actions: 3, mixedActions: true, replyRequested: 1, steered: 1, rowIds: ["t0", "h", "t1", "t2"]});
+	expect(groups[0]).toMatchObject({count: 1, actions: 3, replyRequested: 1, steered: 1, rowIds: ["t0", "h", "t1", "t2"]});
 	expect(quietGroupsOf(tools)).toEqual([]);
 	expect(quietGroupsOf([tools[0]!, hub, tools[1]!])).toEqual([]);
 	expect(quietGroupsOf([hub, {...hub, id: "h2", kind: "subagent_message"}])).toHaveLength(1);

@@ -414,3 +414,37 @@ def test_oversized_code_is_refused_before_shared_parser_work(name, key, monkeypa
     )
     assert len(scan.pending) == 1
     assert not next(iter(scan.pending.values())).outputs
+
+
+@pytest.mark.parametrize("name", ["generate_image", "generate_voiceover", "generate_sound_effect"])
+@pytest.mark.parametrize("pruned", [False, True])
+def test_audio_and_same_row_image_control_survive_pruning(name, pruned):
+    facts = {
+        "artifacts": [
+            {"digest": DIGEST, "kind": "audio", "content_type": "audio/wav", "duration_s": 1.0}
+        ]
+    }
+    scan = _scan([tool("audio-row", 1, "audio-call", name, "generated", facts, pruned=pruned)])
+    assert list(scan.records) == [f"a:{DIGEST}"]
+    record = next(iter(scan.records.values()))
+    assert record.kind == "audio"
+
+
+def test_audio_settlement_custom_row_uses_existing_artifact_index():
+    scan = _scan(
+        [
+            {
+                "id": "settled",
+                "ts": 2,
+                "type": "custom",
+                "payload": {
+                    "custom_type": "audio_settle_v1",
+                    "details": {
+                        "request_id": "accepted-job",
+                        "artifacts": [{"digest": DIGEST, "kind": "audio"}],
+                    },
+                },
+            }
+        ]
+    )
+    assert list(scan.records) == [f"a:{DIGEST}"]

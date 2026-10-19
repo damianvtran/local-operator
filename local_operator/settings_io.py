@@ -65,12 +65,23 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
+from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
+from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
-from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
+from local_operator.model.effort import (
+    EFFORT_ORDER,
+    FALLBACK_EFFORTS,
+    TIER_EFFORTS,
+    parse_tier_mapping,
+)
+from local_operator.providers.account_policy import (
+    DEFAULT_ACCOUNT_SELECTION_POLICY,
+    effective_account_selection_policy,
+)
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -120,6 +131,14 @@ try:
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
+# The OpenRouter host-speed row is a small English-only addition, merged for the
+# same reason as ``wire.aida_cadence``: it must not move the already-audited
+# ``wire.settings`` source hash the translated locales are pinned to.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
 # The console-admission section reads its copy from its own namespace for the
 # same reason as `wire.aida_cadence`: the section is new, so adding it beside
 # already-translated settings must not move those sources. Without this merge the
@@ -128,6 +147,8 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
+    # The new child keeps translated wire.settings source hashes unchanged.
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.account_policy"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -522,6 +543,20 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.session_cleanup_description()),
     ),
+    # LIVE, and its own section rather than a row under ``session``: the cap is
+    # read on EVERY pad write (``scratchpad.scratchpad_budget_bytes``), so the
+    # value applies to a running session on the very next write. ``session`` is
+    # NEW_LAUNCH for its autosave row, and scope is uniform within a section by
+    # construction — putting a per-write row there would label it "takes effect:
+    # new launch", which is not what happens. The config namespace stays
+    # ``session.scratchpad`` because the pad belongs to the session; the SECTION
+    # is only the page grouping.
+    Section(
+        "session_scratchpad",
+        _t(_ws.session_scratchpad_title()),
+        Scope.LIVE,
+        _t(_ws.session_scratchpad_description()),
+    ),
     Section(
         "session_delegated",
         # NOT "Delegated work: subagents and background sessions": at 49 cells
@@ -787,6 +822,16 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.aida_description()),
     ),
+    # The Librarian keys, LIVE for the same reason the Aida block is: the pause
+    # flag reaches a live pass through the config watcher's 2 s tick, and the
+    # other keys are read at her next arm. The name is read by the receipts and
+    # by every row the engine arms, so an edit is visible at the next paint.
+    Section(
+        "librarian",
+        _t(_ws.librarian_title()),
+        Scope.LIVE,
+        _t(_ws.librarian_description()),
+    ),
     # The hub keys. LIVE is honest here: the update runner re-reads the mapping
     # on every tick (and every interval sleep), so an edit lands within one tick.
     # Both auto-update switches default ON; turning one OFF keeps the runner
@@ -876,6 +921,17 @@ SECTIONS: tuple[Section, ...] = (
     ),
     # Preserve the established Model landing row and short-terminal editor target.
     Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
+    # Queued asks (decisions D6–D9). LIVE because every reader applies the
+    # window at READ time — the index readers per request, the live
+    # projection per publish — and a running session republishes on the
+    # change (``Session._apply_config_change``), so an edit lands with no
+    # relaunch on the terminal, the desktop app and the phone alike.
+    Section(
+        "asks",
+        _t(_ws.asks_title()),
+        Scope.LIVE,
+        _t(_ws.asks_description()),
+    ),
 )
 
 
@@ -1397,6 +1453,67 @@ def _validate_advertise_hosts(value: object) -> object:
 _AIDA_NAME_MAX_CHARS = 80
 
 
+def validate_tier_value(value: Any) -> None:
+    """A ``subagents.models.<tier>`` value: a selector string or a ``{model, effort}`` map.
+
+    The mapping form (#2428) gives a tier a reasoning effort; it mirrors a
+    fallback-chain hop and is parsed by the same leaf function the launch path
+    uses (``model.effort.parse_tier_mapping``), so a value this accepts is one
+    the launch resolves. A string stays the row's ordinary TEXT contract — this
+    validator only exists because ``validate``'s generic TEXT arm refuses every
+    non-string. A string that LOOKS like JSON is refused: stored verbatim it
+    would be read as a ``provider/model`` selector and fail at launch (a
+    well-formed JSON string never gets here — :func:`write_setting` parses it
+    first — so what reaches this branch is JSON that did not parse).
+
+    This checks the value's SHAPE only. Whether the selector names a usable
+    ``provider/model`` (or the ``default`` sentinel) is judged at launch by the
+    tier reader, exactly as it is for a bare string, so the two forms are held
+    to one standard.
+    """
+    if isinstance(value, str):
+        if value.strip().startswith("{"):
+            raise ValueError(_TIER_JSON_HINT)
+        return
+    if parse_tier_mapping(value) is None:
+        raise ValueError(
+            "expected provider/model, or "
+            f'{{"model": "provider/model", "effort": "{"|".join(TIER_EFFORTS)}"}}'
+        )
+
+
+#: The one hint for a tier mapping typed as JSON that did not parse, shared by
+#: :func:`coerce` and :func:`validate_tier_value` so the page, ``lop config
+#: edit`` and ``PATCH /v1/settings`` say the same thing.
+_TIER_JSON_HINT = 'expected JSON, e.g. {"model": "provider/model", "effort": "high"}'
+
+
+def _normalise_tier_value(value: Any) -> Any:
+    """A tier value as it should be STORED, whichever writer delivered it.
+
+    ``read_setting`` serves a mapping tier as JSON text, and two writers —
+    ``PATCH /v1/settings/{key}`` and the agent ``setting`` tool — hand their
+    value to :func:`write_setting` without :func:`coerce`. Without this the
+    exact string a client was served came back as a string and was refused,
+    so the desktop could not save a row it had just displayed (#2428 R1-1).
+    JSON that does not parse is returned as-is so the validator refuses it
+    with the JSON hint. A mapping the parser accepts is stored in its
+    normalised form (stripped selector, lowercased effort, ``auto`` dropped),
+    so the file holds what the launch path will act on, not ``" MAX "``.
+    """
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, Mapping):
+        parsed = parse_tier_mapping(dict(value))
+        if parsed is not None:
+            selector, effort = parsed
+            return {"model": selector} if effort is None else {"model": selector, "effort": effort}
+    return value
+
+
 def _validate_delegated_max_age_hours(value: Any) -> None:
     """The range sentence for ``session.cleanup.delegated.max_age_hours``.
 
@@ -1445,21 +1562,28 @@ def _validate_static_roots(value: Any) -> None:
             raise ValueError(f"{item!r}: {reason}")
 
 
-def _validate_aida_name(value: Any) -> None:
-    """``aida.name`` is a display name: trimmed, non-empty, bounded, no controls.
+#: The ``librarian.name`` cap — a LITERAL here for the same reason the aida
+#: one is (this module stays off the feature package's import path); the real
+#: constant is ``librarian.bootstrap.MAX_NAME_CHARS`` and the anti-drift test
+#: pins the two together. Kept equal to the title cap for the same rename-sync
+#: reason: a title the session layer accepted must never be refused here.
+_LIBRARIAN_NAME_MAX_CHARS = 80
+
+
+def _validate_display_name(value: Any, *, example: str) -> None:
+    """One display-name rule set: trimmed, non-empty, bounded, no controls.
 
     Enforced at the write facade for the same reason ``_validate_advertise_hosts``
     is — every writer (/settings, ``lop config edit``, ``PATCH /v1/settings``)
-    funnels through :func:`validate` — and the rename paths reuse THIS refusal
-    via ``aida.naming.validate_name``, so the settings page and a ``/aida
-    rename`` receipt cannot disagree about what a name is (the drift rule:
-    one rule set, one funnel). Whitespace is collapsed before the checks, so
-    ``"  Maya  "`` is the valid name ``Maya`` — readers normalize identically —
-    while control characters (a pasted escape sequence) are refused outright,
-    because they would corrupt every surface that renders the name.
+    funnels through :func:`validate` — and the bootstrap reuses the same shape,
+    so a settings edit and a programmatic write cannot disagree about what a
+    name is. Whitespace is collapsed before the checks, so ``"  Nova  "`` is
+    the valid name ``Nova`` — readers normalize identically — while control
+    characters (a pasted escape sequence) are refused outright, because they
+    would corrupt every surface that renders the name.
     """
     if not isinstance(value, str):
-        raise ValueError("expected a name, e.g. Aida")
+        raise ValueError(f"expected a name, e.g. {example}")
     name = " ".join(value.split())
     if not name:
         raise ValueError("a name is required")
@@ -1467,6 +1591,16 @@ def _validate_aida_name(value: Any) -> None:
         raise ValueError(f"at most {_AIDA_NAME_MAX_CHARS} characters — this is {len(name)}")
     if any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ValueError("control characters are not allowed in a name")
+
+
+def _validate_aida_name(value: Any) -> None:
+    """``aida.name``: see :func:`_validate_display_name` for the shared rule."""
+    _validate_display_name(value, example="Aida")
+
+
+def _validate_librarian_name(value: Any) -> None:
+    """``librarian.name``: see :func:`_validate_display_name` for the rule."""
+    _validate_display_name(value, example="Librarian")
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -1947,6 +2081,23 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0.0,
         maximum=600.0,
     ),
+    # Like ``provider_affinity`` above, a HARNESS switch rather than a wire key:
+    # ``_openrouter_provider_preferences`` deliberately does not read it, so it
+    # can never make the shipped config start emitting a ``provider`` object. It
+    # is read by ``SessionStreamFn._score_host_decode_rate`` and applies to the
+    # affinity pin only -- with affinity off (or any of order/only/ignore/sort
+    # set) there is no pin to release and the check never runs.
+    Setting(
+        key="providers.openrouter.retire_below_tps",
+        path=("providers", "openrouter", "retire_below_tps"),
+        section="openrouter",
+        label=_t(_hs.retire_below_tps_label()),
+        kind=Kind.FLOAT,
+        default=0.0,
+        help=_t(_hs.retire_below_tps_help()),
+        minimum=0.0,
+        maximum=100_000.0,
+    ),
     # -- failover -----------------------------------------------------------
     Setting(
         key="retry.enabled",
@@ -2032,13 +2183,29 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
+        key="retry.accountSelectionPolicy",
+        path=("retry", "accountSelectionPolicy"),
+        section="failover",
+        label=_t(_ap.label()),
+        kind=Kind.ENUM,
+        default=DEFAULT_ACCOUNT_SELECTION_POLICY,
+        help=_t(_ap.help()),
+        choices=(
+            Choice(
+                "reset-soonest", _t(_ap.reset_soonest_label()), _t(_ap.reset_soonest_description())
+            ),
+            Choice("headroom", _t(_ap.headroom_label()), _t(_ap.headroom_description())),
+            Choice("fair", _t(_ap.fair_label()), _t(_ap.fair_description())),
+        ),
+    ),
+    Setting(
         key="retry.usageAwareAccountPick",
         path=("retry", "usageAwareAccountPick"),
         section="failover",
-        label=_t(_ws.retry_usageawareaccountpick_label()),
+        label=_t(_ap.legacy_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(_t(_ws.retry_usageawareaccountpick_help())),
+        help=_t(_ap.legacy_help()),
         choices=_bool_choices(
             _t(_ws.retry_usageawareaccountpick_choice_true_description()),
             _t(_ws.retry_usageawareaccountpick_choice_false_description()),
@@ -2742,6 +2909,28 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.auto_save_conversation_choice_false_description()),
         ),
     ),
+    # -- session scratchpad size --------------------------------------------
+    # The BACKSTOP is configurable so a pad that legitimately holds more than
+    # the shipped 256 MiB is not forced onto the shell route around the write
+    # policy (the refusal names this key as the remedy). The bounds are the
+    # ones the reader clamps to as well, and the default literal is pinned to
+    # ``scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES`` by
+    # ``test_settings_io._consumer_defaults``: this module stays off the
+    # writer's import path, so the pair is checked rather than shared.
+    Setting(
+        key="session.scratchpad.max_bytes",
+        path=("session", "scratchpad", "max_bytes"),
+        section="session_scratchpad",
+        label=_t(_ws.session_scratchpad_max_bytes_label()),
+        kind=Kind.INT,
+        default=256 * 1024 * 1024,
+        # Both limits are in the help because the page paints help but not
+        # min/max, and a user hand-editing config.yml needs the range.
+        help=_t(_ws.session_scratchpad_max_bytes_help()),
+        minimum=16 * 1024 * 1024,
+        maximum=8 * 1024 * 1024 * 1024,
+        unit="bytes",
+    ),
     # -- runtime ------------------------------------------------------------
     Setting(
         # `runtime.*`, matching the section it appears in and the other key in
@@ -3094,6 +3283,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_lo_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     Setting(
         key="subagents.models.med",
@@ -3155,6 +3345,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_med_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     Setting(
         key="subagents.models.hi",
@@ -3216,6 +3407,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_hi_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     # -- resource classification --------------------------------------------
     #
@@ -4833,17 +5025,6 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=1440,
         help=_t(_ws.hub_check_interval_min_help()),
     ),
-    Setting(
-        key="hub.merge_model",
-        path=("hub", "merge_model"),
-        section="hub",
-        label=_t(_ws.hub_merge_model_label()),
-        kind=Kind.TEXT,
-        default="",
-        placeholder=_t(_ws.hub_merge_model_placeholder()),
-        help=_t(_ws.hub_merge_model_help()),
-        empty_unsets=True,
-    ),
     # -- agents ------------------------------------------------------------
     # The starter-update switch. A LITERAL default for the same reason the hub
     # keys are literals: this module stays off the import path of the package
@@ -4975,6 +5156,79 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1,
         maximum=365,
         help=(_t(_ws.aida_onboarding_nudge_days_help())),
+    ),
+    # -- librarian ---------------------------------------------------------
+    # Defaults are LITERALS here like the aida block's, for the same import
+    # weight reason; `_consumer_defaults()` in tests/unit/test_settings_io.py
+    # pins them to the constants in ``local_operator/librarian/``.
+    Setting(
+        key="librarian.enabled",
+        path=("librarian", "enabled"),
+        section="librarian",
+        label=_t(_ws.librarian_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ws.librarian_enabled_choice_true_description()),
+            _t(_ws.librarian_enabled_choice_false_description()),
+        ),
+        help=_t(_ws.librarian_enabled_help()),
+    ),
+    Setting(
+        key="librarian.name",
+        path=("librarian", "name"),
+        section="librarian",
+        label=_t(_ws.librarian_name_label()),
+        kind=Kind.TEXT,
+        default="Librarian",
+        placeholder=_t(_ws.librarian_name_placeholder()),
+        validate_value=_validate_librarian_name,
+        help=_t(_ws.librarian_name_help()),
+    ),
+    Setting(
+        key="librarian.cadence.at",
+        path=("librarian", "cadence", "at"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_at_label()),
+        kind=Kind.TEXT,
+        default="03:30",
+        placeholder=_t(_ws.librarian_cadence_at_placeholder()),
+        help=_t(_ws.librarian_cadence_at_help()),
+    ),
+    Setting(
+        key="librarian.cadence.paused",
+        path=("librarian", "cadence", "paused"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_paused_label()),
+        kind=Kind.BOOL,
+        default=False,
+        choices=_bool_choices(
+            _t(_ws.librarian_cadence_paused_choice_true_description()),
+            _t(_ws.librarian_cadence_paused_choice_false_description()),
+        ),
+        help=_t(_ws.librarian_cadence_paused_help()),
+    ),
+    Setting(
+        key="librarian.cadence.max_extra_per_day",
+        path=("librarian", "cadence", "max_extra_per_day"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_max_extra_per_day_label()),
+        kind=Kind.INT,
+        default=1,
+        minimum=0,
+        maximum=12,
+        help=_t(_ws.librarian_cadence_max_extra_per_day_help()),
+    ),
+    Setting(
+        key="librarian.cadence.min_gap_minutes",
+        path=("librarian", "cadence", "min_gap_minutes"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_min_gap_minutes_label()),
+        kind=Kind.INT,
+        default=720,
+        minimum=0,
+        maximum=1440,
+        help=_t(_ws.librarian_cadence_min_gap_minutes_help()),
     ),
     # -- projects -------------------------------------------------------------
     # The staleness window. Default is a LITERAL like the aida block's (this
@@ -5254,6 +5508,40 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         help=_t(_ws.speech_voice_instructions_help()),
     ),
+    Setting(
+        key="speech.transcription.cleanup",
+        path=("speech", "transcription", "cleanup"),
+        section="speech",
+        label=_t(_ws.speech_transcription_cleanup_label()),
+        kind=Kind.ENUM,
+        # The route reads this per request; a request field, when present,
+        # still wins. ``auto`` is the shipped behaviour: provider-native where
+        # the rung has a switch, conservative client rules elsewhere.
+        default="auto",
+        help=_t(_ws.speech_transcription_cleanup_help()),
+        choices=(
+            Choice(
+                "auto",
+                _t(_ws.speech_transcription_cleanup_choice_auto_label()),
+                _t(_ws.speech_transcription_cleanup_choice_auto_description()),
+            ),
+            Choice(
+                "provider",
+                _t(_ws.speech_transcription_cleanup_choice_provider_label()),
+                _t(_ws.speech_transcription_cleanup_choice_provider_description()),
+            ),
+            Choice(
+                "client",
+                _t(_ws.speech_transcription_cleanup_choice_client_label()),
+                _t(_ws.speech_transcription_cleanup_choice_client_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.speech_transcription_cleanup_choice_off_label()),
+                _t(_ws.speech_transcription_cleanup_choice_off_description()),
+            ),
+        ),
+    ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import
     # path of the package that reads these keys (it is loaded on every CLI
@@ -5295,6 +5583,46 @@ SETTINGS: tuple[Setting, ...] = (
         # designated" (badge only).
         empty_unsets=True,
         help=_t(_ws.team_bridge_session_help()),
+    ),
+    # -- asks ------------------------------------------------------------------
+    # How long a LAPSED (timed-out, unanswered) ask stays shown, measured from
+    # its deadline. Display only (D6): the late-answer window and the index
+    # sweep stay at 7 d, and settled rows keep the 7 d horizon. The default is
+    # a literal because this module stays off the readers' import path;
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins it to
+    # ``asks.store.DEFAULT_LAPSED_VISIBLE_FOR``, and the choice VALUES are the
+    # keys of ``asks.store.LAPSED_VISIBLE_FOR_S`` (pinned beside it). An ENUM,
+    # not an INT of hours (D7): a dropdown of four was asked for.
+    Setting(
+        key="asks.lapsed_visible_for",
+        path=("asks", "lapsed_visible_for"),
+        section="asks",
+        label=_t(_ws.asks_lapsed_visible_for_label()),
+        kind=Kind.ENUM,
+        default="7d",
+        help=_t(_ws.asks_lapsed_visible_for_help()),
+        choices=(
+            Choice(
+                "at_expiry",
+                _t(_ws.asks_lapsed_visible_for_choice_at_expiry_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_at_expiry_description()),
+            ),
+            Choice(
+                "1h",
+                _t(_ws.asks_lapsed_visible_for_choice_1h_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_1h_description()),
+            ),
+            Choice(
+                "24h",
+                _t(_ws.asks_lapsed_visible_for_choice_24h_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_24h_description()),
+            ),
+            Choice(
+                "7d",
+                _t(_ws.asks_lapsed_visible_for_choice_7d_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_7d_description()),
+            ),
+        ),
     ),
 )
 
@@ -5387,12 +5715,20 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
     ``"false"`` reads as the consumer reads it (off), and ``is_default`` /
     the value ink / the toggle all agree with the policy about the state.
     """
+    if setting.key == "retry.accountSelectionPolicy":
+        # Registry projections and the request parser must agree even for an
+        # old file carrying only an explicit legacy boolean.
+        return effective_account_selection_policy(manager.get_config().values)
     raw = _walk(manager.get_config().values, setting.path)
     if raw is _MISSING:
         return setting.default
     if setting.validate_value is model_overrides and isinstance(raw, Mapping):
         # Hand-written YAML maps and the text editor share the same contract.
         # Python's dict repr uses single quotes and cannot round-trip as JSON.
+        return json.dumps(raw, default=str)
+    if setting.validate_value is validate_tier_value and isinstance(raw, Mapping):
+        # Same contract as model_overrides above: a ``{model, effort}`` tier
+        # (#2428) is shown as JSON the TEXT editor can round-trip.
         return json.dumps(raw, default=str)
     if setting.validate_value is _validate_openrouter_max_price and isinstance(raw, Mapping):
         # Same contract as model_overrides above: the TUI editor is text, so a
@@ -5490,6 +5826,14 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.validate_value is validate_tier_value and text.startswith("{"):
+        # A ``{model, effort}`` tier typed on the page or via ``lop config
+        # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON
+        # text, which the tier reader would take for a selector.
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError(_TIER_JSON_HINT) from None
     return text
 
 
@@ -5725,6 +6069,10 @@ def write_setting(
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
         else:
             value = _keymap.normalize_key(value)
+    if setting.validate_value is validate_tier_value:
+        # Same reason as the HOTKEY arm: not every writer passes through
+        # `coerce`, so a tier's JSON text and its spelling are settled here.
+        value = _normalise_tier_value(value)
     # The group check needs the CURRENT config, so it is supplied here rather
     # than left to each caller: this is the one function every writer funnels
     # through, including `lop config edit` and `PATCH /v1/settings`, neither of
@@ -5764,7 +6112,10 @@ def reset_setting(manager: "ConfigManager", setting: Setting, *, notify: bool = 
     """
     if setting.kind is Kind.READONLY:
         raise ValueError("this setting is retired and cannot be changed")
-    _delete(manager, setting.path)
+    if setting.key == "retry.accountSelectionPolicy":
+        _reset_account_policy(manager)
+    else:
+        _delete(manager, setting.path)
     _invalidate_caches()
     if notify:
         _notify_watcher(manager)
@@ -5840,7 +6191,15 @@ def _require_readable_config(manager: "ConfigManager") -> None:
     A MISSING file is not unreadable — that is a first run, the reload
     correctly yields defaults, and there is no prior config to destroy.
     """
-    config_file = getattr(manager, "config_file", None)
+    require_readable_config_path(getattr(manager, "config_file", None))
+
+
+def require_readable_config_path(config_file: Path | None) -> None:
+    """Guard a relocated root BEFORE constructing a reload-capable manager.
+
+    Relay requests construct their manager lazily; checking only afterwards
+    would allow ConfigManager's recovery rename to disguise unreadable bytes.
+    """
     if config_file is None:
         return
     try:
@@ -5897,6 +6256,27 @@ def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
         cursor = cursor[part]
     cursor[path[-1]] = value
     manager.set_config_value(top, root)
+
+
+@serialized_config_write
+def _reset_account_policy(manager: "ConfigManager") -> None:
+    # Resolve reset semantics in one locked write. Sequential alias deletions
+    # could expose a legacy preference or half-reset state when a later write
+    # fails, and must not overwrite unrelated settings from another writer.
+    _reload_before_write(manager)
+    existing = manager.get_config_value("retry", None)
+    if not isinstance(existing, Mapping):
+        return
+    root = dict(existing)
+    for key in (
+        "accountSelectionPolicy",
+        "account_selection_policy",
+        "usageAwareAccountPick",
+        "usage_aware_account_pick",
+    ):
+        root.pop(key, None)
+    if root != existing:
+        manager.set_config_value("retry", root)
 
 
 @serialized_config_write

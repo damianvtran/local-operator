@@ -41,6 +41,7 @@ from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     MAX_REJECTED_REPLY_CHARS,
     MAX_TOLERATED_TRAILING_CHARS,
+    UNCHANGED_FRAMES_NOTE,
     ActionBatchRefused,
     DecisionParseError,
     ProviderModelClient,
@@ -48,6 +49,7 @@ from local_operator.evaluation.runner.provider_client import (
     build_system_prompt,
     classify_rejection,
     parse_decision,
+    unchanged_frames_note,
 )
 from local_operator.evaluation.runner.public_reply import decode_public_reply
 from local_operator.harness.reply_channel import REPLY_CHANNEL_TOOL_NAME
@@ -2729,6 +2731,158 @@ async def test_identical_frames_are_declared_as_a_no_op(tmp_path: Path) -> None:
     assert "Do not repeat it" in second
     # The prompt has to teach the model what that sentence is for.
     assert "did nothing" in stream.requests[-1].system_blocks[0]
+
+
+def test_unchanged_frames_note_escalates_without_accumulating_warnings() -> None:
+    assert unchanged_frames_note(1) == UNCHANGED_FRAMES_NOTE
+    counted = unchanged_frames_note(2)
+    assert counted == (
+        UNCHANGED_FRAMES_NOTE + " The screenshot has stayed identical for 2 consecutive steps."
+    )
+    escalated = unchanged_frames_note(3)
+    assert "3 consecutive steps" in escalated
+    assert "otherwise change the target, action kind, or application" in escalated
+    assert "If the surface is still loading, keep waiting" in escalated
+    assert "will keep failing" not in escalated
+    for streak in (4, 200, 100_000):
+        note = unchanged_frames_note(streak)
+        assert note == escalated.replace("3 consecutive", f"{streak} consecutive")
+        assert note.count("keep waiting") == 1
+        assert "\n" not in note
+        assert len(note) < 450
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_kind", ["wait", "type"], ids=["wait-only", "non-wait"])
+async def test_escalated_no_change_note_preserves_loading_exception(
+    tmp_path: Path, action_kind: str
+) -> None:
+    def reply(message: Any) -> str:
+        payload = json.loads(_wait_reply(message))
+        if action_kind == "type":
+            payload["actions"][0].pop("duration_ms")
+            payload["actions"][0].update(kind="type", text="hello")
+        return json.dumps(payload)
+
+    stream = RecordingStream(reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence in range(4):
+        current = _framed_observation(tmp_path, sequence)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+    rendered = stream.requests[-1].messages[-1].content[0].text
+    assert unchanged_frames_note(3) in rendered
+    assert "If the surface is still loading, keep waiting; otherwise change" in rendered
+    assert "will keep failing" not in rendered
+    assert client._context._no_change_streak == 3
+
+
+def test_no_change_streak_survives_compaction_and_history_replay(tmp_path: Path) -> None:
+    from local_operator.evaluation.runner.provider_client import _ContextBuilder
+
+    context = _ContextBuilder(artifact_root=tmp_path, keep_recent_frames=1, rebuild_every_frames=1)
+    history = [EpisodeTurn(observation=_framed_observation(tmp_path, index)) for index in range(4)]
+    context.append_new_turns(history)
+    assert context._no_change_streak == 3
+    assert context.rebuild_due()
+    # Compaction replaces messages, not episode history. Replay must neither
+    # re-render old observations nor reset the evidence used by the next step.
+    compacted = context.messages[-1:]
+    context.replace(compacted)
+    context.append_new_turns(history)
+    assert context.messages == compacted
+    assert context._no_change_streak == 3
+    history.append(EpisodeTurn(observation=_framed_observation(tmp_path, 4)))
+    context.append_new_turns(history)
+    assert context._no_change_streak == 4
+    last_block = context.messages[-1].content[0]
+    assert isinstance(last_block, TextContent)
+    assert unchanged_frames_note(4) in last_block.text
+    assert len(context.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_no_change_streak_counts_once_per_turn_and_resets_on_change(tmp_path: Path) -> None:
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    # Four identical screens escalate; a changed screen resets the counter,
+    # and a frameless observation also breaks the visible-evidence streak.
+    for sequence, pixel in enumerate((b"a", b"a", b"a", b"a", b"b", b"b", None, b"b", b"b")):
+        current = (
+            observation(sequence)
+            if pixel is None
+            else _distinct_framed_observation(tmp_path, sequence, pixel)
+        )
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rendered = [
+        message.content[0].text
+        for message in stream.requests[-1].messages
+        if message.role == "user" and isinstance(message.content[0], TextContent)
+    ]
+    for text, streak in zip(rendered, (0, 1, 2, 3, 0, 1, 0, 0, 1), strict=True):
+        if streak:
+            assert unchanged_frames_note(streak) in text
+            assert text.count(UNCHANGED_FRAMES_NOTE) == 1
+        else:
+            assert UNCHANGED_FRAMES_NOTE not in text
+    assert client._context._no_change_streak == 1
+
+
+@pytest.mark.asyncio
+async def test_no_change_streak_starts_fresh_for_each_episode(tmp_path: Path) -> None:
+    # A client (and its context builder) is constructed once per episode;
+    # stale warnings must not leak into a new client's first observation.
+    for _episode in range(2):
+        stream = RecordingStream(_wait_reply)
+        client = _client(stream, tmp_path)
+        assert client._context._no_change_streak == 0
+        history: list[EpisodeTurn] = []
+        for sequence in range(4):
+            current = _framed_observation(tmp_path, sequence)
+            history.append(EpisodeTurn(observation=current))
+            decision = await client.decide(current, tuple(history))
+            history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+        assert client._context._no_change_streak == 3
+        first = stream.requests[0].messages[0].content[0].text
+        assert UNCHANGED_FRAMES_NOTE not in first
+
+
+@pytest.mark.asyncio
+async def test_no_change_note_stays_after_answers_tolerated_fields_and_frames(
+    tmp_path: Path,
+) -> None:
+    from local_operator.evaluation.runner.public_reply import tolerated_fields_note
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence in range(4):
+        current = _framed_observation(tmp_path, sequence)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(
+            update={
+                "batch": decision.action_batch,
+                "ask_answer": "Carry on",
+                "tolerated_field_names": ("wait.frame_id",),
+            }
+        )
+    rendered = stream.requests[-1].messages[-1].content[0].text
+    lines = rendered.splitlines()
+    answer = lines.index("Answer from the user: Carry on")
+    tolerated_note = tolerated_fields_note(("wait.frame_id",))
+    assert tolerated_note is not None
+    tolerated = lines.index(tolerated_note)
+    frames = next(index for index, line in enumerate(lines) if line.startswith("Frames:"))
+    assert answer < tolerated < frames
+    assert lines[frames + 1] == unchanged_frames_note(3)
+    assert lines[frames + 2 :] == ["", "(unchanged)"]
 
 
 @pytest.mark.asyncio

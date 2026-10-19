@@ -48,13 +48,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from typing import Any, Callable, Final, Iterable, Mapping
+from urllib.parse import unquote, urlsplit
 
 from local_operator.ansi import sanitize_prompt_line
 
 # The bash/eval output grammar is the Highlights feature's; importing its private helpers is the
 # point (ONE parser for "what did this command write"), not an accident.
+from local_operator.library.classify import is_known_extension
 from local_operator.supplements.candidates import _bash_outputs, _eval_outputs, kind_of
 from local_operator.supplements.contract import (
     SUPPLEMENT_CUSTOM_TYPE,
@@ -66,7 +69,7 @@ from local_operator.supplements.contract import (
 #: tool, a changed rule): a cache written under another version is discarded and rebuilt, so a
 #: rule change is never half-applied to an old session. Also covers the denylist's verdicts,
 #: which are baked into the stored records.
-SCAN_SCHEMA: Final = 2
+SCAN_SCHEMA: Final = 4
 
 #: ``origin`` vocabulary, strongest evidence first. A file seen under several origins keeps the
 #: strongest (``write`` then a later ``bash > same`` is still "written"), so the filter chips are
@@ -79,6 +82,10 @@ ORIGINS: Final = (
     "edited",
     "command",
     "highlight",
+    # Only ever a REFERENCE, never production: the mention pass at the bottom
+    # of this module adds it, and the Library's `mentioned` origin group is
+    # built from it. Last because every stronger origin must win a merge.
+    "mentioned",
 )
 _ORIGIN_RANK: Final = {name: index for index, name in enumerate(ORIGINS)}
 
@@ -109,13 +116,23 @@ _RESULT_TOOLS: Final = frozenset(
         "eval",
         "browser",
         "generate_image",
+        "generate_voiceover",
+        "generate_sound_effect",
         "generate_video",
         "video_status",
     }
 )
 #: Tool names whose CALL rows are worth parsing: the ones that pair with a result above.
 _CALL_TOOLS: Final = frozenset({"write", "edit", "bash", "eval"})
-_ARTIFACT_TOOLS: Final = frozenset({"generate_image", "generate_video", "video_status"})
+_ARTIFACT_TOOLS: Final = frozenset(
+    {
+        "generate_image",
+        "generate_video",
+        "video_status",
+        "generate_voiceover",
+        "generate_sound_effect",
+    }
+)
 _ARTIFACT_KINDS: Final = frozenset({"image", "video", "audio"})
 
 # -- byte probes ------------------------------------------------------------------------------
@@ -123,7 +140,9 @@ _ARTIFACT_KINDS: Final = frozenset({"image", "video", "audio"})
 # a hand-built fixture or a future pretty-printer cannot silently blind the scanner.
 _CALL_NAME_PROBE: Final = re.compile(rb'"name"\s*:\s*"(?:write|edit|bash|eval)"')
 _TOOL_NAME_PROBE: Final = re.compile(rb'"tool_name"\s*:\s*"([a-z_]{1,32})"')
-_CUSTOM_PROBE: Final = re.compile(rb'"custom_type"\s*:\s*"(supplement_v1|job_result)"')
+_CUSTOM_PROBE: Final = re.compile(
+    rb'"custom_type"\s*:\s*"(supplement_v1|job_result|audio_settle_v1)"'
+)
 _CALL_ID_PROBE: Final = re.compile(rb'"tool_call_id"\s*:\s*"([^"\\]{1,128})"')
 _IS_ERROR_PROBE: Final = re.compile(rb'"is_error"\s*:\s*true')
 #: A bash result's own first line, ``exit code: N``. A non-zero exit is not ``is_error`` (the tool
@@ -136,6 +155,30 @@ _NONZERO_EXIT_PROBE: Final = re.compile(
 _BROWSER_FACT_PROBE: Final = re.compile(rb'"details"\s*:\s*\{\s*"(?:path|files)"')
 _ROW_TS_PROBE: Final = re.compile(rb'^\{\s*"id"\s*:\s*"[^"]*"\s*,\s*"ts"\s*:\s*([0-9.eE+\-]+)')
 _DIGEST_FIELD_PROBE: Final = re.compile(rb'"(?:digest|digests|artifacts)"')
+
+# -- mention probes (design §3.3) ------------------------------------------------------------
+# Deliberately conservative: structured evidence only, plus ABSOLUTE or `~/` prose paths with a
+# known extension in a USER message. Relative prose is not admitted — a bare "report.png" in
+# conversation is a guess about which directory was meant, and a wrong guess is a catalog row
+# pointing at nothing.
+_USER_ROW_PROBE: Final = re.compile(rb'"role"\s*:\s*"user"')
+_REFERENCE_HEAD: Final = re.compile(r'<(?:reference|listed)\b[^>]*\bpath="([^"]+)"')
+_FILE_URL: Final = re.compile(r"file://[^\s<>\"']+")
+_PROSE_PATH: Final = re.compile(r"(?:^|[\s(\[`\"'])((?:~|/)[^\s<>\"'`)\]]+)")
+#: Tool-argument keys that name a FILE the turn referenced. Directory-valued keys are included
+#: because a directory a turn was handed is not a catalog asset, and the stat check rejects it —
+#: keeping the list in one place means a future caller does not have to remember that.
+_MENTION_ARG_KEYS: Final = (
+    "path",
+    "file",
+    "files",
+    "output_path",
+    "output_file",
+    "directory",
+    "dir",
+    "cwd",
+)
+_TRAILING_PUNCTUATION: Final = ".,;:!?)]}'\""
 
 
 @dataclass(slots=True)
@@ -247,6 +290,24 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _unescape_attribute(raw: str) -> str:
+    """The five named entities an XML attribute can carry.
+
+    ``html.unescape`` would be the obvious call, but it lazily imports
+    ``html.entities`` — a generated 1 MB table that measured ~1.6 s on first
+    use, inside a request that has a 1.5 s budget. A path cannot contain a
+    numeric character reference in practice, and the named five are what the
+    reference writer emits.
+    """
+    return (
+        raw.replace("&quot;", '"')
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+    )
+
+
 def resolve_path(raw: str, *, cwd: str, home: str) -> str | None:
     """An absolute, normalised path for ``raw`` as a tool call spelled it, or ``None``.
 
@@ -291,6 +352,10 @@ class FileScan:
         # Legacy roster rows share this bounded/resumable journal pass. Persisting absence
         # avoids a whole-journal backward fallback on every warm Files request.
         self.roster: dict[str, Any] | None = None
+        # The conversation's opening line, captured here so the Library index
+        # never has to call `resume.session_name` (a cold 2-6 s transcript
+        # scan) inside a 1.5 s budget. Empty when the journal has no user row.
+        self.title: str = ""
         self.truncated = False
         self.dropped = 0
         self._denied: set[str] = set()
@@ -307,8 +372,18 @@ class FileScan:
         # ``in`` is a memchr: the three probes below cost nothing on the ~95% of rows that are
         # prose, state snapshots and spend ledgers.
         if b'"tool_calls"' in line:
-            if _CALL_NAME_PROBE.search(line):
-                self._on_call_row(seq, line)
+            # EVERY call row, not only the four file-producing tools: a `read`
+            # argument is mention evidence, and gating on the write probe would
+            # silently drop it. `_CALL_NAME_PROBE` still exists for the result
+            # pairing path; the parse cost here is bounded by the few percent
+            # of rows that carry tool calls at all.
+            self._on_call_row(seq, line)
+            # A call row may ALSO be a user row in a hand-built fixture, but the real
+            # transcript never does that; the mention pass is reached below only when there
+            # are no tool calls to pair.
+            return
+        if b'"role"' in line and _USER_ROW_PROBE.search(line):
+            self._on_user_row(seq, line)
             return
         if b'"tool_name"' in line:
             match = _TOOL_NAME_PROBE.search(line)
@@ -344,12 +419,11 @@ class FileScan:
         calls = payload.get("tool_calls") if isinstance(payload, dict) else None
         if not isinstance(calls, list):
             return
+        ts = _row_ts(line)
         for call in calls:
             if not isinstance(call, dict):
                 continue
             name, call_id = call.get("name"), call.get("id")
-            if name not in _CALL_TOOLS or not isinstance(call_id, str) or not call_id:
-                continue
             args = call.get("arguments")
             if isinstance(args, str):
                 try:
@@ -357,6 +431,16 @@ class FileScan:
                 except ValueError:
                     args = None
             if not isinstance(args, dict):
+                continue
+            # EVERY tool's path-valued arguments are mention evidence, not only the
+            # file-producing four below: `read`, `lsp`, `search` and a custom tool all name
+            # files the turn SAW. Recording them before the result arrives is what lets a
+            # `write` upgrade the same key from mentioned to written via `_upsert`.
+            # `write`/`edit` name their OUTPUT; the result row records it once.
+            # Counting the call too would make one write look like two touches.
+            if name and name not in ("write", "edit"):
+                self._note_argument_mentions(args, name, call_id, seq, ts)
+            if name not in _CALL_TOOLS or not isinstance(call_id, str) or not call_id:
                 continue
             intent = sanitize_prompt_line(str(args.get("i") or ""), limit=_INTENT_MAX_CHARS)
             outputs: list[str] = []
@@ -463,15 +547,26 @@ class FileScan:
     # -- digest-only artifacts ----------------------------------------------------------------
 
     def _on_job_result_row(self, seq: int, line: bytes) -> None:
-        """A video job's ``job_result`` row: the background path delivers the receipt here."""
+        """Background video/audio receipts share the same durable artifact facts."""
         row = _row(line)
         payload = row.get("payload") if row else None
-        details = payload.get("details") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return
+        details = payload.get("details")
         if not isinstance(details, dict):
             return
         ts = _float(row.get("ts")) or 0.0 if row else 0.0
         self._on_artifact_facts(
-            seq, ts, "generate_video", _str(details.get("job_id")), details, None
+            seq,
+            ts,
+            (
+                (_str(details.get("tool")) or "generate_voiceover")
+                if payload.get("custom_type") == "audio_settle_v1"
+                else "generate_video"
+            ),
+            _str(details.get("request_id") or details.get("job_id")),
+            details,
+            None,
         )
 
     def _on_artifact_facts(
@@ -550,6 +645,8 @@ class FileScan:
         call_id: str | None,
         seq: int,
         ts: float,
+        *,
+        origin: str = "generated",
     ) -> int:
         if not is_digest(digest):
             return 0
@@ -569,7 +666,7 @@ class FileScan:
                 width=_int(facts.get("width")),
                 height=_int(facts.get("height")),
                 duration_s=_float(facts.get("duration_s")),
-                origin="generated",
+                origin=origin,
                 tool=tool,
                 call_id=call_id,
                 intent=None,
@@ -578,7 +675,7 @@ class FileScan:
                 first_ts=ts,
                 last_ts=ts,
             ),
-            "generated",
+            origin,
             tool,
             call_id,
             None,
@@ -715,6 +812,113 @@ class FileScan:
                 intent,
             )
 
+    # -- mentions -----------------------------------------------------------------------------
+
+    def _on_user_row(self, seq: int, line: bytes) -> None:
+        """Admit structured references from one USER message.
+
+        The row is parsed only after the byte probes in :meth:`feed` saw a user role, so the
+        ~95% of rows that are tool traffic, state snapshots or assistant prose cost nothing.
+        """
+        row = _row(line)
+        payload = row.get("payload") if row else None
+        if not isinstance(payload, dict):
+            return
+        ts = _row_ts(line)
+        texts: list[str] = []
+        content = payload.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    texts.append(text)
+                # A user-attached image/audio/video is a digest the turn referenced. The
+                # store's presence is checked at index time; the journal is the evidence.
+                digest = block.get("attachment")
+                if block.get("kind") in _ARTIFACT_KINDS:
+                    self._note_artifact(
+                        digest,
+                        block.get("kind"),
+                        block.get("content_type") or block.get("mime_type"),
+                        block.get("name"),
+                        block,
+                        "user",
+                        None,
+                        seq,
+                        ts,
+                        origin="mentioned",
+                    )
+        if not texts:
+            return
+        if not self.title:
+            self.title = sanitize_prompt_line(texts[0], limit=120)
+        text = "\n".join(texts)
+        seen: set[str] = set()
+        for raw in _REFERENCE_HEAD.findall(text):
+            self._note_mention(_unescape_attribute(raw), "reference", None, seq, ts, seen=seen)
+        for raw in _FILE_URL.findall(text):
+            parsed = urlsplit(raw)
+            path = unquote(parsed.path)
+            if path:
+                self._note_mention(path, "file_url", None, seq, ts, seen=seen)
+        for match in _PROSE_PATH.finditer(text):
+            raw = match.group(1).rstrip(_TRAILING_PUNCTUATION)
+            if not is_known_extension(os.path.basename(raw)):
+                continue
+            self._note_mention(raw, "prose", None, seq, ts, seen=seen)
+
+    def _note_argument_mentions(
+        self,
+        args: Mapping[str, Any],
+        tool: str,
+        call_id: str | None,
+        seq: int,
+        ts: float,
+    ) -> None:
+        """Note path-valued tool arguments. Values may be strings or lists of strings."""
+        seen: set[str] = set()
+        for key in _MENTION_ARG_KEYS:
+            value = args.get(key)
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if isinstance(item, str) and item:
+                    self._note_mention(item, tool, call_id, seq, ts, seen=seen)
+
+    def _note_mention(
+        self,
+        raw: str,
+        tool: str,
+        call_id: str | None,
+        seq: int,
+        ts: float,
+        *,
+        seen: set[str],
+    ) -> None:
+        """Admit one mention only when it resolves to a REGULAR, non-denied file.
+
+        The stat is the design's admission rule (§3.3), and it is deliberately here rather
+        than at the surface: a journal mention that no longer exists must not become a row
+        that opens a missing file, and doing it once at scan time keeps every surface
+        (desktop, TUI, phone, tool) agreeing without each re-stat'ing.
+        """
+        path = resolve_path(raw, cwd=self.cwd, home=self.home)
+        if not path or path in seen:
+            return
+        seen.add(path)
+        try:
+            info = os.stat(path)
+        except (OSError, ValueError):
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        if self._denied_path(path):
+            return
+        self._note_path(path, "mentioned", tool, call_id, None, seq, ts, info.st_size)
+
     # -- persistence ------------------------------------------------------------------------
 
     def clone(self) -> "FileScan":
@@ -731,6 +935,7 @@ class FileScan:
         }
         other.pending = dict(self.pending)
         other.roster = self.roster
+        other.title = self.title
         other.anchors = {
             key: Anchor(a.version, a.ts, a.seq, list(a.files), list(a.more))
             for key, a in self.anchors.items()
@@ -743,6 +948,7 @@ class FileScan:
         return {
             "rows": self.rows,
             "roster": self.roster,
+            "title": self.title,
             "truncated": self.truncated,
             "dropped": self.dropped,
             "records": [
@@ -772,6 +978,7 @@ class FileScan:
         try:
             scan.rows = int(payload["rows"])
             scan.roster = payload.get("roster") if isinstance(payload.get("roster"), dict) else None
+            scan.title = str(payload.get("title") or "")[:120]
             scan.truncated = bool(payload.get("truncated"))
             scan.dropped = int(payload.get("dropped") or 0)
             for values in payload["records"]:

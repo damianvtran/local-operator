@@ -135,9 +135,11 @@ def test_section_renders_the_published_table() -> None:
     assert "$0.061" in text and "billed · 1 image" in text
     legacy_line = next(line for line in text.splitlines() if "openai-sub" in line)
     assert "$0.053" in legacy_line and "estimated" in legacy_line, legacy_line
-    # The unsized tts row prints $— and a reason, and never a fabricated zero.
+    # The unsized tts row prints $— and states WHY (a 200 that carried no
+    # price), and never a fabricated zero.
     assert "tts · radient/elevenlabs" in text and "$—" in text
-    assert "price not stated · 420 chars" in text
+    assert "server stated no price" in text
+    assert "price not stated" not in text
     # The Total carries the lower-bound mark and the app's own legend words.
     assert "$1.01+" in text, text  # mark attached, dim: 61000+53000+900000 micros
     assert "+ lower bound" in text
@@ -364,3 +366,191 @@ def test_a_voice_only_session_draws_the_state_instead_of_nothing() -> None:
     assert "2\u00a0requests." in text
     assert UNKNOWN_COST_CELL in text, "an empty fold totals $—, never a fabricated zero"
     assert "$0.0000" not in text
+
+
+# -- one decision model, one row, and a stated reason ------------------------
+
+
+def classification_payload(*records: ChannelSpendRecord) -> FrontendSpendChannels:
+    return FrontendSpendChannels.model_validate(
+        combine(fold_records(list(records)).rows(), tracked=True)
+    )
+
+
+def decision_record(
+    record_id: str,
+    *,
+    model: str,
+    amount_micro: int | None,
+    status: str = "ok",
+) -> ChannelSpendRecord:
+    return ChannelSpendRecord(
+        record_id=record_id,
+        channel="classification",
+        provider="radient",
+        model=model,
+        units=1,
+        unit="calls",
+        amount_micro=amount_micro,
+        billing_basis="billed",
+        cost_source="server_reported" if amount_micro is not None else "none",
+        status=status,
+    )
+
+
+def test_a_failed_classification_row_says_no_charge_not_price_not_stated() -> None:
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record(
+                    "classification:failed", model="jev-1.13.0", amount_micro=None, status="failed"
+                )
+            ),
+        )
+    )
+    line = next(line for line in text.splitlines() if "classification" in line)
+    assert "no charge" in line, line
+    assert "request failed · not billed" in line, line
+    assert "price not stated" not in line, line
+    assert "$—" not in line, "the failure is a stated not-billed outcome, not an unknown"
+
+
+def test_a_failed_only_row_keeps_its_reason_at_80_columns() -> None:
+    """The 65-cell body of an 80x24 terminal has a 12-cell note budget.
+
+    The failed-only ladder keeps a rung that fits it; a failed-only row is the
+    one case where ``no charge`` and ``not billed`` describe the whole row.
+    """
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record(
+                    "classification:failed", model="jev-1.13.0", amount_micro=None, status="failed"
+                )
+            ),
+        ),
+        width=65,
+    )
+    line = next(line for line in text.splitlines() if "classification" in line)
+    assert "no charge" in line, line
+    assert "not billed" in line, line
+
+
+def test_two_historical_spellings_render_as_one_classification_row() -> None:
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
+            ),
+        )
+    )
+    lines = [line for line in text.splitlines() if "classification" in line]
+    assert len(lines) == 1, lines
+    assert "jev-1.13" in lines[0] and "jev-1.13.0" not in lines[0], lines[0]
+    assert "<$0.0001" in lines[0], lines[0]
+    # A MIXED row must attribute the zero to the failed attempt, never call the
+    # priced group unbilled (design round 1, D-1).
+    assert "failed attempt added no charge" in lines[0], lines[0]
+    assert "not billed" not in lines[0] and "unbilled" not in lines[0], lines[0]
+
+
+def test_a_mixed_row_at_80_columns_stays_truthful() -> None:
+    """D-1 at the real 80x24 body width: the 11-cell rung must fit.
+
+    The unqualified ``not billed`` used to appear here beside a positive cost.
+    """
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
+            ),
+        ),
+        width=65,
+    )
+    line = next(line for line in text.splitlines() if "classification" in line)
+    assert "failed: +$0" in line, line
+    assert "not billed" not in line and "unbilled" not in line, line
+    assert "<$0.0001" in line, line
+
+
+def test_a_mixed_row_uses_the_19_cell_rung_at_the_100_column_body() -> None:
+    """At the canonical 83-cell body (24-cell budget) the increment is explicit."""
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
+            ),
+        ),
+        width=83,
+    )
+    line = next(line for line in text.splitlines() if "classification" in line)
+    assert "failed attempt: +$0" in line, line
+    assert "not billed" not in line and "unbilled" not in line, line
+
+
+def test_a_cancelled_classification_row_keeps_the_unknown_cell_and_says_why() -> None:
+    text = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record(
+                    "classification:cancelled",
+                    model="jev-1.13.0",
+                    amount_micro=None,
+                    status="cancelled",
+                )
+            ),
+        )
+    )
+    line = next(line for line in text.splitlines() if "classification" in line)
+    assert "$—" in line, line
+    assert "response lost · may be billed" in line, line
+    assert "price not stated" not in line, line
+
+
+def test_cancelled_and_partial_reasons_survive_80_columns() -> None:
+    """D-2: a 65-cell body has a 12-cell note budget; the reason must not vanish."""
+    cancelled = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record(
+                    "classification:cancelled",
+                    model="jev-1.13.0",
+                    amount_micro=None,
+                    status="cancelled",
+                )
+            ),
+        ),
+        width=65,
+    )
+    cancelled_line = next(line for line in cancelled.splitlines() if "classification" in line)
+    assert "$—" in cancelled_line and "bill unknown" in cancelled_line, cancelled_line
+
+    partial = rendered(
+        replace(
+            runtime(),
+            spend_channels=classification_payload(
+                decision_record("classification:ok", model="jev-1.13", amount_micro=11),
+                decision_record("classification:parked", model="jev-1.13", amount_micro=None),
+            ),
+        ),
+        width=65,
+    )
+    partial_line = next(line for line in partial.splitlines() if "classification" in line)
+    assert "some unknown" in partial_line, partial_line
+    assert "+$0" not in partial_line, partial_line

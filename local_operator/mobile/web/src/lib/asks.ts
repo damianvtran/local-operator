@@ -51,12 +51,15 @@ export type AskStatus =
  *  `open` — the honest intermediate, never shown as settled. */
 export type AskTone = "waiting" | "settled" | "gone" | "attention";
 
-/** Whether the card offers answer controls for this state.
+/** Whether the STORE still accepts an answer in this state.
  *
- *  `timed_out` IS answerable and that is the point of the state: the agent moved
- *  on, but the user's answer still reaches it as a `late` response. Everything
- *  already settled (answered/late/declined/dismissed/withdrawn) and everything
- *  too old to carry (expired) is not.
+ *  `timed_out` is answerable on the wire: the queue still takes a late answer
+ *  and delivers it as a `late` response. The phone's card no longer offers one
+ *  there — a lapsed ask (`isLapsed`) is shown read-only — and the runtime's
+ *  `asks_open` no longer counts one (#2388); the dock still follows this
+ *  predicate, which is what keeps a lapsed-only queue's Dismiss door.
+ *  Everything already settled (answered/late/declined/dismissed/withdrawn)
+ *  and everything too old to carry (expired) is not answerable.
  */
 export function isAnswerable(status: string): boolean {
 	return status === "open" || status === "timed_out";
@@ -71,6 +74,51 @@ export function isAnswerable(status: string): boolean {
 export function isOutstanding(status: string): boolean {
 	return isAnswerable(status);
 }
+
+/** Whether an ask's deadline has passed and the agent has gone ahead without
+ *  it, so the card shows the question read-only instead of offering options.
+ *
+ *  THE STATUS ALONE DECIDES, never the phone's clock. The deadline is judged on
+ *  the runtime's host: a live runtime folds it on its own tick, and the index
+ *  readers (`asks/store.py` `_shown_rows`, behind both the aggregate and a
+ *  stopped conversation's screen) re-derive a stale `open` row to `timed_out`
+ *  against their own `now`. A phone running minutes ahead would otherwise strip
+ *  the controls from an ask the agent is still waiting on (review round 1, R3). */
+export function isLapsed(row: PendingAsk): boolean {
+	return String(row.status || "open") === "timed_out";
+}
+
+/** How many QUESTIONS the outstanding set holds, split by whether they can still
+ *  be answered: `waiting` (offered) and `lapsed` (shown read-only).
+ *
+ *  ONE SPLIT FOR EVERY ENTRY POINT (design round 1, D1): the dock, the header
+ *  and the sheet's title all called a lapsed question "waiting", the most
+ *  prominent marks on a stopped conversation's screen stating a live decision
+ *  above a card that says there is none. */
+export function questionTally(rows: PendingAsk[] | undefined | null): {
+	waiting: number;
+	lapsed: number;
+} {
+	let waiting = 0;
+	let lapsed = 0;
+	for (const row of outstandingAsks(rows)) {
+		const count = Array.isArray(row.questions) ? row.questions.length : 0;
+		if (isLapsed(row)) lapsed += count;
+		else waiting += count;
+	}
+	return { waiting, lapsed };
+}
+
+/** The one line a lapsed ask (`isLapsed`) states.
+ *
+ *  Says what is true in every timeout notice the agent receives (design round 1,
+ *  D3): it may use its recommended option or its best judgment, and a secret ask
+ *  has no default at all ("do not run anything that needed it"), so "took its
+ *  default" claimed more than the agent was told. "Timed out", Ben's word and
+ *  the badge's, byte-identical to the desktop's `ASK_STATUS_COPY.timed_out` and
+ *  the TUI card title (#2481 design D2): one state, one name on every surface. */
+export const LAPSED_BODY = "the agent goes ahead without your answer";
+const LAPSED_LINE = `Timed out — ${LAPSED_BODY}`;
 
 /** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
  *
@@ -158,12 +206,12 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 	switch (status) {
 		case "open": {
 			if (left <= 0) {
-				/* The runtime has not folded the deadline yet (it folds on its own
-				   ≤60s tick), so this is a race window measured in seconds — but it
-				   is also the user's real situation, and claiming "expires in 0 m"
-				   or silently showing the pre-deadline line would both be untrue.
-				   The ask is still answerable either way, so the remedy is the same
-				   answer the timed-out line gives. */
+				/* Past the deadline on the PHONE's clock while the runtime's side
+				   still says open: a live runtime folds on its own ≤60s tick, and a
+				   stopped one is re-derived by the index readers, so this is the
+				   fold's race window or a phone clock running ahead. Either way the
+				   ask is still answerable, and claiming "expires in 0 m" would be
+				   untrue. */
 				return { text: "Queued — the agent is continuing; deadline passed", tone: "attention" };
 			}
 			return {
@@ -196,10 +244,7 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 				tone: "gone",
 			};
 		case "timed_out":
-			return {
-				text: "Timed out — the agent moved on; you can still answer",
-				tone: "attention",
-			};
+			return { text: LAPSED_LINE, tone: "gone" };
 		default:
 			/* A status from a newer runtime. Passing it through as its own word is
 			   the same rule the projects sheet follows for an unknown project
@@ -207,6 +252,23 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 			   one, and it must not crash the card either. */
 			return { text: status.replace(/_/g, " "), tone: "waiting" };
 	}
+}
+
+/** A fold of one conversation's published ask rows (id and status), for "did
+ *  this conversation's ask population change?".
+ *
+ *  WHY IT EXISTS (#2388). The list frame's `asks_open` cannot say it for a
+ *  lapsed ask: a timed-out ask is no longer counted, so dismissing it, or
+ *  answering it late, leaves the count at 0 before and after. The row list on
+ *  the conversation's own projection does move, so the open asks sheet re-reads
+ *  on this signature as well as on the list frame's. Order-insensitive, like
+ *  `asksPopulationSignature`, so a re-rank is not a change. */
+export function askRowsSignature(rows: PendingAsk[] | undefined | null): string {
+	if (!Array.isArray(rows)) return "";
+	return rows
+		.map((row) => `${row?.ask_id}:${row?.status}`)
+		.sort()
+		.join(",");
 }
 
 /** The asks worth showing on the outstanding surfaces, newest first (the wire's
