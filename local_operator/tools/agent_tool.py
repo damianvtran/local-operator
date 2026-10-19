@@ -108,7 +108,7 @@ from local_operator.tools.builtin import (
     _validation_error,
     _with_advertised_effort,
     effort_validation_context,
-    note_identifiers,
+    identifier_text,
     spill_truncate,
 )
 
@@ -290,8 +290,17 @@ def _name_taken_message(name: str, *, installing: bool = False) -> str:
     return f"{lead} Rename that agent, or use a different name for the role."
 
 
-def _profile_line(profile: AgentProfile, *, installed: bool, compact: bool = False) -> str:
+def _profile_line(
+    profile: AgentProfile,
+    *,
+    installed: bool,
+    compact: bool = False,
+    context: ToolContext | None = None,
+) -> str:
     """One scannable row: name, where it came from, and what it is for.
+
+    Identifier fields: the role name and its human label are marked spans —
+    the row names the string a later ``install``/``update`` must pass.
 
     ``compact`` caps the row at one 80-column line and is used for the
     starters section (see ``_STARTER_ROW_CAP``); installed roles and search
@@ -336,9 +345,12 @@ def _profile_line(profile: AgentProfile, *, installed: bool, compact: bool = Fal
     # (``UX Reviewer``), which is right on a human listing and wrong on the one
     # surface where the reader has to reproduce the exact install name.
     if profile.label and profile.label.casefold() != profile.name.casefold():
-        display = f"{profile.name} ({profile.label})"
+        display = (
+            f"{identifier_text(context, profile.name)} "
+            f"({identifier_text(context, profile.label)})"
+        )
     else:
-        display = profile.name
+        display = identifier_text(context, profile.name)
     row = f"- {display}{suffix}: {summary}"
     # Ellipsis when the cut fires: a bare slice ends mid-word, and the reader
     # cannot tell an author's fragment from text we dropped.
@@ -556,12 +568,8 @@ def _registered_profiles(registry: Any) -> list[AgentProfile]:
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:
     registry = _registry(context)
     installed = _registered_profiles(registry) if registry is not None else []
-    # Identifier fields: each role's name and display label are names the
-    # caller passes to task(agent=...); redaction must not apply to either.
-    for profile in installed:
-        note_identifiers(context, profile.name, profile.label)
     installed_names = {profile.name.lower() for profile in installed}
-    lines = [_profile_line(profile, installed=True) for profile in installed]
+    lines = [_profile_line(profile, installed=True, context=context) for profile in installed]
     specialists: list[Any] = []
     if registry is not None:
         try:
@@ -576,8 +584,6 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
         for profile in (load_seed(name) for name in list_seeds())
         if profile is not None and profile.name.lower() not in installed_names
     ]
-    for profile in starters:
-        note_identifiers(context, profile.name, profile.label)
     body = ""
     if lines:
         body += "registered roles:\n" + "\n".join(lines)
@@ -586,16 +592,20 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             body += "\n\n"
         specialist_lines = []
         for agent in specialists:
-            note_identifiers(context, agent.name, getattr(agent, "label", ""))
             summary = (agent.description or "").strip() or "(no description)"
-            specialist_lines.append(f"- {agent.name} [specialist]: {summary}")
+            specialist_lines.append(
+                f"- {identifier_text(context, str(agent.name))} [specialist]: {summary}"
+            )
         body += "registered specialists:\n" + "\n".join(specialist_lines)
     if starters:
         if body:
             body += "\n\n"
         body += (
             "installable starters (packaged, not yet in your registry — op='install'):\n"
-        ) + "\n".join(_profile_line(profile, installed=False, compact=True) for profile in starters)
+        ) + "\n".join(
+            _profile_line(profile, installed=False, compact=True, context=context)
+            for profile in starters
+        )
     if not body:
         body = "no roles registered and no starters packaged."
     text, spill = spill_truncate(body, "agent", context)
@@ -613,16 +623,14 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         except Exception:  # noqa: BLE001
             specialist = None
         if specialist is not None and is_specialist(specialist):
-            # Identifier fields: the specialist's name and label are the name
-            # a caller launches and lists, not a credential.
-            note_identifiers(context, specialist.name, getattr(specialist, "label", ""))
             instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
             body = (
-                f"{specialist.name} — registered specialist\n"
+                f"{identifier_text(context, specialist.name)} — registered specialist\n"
                 f"when to use: {specialist.description or '(unstated)'}\n"
                 "tools: full inventory\n\n"
                 f"instructions:\n{instructions}\n\n"
-                f"launch with --agent {specialist.name}, or add it to a team roster."
+                f"launch with --agent {identifier_text(context, specialist.name)}, "
+                "or add it to a team roster."
             )
             text, spill = spill_truncate(body, "agent", context)
             return _text(tool_call_id, "agent", text, details=spill or None)
@@ -633,11 +641,10 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             f"no role or specialist named {name!r} (try op='list')",
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
-    # Identifier fields: the role name and its display label head the body; a
-    # mask would hide the name the caller delegates to.
-    note_identifiers(context, profile.name, profile.label)
+    # Identifier fields: the role name and label head the body; both are
+    # marked spans so redaction leaves the delegation name readable.
     header = [
-        f"{profile.name} — {origin}",
+        f"{identifier_text(context, profile.name)} — {origin}",
         f"when to use: {profile.when_to_use or profile.description or '(unstated)'}",
         f"tools: {', '.join(profile.tools) if profile.tools else 'full inventory'}",
         f"class: {_class_label(profile.action_class)}",
@@ -686,11 +693,14 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     # The highest-intent moment in the flow: someone has just read a role's
     # guidance and decided they want it. Every other op ends by naming the next
     # command; this one used to stop at "not installed" and leave them there.
-    body += f"\n\nlaunch with task(agent={profile.name!r})"
+    body += f"\n\nlaunch with task(agent={identifier_text(context, profile.name)!r})"
     if not profile.agent_id:
-        body += f", or op='install' name={profile.name!r} to edit it"
+        body += f", or op='install' name={identifier_text(context, profile.name)!r} to edit it"
     elif divergence is not None and divergence[2] == "installed":
-        body += f", or op='reset' name={profile.name!r} to restore the packaged version"
+        body += (
+            f", or op='reset' name={identifier_text(context, profile.name)!r} "
+            "to restore the packaged version"
+        )
     elif divergence is not None:
         # An unrecorded row cannot be reset (reset will not overwrite what it
         # cannot prove the harness wrote), so offering the verb here would be
@@ -771,11 +781,6 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
     if not candidates:
         return _text(tool_call_id, "agent", "no roles available to search.")
 
-    # Identifier fields: each candidate's role name and display label are what
-    # search exists to hand back; redaction must not apply to either.
-    for profile in candidates:
-        note_identifiers(context, profile.name, profile.label)
-
     rows = [
         Skill(
             name=profile.name,
@@ -826,7 +831,7 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
         profile = by_name.get(row.name)
         if profile is None:
             continue
-        lines.append(_profile_line(profile, installed=bool(profile.agent_id)))
+        lines.append(_profile_line(profile, installed=bool(profile.agent_id), context=context))
     # Measured on a query set: true matches score 0.118 and up, while
     # unrelated queries ("order me a pizza") top out near 0.10. The margin is
     # too thin to CUT on (that was the old behaviour, and it hid roles whose

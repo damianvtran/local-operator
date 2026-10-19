@@ -591,18 +591,24 @@ class Team(BaseModel):
                 return value
         return None
 
-    def roster_lines(self) -> list[str]:
+    def roster_lines(self, mark: Callable[[str], str] | None = None) -> list[str]:
         """One scannable line per slot, manager first.
 
         A nested-team slot is badged ``(team)`` so a reader (and ``team show``)
         can tell an org apart from a flat roster — a member named ``pod`` and a
         sub-team named ``pod`` would otherwise render identically.
+
+        ``mark`` wraps each NAME for the redaction pass: the ``team`` tool passes
+        ``identifier_text`` so a role or manager named like a credential stays
+        readable in the rendered line. Teams itself imports no tool module, so
+        the callable is the only coupling (LOH-28).
         """
-        lines = [f"- manager: {self.manager} (you, when this team is invoked)"]
+        label = mark or (lambda value: value)
+        lines = [f"- manager: {label(self.manager)} (you, when this team is invoked)"]
         for member in self.members:
             suffix = f" x{member.count}" if member.count > 1 else ""
             badge = " (team)" if member.kind == "team" else ""
-            lines.append(f"- {member.role}{badge}{suffix}")
+            lines.append(f"- {label(member.role)}{badge}{suffix}")
         return lines
 
     def member_count(self) -> int:
