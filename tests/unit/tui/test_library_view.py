@@ -467,9 +467,7 @@ async def test_an_in_flight_reload_cannot_retarget_the_form(monkeypatch) -> None
         assert view._form.asset_id == first["id"]
 
         gate.set()
-        await _settle(
-            pilot, lambda: _selected_is(view, second["id"])
-        )
+        await _settle(pilot, lambda: _selected_is(view, second["id"]))
 
         view._name_input.value = "A renamed"
         view._tags_input.focus()
@@ -818,9 +816,13 @@ async def test_space_previews_a_real_image_and_falls_back_for_an_unsupported_one
 
 
 @pytest.mark.asyncio
-async def test_the_librarian_hint_degrades_to_a_sentence(calls) -> None:
+async def test_the_librarian_hint_degrades_to_a_sentence(calls, monkeypatch) -> None:
+    from local_operator.tui import librarian_control
     from tests.unit.tui.test_slash_echo import _notice_texts
 
+    # The Librarian package is merged, so the degraded sentence is exercised by
+    # pinning the app's own availability seam rather than by having no package.
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 34)) as pilot:
         await _boot(pilot, app)
