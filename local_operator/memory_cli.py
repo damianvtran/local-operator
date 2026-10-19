@@ -389,7 +389,7 @@ def _bulk_flags(args: argparse.Namespace) -> list[str]:
 #: Flags a bulk preview can add to narrow a selection, in the order a reader is
 #: most likely to reach for them. `--unverified` is absent deliberately: it
 #: selects a property rather than tightening the slice the filter already names.
-_NARROWING_FLAGS = ("--older-than", "--tag", "--title-matches")
+_NARROWING_FLAGS = ("--older-than", "--tag", "--title-matches", "--body-matches")
 
 
 def _narrowing_hints(args: argparse.Namespace) -> list[str]:
@@ -403,6 +403,7 @@ def _narrowing_hints(args: argparse.Namespace) -> list[str]:
         "--older-than": bool(args.older_than),
         "--tag": bool(args.tag),
         "--title-matches": bool(args.title_matches),
+        "--body-matches": bool(args.body_matches),
     }
     return [flag for flag in _NARROWING_FLAGS if not applied[flag]]
 
@@ -488,7 +489,7 @@ def _bulk_forget(
             remedy = f"Narrow the filter (for example add {_or_list(hints)})"
         else:
             remedy = (
-                "Every narrowing flag (--older-than, --tag, --title-matches) is already "
+                f"Every narrowing flag ({_or_list(list(_NARROWING_FLAGS))}) is already "
                 "applied, so tighten those values"
             )
         raise MemoryError(
@@ -1282,9 +1283,10 @@ def _bulk_preview_text(value: dict[str, Any]) -> str:
         # the consequence sit NEXT TO the line, so nobody pastes it blind and
         # reads "refused" as a broken preview.
         lines += _shaped(
-            f"This removes {value['count']} of {value['total']} fact(s) in {value['scope']} "
-            f"({value['fraction']:.0%}) and cannot be undone. To proceed, add --force to the "
-            "command below deliberately; without it the confirmation is refused."
+            f"Running that confirmation removes {value['count']} of {value['total']} fact(s) "
+            f"in {value['scope']} ({value['fraction']:.0%}) and cannot be undone. To proceed, "
+            "add --force to the command below deliberately; without it the confirmation is "
+            "refused."
         )
     else:
         lines += _shaped(f"To forget exactly these {value['count']} fact(s), run:")
