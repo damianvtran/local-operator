@@ -169,9 +169,7 @@ class _Config:
 
     def __init__(self, root: Path, *, session: str = "sess_cos") -> None:
         self.config_dir = root
-        self._values: dict[str, Any] = {
-            "team_bridge": {"enabled": True, "session": session}
-        }
+        self._values: dict[str, Any] = {"team_bridge": {"enabled": True, "session": session}}
 
     def get_nested_value(self, path: tuple[str, ...], default: Any = None) -> Any:
         node: Any = self._values
@@ -288,7 +286,7 @@ async def test_inbox_handling_carries_the_response_scope(
         None,
         context,
     )
-    text = "\n".join(block.text for block in result.content)
+    text = "\n".join(getattr(block, "text", "") for block in result.content)
     assert "[bridge guidance — advisory]" in text
     assert "Share only the status and implementation detail of in-flight work" in text
     assert "Never share personal or private information" in text
