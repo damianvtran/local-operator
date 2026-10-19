@@ -93,3 +93,21 @@ def test_the_tool_is_registered_for_every_session() -> None:
     assert "library" in TOOL_BUILDERS
     tool = TOOL_BUILDERS["library"](None)
     assert tool is not None and tool.name == "library" and tool.approval_tier == "read"
+
+
+def test_the_wire_schema_matches_the_validator() -> None:
+    from local_operator.tools.library_tool import LIBRARY_PARAMETERS, LibraryParams
+
+    properties = LIBRARY_PARAMETERS["properties"]
+    assert set(properties) == set(LibraryParams.model_fields)
+    assert LIBRARY_PARAMETERS["required"] == ["op"]
+    assert properties["op"]["enum"] == [
+        "stats",
+        "list",
+        "get",
+        "update",
+        "tags",
+        "conventions",
+    ]
+    # A compact wire schema is a second declaration; the property set above is
+    # the guard that keeps it from drifting from the model that validates calls.

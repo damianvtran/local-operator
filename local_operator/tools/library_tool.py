@@ -313,18 +313,67 @@ def _render(payload: Any) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+#: The WIRE schema, kept deliberately compact: property names, types and the
+#: enums a caller must get right, and nothing else. Pydantic's generated schema
+#: carries a ``title``, ``default`` and ``anyOf`` wrapper per optional field;
+#: that structural prose measured 5,060 characters and pushed the start context
+#: over its CI ceiling. The per-op semantics live in ``tool://library`` and in
+#: ``LibraryParams`` (which still validates every call), so this dict is the
+#: discovery surface only. ``test_the_wire_schema_matches_the_validator`` pins
+#: the property set and types against ``LibraryParams`` so the two cannot drift.
+LIBRARY_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "required": ["op"],
+    "properties": {
+        "op": {
+            "type": "string",
+            "enum": ["stats", "list", "get", "update", "tags", "conventions"],
+        },
+        "asset_id": {"type": "string"},
+        "q": {"type": "string"},
+        "category": {"type": "string"},
+        "kind": {"type": "string"},
+        "origin_group": {"type": "string"},
+        "tag": {"type": "string"},
+        "session_id": {"type": "string"},
+        "organized": {"type": "boolean"},
+        "highlighted": {"type": "boolean"},
+        "favorite": {"type": "boolean"},
+        "tag_mode": {"type": "string"},
+        "sort": {"type": "string"},
+        "order": {"type": "string"},
+        "limit": {"type": "integer"},
+        "cursor": {"type": "string"},
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "locked": {"type": "boolean"},
+        "archived": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "actor": {"type": "string"},
+        "action": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "primary": {"type": "string"},
+        "tag_id": {"type": "string"},
+        "tag_name": {"type": "string"},
+        "tag_category": {"type": "string"},
+        "into": {"type": "string"},
+        "kind_name": {"type": "string"},
+        "body": {"type": "string"},
+        "convention_id": {"type": "string"},
+    },
+}
+
+
 def build_library_tool(context: ToolContext | None = None) -> AgentTool:
     return AgentTool(
         name="library",
         label="Library",
         description=(
-            "The user's long-term, cross-conversation asset catalog: stats, "
-            "search/list, one asset, rename/describe/favorite/lock, tags, and "
-            "the Librarian's taxonomy conventions. Writes are local, reversible "
-            "metadata only — never a file operation. Use it for durable names, "
-            "descriptions and tags; the Canvas Files panel is session-local."
+            "Long-term asset catalog across conversations: search, read, "
+            "name/describe, tag, conventions. Local metadata writes only; "
+            "see tool://library."
         ),
-        parameters=LibraryParams.model_json_schema(),
+        parameters=LIBRARY_PARAMETERS,
         # Local metadata writes are reversible and the Librarian runs
         # unattended; the design's §5.1 disposition makes this a read-tier
         # tool. A future destructive Library op would be its own write tool.
@@ -335,4 +384,4 @@ def build_library_tool(context: ToolContext | None = None) -> AgentTool:
     )
 
 
-__all__ = ["LibraryParams", "build_library_tool", "execute_library"]
+__all__ = ["LIBRARY_PARAMETERS", "LibraryParams", "build_library_tool", "execute_library"]
