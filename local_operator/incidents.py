@@ -1745,3 +1745,28 @@ def format_model_switch_message(
             "may differ from the previous model; act as the model you now are."
         )
     return "\n".join(lines)
+
+
+# Child outcomes are not all involuntary cut-offs. Keep deliberate cancellation
+# out of CUT_OFF_CAUSES: attention/journal classification relies on that table.
+CHILD_DEATH_CAUSES = {
+    "child-paused": "the child was deliberately paused and can be resumed",
+    "child-cancelled": "the child was explicitly cancelled or paused",
+    "child-parent-gone": "the parent session ended and stopped the child",
+    "child-tool-timeout": "the child's tool timed out",
+    "child-provider-error": "the child's provider failed",
+    "child-host-kill": "the child host disappeared without an exit record",
+    "child-never-settled": "the child was launched but never recorded an outcome",
+}
+
+
+def render_child_death(cause: str, detail: str = "", last_step: str = "") -> str:
+    """Render one recoverable child-death fact without changing cut-off semantics."""
+    sentence = CHILD_DEATH_CAUSES.get(cause)
+    if sentence is None:
+        sentence = render_cut_off_reason(cause) if cause else "the child stopped"
+    if detail:
+        sentence += f" ({' '.join(detail.split())})"
+    if last_step:
+        sentence += f"; last completed step: {' '.join(last_step.split())}"
+    return sentence
