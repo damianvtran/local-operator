@@ -344,3 +344,39 @@ def test_a_placement_row_does_not_make_a_reference_server_oauth(
     rows = server_states(str(cwd), base=root, configs=configs)
     assert rows["slack"]["shape"] == shape
     assert rows["slack"]["state"] == "synced"
+
+
+def test_durable_evidence_beats_a_live_holder_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cloudflare/minerva-qa: the share is live, the OWNER's sign-in is dead.
+
+    A holder row alone would say ``synced``; the last broker refusal is the more
+    recent fact and must win, naming the device a person has to sign in on.
+    """
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    store.save(_record(), root)
+    _place(root)  # owner PEER, SELF is a holder
+    mcp_state.record(
+        NETWORK,
+        credential_key_for_mcp(URL),
+        state="expired",
+        code="interactive_required",
+        owner_device=PEER,
+        owner_name="macbook",
+        root=root,
+    )
+
+    configs = {"linear": MCPHttpServerConfig(url=URL, auth=MCPAuthConfig(type="oauth"))}
+    rows = server_states(str(cwd), base=root, configs=configs)
+
+    assert rows["linear"]["state"] == "expired", rows
+    assert "macbook" in rows["linear"]["reason"]
+    assert "sign in again" in rows["linear"]["reason"]

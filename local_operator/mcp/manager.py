@@ -2575,6 +2575,7 @@ class McpManager:
         *,
         interactive: bool = False,
         attempt: _AttemptRecord | None = None,
+        _force_brokered: bool = False,
     ) -> ServerConnection:
         """Open transport + session, initialize, list tools, update cache.
 
@@ -2679,6 +2680,11 @@ class McpManager:
         url = getattr(cfg, "url", None)
         challenge_watcher = _AuthChallengeWatcher(url) if isinstance(url, str) and url else None
         try:
+            # ``force_brokered`` is passed ONLY on the retry. The helper is a test
+            # seam several cells replace with a fixed signature; paying a new
+            # keyword on every ordinary connect would break every one of them for
+            # a flag that is False almost always.
+            extra = {"force_brokered": True} if _force_brokered else {}
             conn = await self._open_transport_and_session(
                 stack,
                 name,
@@ -2687,6 +2693,7 @@ class McpManager:
                 stderr_log,
                 interactive=interactive,
                 challenge_watcher=challenge_watcher,
+                **extra,
             )
             # The live connection carries the PRISTINE config, never the resolved
             # one: ``ServerConnection`` is a plain dataclass, six registration
@@ -2711,6 +2718,28 @@ class McpManager:
                 await stack.aclose()
             except BaseException as ce:  # noqa: BLE001 — examined below, never lost
                 close_exc = ce
+            # ONE BROKER RETRY AFTER A LOCAL 401 (real-node QA, cloud-node-1).
+            # A row that LOOKS like a local grant but cannot serve a bearer — an
+            # emptied row, or a tombstoned refresh token ``server_has_stored_grant``
+            # now refuses — made the local path win over the borrow and produced a
+            # bare 401 with no borrow ever attempted. If this device is a holder
+            # that may borrow, try exactly ONCE with ``BrokeredBearerAuth``. The
+            # recursive call passes ``_force_brokered=True`` and ``attempt=None``:
+            # depth is therefore bounded at one, and the attempt marker taken by
+            # the first try (the grant it actually presented) is not overwritten
+            # by the retry.
+            if (
+                close_exc is None
+                and not _force_brokered
+                and self._broker_retry_available(transport_cfg, exc)
+            ):
+                return await self._connect_server(
+                    name,
+                    cfg,
+                    interactive=interactive,
+                    attempt=None,
+                    _force_brokered=True,
+                )
             # ONE pop for the whole classification, whatever the exception turns
             # out to be, so a record cannot leak into a later connect of the
             # same server. It is consumed below only by the cancellation arm,
@@ -3018,6 +3047,7 @@ class McpManager:
         *,
         interactive: bool = False,
         challenge_watcher: "_AuthChallengeWatcher | None" = None,
+        force_brokered: bool = False,
     ) -> ServerConnection:
         """Enter the transport + ClientSession context managers on ``stack``.
 
@@ -3050,7 +3080,9 @@ class McpManager:
                 streamable_http_client,
             )
 
-            oauth_provider = self._build_oauth_auth(cfg.url, cfg, interactive=interactive)
+            oauth_provider = self._build_oauth_auth(
+                cfg.url, cfg, interactive=interactive, force_brokered=force_brokered
+            )
             http_client = create_mcp_http_client(
                 headers=dict(cfg.headers) or None,
                 auth=oauth_provider,
@@ -3134,7 +3166,12 @@ class McpManager:
         return await probe_oauth_capability(cfg, self._effective_auth_store())
 
     def _build_oauth_auth(
-        self, url: str, cfg: MCPServerConfig, *, interactive: bool = False
+        self,
+        url: str,
+        cfg: MCPServerConfig,
+        *,
+        interactive: bool = False,
+        force_brokered: bool = False,
     ) -> OAuthClientProvider | BrokeredBearerAuth | None:
         """The auth this server's HTTP client is built with.
 
@@ -3179,7 +3216,7 @@ class McpManager:
         # matter: a local row always wins (the local path below is byte-identical,
         # which is the non-regression guarantee), and a device with no placement at
         # all never reaches here because its store carries no mesh client.
-        brokered = self._brokered_mcp_auth(url)
+        brokered = self._brokered_mcp_auth(url, ignore_local=force_brokered)
         if brokered is not None:
             return brokered
 
@@ -3213,7 +3250,42 @@ class McpManager:
             self._oauth_flows[url] = flow
         return provider
 
-    def _brokered_mcp_auth(self, url: str) -> Any:
+    def _broker_retry_available(self, cfg: MCPServerConfig, exc: BaseException) -> bool:
+        """Whether a failed LOCAL connect may be retried once through the broker.
+
+        Both halves are required, and neither is a policy of its own:
+
+        * the failure is an auth shape (a 401/challenge or a dead grant the auth
+          layer refused) — a transport or schema error must not be retried;
+        * this device may borrow the key AND a local grant was what the attempt
+          used. ``server_has_stored_grant`` is now the USABLE test, so a row that
+          cannot serve is exactly the case that still qualifies here (the local
+          path was taken because ``_brokered_mcp_auth`` reads the same predicate
+          — once it reads False, ``_build_oauth_auth`` already chose the broker
+          and the retry condition is unreachable).
+        """
+        url = getattr(cfg, "url", None)
+        if not isinstance(url, str) or not url:
+            return False
+        if not isinstance(
+            _unwrap_auth_required(exc), (McpAuthRequiredError, McpAuthChallengeError)
+        ):
+            return False
+        store = self._effective_auth_store()
+        client = getattr(store, "mesh_client", None)
+        if client is None:
+            return False
+        from local_operator.mcp.auth import server_has_stored_grant
+        from local_operator.network.credentials.types import credential_key_for_mcp
+
+        if not client.should_borrow(credential_key_for_mcp(url)):
+            return False
+        try:
+            return server_has_stored_grant(url, store)
+        except Exception:  # noqa: BLE001 — an unreadable store cannot justify a retry
+            return False
+
+    def _brokered_mcp_auth(self, url: str, *, ignore_local: bool = False) -> Any:
         """A borrowed bearer for an MCP server whose grant lives elsewhere, or ``None``.
 
         ``server_has_stored_grant`` is the local-wins test, and it is asked FIRST: a
@@ -3233,13 +3305,20 @@ class McpManager:
         key = credential_key_for_mcp(url)
         if not client.should_borrow(key):
             return None
-        try:
-            from local_operator.mcp.auth import server_has_stored_grant
+        if ignore_local:
+            # THE RETRY PATH ONLY. The first attempt used the local path and the
+            # server refused it; asking the same predicate again would answer
+            # "local" and return ``None`` — the retry has to be allowed to
+            # override the local-wins rule exactly once.
+            pass
+        else:
+            try:
+                from local_operator.mcp.auth import server_has_stored_grant
 
-            if server_has_stored_grant(url, store):
+                if server_has_stored_grant(url, store):
+                    return None
+            except Exception:  # noqa: BLE001 — an unreadable store must not invent a borrow
                 return None
-        except Exception:  # noqa: BLE001 — an unreadable store must not invent a borrow
-            return None
         # Imported HERE, not at module scope: this module keeps a lazy-SDK property
         # (see _TRANSPORT_EXC_DETAIL), and the brokered auth subclasses ``httpx2.Auth``.
         # Reaching this line requires a mesh client, so the dependency arrives only on
