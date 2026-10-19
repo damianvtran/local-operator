@@ -282,14 +282,15 @@ def set_tags_payload(
     if not identity.is_asset_id(asset_id):
         raise LibraryRouteError(404, "library_asset_not_found")
     try:
-        # Ensure a well-formed but unknown id is a 404 before a write, matching
-        # every other route in this family. The store write itself is the
-        # authoritative one: ``service.set_tags`` forwards a ``source`` kwarg
-        # the store does not accept (core WIP), so this adapter calls the store
-        # directly rather than restating its rules. Reported upstream.
-        library_service.get_asset(config_dir, asset_id, display=True)
-        tags = MetadataStore(config_dir).set_asset_tags(asset_id, raw, primary=primary)
-        return {"tags": tags}
+        # One write path, as on every other Library surface: the service resolves
+        # the id (an unknown one is a 404, not a new metadata row), ensures the
+        # asset row exists and applies the store's own tag rules. Returning the
+        # row's tags keeps this route's shape stable for the phone, which is the
+        # only consumer of ``{"tags": ...}``.
+        row = library_service.set_tags(
+            config_dir, asset_id, raw, primary=primary, actor="user"
+        )
+        return {"tags": row["tags"]}
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:
