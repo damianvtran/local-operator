@@ -1786,14 +1786,15 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     ``Message``s that may not be journalled. Each is synthesized into the live
     context from the marker payload, and replay synthesizes the same rows from
     the same payload — so journalling either one writes a row that lands AFTER
-    ``first_kept_entry_id``, inside the
-    replayed suffix, and the resumed context then holds it twice. That is
+    ``first_kept_entry_id``, inside the replayed suffix, and the resumed
+    context then holds it twice. That is
     exactly what shipped in an earlier revision of this fix: live 2 rows vs
     resumed 3, and because the persisted copy carried ``compaction_preserved``
     it was skipped by ``find_cut_point`` and folded into the next pass's count,
     which doubled the reported figure on every resume (6 -> 7,167 over ten
-    cycles). Excluded by id here AND kept out of the payload at the write site;
-    one guard failing silently is what produced the defect.
+    cycles). Excluded by ``is_carried_tier`` here (the same predicate the cut
+    walker and the kept-window filter use) AND kept out of the payload at the
+    write site; one guard failing silently is what produced the defect.
 
     Plain ``Message``s otherwise always may. A ``CustomMessage`` may only when its type is
     in :data:`_PERSISTABLE_CUSTOM_TYPES` — todo reminders are ephemeral by
