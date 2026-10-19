@@ -808,6 +808,16 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.aida_description()),
     ),
+    # The Librarian keys, LIVE for the same reason the Aida block is: the pause
+    # flag reaches a live pass through the config watcher's 2 s tick, and the
+    # other keys are read at her next arm. The name is read by the receipts and
+    # by every row the engine arms, so an edit is visible at the next paint.
+    Section(
+        "librarian",
+        _t(_ws.librarian_title()),
+        Scope.LIVE,
+        _t(_ws.librarian_description()),
+    ),
     # The hub keys. LIVE is honest here: the update runner re-reads the mapping
     # on every tick (and every interval sleep), so an edit lands within one tick.
     # Both auto-update switches default ON; turning one OFF keeps the runner
@@ -1538,21 +1548,28 @@ def _validate_static_roots(value: Any) -> None:
             raise ValueError(f"{item!r}: {reason}")
 
 
-def _validate_aida_name(value: Any) -> None:
-    """``aida.name`` is a display name: trimmed, non-empty, bounded, no controls.
+#: The ``librarian.name`` cap — a LITERAL here for the same reason the aida
+#: one is (this module stays off the feature package's import path); the real
+#: constant is ``librarian.bootstrap.MAX_NAME_CHARS`` and the anti-drift test
+#: pins the two together. Kept equal to the title cap for the same rename-sync
+#: reason: a title the session layer accepted must never be refused here.
+_LIBRARIAN_NAME_MAX_CHARS = 80
+
+
+def _validate_display_name(value: Any, *, example: str) -> None:
+    """One display-name rule set: trimmed, non-empty, bounded, no controls.
 
     Enforced at the write facade for the same reason ``_validate_advertise_hosts``
     is — every writer (/settings, ``lop config edit``, ``PATCH /v1/settings``)
-    funnels through :func:`validate` — and the rename paths reuse THIS refusal
-    via ``aida.naming.validate_name``, so the settings page and a ``/aida
-    rename`` receipt cannot disagree about what a name is (the drift rule:
-    one rule set, one funnel). Whitespace is collapsed before the checks, so
-    ``"  Maya  "`` is the valid name ``Maya`` — readers normalize identically —
-    while control characters (a pasted escape sequence) are refused outright,
-    because they would corrupt every surface that renders the name.
+    funnels through :func:`validate` — and the bootstrap reuses the same shape,
+    so a settings edit and a programmatic write cannot disagree about what a
+    name is. Whitespace is collapsed before the checks, so ``"  Nova  "`` is
+    the valid name ``Nova`` — readers normalize identically — while control
+    characters (a pasted escape sequence) are refused outright, because they
+    would corrupt every surface that renders the name.
     """
     if not isinstance(value, str):
-        raise ValueError("expected a name, e.g. Aida")
+        raise ValueError(f"expected a name, e.g. {example}")
     name = " ".join(value.split())
     if not name:
         raise ValueError("a name is required")
@@ -1560,6 +1577,16 @@ def _validate_aida_name(value: Any) -> None:
         raise ValueError(f"at most {_AIDA_NAME_MAX_CHARS} characters — this is {len(name)}")
     if any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ValueError("control characters are not allowed in a name")
+
+
+def _validate_aida_name(value: Any) -> None:
+    """``aida.name``: see :func:`_validate_display_name` for the shared rule."""
+    _validate_display_name(value, example="Aida")
+
+
+def _validate_librarian_name(value: Any) -> None:
+    """``librarian.name``: see :func:`_validate_display_name` for the rule."""
+    _validate_display_name(value, example="Librarian")
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -5093,6 +5120,79 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1,
         maximum=365,
         help=(_t(_ws.aida_onboarding_nudge_days_help())),
+    ),
+    # -- librarian ---------------------------------------------------------
+    # Defaults are LITERALS here like the aida block's, for the same import
+    # weight reason; `_consumer_defaults()` in tests/unit/test_settings_io.py
+    # pins them to the constants in ``local_operator/librarian/``.
+    Setting(
+        key="librarian.enabled",
+        path=("librarian", "enabled"),
+        section="librarian",
+        label=_t(_ws.librarian_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ws.librarian_enabled_choice_true_description()),
+            _t(_ws.librarian_enabled_choice_false_description()),
+        ),
+        help=_t(_ws.librarian_enabled_help()),
+    ),
+    Setting(
+        key="librarian.name",
+        path=("librarian", "name"),
+        section="librarian",
+        label=_t(_ws.librarian_name_label()),
+        kind=Kind.TEXT,
+        default="Librarian",
+        placeholder=_t(_ws.librarian_name_placeholder()),
+        validate_value=_validate_librarian_name,
+        help=_t(_ws.librarian_name_help()),
+    ),
+    Setting(
+        key="librarian.cadence.at",
+        path=("librarian", "cadence", "at"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_at_label()),
+        kind=Kind.TEXT,
+        default="03:30",
+        placeholder=_t(_ws.librarian_cadence_at_placeholder()),
+        help=_t(_ws.librarian_cadence_at_help()),
+    ),
+    Setting(
+        key="librarian.cadence.paused",
+        path=("librarian", "cadence", "paused"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_paused_label()),
+        kind=Kind.BOOL,
+        default=False,
+        choices=_bool_choices(
+            _t(_ws.librarian_cadence_paused_choice_true_description()),
+            _t(_ws.librarian_cadence_paused_choice_false_description()),
+        ),
+        help=_t(_ws.librarian_cadence_paused_help()),
+    ),
+    Setting(
+        key="librarian.cadence.max_extra_per_day",
+        path=("librarian", "cadence", "max_extra_per_day"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_max_extra_per_day_label()),
+        kind=Kind.INT,
+        default=1,
+        minimum=0,
+        maximum=12,
+        help=_t(_ws.librarian_cadence_max_extra_per_day_help()),
+    ),
+    Setting(
+        key="librarian.cadence.min_gap_minutes",
+        path=("librarian", "cadence", "min_gap_minutes"),
+        section="librarian",
+        label=_t(_ws.librarian_cadence_min_gap_minutes_label()),
+        kind=Kind.INT,
+        default=720,
+        minimum=0,
+        maximum=1440,
+        help=_t(_ws.librarian_cadence_min_gap_minutes_help()),
     ),
     # -- projects -------------------------------------------------------------
     # The staleness window. Default is a LITERAL like the aida block's (this

@@ -45,6 +45,13 @@ matching guide first; the code and guides are the source of truth, not memory.
   not on every task. A result is input, never the answer and never the edge of your
   options — verify it here.
 
+## Library
+
+The Library is the user's global, long-term file catalog; Canvas Files is
+session-local. Produced and highlighted files enter it — prefer durable
+deliverables over scratch. Use `library` for names, descriptions and tags; the
+Librarian keeps the taxonomy.
+
 ## Narration
 
 Text between tool calls is chat the user reads and context re-billed every turn.
