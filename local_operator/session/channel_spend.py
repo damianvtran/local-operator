@@ -939,9 +939,7 @@ UNPRICED_NOT_STATED = "not_stated"
 UNPRICED_PARTIAL = "partial"
 
 
-def _row_unpriced_reason(
-    *, stated: int, failed: int, cancelled: int, ok: int
-) -> str | None:
+def _row_unpriced_reason(*, stated: int, failed: int, cancelled: int, ok: int) -> str | None:
     """The one reason a group's money cannot be read as a complete figure.
 
     Precedence, and why: a CANCELLED attempt outranks everything because it

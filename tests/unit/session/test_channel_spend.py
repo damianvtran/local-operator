@@ -688,9 +688,9 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
     }
     # ADDITIVE unpriced reason: present ONLY on a row that carries the condition,
     # so a priced row above keeps the exact key set every older reader knows.
-    assert [
-        row["unpriced_reason"] for row in fixture["rows"] if "unpriced_reason" in row
-    ] == ["cancelled_outcome_unknown"]
+    assert [row["unpriced_reason"] for row in fixture["rows"] if "unpriced_reason" in row] == [
+        "cancelled_outcome_unknown"
+    ]
     assert set(fixture["children"]) == {"total_micro", "knowledge"}
     assert set(fixture["by_basis"]) == {
         "billed",
@@ -1584,7 +1584,9 @@ def test_a_dated_vendor_echo_groups_under_the_canonical_id() -> None:
                     "classification:dated", model="typesafe/jev-1.13-20261001", amount_micro=11
                 ),
                 decision_record(
-                    "classification:cancelled", model="typesafe/jev-1.13", amount_micro=None,
+                    "classification:cancelled",
+                    model="typesafe/jev-1.13",
+                    amount_micro=None,
                     status="cancelled",
                 ),
             ]
@@ -1598,8 +1600,11 @@ def test_a_dated_vendor_echo_groups_under_the_canonical_id() -> None:
 
 def test_a_failed_only_group_states_why_no_amount_is_present() -> None:
     (row,) = payload(
-        [decision_record("classification:failed", model="jev-1.13.0", amount_micro=None,
-                         status="failed")]
+        [
+            decision_record(
+                "classification:failed", model="jev-1.13.0", amount_micro=None, status="failed"
+            )
+        ]
     )["rows"]
     assert row["amount_micro"] is None, "unknown, never a fabricated zero"
     assert row["knowledge"] == "exact", "the failed-unbilled presumption is not missing money"
@@ -1608,16 +1613,22 @@ def test_a_failed_only_group_states_why_no_amount_is_present() -> None:
 
 def test_a_cancelled_group_says_the_outcome_is_unknown() -> None:
     (row,) = payload(
-        [decision_record("classification:cancelled", model="jev-1.13.0", amount_micro=None,
-                         status="cancelled")]
+        [
+            decision_record(
+                "classification:cancelled",
+                model="jev-1.13.0",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ]
     )["rows"]
     assert row["unpriced_reason"] == "cancelled_outcome_unknown"
 
 
 def test_an_ok_row_without_an_amount_says_the_server_stated_no_price() -> None:
-    (row,) = payload(
-        [decision_record("classification:ok", model="jev-1.13", amount_micro=None)]
-    )["rows"]
+    (row,) = payload([decision_record("classification:ok", model="jev-1.13", amount_micro=None)])[
+        "rows"
+    ]
     assert row["unpriced_reason"] == "not_stated"
 
 

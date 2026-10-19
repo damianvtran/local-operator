@@ -219,9 +219,7 @@ def answered_record(
     amount = micro_from_amount(response.cost_usd)
     if amount is not None and not 0 <= amount <= (1 << 63) - 1:
         amount = None
-    billed_model = canonical_model_id(
-        response.cost_model or requested_model or response.model
-    )
+    billed_model = canonical_model_id(response.cost_model or requested_model or response.model)
     # Evidence only: the echo is not the billing identity. ``detail`` is the
     # record's free-text field (see ChannelSpendRecord) and carries no status
     # semantics, so a later reconciler can still see that the wire said

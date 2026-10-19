@@ -403,8 +403,9 @@ def test_a_failed_classification_row_says_no_charge_not_price_not_stated() -> No
         replace(
             runtime(),
             spend_channels=classification_payload(
-                decision_record("classification:failed", model="jev-1.13.0", amount_micro=None,
-                                status="failed")
+                decision_record(
+                    "classification:failed", model="jev-1.13.0", amount_micro=None, status="failed"
+                )
             ),
         )
     )
@@ -425,8 +426,9 @@ def test_a_failed_only_row_keeps_its_reason_at_80_columns() -> None:
         replace(
             runtime(),
             spend_channels=classification_payload(
-                decision_record("classification:failed", model="jev-1.13.0", amount_micro=None,
-                                status="failed")
+                decision_record(
+                    "classification:failed", model="jev-1.13.0", amount_micro=None, status="failed"
+                )
             ),
         ),
         width=65,
@@ -442,8 +444,9 @@ def test_two_historical_spellings_render_as_one_classification_row() -> None:
             runtime(),
             spend_channels=classification_payload(
                 decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
-                decision_record("classification:failed", model="jev-1.13", amount_micro=None,
-                                status="failed"),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
             ),
         )
     )
@@ -467,8 +470,9 @@ def test_a_mixed_row_at_80_columns_stays_truthful() -> None:
             runtime(),
             spend_channels=classification_payload(
                 decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
-                decision_record("classification:failed", model="jev-1.13", amount_micro=None,
-                                status="failed"),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
             ),
         ),
         width=65,
@@ -486,8 +490,9 @@ def test_a_mixed_row_uses_the_19_cell_rung_at_the_100_column_body() -> None:
             runtime(),
             spend_channels=classification_payload(
                 decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
-                decision_record("classification:failed", model="jev-1.13", amount_micro=None,
-                                status="failed"),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
             ),
         ),
         width=83,
@@ -502,8 +507,12 @@ def test_a_cancelled_classification_row_keeps_the_unknown_cell_and_says_why() ->
         replace(
             runtime(),
             spend_channels=classification_payload(
-                decision_record("classification:cancelled", model="jev-1.13.0",
-                                amount_micro=None, status="cancelled")
+                decision_record(
+                    "classification:cancelled",
+                    model="jev-1.13.0",
+                    amount_micro=None,
+                    status="cancelled",
+                )
             ),
         )
     )
@@ -519,8 +528,12 @@ def test_cancelled_and_partial_reasons_survive_80_columns() -> None:
         replace(
             runtime(),
             spend_channels=classification_payload(
-                decision_record("classification:cancelled", model="jev-1.13.0",
-                                amount_micro=None, status="cancelled")
+                decision_record(
+                    "classification:cancelled",
+                    model="jev-1.13.0",
+                    amount_micro=None,
+                    status="cancelled",
+                )
             ),
         ),
         width=65,
