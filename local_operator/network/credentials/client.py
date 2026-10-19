@@ -1061,7 +1061,8 @@ class MeshCredentialClient:
         broker-only key all answer locally. The receipt is ``{ok, state, code}``,
         the same three fields ``pull_now`` answers, and no value crosses it.
         """
-        from local_operator.network.credentials import mcp_state, sync as sync_mod
+        from local_operator.network.credentials import mcp_state
+        from local_operator.network.credentials import sync as sync_mod
 
         placement = self.placement
         if placement is None:
@@ -1114,9 +1115,7 @@ class MeshCredentialClient:
             )
             return {"ok": False, "state": "unavailable", "code": "owner_offline"}
         detail = reply.get("detail") if isinstance(reply, dict) else None
-        outcome = self._sync_engine().apply_copy_reply(
-            key, detail, owner=owner, held_gen=held_gen
-        )
+        outcome = self._sync_engine().apply_copy_reply(key, detail, owner=owner, held_gen=held_gen)
         if outcome in ("applied", "in_sync"):
             return {"ok": True, "state": "synced", "code": ""}
         if outcome.startswith("refused:"):

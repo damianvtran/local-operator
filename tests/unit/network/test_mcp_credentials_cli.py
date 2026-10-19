@@ -15,8 +15,8 @@ sentinels; every output assertion also checks they never appear.
 from __future__ import annotations
 
 import argparse
-from argparse import Namespace
 import json
+from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
@@ -607,9 +607,12 @@ def test_repair_grants_the_brokered_key_to_eligible_members(
     network_store.save(_record(), root)
     _seed_oauth_grant(root)
 
-    assert net_cli._cmd_mcp_credentials(  # noqa: SLF001
-        Namespace(json=True, adopt=False, repair=True), root
-    ) == 0
+    assert (
+        net_cli._cmd_mcp_credentials(  # noqa: SLF001
+            Namespace(json=True, adopt=False, repair=True), root
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
 
     grants = _mcp_grants(payload)
@@ -637,9 +640,12 @@ def test_repair_grants_a_dead_owner_grant_on_purpose(
     network_store.save(_record(), root)
     _seed_oauth_grant(root, dead=True)
 
-    assert net_cli._cmd_mcp_credentials(  # noqa: SLF001
-        Namespace(json=True, adopt=False, repair=True), root
-    ) == 0
+    assert (
+        net_cli._cmd_mcp_credentials(  # noqa: SLF001
+            Namespace(json=True, adopt=False, repair=True), root
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert _mcp_grants(payload)[credential_key_for_mcp(URL)] == {SELF, DRIVE}

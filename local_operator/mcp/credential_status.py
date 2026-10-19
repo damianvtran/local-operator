@@ -185,9 +185,7 @@ def _server_row(
     # "needs sign-in" for a server whose key was simply not copied yet. The
     # config's own ``auth.type``, or a live OAuth grant on a server that declares
     # no references, is the distinguishing fact.
-    oauth_shape = bool(url) and (
-        auth_type == "oauth" or (grant_live and not has_refs)
-    )
+    oauth_shape = bool(url) and (auth_type == "oauth" or (grant_live and not has_refs))
     shape = (
         "oauth"
         if oauth_shape
@@ -369,9 +367,7 @@ def _fact_row(
         return _row(
             "synced",
             _bounded(
-                f"borrows from {owner_name}"
-                if owner_name
-                else "borrows from a shared device"
+                f"borrows from {owner_name}" if owner_name else "borrows from a shared device"
             ),
             owner=str(getattr(placed.get("entry"), "owner_device", "") or ""),
             shape=shape,
@@ -476,9 +472,7 @@ def _oauth_row(
         return _row(
             "synced",
             _bounded(
-                f"borrows from {owner_name}"
-                if owner_name
-                else "borrows from a shared device"
+                f"borrows from {owner_name}" if owner_name else "borrows from a shared device"
             ),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
@@ -547,13 +541,10 @@ def _mesh_context(root: Path) -> dict[str, Any]:
         from local_operator.network import store
         from local_operator.network.credentials import mcp_state
         from local_operator.network.credentials.placement import PlacementDocument
-
-        records = store.list_networks(root)
-    except Exception:  # noqa: BLE001 — no readable network state is the zero-peer answer
-        # RETURN the empty answer rather than falling through: the artifacts-only
-        # block below needs ``PlacementDocument``/``mcp_state``, which are the very
-        # imports that just failed, and pyright is right that they would be
-        # unbound (review round 5, type-check).
+    except Exception:  # noqa: BLE001 — the network package is unavailable here
+        # A BROKEN INSTALL, not a verdict: there is no document reader at all, so
+        # the honest answer is "no mesh state" and every row falls back to its
+        # local stores. This is NOT the unreadable-store case below.
         def _no_holder(ref_name: str) -> bool:
             return False
 
@@ -568,6 +559,15 @@ def _mesh_context(root: Path) -> dict[str, Any]:
             "holder_of_secret": _no_holder,
             "evidence_revoked": _no_revoked,
         }
+    # THE READ ALONE IS FALLIBLE (review m7). An unreadable network store is NOT
+    # "no networks": the artifacts-only block below still has to run, because a
+    # device that lost its record but not its placement documents has lost
+    # ACCESS — scoping this try to the read keeps that revoked verdict.
+    records: list[Any] = []
+    try:
+        records = store.list_networks(root)
+    except Exception:  # noqa: BLE001 — the artifacts-only block still runs
+        records = []
     for record in records:
         has_records = True
         try:

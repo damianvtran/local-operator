@@ -2208,9 +2208,7 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
         if placement_client is not None:
             placement_client.pull_placement(only_device=device_id)
     except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
-        logger.debug(
-            "credentials sync: placement pull for %s failed", device_id, exc_info=True
-        )
+        logger.debug("credentials sync: placement pull for %s failed", device_id, exc_info=True)
     pulled = document_engine.enqueue_placement_pull(device_id)
     # The exchange's own word stays the tick's answer whenever it did anything:
     # existing callers (and the wipe/removal tests) branch on it, and both jobs
