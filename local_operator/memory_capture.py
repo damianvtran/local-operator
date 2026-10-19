@@ -427,6 +427,29 @@ def _count(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+def _meta_fields(value: Any) -> tuple[str | None, int, int]:
+    """``(reason, refused, skipped)`` from one stored attribution value.
+
+    One parser for every reader, so ``capture_detail`` and ``persist``'s duplicate
+    path cannot disagree about what a record says. A reason outside
+    :data:`CAPTURE_REASONS` — ``refused-row`` from a pre-split build — is reported as
+    ``None`` because it named no guard, and a malformed value degrades to no
+    attribution rather than breaking the hint: the row itself is the truth.
+    """
+    try:
+        parsed = json.loads(value) if value is not None else None
+    except (TypeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        return None, 0, 0
+    reason = parsed.get("reason")
+    return (
+        reason if reason in CAPTURE_REASONS else None,
+        _count(parsed.get("refused")),
+        _count(parsed.get("skipped")),
+    )
+
+
 def capture_detail(store: MemoryStore, marker_id: str) -> CaptureDetail | None:
     """The terminal row plus ``reason``/``refused``/``skipped`` from ``meta``.
 
@@ -451,15 +474,7 @@ def capture_detail(store: MemoryStore, marker_id: str) -> CaptureDetail | None:
     refused = 0
     skipped = 0
     if record is not None:
-        try:
-            parsed = json.loads(record[0])
-        except (TypeError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict):
-            if parsed.get("reason") in CAPTURE_REASONS:
-                reason = parsed["reason"]
-            refused = _count(parsed.get("refused"))
-            skipped = _count(parsed.get("skipped"))
+        reason, refused, skipped = _meta_fields(record[0])
     return CaptureDetail(str(row[0]), int(row[1]), reason, refused, skipped)
 
 
@@ -557,11 +572,21 @@ def persist(
     store.import_session()
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        if db.execute(
-            "SELECT 1 FROM captures WHERE session=? AND compaction=?",
+        existing = db.execute(
+            "SELECT status FROM captures WHERE session=? AND compaction=?",
             (store.identity.session_id, marker_id),
-        ).fetchone():
-            return status, reason
+        ).fetchone()
+        if existing is not None:
+            # A duplicate pass must report the terminal pair the store ALREADY holds:
+            # ``declined``/``failed`` are derived below from what the pass wrote, so
+            # echoing the caller's requested status here would contradict both the
+            # row a resumed caller reads next and this function's returned contract.
+            # The reason is read back for the same reason.
+            record = db.execute(
+                "SELECT value FROM meta WHERE key=?", (_capture_key(store, marker_id),)
+            ).fetchone()
+            stored_reason, _, _ = _meta_fields(record[0] if record is not None else None)
+            return str(existing[0]), stored_reason
         origin = store._origin(db)
         seq = db.execute(
             "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
@@ -627,12 +652,14 @@ def persist(
             )
             store._reindex(db, entity)
             captured += 1
-        # A pass that captured nothing must not present as a completed capture: the
-        # hint would claim success and a health metric would count it as a good pass.
+        # Guard losses and stage faults must not present as a completed capture: the
+        # hint would claim success and a health metric would count them as good passes.
         # An admission-only skip is DECLINED (benign: the guard rejected everything the
         # scan found), while a fault or a write-belt total loss stays FAILED. `quota`
         # and `store-error` normally arrive through ``_record_failure`` with status
-        # already `failed`; they are listed here so no path can land an `ok`/0 for them.
+        # already `failed`; they are listed here so no guarded/faulted path lands
+        # `ok`/0. A pass whose facts were all dropped by a tombstone or supersede
+        # ``continue`` is NOT a loss — a forget/edit was respected — and stays `ok`/0.
         if status == "ok" and not captured:
             if reason == "admission-skip":
                 status = "declined"
@@ -656,8 +683,8 @@ def persist(
         )
         # Attribution lives in ``meta``, not in ``captures``: the 4-column table keeps
         # the previous release's positional INSERT working for sessions still running
-        # old code during rollout. Written only when there is something to attribute,
-        # so a clean pass adds no meta row.
+        # old code during rollout. This attribution row is written only when there is
+        # something to attribute; the cohort stamp above is not per-pass attribution.
         if reason is not None or refused or skipped:
             db.execute(
                 "INSERT OR REPLACE INTO meta VALUES (?,?)",
@@ -953,8 +980,18 @@ def hint(store: MemoryStore, marker_id: str) -> str:
                 "Store goals and decisions explicitly."
             )
         else:
+            # A pre-split record's reason reads None because ``refused-row`` named no
+            # guard; its stored counts still prove the pass was partial. Report that
+            # evidence without naming a guard: an unqualified success here would hide
+            # the withheld candidates on exactly the records that can never be
+            # reclassified (review round 1, MINOR 1).
+            withheld = state.refused + state.skipped
+            caveat = (
+                f"; {withheld} candidates were withheld (cause not recorded)" if withheld else ""
+            )
             text = (
-                f"Context compacted; {state.n} candidates captured to session memory. "
+                f"Context compacted; {state.n} candidates captured to session memory"
+                f"{caveat}. "
                 "Search/read memory:// for paths and links, retained asks and decisions. "
                 "Store goals and decisions explicitly."
             )

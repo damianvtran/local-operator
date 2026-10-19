@@ -1185,6 +1185,51 @@ def test_a_legacy_verdict_literal_is_unclassifiable_and_never_rewritten(store):
     }
 
 
+def test_a_legacy_partial_pass_still_reports_withheld_candidates(store):
+    """MINOR 1: an unclassifiable record must not render as a clean success.
+
+    ``capture_detail`` refuses the pre-split verdict literal, so the reason reads
+    ``None``; the stored counts are the only surviving evidence that the pass was
+    partial. The hint reports them without naming a guard — the one thing it must not
+    do is invent a cause or claim a clean pass on the records this change cannot
+    reclassify.
+    """
+    meta = json.dumps({"reason": "refused-row", "refused": 0, "skipped": 18})
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO meta VALUES (?,?)",
+            (f"capture.{store.identity.session_id}.legacy-partial", meta),
+        )
+        db.execute(
+            "INSERT INTO captures(session,compaction,status,n) VALUES (?,?,?,?)",
+            (store.identity.session_id, "legacy-partial", "ok", 5),
+        )
+        db.commit()
+    message = hint(store, "legacy-partial")
+    assert "18 candidates were withheld (cause not recorded)" in message
+    assert "declined by the admission guard" not in message
+    assert "withheld by the memory guard at the write" not in message
+    # A genuinely clean pass keeps the unqualified wording.
+    persist(store, "legacy-clean", _scan_rows(2), "ok")
+    assert "withheld" not in hint(store, "legacy-clean")
+
+
+def test_a_duplicate_persist_reports_the_terminal_pair_the_store_holds(store):
+    """MINOR 2: a replayed marker reports the recorded status, not the requested one.
+
+    ``declined`` is derived inside ``persist`` from what the pass wrote, so the
+    duplicate early-return must read the row back. Echoing the caller's ``ok`` would
+    contradict the row a resumed caller reads next and the docstring that promises
+    the terminal pair actually recorded.
+    """
+    rows = extract(f"/docs/{HEX}")
+    assert persist(store, "duplicate-marker", rows, "ok") == ("declined", "admission-skip")
+    assert persist(store, "duplicate-marker", rows, "ok") == ("declined", "admission-skip")
+    assert watermark(store, "duplicate-marker") == ("declined", 0)
+    assert persist(store, "duplicate-clean", _scan_rows(2), "ok") == ("ok", None)
+    assert persist(store, "duplicate-clean", _scan_rows(2), "ok") == ("ok", None)
+
+
 #: The four shapes whose reason/status mapping is contractual. ``admission-skip`` and
 #: ``write-refused`` are different guards; only the latter is a total loss when every
 #: candidate lands there. ``quota`` and ``timeout`` are stage faults and stay ``failed``
