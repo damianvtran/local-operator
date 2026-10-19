@@ -49,7 +49,9 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -84,6 +86,7 @@ BASELINE_NOTE = (
 )
 BASELINE = REPO / "i18n" / "baseline.json"
 ALLOWLIST = REPO / "i18n" / "allowlist.toml"
+ALLOWANCE = REPO / "i18n" / "coverage-allowance.json"
 PRAGMA_RE = re.compile(r"#\s*i18n:\s*ignore\s+\S")
 KEY_RE = re.compile(r"^[a-z0-9_.]+$")
 #: Any Unicode letter — the line between a prose-like literal and punctuation,
@@ -612,6 +615,95 @@ def _check_context_sidecar(
 # ---------------------------------------------------------------------------
 
 
+def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
+    """Every ``(locale, namespace, key)`` the allowance records as missing."""
+    ids: set[tuple[str, str, str]] = set()
+    for entry in data.get("pairs", []):
+        locale = entry["locale"]
+        namespace = entry["namespace"]
+        for key in entry.get("missing", []):
+            ids.add((locale, namespace, key))
+    return ids
+
+
+def allowance_growth(base: dict[str, Any], head: dict[str, Any]) -> set[tuple[str, str, str]]:
+    """Keys HEAD records as missing that the base allowance did not."""
+    return _allowance_ids(head) - _allowance_ids(base)
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=False)
+
+
+def _ci_base() -> tuple[str | None, str | None]:
+    """The pull request base SHA and branch GitHub exposes, when this is a PR."""
+    if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
+        return None, None
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        return None, None
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        base = event["pull_request"]["base"]
+        return base["sha"], base["ref"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+
+
+def _resolve_allowance_base(base: str | None) -> tuple[str | None, bool]:
+    """``(ref, required)``; fetch the PR base commit when checkout is shallow.
+
+    An explicit ref or the GitHub PR base SHA is required: failing to resolve it
+    must fail the gate, not silently skip the shrink-only comparison. A local
+    checkout without ``origin/main`` is the one case that skips.
+    """
+    explicit = base is not None
+    ci_sha, ci_branch = _ci_base() if base is None else (None, None)
+    ref = base or ci_sha or "origin/main"
+    required = explicit or ci_sha is not None
+    if _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0:
+        return ref, required
+    # actions/checkout fetches one commit by default; the PR base is not in the
+    # object database. One small fetch is enough to compare the allowance. If
+    # the runner refuses a fetch by SHA, the base branch tip is the fallback.
+    fetched = _git("fetch", "--no-tags", "--depth=1", "origin", ref)
+    if fetched.returncode == 0:
+        return "FETCH_HEAD", required
+    if ci_branch:
+        fetched = _git("fetch", "--no-tags", "--depth=1", "origin", ci_branch)
+        if fetched.returncode == 0:
+            return "FETCH_HEAD", required
+    return None, required
+
+
+def check_allowance_growth(base: str | None = None) -> list[str]:
+    """Fail when HEAD adds missing-key entries relative to the base branch.
+
+    This is the automated half of the allowance's shrink-only rule. It cannot
+    stop someone editing the file, but an added entry becomes a red check that
+    names the debt, so growth is a deliberate reviewed act rather than a
+    silent escape. A base branch without the file is the introduction case.
+    """
+    ref, required = _resolve_allowance_base(base)
+    if ref is None:
+        if required:
+            return ["allowance growth: cannot resolve the base ref to compare against"]
+        return []
+    shown = _git("show", f"{ref}:i18n/coverage-allowance.json")
+    if shown.returncode != 0:
+        return []
+    try:
+        base_data = json.loads(shown.stdout)
+        head_data = json.loads(ALLOWANCE.read_text(encoding="utf-8"))
+        added = allowance_growth(base_data, head_data)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [f"allowance growth: cannot compare allowances: {exc}"]
+    return [
+        f"allowance growth: added {locale}/{namespace}: {key}"
+        for locale, namespace, key in sorted(added)
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -630,6 +722,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--force", action="store_true", help="allow --init over an existing baseline"
+    )
+    parser.add_argument(
+        "--allowance-base",
+        metavar="REF",
+        # i18n: ignore checker diagnostic (operator tooling help, English-only)
+        help="fail when i18n/coverage-allowance.json adds entries relative to REF; "
+        "defaults to the pull request base in CI, then origin/main locally",
     )
     args = parser.parse_args(argv)
 
@@ -705,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(line)
         else:
             advisories.append(f"advisory: {line}")
-    problems = check_catalogues() + check_login(REPO)
+    problems = check_catalogues() + check_login(REPO) + check_allowance_growth(args.allowance_base)
     for line in advisories + failures + problems:
         print(line)
     if failures or problems:
