@@ -713,6 +713,10 @@ class TagAssignment(Input):
         description="Existing assignment order is preserved; new tags append in this order.",
     )
     primary: str | None
+    expected_revision: str | int | None = Field(
+        default=None,
+        description="Optional exact per-session tags revision observed by this client.",
+    )
 
 
 class Archive(Input):
@@ -4452,10 +4456,22 @@ async def replace_tags(body: TagRegistry, request: Request):
 
 @router.put("/v1/desktop/sessions/{session_id}/tags", response_model=CRUDResponse[dict[str, Any]])
 async def session_tags(session_id: str, body: TagAssignment, request: Request):
+    from local_operator.session.session_tags import TagRevisionConflict
+
     async with errors(request):
         await _refuse_remote_write(request, session_id, noun="tag assignment")
         try:
-            return reply(await host(request).set_tags(session_id, body.tags, body.primary))
+            return reply(
+                await host(request).set_tags(
+                    session_id, body.tags, body.primary, body.expected_revision
+                )
+            )
+        except TagRevisionConflict as exc:
+            raise HTTPException(
+                409,
+                _wd.desktop_refusal(error="Tags changed elsewhere.").envelope(code="tags_conflict")
+                | {"result": exc.current},
+            ) from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 

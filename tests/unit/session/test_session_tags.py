@@ -28,7 +28,11 @@ def test_category_lifecycle_and_assignment_identity(tmp_path: Path) -> None:
     assert write_categories(tmp_path, [(b["id"], "Fixes"), (a["id"], "Review")])[0]["id"] == b["id"]
     assert read_entity_tags(tmp_path, "session", SID)["primary"] == a["id"]
     write_categories(tmp_path, [(b["id"], "Fixes")])
-    assert read_entity_tags(tmp_path, "session", SID) == {"tags": [b["id"]], "primary": b["id"]}
+    assert read_entity_tags(tmp_path, "session", SID) == {
+        "tags": [b["id"]],
+        "primary": b["id"],
+        "revision": 1,
+    }
     recreated = write_categories(tmp_path, [(b["id"], "Fixes"), (None, "Review")])[1]
     assert recreated["id"] != a["id"]
     assert read_entity_tags(tmp_path, "session", SID)["tags"] == [b["id"]]
@@ -91,7 +95,7 @@ def test_entity_paths_are_validated(tmp_path: Path, kind: str, key: str) -> None
 
 
 def test_absent_corrupt_and_invalid_primary(tmp_path: Path) -> None:
-    empty = {"tags": [], "primary": None}
+    empty = {"tags": [], "primary": None, "revision": 0}
     assert read_categories(tmp_path) == []
     assert read_entity_tags(tmp_path, "session", SID) == empty
     a, b = write_categories(tmp_path, [(None, "A"), (None, "B")])
@@ -104,6 +108,7 @@ def test_absent_corrupt_and_invalid_primary(tmp_path: Path) -> None:
     assert read_entity_tags(tmp_path, "session", SID) == {
         "tags": [b["id"], a["id"]],
         "primary": b["id"],
+        "revision": 0,
     }
     for contents in ("broken", "[]", '{"version":1,"tags":null}', '{"version":2,"tags":[]}'):
         path.write_text(contents)
@@ -156,12 +161,16 @@ def test_primary_changes_and_put_order_preserve_assignment_history(tmp_path: Pat
     a, b = write_categories(tmp_path, [(None, "A"), (None, "B")])
     set_entity_tags(tmp_path, "session", SID, [a["id"]], a["id"])
     state = set_entity_tags(tmp_path, "session", SID, [b["id"], a["id"]], b["id"])
-    assert state == {"tags": [a["id"], b["id"]], "primary": b["id"]}
+    assert state == {"tags": [a["id"], b["id"]], "primary": b["id"], "revision": 2}
     state = set_entity_tags(tmp_path, "session", SID, [b["id"], a["id"]], a["id"])
     assert state["tags"] == [a["id"], b["id"]]
     set_entity_tags(tmp_path, "session", SID, [b["id"], a["id"]], b["id"])
     write_categories(tmp_path, [(a["id"], "A")])
-    assert read_entity_tags(tmp_path, "session", SID) == {"tags": [a["id"]], "primary": a["id"]}
+    assert read_entity_tags(tmp_path, "session", SID) == {
+        "tags": [a["id"]],
+        "primary": a["id"],
+        "revision": 4,
+    }
 
 
 def test_usage_counts_ignore_orphan_session_assignments(tmp_path: Path) -> None:
@@ -235,7 +244,11 @@ def test_the_revision_token_moves_only_on_real_mutations(tmp_path: Path) -> None
 
     # Read/assignment semantics are untouched by the marker.
     assert read_categories(tmp_path) == [renamed]
-    assert read_entity_tags(tmp_path, "session", SID) == {"tags": [], "primary": None}
+    assert read_entity_tags(tmp_path, "session", SID) == {
+        "tags": [],
+        "primary": None,
+        "revision": 2,
+    }
     assert read_categories(tmp_path) == [renamed]
 
 
@@ -291,6 +304,7 @@ def test_a_failed_marker_write_removes_the_stale_marker(
     assert set_entity_tags(tmp_path, "session", SID, [review["id"]], review["id"]) == {
         "tags": [review["id"]],
         "primary": review["id"],
+        "revision": 1,
     }
     assert failures["left"] == 0, "the retry must actually be attempted"
     assert not marker.exists(), "the stale marker must be removed"
@@ -300,3 +314,80 @@ def test_a_failed_marker_write_removes_the_stale_marker(
     monkeypatch.setattr(session_tags, "_write", real_write)
     set_entity_tags(tmp_path, "session", SID, [], None)
     assert read_tags_revision(tmp_path) is not None
+
+
+def test_assignment_revisions_track_changes_not_retries(tmp_path: Path) -> None:
+    a, b = [tag["id"] for tag in write_categories(tmp_path, [(None, "A"), (None, "B")])]
+    path = tmp_path / "tags" / "session" / f"{SID}.json"
+    assert read_entity_tags(tmp_path, "session", SID)["revision"] == 0
+    assert set_entity_tags(tmp_path, "session", SID, [], None)["revision"] == 0
+    assert not path.exists()
+    for tags, primary, expected, revision in [
+        ([a], a, "0", 1),
+        ([a, b], a, 1, 2),
+        ([a, b], b, "2", 3),
+        ([b], b, 3, 4),
+        ([], None, "4", 5),
+    ]:
+        assert (
+            set_entity_tags(tmp_path, "session", SID, tags, primary, expected)["revision"]
+            == revision
+        )
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        assert (
+            set_entity_tags(tmp_path, "session", SID, tags, primary, str(revision))["revision"]
+            == revision
+        )
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    set_entity_tags(tmp_path, "session", SID, [a, b], a)
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    assert set_entity_tags(tmp_path, "session", SID, [b, a], None, "6")["revision"] == 6
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_revision_conflict_is_typed_and_does_not_write(tmp_path: Path) -> None:
+    from local_operator.session.session_tags import TagRevisionConflict
+
+    tag = write_categories(tmp_path, [(None, "A")])[0]
+    set_entity_tags(tmp_path, "session", SID, [tag["id"]], tag["id"])
+    path = tmp_path / "tags" / "session" / f"{SID}.json"
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    for expected in (0, "0", "01"):
+        with pytest.raises(TagRevisionConflict) as caught:
+            set_entity_tags(tmp_path, "session", SID, [], None, expected)
+        assert caught.value.current == {"tags": [tag], "primary": tag["id"], "tags_revision": "1"}
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_conditional_writers_serialize_within_one_process(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from local_operator.session.session_tags import TagRevisionConflict
+
+    a, b = [tag["id"] for tag in write_categories(tmp_path, [(None, "A"), (None, "B")])]
+    barrier = Barrier(2)
+
+    def apply(key):
+        barrier.wait(timeout=5)
+        try:
+            return set_entity_tags(tmp_path, "session", SID, [key], key, "0")["revision"]
+        except TagRevisionConflict:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(apply, [a, b]))
+    assert sorted(map(str, results)) == ["1", "conflict"]
+    assert read_entity_tags(tmp_path, "session", SID)["revision"] == 1
+
+
+def test_legacy_assignment_starts_at_zero_without_rewriting_on_retry(tmp_path: Path) -> None:
+    tag = write_categories(tmp_path, [(None, "A")])[0]["id"]
+    path = tmp_path / "tags" / "session" / f"{SID}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"version": 1, "tags": [tag], "primary": tag}))
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    assert read_entity_tags(tmp_path, "session", SID)["revision"] == 0
+    assert set_entity_tags(tmp_path, "session", SID, [tag], tag, "0")["revision"] == 0
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert set_entity_tags(tmp_path, "session", SID, [], None, "0")["revision"] == 1
