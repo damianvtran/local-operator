@@ -141,3 +141,25 @@ def test_an_uncut_reply_is_cleaned_not_truncated() -> None:
     assert reply.truncated is False
     assert "ls" not in reply.text.split()
     assert "".join(reply.segments) == reply.text
+
+
+@pytest.mark.parametrize(
+    "cluster",
+    [
+        "\U0001f1fa\U0001f1f8",  # flag: two regional indicators
+        "\U0001f468\u200d\U0001f469\u200d\U0001f467",  # ZWJ family
+        "e\u0301\u0323",  # letter with stacked combining marks
+        "\U0001f44d\U0001f3fd",  # emoji with skin-tone modifier
+    ],
+)
+@pytest.mark.parametrize("offset", range(0, 4))
+def test_a_cut_never_lands_inside_a_grapheme_cluster(cluster: str, offset: int) -> None:
+    from local_operator.voice.segments import VOICE_SEGMENT_MAX_CHARS as cap
+
+    # An unbroken run, so the cut is forced near the cap; slide the cluster across it.
+    text = "a" * (cap - offset - 1) + cluster + "b" * 50
+    parts = segment(text)
+    assert "".join(parts) == text
+    assert all(len(part) <= cap for part in parts)
+    # Whole in one segment means no seam fell inside it.
+    assert any(cluster in part for part in parts)

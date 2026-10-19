@@ -98,6 +98,7 @@ from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
+from fastapi.routing import APIRoute
 from pydantic import TypeAdapter, ValidationError
 
 from local_operator.clients._http import APIError
@@ -142,7 +143,42 @@ from local_operator.voice import speakable as voice_speakable
 
 logger = logging.getLogger("local_operator.server.routes.desktop_voice")
 
-router = APIRouter(tags=["Voice"], dependencies=[Depends(require_desktop)])
+
+class _UploadCeilingRoute(APIRoute):
+    """Refuse an oversized body from ``Content-Length`` before the form is parsed.
+
+    Starlette spools every multipart part to disk while parsing, ahead of any
+    handler code, so the post-read check in :func:`_save_upload` fires only after
+    the whole upload is on disk. A route class is the one hook that runs first.
+    The header can be absent or understated (chunked bodies); the post-read check
+    stays as the backstop. The form's text fields add a little to the length, so
+    the ceiling here only needs to be a lower bound on the file part.
+    """
+
+    def get_route_handler(self) -> Any:
+        original = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            declared = request.headers.get("content-length", "")
+            if (
+                request.url.path.endswith("/utterance")
+                and declared.isdigit()
+                and int(declared) > MAX_UPLOAD_BYTES
+            ):
+                raise _refuse(
+                    413,
+                    "voice_upload_too_large",
+                    _wv.upload_too_large(limit_mib=str(MAX_UPLOAD_BYTES // (1024 * 1024))),
+                )
+            return await original(request)
+
+        return handler
+
+
+router = APIRouter(
+    tags=["Voice"], dependencies=[Depends(require_desktop)], route_class=_UploadCeilingRoute
+)
+
 
 _REQUEST_ID = TypeAdapter(RequestID)
 
@@ -813,6 +849,11 @@ async def voice_speech(
             try:
                 cached = cache_file.read_bytes()
             except OSError:
+                cached = b""
+            if cached and stt_audio.sniff_audio(cached) is None:
+                # A truncated or corrupt file must not be served for ever: drop
+                # it and fall through to a paid regeneration, which re-stores it.
+                cache_file.unlink(missing_ok=True)
                 cached = b""
             if cached:
                 return Response(
