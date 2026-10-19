@@ -39,7 +39,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1194,4 +1194,7 @@ def test_credentials_cadence_is_independent_of_net_definitions(
     # device may hold toward a peer), not the member row.
     record.self_capabilities = sorted(types.capabilities_for_role("drive"))
     store.save(record, root)
-    assert sync.credentials_sync_step(server, peer) == "skipped:no_broker_credential"
+    # The fake server is deliberately duck-typed (a SimpleNamespace); the cast is
+    # the same deliberate `Any` the mcp suite's fake stores use, and it keeps the
+    # whole-tree type check green without a real RelayServer.
+    assert sync.credentials_sync_step(cast(Any, server), peer) == "skipped:no_broker_credential"
