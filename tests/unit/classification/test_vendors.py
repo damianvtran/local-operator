@@ -1267,3 +1267,56 @@ async def test_a_walk_that_ended_with_no_credential_still_resets(bare_manager) -
     await vendor.decide(request_of(choice_question()), timeout_s=5.0)
     assert bearers[-1] == "fresh-bearer"
     assert vendor._tier == 0
+
+
+# ---------------------------------------------------------------------------
+# The priced-from id (top-level cost.model) is separate from the vendor echo
+# ---------------------------------------------------------------------------
+
+
+async def test_the_cost_objects_model_is_captured_while_the_echo_is_unchanged(manager) -> None:
+    """``model`` is the vendor echo; ``cost.model`` is what the amount was priced from.
+
+    The live Radient body measured 2026-10-19 carries both: ``model:
+    "jev-1.13.0"`` at the top level and ``cost.model: "jev-1.13"``. The ledger
+    row must use the latter, so the parser keeps the two facts apart.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "model": "jev-1.13.0",
+                "answers": {"recommend_skill": {"choice": "none", "confidence": 1.0}},
+                "cost": {
+                    "v": 1,
+                    "amount_usd": 1.1424e-05,
+                    "basis": "billed",
+                    "model": "jev-1.13",
+                },
+            }
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.model == "jev-1.13.0", "the vendor echo stays untouched"
+    assert response.cost_model == "jev-1.13", "the priced-from id is the billing identity"
+
+
+async def test_a_body_without_a_cost_object_has_no_priced_from_id(manager) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "model": "jev-1.13.0",
+                "answers": {"recommend_skill": {"choice": "none"}},
+                "usage": {"cost": 0.000027},
+            }
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_model is None
+    assert response.model == "jev-1.13.0"

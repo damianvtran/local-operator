@@ -25,9 +25,18 @@ from typing import Any, Callable
 import httpx
 import pytest
 
+from local_operator.classification.accounting import (
+    answered_record,
+    failed_record,
+    interrupted_record,
+)
 from local_operator.classification.recommend import RecommendationRequest
 from local_operator.classification.service import ClassificationService
-from local_operator.classification.types import Question
+from local_operator.classification.types import (
+    DecisionResponse,
+    DecisionVendorError,
+    Question,
+)
 from local_operator.session.channel_spend import (
     STATUS_CANCELLED,
     STATUS_FAILED,
@@ -734,3 +743,101 @@ async def test_record_factory_fault_never_changes_vendor_outcome(
         assert caught.value is original
     assert rows == []
     assert len(built) == int(bound), "an unbound service must not invoke a record factory"
+
+
+# -- billing identity: the priced-from id, not the vendor echo ---------------
+
+
+@pytest.mark.parametrize(
+    "server_id",
+    [
+        None,
+        "jev-1.13",
+        "jev-1.13.0",
+        "typesafe/jev-1.13",
+        "jev-1.13-20261019",
+        "typesafe/jev-1.13-20261019",
+    ],
+)
+async def test_every_server_emittable_decision_id_lands_on_the_canonical_row(
+    server_id: str | None,
+) -> None:
+    """One model, one ledger identity: the aliases the server can state collapse."""
+    response = DecisionResponse(
+        vendor="radient",
+        # The vendor's own echo, deliberately a different spelling from the
+        # canonical id. It stays on ``response.model`` for evidence.
+        model="jev-1.13.0",
+        answers={},
+        cost_usd=1.2e-05,
+        cost_model=server_id,
+    )
+    row = answered_record(response, posts=1, requested_model="jev-1.13")
+
+    assert row.model == "jev-1.13"
+    assert row.detail == "vendor-model=jev-1.13.0"
+
+
+async def test_without_a_cost_object_the_requested_leg_model_is_the_fallback() -> None:
+    response = DecisionResponse(
+        vendor="radient", model="jev-1.13.0", answers={}, cost_usd=None, cost_model=None
+    )
+    row = answered_record(response, posts=1, requested_model="typesafe/jev-1.13")
+
+    assert row.model == "jev-1.13"
+    assert row.amount_micro is None, "unknown stays unknown"
+
+
+async def test_a_failed_or_interrupted_row_canonicalises_its_model_argument() -> None:
+    error = DecisionVendorError("down", kind="server")
+
+    failed = failed_record("radient", "jev-1.13.0", error, posts=1)
+    interrupted = interrupted_record("radient", "typesafe/jev-1.13-20261019", posts=1)
+
+    assert failed.model == "jev-1.13"
+    assert interrupted.model == "jev-1.13"
+    assert (
+        failed_record("typesafe", "another-model", error, posts=1).model == "another-model"
+    ), "an unknown id is not rewritten into the JEV family"
+
+
+async def test_the_service_records_the_priced_id_while_the_echo_rides_detail(manager) -> None:
+    """The measured wire: top-level ``model`` echoes the pinned id, cost.model prices."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **answer_body(cost=None),
+                "model": "jev-1.13.0",
+                "cost": {
+                    "v": 1,
+                    "amount_usd": 1.1424e-05,
+                    "basis": "billed",
+                    "units": 272,
+                    "unit": "token",
+                    "provider": "typesafe",
+                    "model": "jev-1.13",
+                    "usage_record_id": "a1b2c3d4e5f60718293a4b5c",
+                    "price_version": "decisions-rate@2026-09-19",
+                },
+            },
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.model == "jev-1.13", "the row is the priced-from id, not the echo"
+    assert row.detail == "vendor-model=jev-1.13.0", "the echo survives as evidence"
+    assert row.amount_micro == 11, "1.1424e-05 USD rounds to 11 micro-USD"
+
+
+async def test_canonical_model_id_normalises_none_to_the_empty_string() -> None:
+    """Q-1: the leaf's contract is ``str`` in and ``str`` out, empty for no model."""
+    from local_operator.decision_models import canonical_model_id
+
+    assert canonical_model_id(None) == ""
+    assert canonical_model_id("") == ""
+    assert canonical_model_id("jev-1.13.0") == "jev-1.13"
+    assert canonical_model_id("another-model") == "another-model"
