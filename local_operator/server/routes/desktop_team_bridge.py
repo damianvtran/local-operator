@@ -405,6 +405,63 @@ def _raise_read(code: str) -> NoReturn:
     raise HTTPException(status, {"code": code, "message": message})
 
 
+#: The desktop's ONE accepted multi-organization scope for the two aggregate
+#: reads. The organization set is SERVER-DERIVED from the signed-in account's
+#: active memberships, and eligibility is applied per org by the same resolver
+#: the pair lane uses; the renderer therefore never supplies a tenant list (the
+#: design note's tenant-isolation invariant) and never gets to name a second
+#: scope.
+ACCOUNT_SCOPE = "account"
+
+
+def _account_scope(scope: str | None) -> bool:
+    """Normalize a read's ``scope``: the one account literal, or absent.
+
+    Any other value is a caller bug and is refused before I/O. One helper for
+    both reads keeps the accepted vocabulary from drifting; the page-specific
+    conflicts (tenant/position names beside it) stay with the route that owns
+    that table.
+    """
+
+    if scope is None:
+        return False
+    if scope != ACCOUNT_SCOPE:
+        _raise_read("invalid_request")
+    return True
+
+
+def _refuse_read_scope(request: Request) -> None:
+    """Id-addressed reads never take a scope: the id already names one org.
+
+    Ignoring a scope here would answer from the default organization while the
+    client believed it had asked for another, so the upstream refuses it on
+    every id-addressed read and this mirror does the same. The refused name is
+    only ``scope``, not the whole query: each route keeps its own closed table
+    (tenant, cursors, endpoint) and this rule does not become a second copy of
+    it.
+    """
+
+    if "scope" in request.query_params:
+        _raise_read("invalid_request")
+
+
+def _refuse_write_scope(request: Request) -> None:
+    """Writes never take a scope: each names exactly ONE tenant.
+
+    An account-wide read is an aggregate over memberships; a write cannot be
+    aggregated, because the server would have to guess which organization the
+    send/read/join was meant to land in. That is the "communicate only in the
+    expected space" invariant, so ``scope`` is refused here before any I/O. The
+    check is the same closed-table pattern the reads use, over an empty accepted
+    set: it names ONLY ``scope``, so a write keeps whatever other query names its
+    own route already accepts (``endpoint_id`` on admit) without this becoming a
+    second table.
+    """
+
+    if "scope" in request.query_params:
+        _raise_read("invalid_request")
+
+
 @router.get("/v1/desktop/team-bridge/status", response_model=CRUDResponse[Any])
 async def status(
     boundary: str = Query(default="surface_open"),
@@ -1027,31 +1084,6 @@ async def _conversation_reply(awaitable: Any) -> Any:
         _raise_bridge(exc)
 
 
-#: The desktop's ONE accepted multi-organization scope for the two reads. The
-#: organization set is SERVER-DERIVED from the signed-in account's active
-#: memberships, and eligibility is applied per org by the same resolver the pair
-#: lane uses; the renderer therefore never supplies a tenant list (the design
-#: note's tenant-isolation invariant) and never gets to name a second scope.
-ACCOUNT_SCOPE = "account"
-
-
-def _refuse_write_scope(request: Request) -> None:
-    """Writes never take a scope: each names exactly ONE tenant.
-
-    An account-wide read is an aggregate over memberships; a write cannot be
-    aggregated, because the server would have to guess which organization the
-    send/read/join was meant to land in. That is the "communicate only in the
-    expected space" invariant, so ``scope`` is refused here before any I/O. The
-    check is the same closed-table pattern the reads use, over an empty accepted
-    set: it names ONLY ``scope``, so a write keeps whatever other query names its
-    own route already accepts (``endpoint_id`` on admit) without this becoming a
-    second table.
-    """
-
-    if "scope" in request.query_params:
-        _raise_read("invalid_request")
-
-
 @router.get("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
 async def list_conversations(
     request: Request,
@@ -1066,9 +1098,11 @@ async def list_conversations(
 
     The account page is ordered by activity across the caller's organizations and
     carries each row's own ``tenant_id``; conversations are never merged into one
-    row. Its position is the single opaque ``cursor`` the server mints, so a
-    per-tenant ``before`` or a ``tenant_id`` beside it would name a conflicting
-    scope and is refused here rather than being resolved by the server.
+    row. BOTH scopes return the lossless compound ``cursor`` the server mints —
+    on a tenant page it preserves ties in ``last_message_at`` — and ``before`` is
+    the legacy timestamp-only bound, mutually exclusive with it. ``before`` and a
+    ``tenant_id`` beside the account scope would name a conflicting read and are
+    refused here rather than being resolved by the server.
     """
 
     if set(request.query_params) - {
@@ -1079,17 +1113,14 @@ async def list_conversations(
         "scope",
     }:
         _raise_read("invalid_request")
-    account_wide = scope == ACCOUNT_SCOPE
-    if scope is not None and not account_wide:
+    account_wide = _account_scope(scope)
+    if before is not None and cursor is not None:
+        # The upstream's own rule for both scopes: a legacy timestamp bound
+        # cannot be combined with the compound position.
         _raise_read("invalid_request")
-    if account_wide:
+    if account_wide and (tenant_id is not None or before is not None):
         # ``after`` is not a name of this read at all, so the closed table above
         # refuses it on every page; these two are the page-specific conflicts.
-        if tenant_id is not None or before is not None:
-            _raise_read("invalid_request")
-    elif cursor is not None:
-        # The merged page pages on ``cursor``; a tenant page pages on ``before``.
-        # Accepting both would leave it to the server which one wins.
         _raise_read("invalid_request")
     parsed_limit: int | None = None
     if limit is not None:
@@ -1104,7 +1135,7 @@ async def list_conversations(
             limit=parsed_limit,
             before=before,
             cursor=cursor,
-            scope=scope,
+            scope=ACCOUNT_SCOPE if account_wide else None,
         )
     )
     return reply(payload)
@@ -1136,11 +1167,13 @@ async def create_conversation(
 )
 async def get_conversation(
     conversation_id: str,
+    request: Request,
     tenant_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """One conversation: members, read state and latest seq. No body, ever."""
     _require_conversation_id(conversation_id)
+    _refuse_read_scope(request)
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(client.conversation(conversation_id, tenant_id=tenant_id))
@@ -1393,6 +1426,7 @@ async def send_conversation_message(
 async def conversation_message_body(
     conversation_id: str,
     message_id: str,
+    request: Request,
     tenant_id: str | None = Query(default=None),
     endpoint_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
@@ -1400,6 +1434,7 @@ async def conversation_message_body(
     """The agent classification fetch: body + binding hash. Not a context path."""
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
+    _refuse_read_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1485,10 +1520,12 @@ async def conversation_unread(
 
     if set(request.query_params) - {"tenant_id", "scope"}:
         _raise_read("invalid_request")
-    account_wide = scope == ACCOUNT_SCOPE
-    if scope is not None and not account_wide:
-        _raise_read("invalid_request")
+    account_wide = _account_scope(scope)
     if account_wide and tenant_id is not None:
         _raise_read("invalid_request")
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.unread(tenant_id=tenant_id, scope=scope)))
+    return reply(
+        await _conversation_reply(
+            client.unread(tenant_id=tenant_id, scope=ACCOUNT_SCOPE if account_wide else None)
+        )
+    )

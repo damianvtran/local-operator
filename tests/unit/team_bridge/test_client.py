@@ -733,3 +733,46 @@ async def test_tenant_state_reads_the_frozen_route_with_the_pinned_bearer():
 
     assert result["effective"] is True
     assert seen == [("/v1/tenants/tnt_1/messaging/state", "Bearer token-1")]
+
+
+# ---------------------------------------------------------------------------
+# the account-scope read surface (desktop multi-org forwarding)
+# ---------------------------------------------------------------------------
+
+
+async def test_conversations_sends_the_scope_and_cursor_wire_names():
+    """The merged page's names belong to the other repo; pin the seam here."""
+
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return _ok({"conversations": [], "cursor": None})
+
+    client = _make_client(handler)
+    await client.conversations(scope="account", cursor="bcur_x", limit=20)
+
+    assert len(seen) == 1
+    assert seen[0].path == "/v1/messaging/conversations"
+    assert dict(seen[0].params) == {
+        "limit": "20",
+        "cursor": "bcur_x",
+        "scope": "account",
+    }
+
+
+async def test_unread_sends_the_scope_wire_name():
+    """The badge's aggregate is one GET; a dropped name would read one org."""
+
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return _ok({"total": 0, "organizations": []})
+
+    client = _make_client(handler)
+    await client.unread(scope="account")
+
+    assert len(seen) == 1
+    assert seen[0].path == "/v1/messaging/unread"
+    assert dict(seen[0].params) == {"scope": "account"}
