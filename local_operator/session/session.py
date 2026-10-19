@@ -2790,6 +2790,30 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             blocks[index] = str(value)
 
 
+def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
+    """The CONVERSATION-chosen level a journal row implies, or ``None``.
+
+    ``level`` is the row's own ``effort`` field; ``None`` (a legacy row, or one
+    written before this field carried a choice) falls back to the spec the
+    caller constructed. Either way the answer is only a CHOICE when it differs
+    from the model's own seed — the same ``reasoning_effort !=
+    reasoning_default_effort`` contract ``_carried_effort`` reads, and the one
+    ``_remember_effort_choice`` maintains live.
+
+    Deliberately computed against the spec being constructed, NOT against the
+    spec a row is about to be clamped into: a row naming ``max`` for a route
+    whose ladder stops at ``high`` must keep ``max`` as the choice even though
+    the spec it resolves to carries the clamp. That asymmetry is the whole
+    point — the clamp is the level IN FORCE, the row is what was ASKED FOR.
+    """
+    candidate = level or getattr(spec, "reasoning_effort", None)
+    if not candidate:
+        return None
+    if candidate == getattr(spec, "reasoning_default_effort", None):
+        return None
+    return candidate
+
+
 def _member_reasoning_effort(spec: ModelSpec, requested: str | None) -> str | None:
     """A member override's effort word as a level THIS spec can be asked for.
 
@@ -3459,13 +3483,22 @@ class Session:
         #: is never tagged; ``_load_conversation_name`` sets it from the
         #: ``_is_unnamed_fork()`` verdict it already computes at construction.
         self._wears_inherited_title = False
-        # The birth selector also governs the existing effort-journalling
-        # policy. Restore its historical value on resume: the factory now
-        # configures the saved primary before construction, not today's default.
-        # Only deliberate flags, never synthesized pairs, may override history.
+        # The birth selector is recorded for diagnostics and for the rows a
+        # journal write stamps (``_persist_selected_model``). It no longer
+        # gates effort journalling: the boot-model early return that used to
+        # live in ``_journal_effort_if_selection_in_force`` was left behind when
+        # v2 selection rows became authoritative for the initial selection, and
+        # it was what made a chosen level revert on the next restart.
         self._boot_selector = f"{model.provider}/{model.model_id}"
         self._model_source = model_source
         self._explicit_model_choice = False
+        #: The reasoning level this CONVERSATION chose (see
+        #: :meth:`_remember_effort_choice`), or ``None``. Deliberately separate
+        #: from ``self._model.reasoning_effort``: the selected model may be a
+        #: route that cannot express the choice (its spec carries ``None`` or a
+        #: clamp), and the durable journal must still record what the user
+        #: asked for.
+        self._chosen_effort: str | None = None
         self._selection_needs_initial_write = True
         self._model_migration_notice = False
         #: Set by :meth:`_apply_config_change` when ``web_search.enabled`` /
@@ -6411,6 +6444,7 @@ class Session:
         """
         previous = self._model
         self._model = model
+        self._remember_effort_choice(previous, model)
         if previous.supports_images and not model.supports_images:
             # A genuine move onto a text-only model (same-model knob changes
             # copy the spec and cannot flip the capability): explain the
@@ -6458,9 +6492,12 @@ class Session:
             # (see `spec_for_target` — a chain entry naming no effort inherits
             # the chosen level), so an `/effort` change has to re-derive it or
             # the band keeps naming the level the user just moved away from.
-            # Quietly — no event, no persistence: the route did not move, and
-            # the `/effort` receipt plus the host's own repaint already cover
-            # the level change.
+            # Quietly — no event: the route did not move, and the `/effort`
+            # receipt plus the host's own repaint already cover the level
+            # change. The SELECTION row is a different matter and is re-written
+            # below: a level the user chose is a durable property of the
+            # conversation, not an in-memory knob (see
+            # `_journal_effort_if_selection_in_force`).
             if self._active_route is not None:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
@@ -6563,17 +6600,86 @@ class Session:
             )
         )
 
-    def _journal_effort_if_selection_in_force(self, previous: ModelSpec, model: ModelSpec) -> None:
-        """Re-journal the selection when a knob change moves the effort on a
-        model the user SWITCHED to, so the restored effort tracks it.
+    def _remember_effort_choice(self, previous: ModelSpec, model: ModelSpec) -> None:
+        """Track the reasoning level the CONVERSATION chose, not the model's.
 
-        The ``selected_model`` row carries an effort field, and a switch
-        followed by a SEPARATE ``/effort`` change would otherwise leave that
-        field frozen at the switch's level: the ``/effort`` call takes
-        ``set_model``'s same-pair early return and never reaches the journal
-        write, so a resume would come back on the switched model at its
-        DEFAULT effort — silently dropping the level the user chose and, on a
-        reasoning model, quietly changing cost (review round 1, F1).
+        A chosen level belongs to the user, not to the model they happened to be
+        on when they chose it — the rule ``_spec_with_chosen_effort`` already
+        states on the host side. The session needs the same fact because a
+        model that cannot express the level carries ``reasoning_effort=None``
+        on its spec, and a journal that recorded only the spec's level would
+        erase the choice the moment the conversation passed through the route.
+        The observed path: ``max`` chosen -> a switch onto an aggregator whose
+        listing supplied no ladder (spec level ``None``) -> a switch back to the
+        birth model, which then fell to that model's seed ``high``. Nobody had
+        asked for ``high``; the choice had simply been overwritten by a route
+        that could not hold it.
+
+        Updated only at the edges where a level is DECIDED:
+
+        * a same-pair move to a level that differs from the model's seed is a
+          CHOICE ("/effort max");
+        * a same-pair move back onto the seed is a WITHDRAWAL ("/effort auto"),
+          so the held choice is cleared — otherwise the next switch would
+          resurrect a level the user had explicitly dropped;
+        * a switch that lands on a non-seed level remembers that level (it is
+          either the choice being carried, or one the caller supplied);
+        * a switch that lands on the seed chooses NOTHING, so the held choice is
+          KEPT: that is exactly the ladder the target could not express, and the
+          whole point is that it should still be there on the way back.
+        """
+        same_pair = (previous.provider, previous.model_id) == (
+            model.provider,
+            model.model_id,
+        )
+        level = model.reasoning_effort
+        seeded = level == model.reasoning_default_effort
+        if same_pair:
+            if level == previous.reasoning_effort:
+                return
+            self._chosen_effort = None if seeded else level
+            return
+        if level and not seeded:
+            self._chosen_effort = level
+
+    @property
+    def chosen_effort(self) -> str | None:
+        """The level this CONVERSATION chose, or ``None`` when nothing was chosen.
+
+        Distinct from ``self.model.reasoning_effort``, which is the level the
+        SELECTED model can express right now (a clamp, a seed, or ``None`` on a
+        model with no ladder). Read by the selection journal and by the
+        failover carry, so a trip through a route that cannot hold the level
+        cannot take the choice away.
+        """
+        return self._chosen_effort
+
+    def _journal_effort_if_selection_in_force(self, previous: ModelSpec, model: ModelSpec) -> None:
+        """Re-journal the selection when a knob change moves the effort.
+
+        The ``selected_model`` row carries an effort field, and ``/effort``
+        takes ``set_model``'s same-pair early return and never reaches the
+        switch's own journal write. Without this, EVERY model — not only a
+        model the user switched to — would come back from ``--resume`` at the
+        level its spec happens to seed, silently dropping the level the user
+        chose and, on a reasoning model, quietly changing cost.
+
+        THE BIRTH MODEL IS NOT EXEMPT, and it used to be. ``#240`` returned
+        early when the model's selector equalled ``self._boot_selector``, on
+        the stated ground that ``_restore_selected_model`` skipped a row whose
+        selector was the boot selector. That skip was removed in ``#797`` when
+        version-2 rows became authoritative for the initial selection too: the
+        restore now honours a boot-selector row, so the guard no longer
+        prevented an inert write — it prevented the ONE write that makes a
+        chosen level survive a restart on the model the conversation booted on.
+        That is the reported defect: a session on its boot model (an agent
+        conversation whose configured model has not been switched, and which
+        restarts most often) took ``/effort max`` in memory, never journalled
+        it, and resumed on the seed ``high`` with nothing on screen having
+        changed. The guard's other half — "effort changes alone do not create
+        model-switch records" — is unaffected: this method appends a
+        ``selected_model`` SNAPSHOT and emits no ``ModelChangeEvent``, so a
+        knob change still never reads as a switch.
 
         Bounded twice, and each bound is load-bearing:
 
@@ -6582,14 +6688,15 @@ class Session:
           rides ``set_model`` on the same pair too, and the journal stores no
           sampling — so re-journalling on those would append identical rows for
           a change the row cannot even express.
-        - **Only a non-birth selection.** This retains the existing /effort
-          policy: effort changes alone do not create model-switch records on
-          the birth model. Initial identity is now durable at admission, but
-          that is not an expansion of this effort-change journalling policy.
+        - **Coalesced, not one append per keystroke.** ``/effort`` cycling
+          (``shift+tab``) lands one write per SETTLED level: the writer
+          snapshots the spec at write time, and a second change while a write
+          is in flight is covered by the dirty flag (see
+          ``_spawn_selected_model_write``). The cost is one small custom row
+          per level change, which is the price of the durability this row
+          exists to provide.
         """
         if previous.reasoning_effort == model.reasoning_effort:
-            return
-        if f"{model.provider}/{model.model_id}" == self._boot_selector:
             return
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
@@ -15644,6 +15751,12 @@ class Session:
             self._active_route = None
             self._active_route_reason = None
             await self._persist_active_route(self._model)
+            # The EFFECTIVE model is a canonical-state field, so publish the
+            # edge here rather than leaving it to a host that happens to fold
+            # the event below: a reader between the two calls would otherwise
+            # see the fallback this session just left. An edge, not a
+            # per-token path (see ``refresh_frontend_state``).
+            self.refresh_frontend_state()
             await self._emit(
                 ModelChangeEvent(
                     provider=self._model.provider,
@@ -15675,6 +15788,10 @@ class Session:
         self._active_route = (selector, target_effort)
         self._active_route_reason = reason
         await self._persist_active_route(self._model)
+        # Same edge as the return branch: ``effective_model`` and the
+        # displacement sentence it implies are canonical-state fields, so a
+        # reader must not have to wait for a host's event fold to see them.
+        self.refresh_frontend_state()
         await self._emit(
             ModelChangeEvent(
                 provider=spec.provider,
@@ -15695,6 +15812,25 @@ class Session:
             reason=reason,
             transient=True,
         )
+        # THE LEVEL IS PART OF WHAT JUST MOVED, so it gets said out loud.
+        #
+        # The band's effort segment names the level IN FORCE — correctly — and
+        # that is exactly why a fallback serving at a level other than the one
+        # the conversation chose used to look like the dial moving on its own:
+        # the target's ladder clamps the choice (``spec_for_target``), or the
+        # chain entry pins a level of its own, and nothing distinguished either
+        # from an explicit ``/effort``. The sentence is composed by
+        # ``frontend_state.effort_displacement`` so the notice here, the
+        # canonical state and every client read one wording.
+        #
+        # ``queue_notice`` because this fires inside the turn the fallback
+        # rescued: the line belongs AFTER that turn's answer, not between the
+        # user's question and the reply (see its docstring).
+        from local_operator.session.frontend_state import effort_displacement
+
+        displacement = effort_displacement(self._model, spec, self._chosen_effort)
+        if displacement.get("note"):
+            await self.queue_notice(displacement["note"], "info")
 
     def _spec_for_route(self, selector: str, effort: str | None) -> ModelSpec | None:
         """The fallback target's own ``ModelSpec``, or None when unresolvable.
@@ -26080,13 +26216,28 @@ class Session:
         payload = {
             "version": 2,
             "selector": f"{model.provider}/{model.model_id}",
-            "effort": model.reasoning_effort,
+            # THE CHOICE FIRST (see ``_remember_effort_choice``): a route that
+            # cannot express the chosen level carries ``None`` (or a clamp) on
+            # its spec, and writing the spec's own level would let the trip
+            # through that route erase the user's choice from the durable row.
+            # The clamp is still a pure function of the row's level and the
+            # target's ladder, so a restore re-derives exactly the level in
+            # force — no clamped value is ever replayed as a choice.
+            "effort": self._chosen_effort or model.reasoning_effort,
             "boot": self._boot_selector,
         }
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
         self._selection_needs_initial_write = False
         current = self._model
-        if (f"{current.provider}/{current.model_id}", current.reasoning_effort) == (
+        # THE SAME EXPRESSION THE PAYLOAD USED. Comparing the spec's raw level
+        # here would read a model that cannot express the choice as "the
+        # selection moved under the append" on every write and schedule a
+        # successor forever — the loop below is only safe because the two sides
+        # are derived identically.
+        if (
+            f"{current.provider}/{current.model_id}",
+            self._chosen_effort or current.reasoning_effort,
+        ) == (
             payload["selector"],
             payload["effort"],
         ):
@@ -26170,6 +26321,11 @@ class Session:
             self._boot_selector = saved.boot_selector
         self._selection_needs_initial_write = not saved.authoritative or saved.recovered
         self._model_migration_notice = saved.recovered
+        # The CONVERSATION's choice, recovered from the row itself. Done before
+        # the no-op early return below, because a row equal to the birth spec is
+        # exactly the ordinary resumed case and it must still seed the choice
+        # the failover carry and the journal write read afterwards.
+        self._chosen_effort = _chosen_level_from(effort, self._model)
         if selector == self.model_label and effort == self._model.reasoning_effort:
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`

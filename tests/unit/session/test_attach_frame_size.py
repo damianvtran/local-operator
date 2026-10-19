@@ -652,6 +652,12 @@ _BOUNDED_COLLECTION_FIELDS = {
     # turns, and its size is fixed by the name rules the values come from (a
     # no-space role or team slug), not by what the user typed into the chat.
     "effective_identity": "one speaker/team/role triple, replaced every refresh",
+    # The chosen level a fallback is not honouring: five short strings
+    # (two level words, two selectors, one sentence), REBUILT from the two model
+    # specs on every refresh rather than appended to. It cannot grow with
+    # conversation length or child count, and neither selector can be longer
+    # than a published model id.
+    "effort_displacement": "five short strings, replaced every refresh",
     "child_costs": "one float per job; O(1) bytes each",
     # At most four fixed basis keys, independent of conversation or child count.
     "subagent_basis_micro": "one micro-USD integer per fixed payment basis",
@@ -1273,6 +1279,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             "team": "a-team-name-at-its-longest-allowed-length-here",
             "role_of_speaker": "manager",
         },
+        "effort_displacement": {
+            "chosen": "minimal",
+            "effective": "xhigh",
+            "selected": "openrouter/anthropic/claude-sonnet-5-5",
+            "serving": "openrouter/anthropic/claude-sonnet-5-5",
+            "note": (
+                "Falls back to xhigh while on openrouter/anthropic/claude-sonnet-5-5 "
+                "(chosen: minimal; returns with openrouter/anthropic/claude-sonnet-5-5)."
+            ),
+        },
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
         # COMPLETED TOOL CALLS, not `message_update` rows. The old fixture used
         # 200 `message_update`s, which `_fold_live_event` dedupes to a single
@@ -1472,13 +1488,26 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # what must not grow. The field's own size-policy review is its entry in
         # ``_BOUNDED_COLLECTION_FIELDS``. Re-derive both figures before moving
         # either number.
-        # Payment-basis buckets charge a further 127 B: bare sync 1,586 -
-        # 1,459 B, and released excess 2,304 - 2,177 B, measured with all four
-        # populated keys. Pay that same fixed charge from title filler
-        # (323 - 127 = 196), preserving the instrument's total and its existing
-        # excess allowance rather than increasing a wire cap to hide the cost.
+        # TWO fixed charges are paid out of the same free-text pool, from the
+        # same base (title 323, goal 2,000), and each is paid in the space its
+        # own change added to:
+        #
+        # 1. Payment-basis buckets charge 127 B: bare sync 1,586 - 1,459 B, and
+        #    released excess 2,304 - 2,177 B, measured with all four populated
+        #    keys. Paid from title filler (323 - 127 = 196).
+        # 2. `effort_displacement` charges 323 B (QA round 1 of the effort
+        #    persistence change): the new field's widest honest shape measures
+        #    323 bytes including its key and separator. Paid from free-text
+        #    goal space (2,000 - 323 = 1,677).
+        #
+        # Both preserve the instrument's TOTAL and its existing excess
+        # allowance rather than increasing a wire cap to hide the cost. The
+        # charges are additive because the bytes they occupy are additive, so
+        # taking both from the pool is the only way the worst-case TOTAL stays
+        # where it has always been: one side's charge alone would leave the
+        # other's field unbudgeted.
         conversation_title="a" * 196,
-        goal="g" * 2_000,
+        goal="g" * 1_677,
         cwd="/" + "d" * 500,
         **populated,
     )

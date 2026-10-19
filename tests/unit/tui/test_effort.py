@@ -247,12 +247,13 @@ async def test_effort_with_a_level_sets_it_and_says_what_changed() -> None:
     receipt = [n for n in notices if "reasoning effort" in n]
     assert receipt, notices
     # Names the old level and the new one, and how long the choice lasts: it is
-    # session-scoped by design and nothing else on screen would say so. The scope
-    # word is `(session)`, one word shorter than the siblings' `(this session)`
-    # because this receipt's two rung words are both variable and this one has to
-    # hold every pair at 80 columns (round-2 D9).
+    # kept for THIS CONVERSATION (the journal row is written on every change,
+    # so a restart keeps it) while `/new` still starts from the configured
+    # default. The scope word is `(saved)`, which is both honest and short
+    # enough that this receipt's two variable rung words still hold every pair
+    # at 80 columns (round-2 D9).
     assert "high" in receipt[-1] and "low" in receipt[-1]
-    assert "(session)" in receipt[-1]
+    assert "(saved)" in receipt[-1]
 
 
 @pytest.mark.asyncio
@@ -291,8 +292,10 @@ async def test_bare_effort_lists_the_ladder_and_marks_the_current_level() -> Non
     # The scope statement is this command's answer to `PERSIST_HINT`, which a
     # bare `/model` prints in the same slot: /model volunteers that a pick CAN
     # be persisted (`/model default`, or the settings page), so /effort has to
-    # volunteer that a level cannot.
-    assert "this session only" in listing
+    # volunteer the unit its level lasts for. It is the CONVERSATION now — the
+    # journal row is written on every effort change, so a restart keeps it —
+    # while `/new` still starts from the configured default.
+    assert "this conversation" in listing
 
 
 @pytest.mark.asyncio
@@ -530,24 +533,24 @@ async def test_effort_auto_on_a_model_with_no_documented_default_sends_nothing()
         receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
         band = _band(app)
     assert level is None
-    assert receipt == "reasoning effort: high → auto (this session) — /settings sets auto", receipt
+    assert receipt == "reasoning effort: high → auto (saved) — /settings sets auto", receipt
     assert "▴ auto" in band
 
 
 @pytest.mark.asyncio
-async def test_effort_auto_says_the_withdrawal_is_for_this_session_only() -> None:
-    """U2: `/effort auto` withdraws the level for THIS conversation, and the
-    stored key still governs the next one — so the receipt has to say both, and
-    name the one route that changes the standing default (`/settings`; a stored
-    level survives a bare `/model default` by design, D6, so that command is not
-    that route)."""
+async def test_effort_auto_says_the_withdrawal_is_for_this_conversation() -> None:
+    """U2: `/effort auto` withdraws the level for THIS conversation — durably,
+    since the withdrawal is journalled — and the stored key still governs the
+    next one, so the receipt has to say both, and name the one route that
+    changes the standing default (`/settings`; a stored level survives a bare
+    `/model default` by design, D6, so that command is not that route)."""
     app = OperatorApp(lambda: _factory(EffortSession()))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/effort xhigh")
         await _submit(pilot, app, "/effort auto")
         receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
-    assert receipt == "reasoning effort: xhigh → high (this session) — /settings sets auto", receipt
+    assert receipt == "reasoning effort: xhigh → high (saved) — /settings sets auto", receipt
     assert len(receipt) <= 70, receipt
 
 
