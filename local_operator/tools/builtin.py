@@ -174,13 +174,14 @@ from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
-    SCRATCHPAD_TOTAL_BUDGET_BYTES,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadContentError,
     ScratchpadPathError,
     check_scratchpad_write,
     ensure_scratchpad_dir,
     parse_scratchpad_url,
+    scratchpad_budget_bytes,
+    scratchpad_contains,
     scratchpad_dir_of,
     scratchpad_env_injection,
     scratchpad_footprint,
@@ -4002,6 +4003,15 @@ async def execute_bash(
             "bash",
             _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
         )
+    # The pad cap, BEFORE the child exists. A shell cannot be refused after the
+    # fact like ``write`` can, and once a pad is over its cap every creating
+    # command made it worse — so a command that would create a path under an
+    # over-cap pad is refused here and nothing runs. Reads and shrinks (``ls``,
+    # ``rm``) do not match the creating-command scan and are unaffected, which is
+    # what keeps the pad's owner able to recover it.
+    pad_refusal = _bash_pad_precheck(params.command, context)
+    if pad_refusal is not None:
+        return _error(tool_call_id, "bash", pad_refusal)
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment (see the helper for
     # the full three-arm reasoning — it is shared with the ``sessions`` tool's
@@ -7770,11 +7780,12 @@ def _pad_budget_line(pad: Path) -> str:
     precise half, where the earlier "refuse further writes" overstated it
     (review round 1, F3).
     """
-    held, over_budget, too_wide = scratchpad_footprint(pad)
+    budget = scratchpad_budget_bytes()
+    held, over_budget, too_wide = scratchpad_footprint(pad, budget)
     if over_budget:
         return (
             f"[scratch] The pad now holds ≥{_pad_size_text(held)}, over its "
-            f"{_pad_size_text(SCRATCHPAD_TOTAL_BUDGET_BYTES, attributive=True)} budget — "
+            f"{_pad_size_text(budget, attributive=True)} budget — "
             f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
         )
     if too_wide:
@@ -7783,6 +7794,86 @@ def _pad_budget_line(pad: Path) -> str:
             f"a tree rather than a pad; {SCRATCHPAD_ELSEWHERE_SHORT}."
         )
     return ""
+
+
+def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
+    """The PRE-EXECUTION half of the pad cap: refuse a creating command when the
+    pad is already over its configured cap.
+
+    Why before the child exists: ``_bash_pad_write_check`` reports what a
+    command LEFT BEHIND, and the write tools refuse before the bytes land. The
+    shell was the one channel that could keep growing a pad it was already over
+    — so a build tree that filled it made every later ``mkdir``/``cp`` add more,
+    with the audit line as the only feedback. This refuses at the same boundary
+    the next ``write`` would hit, at the only moment a shell can be stopped.
+
+    Deliberately narrow: only a command the SAME structural scan says creates a
+    path under the pad (``_bash_created_entries`` + ``_pad_target``) is a
+    candidate, and only when the bounded walk says the pad is over
+    ``scratchpad_budget_bytes()``. ``ls``, ``rm``, ``du`` and every other read
+    or shrink still run — they are the documented way back under the cap, and a
+    gate that refused them would strand the pad's owner. The sentence names the
+    held bytes, the cap and all three remedies, because a refusal that only
+    says no pushes the work into the user's working directory — the littering
+    the pad exists to prevent.
+
+    Returns the refusal sentence, or ``None`` to run the command.
+    """
+    if not command:
+        return None
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return None
+    if not _command_names_pad(command, pad):
+        return None
+    created: list[Path] = []
+    for candidate, _sources in _bash_created_entries(command):
+        target = _pad_target(candidate, pad)
+        if target is not None and scratchpad_contains(target, pad):
+            created.append(target)
+    if not created:
+        return None
+    budget = scratchpad_budget_bytes()
+    held, over_budget, _too_wide = scratchpad_footprint(pad, budget)
+    if not over_budget:
+        return None
+    return (
+        f"[scratch] refused before running: this command creates "
+        f"{os.fspath(created[0])} under the session scratchpad, which already "
+        f"holds ≥{held:,} bytes — over its {budget:,}-byte cap "
+        "(session.scratchpad.max_bytes). Move build output to a git worktree (or "
+        "another checkout), delete what is no longer needed with rm, or raise "
+        "session.scratchpad.max_bytes, then retry. The command did not run."
+    )
+
+
+def _pad_destination_refusal(
+    tool_call_id: str,
+    tool_name: str,
+    target: str,
+    context: ToolContext | None,
+    size: int | None = None,
+) -> ToolResult | None:
+    """Apply the pad write policy when a tool writes to a PATH under the pad.
+
+    ``write``/``edit`` address the pad through ``scratchpad://`` and are checked
+    in ``_scratchpad_target``. A tool that takes an ordinary filesystem path
+    (browser ``screenshot``) would otherwise bypass the pad policy entirely just
+    because the caller spelled the destination absolutely, so the same
+    ``check_scratchpad_write`` runs here. A destination outside every pad is
+    skipped: this is the pad's policy, not a general file-write gate.
+    """
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return None
+    path = Path(target)
+    if not scratchpad_contains(path, pad):
+        return None
+    try:
+        check_scratchpad_write(path, pad, target, size)
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
+    return None
 
 
 def _expand_scratchpad_spellings(text: str, pad: Path) -> str:
@@ -20231,6 +20322,12 @@ async def _browser_screenshot(
         denial = _confinement_denial(resolved, context, resolvable=_resolvable)
         if denial is not None:
             return _error(tool_call_id, "browser", denial)
+        # A screenshot destination is an ordinary path, so the pad policy must
+        # be applied here too: an absolute path into ``scratchpad/`` otherwise
+        # wrote a PNG the next ``write`` would have refused.
+        pad_refusal = _pad_destination_refusal(tool_call_id, "browser", target, context)
+        if pad_refusal is not None:
+            return pad_refusal
     else:
         import tempfile
 
@@ -23519,6 +23616,14 @@ async def _bridge_action(
             "browser",
             f"{_host_label(host)} capture is not a PNG ({len(payload)} bytes)",
         )
+    # The payload size is known now, so the cap check can judge the write the
+    # page is about to make (the per-write ceiling included), not just the
+    # destination's name.
+    pad_refusal = _pad_destination_refusal(
+        tool_call_id, "browser", target, context, len(payload)
+    )
+    if pad_refusal is not None:
+        return pad_refusal
     try:
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_bytes(payload)

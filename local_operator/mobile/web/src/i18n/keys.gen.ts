@@ -901,6 +901,10 @@ export type MessageParams = {
   "wire.settings.session_cleanup_remove_empty.label": undefined;
   "wire.settings.session_delegated.description": undefined;
   "wire.settings.session_delegated.title": undefined;
+  "wire.settings.session_scratchpad.description": undefined;
+  "wire.settings.session_scratchpad.title": undefined;
+  "wire.settings.session_scratchpad_max_bytes.help": undefined;
+  "wire.settings.session_scratchpad_max_bytes.label": undefined;
   "wire.settings.shell_environment.description": undefined;
   "wire.settings.shell_environment.title": undefined;
   "wire.settings.shell_environment_exclude.help": undefined;

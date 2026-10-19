@@ -3366,10 +3366,10 @@ async def test_a_bash_creation_inside_the_pad_is_never_nudged(tmp_path, monkeypa
 # refused after the fact. These rows pin the after arm: ONE [scratch] line on
 # the real tool result when a pad-naming command left the pad over budget, past
 # its entry cap, or holding a refused name — and silence, with no filesystem
-# walk at all, for a command that never names the pad. The budget/cap fixtures
-# patch BOTH bindings of the constants (the walk reads them off
-# ``local_operator.scratchpad``, the sentence off this module's import of them)
-# so the arm under test is the one that fires, not a neighbour.
+# walk at all, for a command that never names the pad. The budget fixtures patch
+# the constant on ``local_operator.scratchpad``, which is where both the walk
+# and the sentence now read it: ``scratchpad_budget_bytes`` falls back to that
+# module global when no config value is set, so ONE patch steers every arm.
 
 
 def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
@@ -3385,7 +3385,6 @@ def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
     filled.write_bytes(b"x" * size)
     held = filled.stat().st_blocks * 512
     monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
-    monkeypatch.setattr(builtin, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
     return context, pad, held
 
 
