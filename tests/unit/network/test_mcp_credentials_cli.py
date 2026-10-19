@@ -83,7 +83,7 @@ def _write_config(root: Path, servers: dict[str, Any]) -> Path:
     return path
 
 
-def _seed_server_holders(root: Path) -> None:
+def _seed_url_holders(root: Path, devices: list[str]) -> None:
     key = credential_key_for_mcp(URL)
     with placement_mod.mutate(NETWORK, root=root, self_device=SELF) as document:
         document.declare(
@@ -94,8 +94,12 @@ def _seed_server_holders(root: Path) -> None:
             kind="mcp-rotating",
             by=SELF,
         )
-        document.grant(key, SELF, by=SELF)
-        document.grant(key, DRIVE, by=SELF)
+        for device in devices:
+            document.grant(key, device, by=SELF)
+
+
+def _seed_server_holders(root: Path) -> None:
+    _seed_url_holders(root, [SELF, DRIVE])
 
 
 def _run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, dict[str, Any]]:
@@ -104,6 +108,45 @@ def _run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, dict[str,
     args = parser.parse_args(["network", "mcp", "credentials", *argv, "--json"])
     rc = net_cli.main(args)
     return rc, json.loads(capsys.readouterr().out)
+
+
+def _run_human(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["network", "mcp", "credentials", *argv])
+    rc = net_cli.main(args)
+    return rc, capsys.readouterr().out
+
+
+def _run_invite(
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    as_json: bool,
+) -> tuple[int, str]:
+    """Invoke the SHIPPED invite handler with the relay answer stubbed."""
+    token = root / "inv1.invite"
+    token.write_text("TOKEN", encoding="utf-8")
+    payload = {
+        "invite_id": "inv1",
+        "path": str(token),
+        "role": "drive",
+        "expires_in_s": 600.0,
+        "hosts": ["127.0.0.1:4197"],
+    }
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: dict(payload))
+    args = argparse.Namespace(
+        network="",
+        role="drive",
+        expires=600.0,
+        hosts="",
+        device="",
+        print_token=False,
+        json=as_json,
+    )
+    rc = net_cli._cmd_invite(args)
+    return rc, capsys.readouterr().out
 
 
 def _entry(key: str, root: Path) -> Any:
@@ -282,3 +325,128 @@ def test_a_device_with_no_network_record_grants_nothing(
     assert rc == 0, payload
     assert payload["servers"][0]["grants"] == []
     assert _servers(root)["gh"]["env"] == {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}
+
+
+def test_invite_prints_a_conflict_only_adoption_line(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conflict means the value will NOT travel; a silent mint hides the decision."""
+    from local_operator.secrets import access
+
+    store = access.open_store(root, create=True)
+    store.set("MCP_SLACK_AUTHORIZATION", b"a different value")
+    _write_config(
+        root,
+        {
+            "slack": {
+                "type": "http",
+                "url": "https://slack.test/mcp",
+                "headers": {"Authorization": f"Bearer {SLACK_SENTINEL}"},
+            }
+        },
+    )
+
+    rc, out = _run_invite(root, capsys, monkeypatch, as_json=False)
+
+    assert rc == 0, out
+    assert "0 MCP credentials adopted into the encrypted store; 1 conflicts" in out, out
+
+
+def test_invite_json_carries_counts_only_when_there_are_some(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.secrets import access
+
+    store = access.open_store(root, create=True)
+    store.set("MCP_SLACK_AUTHORIZATION", b"a different value")
+    _write_config(
+        root,
+        {
+            "slack": {
+                "type": "http",
+                "url": "https://slack.test/mcp",
+                "headers": {"Authorization": f"Bearer {SLACK_SENTINEL}"},
+            }
+        },
+    )
+
+    rc, out = _run_invite(root, capsys, monkeypatch, as_json=True)
+
+    assert rc == 0, out
+    assert json.loads(out)["mcp_credentials"] == {
+        "adopted": 0,
+        "reused": 0,
+        "conflicts": 1,
+    }
+
+    _write_config(root, {})
+    rc, out = _run_invite(root, capsys, monkeypatch, as_json=True)
+
+    assert rc == 0, out
+    assert "mcp_credentials" not in json.loads(out)
+
+
+def test_an_oauth_shaped_server_with_refs_shows_the_grant_not_brokered(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OAuth labels the mcp:<url> path; it must not hide the copies beside it."""
+    network_store.save(_record(), root)
+    _seed_server_holders(root)
+    _write_config(
+        root,
+        {
+            "dd": {
+                "type": "http",
+                "url": URL,
+                "auth": {"type": "oauth"},
+                "headers": {"X-Api-Key": "literal-key-value"},
+            }
+        },
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0, payload
+    row = payload["servers"][0]
+    assert row["shape"] == "oauth"
+    assert row["note"] == ""
+    assert [item["key"] for item in row["grants"]] == ["secret:MCP_DD_X_API_KEY"]
+    assert set(row["grants"][0]["devices"]) == {SELF, DRIVE}
+
+    rc, out = _run_human(capsys, "--repair")
+
+    assert rc == 0, out
+    assert "granted secret:MCP_DD_X_API_KEY" in out, out
+    assert "brokered; no copy" not in out, out
+
+
+def test_http_read_and_pool_holders_never_receive_a_class_two_copy(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The §1.3 gate applies to the HTTP/SSE branch too.
+
+    A ``read`` holder was approved to borrow the brokered access token, not to
+    receive a secret value; a pool member declares no credentials at all.
+    """
+    network_store.save(_record(), root)
+    _seed_url_holders(root, [SELF, DRIVE, READER, POOL])
+    _write_config(
+        root,
+        {
+            "gl": {
+                "type": "http",
+                "url": URL,
+                "headers": {"Authorization": f"Bearer {SLACK_SENTINEL}"},
+            }
+        },
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0, payload
+    item = payload["servers"][0]["grants"][0]
+    assert set(item["devices"]) == {SELF, DRIVE}
+    assert set(_holders(credential_key_for_secret("MCP_GL_AUTHORIZATION"), root)) == {
+        SELF,
+        DRIVE,
+    }

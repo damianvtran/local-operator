@@ -346,3 +346,38 @@ def test_a_missing_document_is_an_empty_noop(root: Path) -> None:
         "skipped": [],
     }
     assert literal_credential_keys(root) == []
+
+
+def test_a_key_that_parses_to_a_different_name_falls_back(root: Path) -> None:
+    """``A}`` must not be used verbatim: ``${A}}`` publishes the name ``A``.
+
+    The parser check asks for EXACTLY ``name``, not merely "the parser published
+    something" — otherwise this key is stored as ``A}`` and the rewrite resolves
+    to the absent ``A``, turning a working literal into a refusal.
+    """
+    _write(root, {"gl": {"type": "stdio", "command": "x", "env": {"A}": "sekret}"}}})
+
+    receipt = adopt_literal_credentials(root)
+
+    assert [row["secret"] for row in receipt["adopted"]] == ["MCP_GL_A"]
+    assert _servers(root)["gl"]["env"] == {"A}": "${MCP_GL_A}"}
+    assert _store_value(root, "MCP_GL_A") == "sekret}"
+
+
+def test_a_dollar_escape_is_left_alone_and_never_listed(root: Path) -> None:
+    """``$${HOME}`` is literal text ``${HOME}``, not a reference and not adoptable.
+
+    Adoption would change what the child process sees, and listing it as a
+    literal credential would recommend adopting a value that is not one.
+    """
+    path = _write(root, {"gl": {"type": "stdio", "command": "x", "env": {"ESCAPED": "$${HOME}"}}})
+    before = path.read_bytes()
+
+    receipt = adopt_literal_credentials(root)
+
+    assert receipt["adopted"] == []
+    assert receipt["skipped"] == [
+        {"server": "gl", "field": "env", "key": "ESCAPED", "reason": "reference"}
+    ]
+    assert path.read_bytes() == before
+    assert literal_credential_keys(root) == []

@@ -128,12 +128,15 @@ def _usable_store_name(name: str) -> bool:
     from local_operator.mcp.secret_refs import public_secret_refs
     from local_operator.secrets.store import is_provider_secret_name
 
-    return (
-        bool(name)
-        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in name)
-        and not is_provider_secret_name(name)
-        and bool(public_secret_refs(SimpleNamespace(env={name: "${" + name + "}"}, headers={})))
-    )
+    if not name or any(ord(character) < 0x20 or ord(character) == 0x7F for character in name):
+        return False
+    if is_provider_secret_name(name):
+        return False
+    published = public_secret_refs(SimpleNamespace(env={name: "${" + name + "}"}, headers={}))
+    # EXACTLY this name, not merely "something": ``${A}}`` publishes ``A``, so a
+    # key containing ``}`` would be rewritten to a reference that resolves to a
+    # DIFFERENT (absent) name and its literal would stop working.
+    return [str(ref.get("id") or "") for ref in published] == [name]
 
 
 def _read_document(path: Path) -> dict[str, Any]:
@@ -222,12 +225,13 @@ class _StoreIndex:
     def _open(self) -> Any:
         """An existing store, or ``None`` when the database was never created.
 
-        THE DATABASE, NOT THE KEY, IS THE EXISTENCE TEST: ``open_store``
-        resolves (and with ``create=True`` may install) a master key, but
-        ``SecretStore.list`` on a database that has never held a row raises
-        ``SecretStoreError`` rather than answering "empty". A status read must
-        not create a database either, so absence is answered here and ``write``
-        is the only path that lets ``set`` initialise one.
+        THE DATABASE FILE, NOT THE KEY, IS THE EXISTENCE TEST: ``open_store``
+        resolves (and with ``create=True`` may install) a master key, but a key
+        is not a database. ``SecretStore.list`` on a MISSING database file
+        raises ``SecretStoreError`` from its read-only ``_open``; once the file
+        exists, ``list`` returns ``[]`` (and reports damaged rows separately).
+        A status read must not create either, so absence is answered here and
+        ``write`` is the only path that lets ``set`` initialise one.
         """
         if not self._opened:
             from local_operator.secrets import access
