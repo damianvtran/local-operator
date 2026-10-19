@@ -305,6 +305,9 @@ def _session_entry(
     )
     if snapshot is None:
         return None, 0.0
+    # The scan's own opening-line capture beats the sidecar for a session the
+    # user never titled, and costs nothing here; the sidecar wins when present.
+    title = snapshot.scan.title or title
     entries = [_record_dict(record) for record in snapshot.scan.records.values()]
     highlights = _highlight_paths(snapshot, cwd=cwd, home=home, deny=deny)
     for entry in entries:
@@ -341,20 +344,25 @@ def _session_entry(
     children: dict[str, Any] = {}
     total_revision = float(snapshot.revision)
     complete = bool(snapshot.complete)
-    try:
-        # The server-side containment helper is the ONE proof (`_prove_child`).
-        # Imported lazily because it lives beside the desktop session pool and
-        # this module is also used by the agent tool with no server at all.
-        from local_operator.server.utils.desktop_sessions import contained_descendants
+    # The containment proof lives beside the desktop session pool, whose module
+    # graph costs ~2.3 s to import. Only a session that actually HAS a roster
+    # can have children, so a normal conversation never pays it.
+    has_roster = (session_dir / "subagent-roster.v1.json").is_file() or (
+        isinstance(snapshot.scan.roster, dict) and bool(snapshot.scan.roster.get("details"))
+    )
+    proven: list[Any] = []
+    if has_roster:
+        try:
+            from local_operator.server.utils.desktop_sessions import contained_descendants
 
-        proven, _skipped = contained_descendants(
-            config_dir,
-            session_id,
-            indexed_roster=snapshot.scan.roster,
-            indexed=True,
-        )
-    except Exception:  # noqa: BLE001 - an unprovable roster is an empty child set
-        proven = []
+            proven, _skipped = contained_descendants(
+                config_dir,
+                session_id,
+                indexed_roster=snapshot.scan.roster,
+                indexed=True,
+            )
+        except Exception:  # noqa: BLE001 - an unprovable roster is an empty child set
+            proven = []
     for child in proven:
         child_snapshot = ledger.refresh(
             config_dir,
@@ -440,8 +448,9 @@ def _build_assets(sessions: dict[str, Any]) -> list[Asset]:
                 asset.content_type = classification.content_type
                 for name in ("size", "width", "height"):
                     value = record.get(name)
-                    if value is not None and getattr(asset, "size_bytes" if name == "size" else name) is None:
-                        setattr(asset, "size_bytes" if name == "size" else name, value)
+                    target = "size_bytes" if name == "size" else name
+                    if value is not None and getattr(asset, target) is None:
+                        setattr(asset, target, value)
                 if record.get("duration_s") is not None:
                     asset.duration_s = record.get("duration_s")
                 origin = str(record.get("origin") or "mentioned")
@@ -465,7 +474,9 @@ def _build_assets(sessions: dict[str, Any]) -> list[Asset]:
                 asset.occurrences.append(occurrence)
                 if origin not in asset.origins:
                     asset.origins.append(origin)
-                asset.highlighted = asset.highlighted or occurrence.highlighted or origin == "highlight"
+                asset.highlighted = (
+                    asset.highlighted or occurrence.highlighted or origin == "highlight"
+                )
     for asset in by_key.values():
         asset.origins.sort(key=lambda value: ORIGINS.index(value))
         if not asset.derived_name:
@@ -526,7 +537,7 @@ def build_catalog(
                 config,
                 session_id,
                 session_dir,
-                title=resume.session_name(session_dir),
+                title=resume.stored_session_title(session_dir),
                 cwd=service.session_cwd(config, session_id, session_dir),
                 home=home,
                 deny=deny,

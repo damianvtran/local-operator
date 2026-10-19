@@ -45,7 +45,6 @@ reader rule for callouts). Nothing here imports the session runtime.
 
 from __future__ import annotations
 
-import html
 import json
 import os
 import re
@@ -291,6 +290,24 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _unescape_attribute(raw: str) -> str:
+    """The five named entities an XML attribute can carry.
+
+    ``html.unescape`` would be the obvious call, but it lazily imports
+    ``html.entities`` — a generated 1 MB table that measured ~1.6 s on first
+    use, inside a request that has a 1.5 s budget. A path cannot contain a
+    numeric character reference in practice, and the named five are what the
+    reference writer emits.
+    """
+    return (
+        raw.replace("&quot;", '"')
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+    )
+
+
 def resolve_path(raw: str, *, cwd: str, home: str) -> str | None:
     """An absolute, normalised path for ``raw`` as a tool call spelled it, or ``None``.
 
@@ -335,6 +352,10 @@ class FileScan:
         # Legacy roster rows share this bounded/resumable journal pass. Persisting absence
         # avoids a whole-journal backward fallback on every warm Files request.
         self.roster: dict[str, Any] | None = None
+        # The conversation's opening line, captured here so the Library index
+        # never has to call `resume.session_name` (a cold 2-6 s transcript
+        # scan) inside a 1.5 s budget. Empty when the journal has no user row.
+        self.title: str = ""
         self.truncated = False
         self.dropped = 0
         self._denied: set[str] = set()
@@ -351,8 +372,12 @@ class FileScan:
         # ``in`` is a memchr: the three probes below cost nothing on the ~95% of rows that are
         # prose, state snapshots and spend ledgers.
         if b'"tool_calls"' in line:
-            if _CALL_NAME_PROBE.search(line):
-                self._on_call_row(seq, line)
+            # EVERY call row, not only the four file-producing tools: a `read`
+            # argument is mention evidence, and gating on the write probe would
+            # silently drop it. `_CALL_NAME_PROBE` still exists for the result
+            # pairing path; the parse cost here is bounded by the few percent
+            # of rows that carry tool calls at all.
+            self._on_call_row(seq, line)
             # A call row may ALSO be a user row in a hand-built fixture, but the real
             # transcript never does that; the mention pass is reached below only when there
             # are no tool calls to pair.
@@ -394,6 +419,7 @@ class FileScan:
         calls = payload.get("tool_calls") if isinstance(payload, dict) else None
         if not isinstance(calls, list):
             return
+        ts = _row_ts(line)
         for call in calls:
             if not isinstance(call, dict):
                 continue
@@ -410,7 +436,10 @@ class FileScan:
             # file-producing four below: `read`, `lsp`, `search` and a custom tool all name
             # files the turn SAW. Recording them before the result arrives is what lets a
             # `write` upgrade the same key from mentioned to written via `_upsert`.
-            self._note_argument_mentions(args, name, call_id, seq)
+            # `write`/`edit` name their OUTPUT; the result row records it once.
+            # Counting the call too would make one write look like two touches.
+            if name not in ("write", "edit"):
+                self._note_argument_mentions(args, name, call_id, seq, ts)
             if name not in _CALL_TOOLS or not isinstance(call_id, str) or not call_id:
                 continue
             intent = sanitize_prompt_line(str(args.get("i") or ""), limit=_INTENT_MAX_CHARS)
@@ -825,10 +854,12 @@ class FileScan:
                     )
         if not texts:
             return
+        if not self.title:
+            self.title = sanitize_prompt_line(texts[0], limit=120)
         text = "\n".join(texts)
         seen: set[str] = set()
         for raw in _REFERENCE_HEAD.findall(text):
-            self._note_mention(html.unescape(raw), "reference", None, seq, ts, seen=seen)
+            self._note_mention(_unescape_attribute(raw), "reference", None, seq, ts, seen=seen)
         for raw in _FILE_URL.findall(text):
             parsed = urlsplit(raw)
             path = unquote(parsed.path)
@@ -846,9 +877,9 @@ class FileScan:
         tool: str,
         call_id: str | None,
         seq: int,
+        ts: float,
     ) -> None:
         """Note path-valued tool arguments. Values may be strings or lists of strings."""
-        ts = 0.0  # a call row has no result timestamp; its own row timestamp is enough
         seen: set[str] = set()
         for key in _MENTION_ARG_KEYS:
             value = args.get(key)
@@ -904,6 +935,7 @@ class FileScan:
         }
         other.pending = dict(self.pending)
         other.roster = self.roster
+        other.title = self.title
         other.anchors = {
             key: Anchor(a.version, a.ts, a.seq, list(a.files), list(a.more))
             for key, a in self.anchors.items()
@@ -916,6 +948,7 @@ class FileScan:
         return {
             "rows": self.rows,
             "roster": self.roster,
+            "title": self.title,
             "truncated": self.truncated,
             "dropped": self.dropped,
             "records": [
@@ -945,6 +978,7 @@ class FileScan:
         try:
             scan.rows = int(payload["rows"])
             scan.roster = payload.get("roster") if isinstance(payload.get("roster"), dict) else None
+            scan.title = str(payload.get("title") or "")[:120]
             scan.truncated = bool(payload.get("truncated"))
             scan.dropped = int(payload.get("dropped") or 0)
             for values in payload["records"]:

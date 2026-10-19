@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 import threading
@@ -41,8 +40,8 @@ DB_FILENAME: Final = "library.sqlite3"
 
 MAX_TAGS_PER_ASSET: Final = 12
 TAG_CATEGORIES: Final = ("topic", "project", "format", "status", "source", "custom")
-TAG_CREATORS: Final = ("user", "librarian", "system")
-FIELD_SOURCES: Final = ("user", "librarian", "derived")
+TAG_CREATORS: Final = ("user", "librarian", "agent", "system")
+FIELD_SOURCES: Final = ("user", "librarian", "agent", "derived")
 
 _SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS assets(
@@ -121,6 +120,11 @@ class MetadataStore:
     def __init__(self, config_dir: str | Path) -> None:
         self.config_dir = Path(config_dir)
         self.path = self.config_dir / DB_DIRNAME / DB_FILENAME
+        # Per-instance schema cache. ``CREATE TABLE IF NOT EXISTS`` on every
+        # call serialised concurrent writers behind the bootstrap lock long
+        # enough that an ensure-then-write pair could lose its row; the schema
+        # cannot change under a running process, so checking once is sound.
+        self._ready = False
 
     # -- connection / schema -------------------------------------------------
 
@@ -150,7 +154,11 @@ class MetadataStore:
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> bool:
         """Create/verify the schema. ``False`` means "serve an empty catalog"."""
+        if self._ready:
+            return True
         with self._bootstrap_lock:
+            if self._ready:
+                return True
             try:
                 connection.executescript(_SCHEMA)
                 row = connection.execute(
@@ -171,6 +179,7 @@ class MetadataStore:
                     # A newer local-operator wrote this store. Guessing at its
                     # columns is how a downgrade corrupts data; answer empty.
                     return False
+                self._ready = True
                 return True
             except MetadataUnavailable:
                 return False
@@ -222,6 +231,28 @@ class MetadataStore:
         effective-name rule applied at the source instead of at every read.
         """
         stamp = _now() if at is None else at
+        for attempt in range(3):
+            try:
+                self._ensure_row(asset_id, key, derived_name, derived_description, stamp)
+                break
+            except MetadataUnavailable as error:
+                # A concurrent writer can hold the lock past ``busy_timeout``
+                # under load. That is transient; a corrupt or future store is
+                # not, so only a busy/locked message is retried.
+                message = str(error).lower()
+                if attempt == 2 or ("locked" not in message and "busy" not in message):
+                    return None
+                time.sleep(0.05 * (attempt + 1))
+        return self.asset(asset_id)
+
+    def _ensure_row(
+        self,
+        asset_id: str,
+        key: str,
+        derived_name: str | None,
+        derived_description: str | None,
+        stamp: float,
+    ) -> None:
         try:
             with self._write() as connection:
                 row = connection.execute(
@@ -260,8 +291,7 @@ class MetadataStore:
                             (derived_description, stamp, asset_id),
                         )
         except MetadataUnavailable:
-            return None
-        return self.asset(asset_id)
+            raise
 
     def ensure_assets(
         self,
@@ -465,7 +495,7 @@ class MetadataStore:
     def _tag_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
-        return {
+        body = {
             "id": row["id"],
             "name": row["name"],
             "category": row["category"],
@@ -473,6 +503,9 @@ class MetadataStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+        if "count" in row.keys():
+            body["count"] = int(row["count"])
+        return body
 
     def list_tags(self) -> list[dict[str, Any]]:
         with self._read() as connection:
@@ -637,7 +670,6 @@ class MetadataStore:
                 return {}
             for start in range(0, len(ids), 500):
                 chunk = ids[start : start + 500]
-                placeholders = ",".join("?" for _ in chunk)
                 keys = [f"{_PRIMARY_PREFIX}{asset_id}" for asset_id in chunk]
                 key_placeholders = ",".join("?" for _ in keys)
                 for row in connection.execute(
@@ -653,6 +685,7 @@ class MetadataStore:
         *,
         primary: str | None = None,
         actor: str = "user",
+        source: str | None = None,
         confidence: float | None = None,
     ) -> list[dict[str, Any]]:
         """Replace an asset's tag set. All-or-nothing, bounded, validated."""
@@ -684,7 +717,10 @@ class MetadataStore:
                 connection.executemany(
                     "INSERT INTO asset_tags(asset_id, tag_id, source, confidence, created_at) "
                     "VALUES(?, ?, ?, ?, ?)",
-                    [(asset_id, tag_id, actor, confidence, stamp) for tag_id in unique],
+                    [
+                        (asset_id, tag_id, source or actor, confidence, stamp)
+                        for tag_id in unique
+                    ],
                 )
                 if primary is None:
                     connection.execute(
@@ -746,7 +782,9 @@ class MetadataStore:
 
     # -- chat link ----------------------------------------------------------
 
-    def set_chat(self, asset_id: str, session_id: str, *, at: float | None = None) -> dict[str, Any]:
+    def set_chat(
+        self, asset_id: str, session_id: str, *, at: float | None = None
+    ) -> dict[str, Any]:
         stamp = _now() if at is None else at
         try:
             with self._write() as connection:
