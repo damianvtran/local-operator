@@ -726,8 +726,15 @@ was never established (refused, connect timeout, name resolution) sent no byte:
 the message reads `guest action N was not sent (...)` and carries
 `delivery=not_sent`. Everything else (a read timeout, a dropped or reset
 connection, an HTTP error) stays `outcome is unknown ... delivery=ambiguous`
-and is never replayed. Neither verdict triggers a retry of the batch: with the
-control server gone a retry cannot succeed. The `delivery=ambiguous` verdict
+and is never replayed. Neither verdict permits replaying the whole batch.
+Only a provably unsent request can be retried inside `AwsProvider.execute`: at
+most three total attempts with a 0.25 s backoff, preserving earlier statements.
+Before the first retry, one bounded GET to `/terminal` must succeed; otherwise
+the error reports `guest down: readiness check failed` and no retry is attempted.
+Each retry logs the upcoming attempt number, `delivery=not_sent`, the exception
+class (never its potentially sensitive text), and whether readiness passed.
+Exhaustion preserves the existing failed-action message and console evidence.
+The `delivery=ambiguous` verdict
 does feed exactly ONE gated harness measure: after such a failure the session
 asks a single read-only question, `probe` -- a bounded GET to the guest's
 readiness endpoint (`providers.aws._READY_PATH`) -- and only an ANSWERING
