@@ -20,6 +20,29 @@ WHAT THE COS MAY DO with a delivered bridge message, per contract:
   #125). The schema omits it and the executor refuses the word if a model
   invents it, pointing at the human ask queue.
 
+THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
+
+- **channels** — one page of the owner account's conversations. Tenant-visible
+  channels the owner has not joined come back with ``discoverable=true``,
+  ``member=false`` and a member count, so an agent can find a channel to join.
+- **channel_create** — a group or channel created by the agent identity. The
+  creator agent member is added automatically (the server requires it); the
+  human owner is added ONLY when named explicitly, because an agent-created
+  channel is the agent's own space, not a silent copy of its owner's.
+- **channel_post** — append one message as the agent. The body is the caller's
+  text; one ``client_ref`` is minted per call, so a retry inside the client
+  reuses it and a second call is a second message.
+- **channel_history** — a bounded page of messages. The server admits bodies
+  per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
+  hash) of messages it has not admitted, with ``body`` null, and only the
+  admitted bodies. There is intentionally no local body cache here.
+
+IDENTITY is never a model argument: the actor endpoint and provenance session
+come from ``runtime.owner.endpoint_id`` and ``runtime.session_id``. Every send
+carries that session id as origin provenance (the server stores it and never
+returns it); a runtime with no endpoint refuses every channel op rather than
+acting as a human. Neither message bodies nor session ids are ever logged here.
+
 THE RUNTIME BUNDLE is declared on ``ToolContext`` (``bridge_runtime``): a
 session that has no bridge runtime — unsigned, disabled, or not the designated
 session — never advertises this tool at all (the same createIf shape ``wake``
@@ -35,7 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
@@ -46,7 +69,17 @@ from .outbox import Outbox, send_from_outbox
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
 #: tries the word gets the right sentence back.
-BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply")
+CHANNEL_OPS: tuple[str, ...] = ("channels", "channel_create", "channel_post", "channel_history")
+BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", *CHANNEL_OPS)
+
+#: The server caps a conversation page at 100 (contract §10.1); bounding here
+#: turns an over-wide ask into a typed refusal instead of a server 400.
+CONVERSATION_PAGE_MAX = 100
+
+#: Display label for the auto-added creator member. The label is display-only
+#: and taken from the member row by the server; this one is what another
+#: member sees until the channel's members relabel it.
+CHANNEL_CREATE_DEFAULT_LABEL = "agent"
 
 #: Local claim lifetime for ``ack working`` — generous enough for a CoS turn,
 #: short enough that a crashed session's claim frees itself.
@@ -95,13 +128,39 @@ class BridgeRuntime:
         )
 
 
+class ChannelMemberParams(BaseModel):
+    """One invited member of a new group/channel (contract §2's member shape).
+
+    ``endpoint_id`` is required by the server for an agent member and refused
+    for a human one, so the tool only forwards it when set. ``display_label``
+    is the only name that crosses the wire; an empty label is normalized by
+    the server, never here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    kind: Literal["human", "agent"] = "human"
+    endpoint_id: str = ""
+    display_label: str = ""
+
+
 class BridgeToolParams(BaseModel):
     """The tool's argument schema. ``extra="forbid"`` so a hallucinated ``op``
     (``decide``) is a validation error, not an ignored field."""
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["take_up", "ack", "send", "reply"]
+    op: Literal[
+        "take_up",
+        "ack",
+        "send",
+        "reply",
+        "channels",
+        "channel_create",
+        "channel_post",
+        "channel_history",
+    ]
     message_id: str = ""
     body_sha256: str = ""
     state: Literal["working", "done"] | None = None
@@ -110,6 +169,18 @@ class BridgeToolParams(BaseModel):
     text: str = ""
     thread_id: str | None = None
     expires_at: str | None = None
+    # -- channel ops --
+    channel_id: str = ""
+    kind: Literal["group", "channel"] | None = None
+    name: str = ""
+    topic: str = ""
+    visibility: Literal["tenant", "private"] | None = None
+    members: list[ChannelMemberParams] = Field(default_factory=list)
+    body: str = ""
+    limit: int = 50
+    cursor: str | None = None
+    before_seq: int | None = None
+    after_seq: int | None = None
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -131,9 +202,64 @@ def body_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _channel_members_with_creator(
+    members: list[ChannelMemberParams], owner: Any
+) -> list[dict[str, str]]:
+    """The wire ``members[]`` with THIS agent always present.
+
+    The server refuses an actor create whose creator agent is not named
+    (``rule=actor_required``) because it will not invent the one member whose
+    identity the act is. So the tool adds the creator when the model omitted
+    it; an explicit creator entry is preserved as-is (its display label is a
+    request fact, not ours to overwrite). The human owner is NOT synthesized:
+    an agent-created channel has no human member unless one was listed.
+    """
+
+    account_id = str(getattr(owner, "account_id", "") or "")
+    endpoint_id = str(getattr(owner, "endpoint_id", "") or "")
+    out: list[dict[str, str]] = []
+    creator_present = False
+    for member in members:
+        entry: dict[str, str] = {"account_id": member.account_id, "kind": member.kind}
+        if member.endpoint_id:
+            entry["endpoint_id"] = member.endpoint_id
+        if member.display_label:
+            entry["display_label"] = member.display_label
+        if (
+            member.kind == "agent"
+            and member.account_id == account_id
+            and member.endpoint_id == endpoint_id
+        ):
+            creator_present = True
+        out.append(entry)
+    if not creator_present:
+        out.append(
+            {
+                "account_id": account_id,
+                "kind": "agent",
+                "endpoint_id": endpoint_id,
+                "display_label": CHANNEL_CREATE_DEFAULT_LABEL,
+            }
+        )
+    return out
+
+
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
+
+    op = str(args.get("op") or "")
+    # CHANNEL IDENTITY, before the gates: these ops act as an AGENT member,
+    # and a runtime with no owner endpoint has no agent identity to act as.
+    # This is a refusal, never a fallback to the human lane — and it only
+    # touches runtime state, so it precedes the network-free fence safely.
+    endpoint_id = str(getattr(runtime.owner, "endpoint_id", "") or "").strip()
+    if op in CHANNEL_OPS and not endpoint_id:
+        return _error(
+            "channel operations act as this session's enrolled agent, and this "
+            "runtime has no endpoint — re-enroll before using channels",
+            code="no_agent_endpoint",
+        )
 
     # LOCAL AUTHORITY FENCE, FIRST (S-1): enabled / unique committed owner /
     # live non-empty generation / consent / exact base-account-tenant-endpoint-
@@ -149,8 +275,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # state refuses THIS op typed and schedules the same single-flight boundary
     # read (fire-and-forget — never waits, never posts). ``take_up`` is a FETCH
     # (S-9): the paused/read-only postures refuse its MUTATING neighbours but
-    # admit the read, while disabled/signin/pending refuse both directions.
-    is_read = str(args.get("op") or "") == "take_up"
+    # admit the read, while disabled/signin/pending refuse both directions. The
+    # channel reads (list/history) are fetches for the same reason; create and
+    # post are mutations.
+    is_read = op in ("take_up", "channels", "channel_history")
     refusal = admission_refusal(runtime, is_read=is_read)
     if refusal is not None:
         admit_soon(runtime)
@@ -159,7 +287,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # The decide word gets its OWN refusal, before schema validation, so the
     # refusal names the rule rather than reading as a typo (the schema also
     # omits it — belt and braces against a model that invents the op).
-    if str(args.get("op") or "") == "decide":
+    if op == "decide":
         return _error(
             "decisions are made by the human through the ask queue — this tool has "
             "no decide authority (contract §10.3, #125)",
@@ -264,6 +392,129 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         message = (result or {}).get("message") or {}
         return {"ok": True, "message_id": str(message.get("id") or ""), "state": "sent"}
 
+    if params.op == "channels":
+        if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+            return _error(f"channels limit must be 1..{CONVERSATION_PAGE_MAX}")
+        try:
+            result = await runtime.client.conversations(
+                tenant_id=runtime.tenant_id,
+                limit=int(params.limit),
+                cursor=params.cursor or None,
+            )
+        except Exception as failure:
+            return _error(f"could not list conversations: {failure}", code="list_failed")
+        # Pass-through, deliberately: ``discoverable``/``member``/``member_count``
+        # are the server's answer for a caller who may not be a human member, and
+        # re-deriving them here would be a second, wrong authorization opinion.
+        return {
+            "ok": True,
+            "state": "ok",
+            "content": json.dumps(result, ensure_ascii=False),
+        }
+
+    if params.op == "channel_create":
+        if params.kind is None:
+            return _error("channel_create needs kind (group or channel)")
+        if any(not member.account_id.strip() for member in params.members):
+            return _error("every channel member needs an account_id")
+        if any(
+            member.kind == "agent" and not member.endpoint_id.strip() for member in params.members
+        ):
+            return _error("an agent member needs its endpoint_id")
+        body: dict[str, Any] = {
+            "kind": params.kind,
+            "members": _channel_members_with_creator(params.members, runtime.owner),
+        }
+        if params.name.strip():
+            body["name"] = params.name.strip()
+        if params.topic.strip():
+            body["topic"] = params.topic.strip()
+        if params.visibility is not None:
+            body["visibility"] = params.visibility
+        try:
+            result = await runtime.client.create_conversation(
+                body,
+                actor_endpoint_id=endpoint_id,
+                origin_session_id=runtime.session_id,
+            )
+        except Exception as failure:
+            return _error(f"the channel was not created: {failure}", code="create_failed")
+        view = result if isinstance(result, dict) else {}
+        nested = view.get("conversation")
+        if isinstance(nested, dict):
+            view = nested
+        summary = {
+            key: view[key]
+            for key in ("id", "kind", "name", "topic", "visibility", "member_count")
+            if key in view
+        }
+        return {
+            "ok": True,
+            "state": "created",
+            "conversation_id": str(view.get("id") or ""),
+            "content": json.dumps(summary, ensure_ascii=False),
+        }
+
+    if params.op == "channel_post":
+        if not params.channel_id.strip():
+            return _error("channel_post needs channel_id")
+        if not params.body.strip():
+            return _error("channel_post needs non-empty body")
+        # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
+        # retry re-sends this exact body, so that retry is idempotent on the
+        # server; a second tool call mints a second ref and is a second message.
+        client_ref = str(uuid.uuid4())
+        try:
+            result = await runtime.client.conversation_send(
+                params.channel_id.strip(),
+                client_ref=client_ref,
+                text=params.body,
+                tenant_id=runtime.tenant_id,
+                actor_endpoint_id=endpoint_id,
+                origin_session_id=runtime.session_id,
+            )
+        except Exception as failure:
+            return _error(f"the post did not confirm: {failure}", code="post_failed")
+        message = result.get("message") if isinstance(result, dict) else None
+        if not isinstance(message, dict):
+            message = {}
+        message_id = str(message.get("id") or "")
+        seq = message.get("seq")
+        content = f"posted to {params.channel_id.strip()}: message {message_id or '?'}"
+        if isinstance(seq, int):
+            content += f" at seq {seq}"
+        return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
+
+    if params.op == "channel_history":
+        if not params.channel_id.strip():
+            return _error("channel_history needs channel_id")
+        if params.before_seq is not None and params.after_seq is not None:
+            return _error(
+                "channel_history takes at most one of before_seq/after_seq "
+                "(before is exclusive, after inclusive; never combined)"
+            )
+        if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+            return _error(f"channel_history limit must be 1..{CONVERSATION_PAGE_MAX}")
+        try:
+            result = await runtime.client.conversation_messages(
+                params.channel_id.strip(),
+                tenant_id=runtime.tenant_id,
+                limit=int(params.limit),
+                before_seq=params.before_seq,
+                after_seq=params.after_seq,
+                endpoint_id=endpoint_id,
+            )
+        except Exception as failure:
+            return _error(f"could not read the channel history: {failure}", code="history_failed")
+        # Bodies are external content even when the sender is a teammate's
+        # agent: the same untrusted wrap as take_up. Unadmitted messages carry
+        # ``body: null`` — metadata only — and stay that way (no local cache).
+        return {
+            "ok": True,
+            "state": "ok",
+            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        }
+
     # The closed set is enforced by the schema; this names the intent for a
     # future op a reviewer might add above without re-reading the contract.
     return _error(
@@ -291,7 +542,11 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
         if outcome.get("ok"):
-            if outcome.get("text") is not None:
+            if outcome.get("content") is not None:
+                # Read-shaped channel results carry their own model-facing
+                # rendering (JSON page, or the untrusted-wrapped history).
+                content = str(outcome["content"])
+            elif outcome.get("text") is not None:
                 # §11.1: the take_up result marks the body as external and
                 # untrusted, exactly as the wake wrap does — the ONE clause
                 # constant (D6), so a copy edit cannot silently un-mark this hop.
@@ -333,13 +588,17 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "Read and answer organization messages: take_up fetches the screened body "
             "(verified against body_sha256), ack claims (working) or releases (done) it, "
-            "send/reply post. Deciding a request is the human’s, through the ask queue "
-            "— this tool cannot approve or deny."
+            "send/reply post. Channels: list conversations, create a group/channel as "
+            "this session's agent, post to a channel and read its history. Deciding a "
+            "request is the human’s, through the ask queue — this tool cannot approve "
+            "or deny."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
         call_approval_tier=lambda args: (
-            "read" if str(args.get("op")) in ("take_up", "ack") else "write"
+            "read"
+            if str(args.get("op")) in ("take_up", "ack", "channels", "channel_history")
+            else "write"
         ),
         concurrency="exclusive",
         interruptible=True,
@@ -349,9 +608,12 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
 
 __all__ = [
     "BRIDGE_OPS",
+    "CHANNEL_OPS",
     "CLAIM_TTL_S",
+    "CONVERSATION_PAGE_MAX",
     "BridgeRuntime",
     "BridgeToolParams",
+    "ChannelMemberParams",
     "body_digest",
     "build_bridge_tool",
     "execute_bridge",
