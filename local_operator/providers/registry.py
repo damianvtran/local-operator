@@ -775,6 +775,23 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         legacy_store_keys=("OPENAI_API_KEY",),
     ),
     ProviderDefinition(
+        id="groq",
+        name="Groq",
+        # NO ``env_keys``, for the reason ``openai-key`` gives: the speech rung
+        # is advertised only from a key the user stored here, so an exported
+        # ``GROQ_API_KEY`` must never light it (session-voice-groq D5). Groq
+        # also serves chat with the same key; a later chat provider flips
+        # ``speech_only`` on this row rather than adding a second one.
+        login=create_api_key_login(
+            "Groq",
+            "https://console.groq.com/keys",
+            "Paste an API key from the Groq console.",
+        ),
+        base_url="https://api.groq.com/openai/v1",
+        speech_only=True,
+        capabilities=frozenset({"stt", "tts"}),
+    ),
+    ProviderDefinition(
         id="radient",
         search_aliases=("radient-oauth",),
         name="Radient",

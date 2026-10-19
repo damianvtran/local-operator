@@ -36,6 +36,8 @@ from local_operator.stt.errors import api_error_from_httpx_response
 #: paths are ``/v1/...`` themselves).
 ELEVENLABS_STT_BASE_URL = "https://api.elevenlabs.io"
 OPENAI_STT_BASE_URL = "https://api.openai.com/v1"
+#: Groq serves the OpenAI audio wire at its own host (session-voice-groq D1).
+GROQ_STT_BASE_URL = "https://api.groq.com/openai/v1"
 
 #: The models. Scribe v2 is the current transcription model (the research POC
 #: measured both; the daemon must not choose silently per request, so the
@@ -48,6 +50,10 @@ OPENAI_STT_MODEL = "gpt-4o-transcribe"
 #: that predate `gpt-4o-transcribe` access still transcribe; a caller that pins
 #: a model explicitly gets exactly that model, no substitution.
 OPENAI_STT_FALLBACK_MODEL = "whisper-1"
+
+#: The Groq transcription model; always PINNED by the rung, so the OpenAI
+#: fallback list never applies to it.
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
 
 #: Default bound for one wire call. The executor always passes its own
 #: remaining-budget value; standalone users get this.
@@ -263,10 +269,14 @@ class OpenAiSttClient:
         *,
         base_url: str | None = None,
         client: Optional[httpx.AsyncClient] = None,
+        label: str = "OpenAI",
     ) -> None:
         self._api_key = api_key
         self._base_url = (base_url or OPENAI_STT_BASE_URL).rstrip("/")
         self._client = client
+        # Names the vendor in failures, so an OpenAI-compatible host (Groq) is
+        # never reported as OpenAI.
+        self._label = label
 
     async def transcribe(
         self,
@@ -303,7 +313,7 @@ class OpenAiSttClient:
                     files=files,
                     data=data,
                     timeout_s=timeout_s,
-                    label="OpenAI",
+                    label=self._label,
                     secrets=[self._api_key],
                 )
             except APIError as exc:
@@ -314,19 +324,19 @@ class OpenAiSttClient:
             text = payload.get("text")
             if not isinstance(text, str):
                 raise APIError(
-                    "OpenAI returned a response without transcript text.",
+                    f"{self._label} returned a response without transcript text.",
                     status_code=response.status_code,
                 )
             return SttClientResult(
                 text=text,
                 model=model_id,
-                provider="openai",
+                provider=self._label.lower(),
                 raw_text=text,
                 language=None,
                 cleanup="none",
             )
         # Only reachable when every candidate was skipped as model-unavailable.
-        raise last or APIError("OpenAI transcription failed on every model candidate.")
+        raise last or APIError(f"{self._label} transcription failed on every model candidate.")
 
 
 def _model_unavailable(exc: APIError) -> bool:

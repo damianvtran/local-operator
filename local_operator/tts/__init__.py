@@ -47,6 +47,8 @@ class VoicePath(StrEnum):
     PROVIDER_TTS_RADIENT = "provider_tts_radient"
     PROVIDER_TTS_ELEVENLABS = "provider_tts_elevenlabs"
     PROVIDER_TTS_OPENAI = "provider_tts_openai"
+    #: Opt-in only (``include_groq``): never listed by the generic paths routes.
+    PROVIDER_TTS_GROQ = "provider_tts_groq"
     #: No usable path. Appears in availability/refusal payloads only.
     NONE = "none"
 

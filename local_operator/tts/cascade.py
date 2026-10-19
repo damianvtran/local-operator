@@ -99,6 +99,16 @@ TTS_RUNG_PATHS = (
     VoicePath.PROVIDER_TTS_OPENAI,
 )
 
+#: Rung 4, reached only when the caller passes ``include_groq=True`` (the voice
+#: routes). Kept out of :data:`TTS_RUNG_PATHS` and out of the default resolver
+#: output: the UI parses ``GET /v1/tts/paths`` strictly and rejects a provider
+#: it does not know (session-voice-groq D1).
+GROQ_TTS_RUNG = VoicePath.PROVIDER_TTS_GROQ
+
+#: The ``groq`` login's own namespace: persisted ``api_key`` rows only, so an
+#: exported ``GROQ_API_KEY`` never lights the rung (session-voice-groq D5).
+GROQ_TTS_NAMESPACE = "groq"
+
 #: The hub's voicing headers this daemon will relay, as a FIXED SET rather than
 #: a ``X-Radient-Speech-`` prefix filter (voicing S2 security round 1, S-3). The
 #: prefix admits whatever the hub adds later, into a browser-readable response,
@@ -212,6 +222,11 @@ async def _openai_tts_key(store: AuthStore, session_id: str | None) -> str | Non
     )
 
 
+async def _groq_tts_key(store: AuthStore, session_id: str | None) -> str | None:
+    """The Groq key the rung would send; the probe and the call read this one row."""
+    return await store.get_persisted_api_key(GROQ_TTS_NAMESPACE, session_id, kinds=OPENAI_TTS_KINDS)
+
+
 async def _probe_key(store: AuthStore, provider: str, session_id: str | None) -> bool:
     """Whether ``provider`` is LOGGED IN, without letting a probe take the voice down.
 
@@ -233,8 +248,13 @@ async def resolve_voice_path(
     base_url: str | None = None,
     session_id: str | None = None,
     store: AuthStore | None = None,
+    include_groq: bool = False,
 ) -> VoicePathResolution:
-    """Decide which text-to-speech path a request would take. See the module docstring."""
+    """Decide which text-to-speech path a request would take. See the module docstring.
+
+    ``include_groq`` adds the Groq rung (rung 4). It defaults off so the
+    generic paths route keeps its exact payload.
+    """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
@@ -251,6 +271,12 @@ async def resolve_voice_path(
         except Exception:  # a non-AuthStore seam; the real store never raises
             logger.warning("tts probe for openai failed; reporting the rung unavailable")
             openai_available = False
+        groq_available = False
+        if include_groq:
+            try:
+                groq_available = bool(await _groq_tts_key(store, session_id))
+            except Exception:  # a non-AuthStore seam; the real store never raises
+                logger.warning("tts probe for groq failed; reporting the rung unavailable")
     finally:
         if owned:
             store.close()
@@ -274,6 +300,21 @@ async def resolve_voice_path(
             VoicePath.PROVIDER_TTS_OPENAI,
             openai_available,
             "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
+        ),
+        *(
+            (
+                RungAvailability(
+                    VoicePath.PROVIDER_TTS_GROQ,
+                    groq_available,
+                    (
+                        "A Groq API key is stored."
+                        if groq_available
+                        else "No Groq API key is stored."
+                    ),
+                ),
+            )
+            if include_groq
+            else ()
         ),
     )
     available = next((rung for rung in rungs if rung.available), None)
@@ -300,6 +341,7 @@ def _rung_label(path: VoicePath) -> str:
         VoicePath.PROVIDER_TTS_RADIENT: "Radient",
         VoicePath.PROVIDER_TTS_ELEVENLABS: "ElevenLabs",
         VoicePath.PROVIDER_TTS_OPENAI: "OpenAI",
+        VoicePath.PROVIDER_TTS_GROQ: "Groq",
     }.get(path, str(path))
 
 
@@ -466,6 +508,55 @@ async def _run_openai_rung(
     return result.audio, result.provider, _mapping_headers(attempt), []
 
 
+async def _run_groq_rung(
+    text: str,
+    *,
+    store: AuthStore,
+    session_id: str | None,
+    descriptor: VoiceDescriptor,
+    timeout_s: float,
+    client: Optional[Any] = None,
+) -> tuple[bytes, str, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Rung 4: the user's own Groq key, speaking with Orpheus.
+
+    Not mapped by the vendored voicing map (it refuses unknown providers): the
+    descriptor's gender picks one of two voices, and tone, pace and accent are
+    NOT applied -- the ``X-Radient-Speech-Degraded`` receipt says so. The body
+    is exactly Groq's four fields, always WAV.
+    """
+    if len(text) > tts_clients.GROQ_TTS_MAX_CHARS:
+        # Local guard, before any network call: Groq would refuse it and the
+        # refusal would still cost a request. Chunking is the caller's job.
+        raise APIError(
+            f"Groq speaks at most {tts_clients.GROQ_TTS_MAX_CHARS} characters per request "
+            f"(got {len(text)}).",
+            status_code=None,
+        )
+    key = await _groq_tts_key(store, session_id)
+    if not key:
+        raise APIError("No Groq API key is stored.", status_code=None)
+    # Orpheus reads ``[word]`` as a vocal direction; an agent's "[1]" or "[note]"
+    # must be spoken as text, not performed.
+    spoken = text.replace("[", "(").replace("]", ")")
+    voice = tts_clients.GROQ_TTS_VOICES[descriptor.resolved_gender()]
+    groq = client or tts_clients.OpenAiTtsClient(
+        key, base_url=tts_clients.GROQ_TTS_BASE_URL, label="Groq"
+    )
+    result = await groq.synthesize(
+        spoken,
+        params=adapters.Params(voice_id=voice),
+        model=tts_clients.GROQ_TTS_MODEL,
+        response_format=tts_clients.GROQ_TTS_FORMAT,
+        timeout_s=timeout_s,
+    )
+    headers = [
+        ("X-Radient-Speech-Voice", voice),
+        ("X-Radient-Speech-Applied", "gender"),
+        ("X-Radient-Speech-Degraded", "tone,pace,accent"),
+    ]
+    return result.audio, result.provider, headers, []
+
+
 def _mapping_headers(attempt: adapters.Attempt) -> list[tuple[str, str]]:
     """The ``X-Radient-Speech-*`` family for a leg THIS daemon mapped.
 
@@ -505,6 +596,8 @@ async def synthesize_speech(
     timeout_s: float = TTS_OVERALL_TIMEOUT_S,
     correlation_session_id: str | None = None,
     client_request_id: str | None = None,
+    include_groq: bool = False,
+    groq_client: Optional[Any] = None,
 ) -> TtsOutcome:
     """Synthesize ``text`` down the cascade. See the module docstring.
 
@@ -519,6 +612,9 @@ async def synthesize_speech(
     question, answered by the store), while these are per-call attribution
     (answered by the route). A BYO rung reads neither — the vendors do not
     have this header family.
+
+    ``include_groq`` adds rung 4 (Groq) to the walk; ``groq_client`` is the test
+    seam. With the default ``False`` the Groq rung is never probed or reached.
     """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
@@ -530,6 +626,7 @@ async def synthesize_speech(
                 base_url=radient_base,
                 session_id=session_id,
                 store=store,
+                include_groq=include_groq,
             )
 
         attempts: list[TtsAttempt] = []
@@ -541,7 +638,8 @@ async def synthesize_speech(
         failures: list[tuple[VoicePath, BaseException]] = []
         deadline = asyncio.get_running_loop().time() + timeout_s
 
-        for path in TTS_RUNG_PATHS:
+        walk = (*TTS_RUNG_PATHS, GROQ_TTS_RUNG) if include_groq else TTS_RUNG_PATHS
+        for path in walk:
             rung = next((r for r in resolution.rungs if r.path == path), None)
             if rung is None or not rung.available:
                 continue
@@ -587,6 +685,15 @@ async def synthesize_speech(
                         response_format=response_format,
                         timeout_s=attempt_timeout,
                         client=elevenlabs_client,
+                    )
+                elif path == VoicePath.PROVIDER_TTS_GROQ:
+                    call = _run_groq_rung(
+                        text,
+                        store=store,
+                        session_id=session_id,
+                        descriptor=descriptor,
+                        timeout_s=attempt_timeout,
+                        client=groq_client,
                     )
                 else:
                     call = _run_openai_rung(

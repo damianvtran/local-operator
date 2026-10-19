@@ -44,6 +44,8 @@ class AudioPath(StrEnum):
     PROVIDER_STT_RADIENT = "provider_stt_radient"
     PROVIDER_STT_ELEVENLABS = "provider_stt_elevenlabs"
     PROVIDER_STT_OPENAI = "provider_stt_openai"
+    #: Opt-in only (``include_groq``): never listed by the generic paths routes.
+    PROVIDER_STT_GROQ = "provider_stt_groq"
     #: RESERVED token, pinned so the vocabulary is closed. The resolver reports
     #: this rung as present-but-unavailable and NO code path returns it: the
     #: superwhisper.com CLI is a history browser, not a non-interactive

@@ -84,6 +84,8 @@ from local_operator.stt.cleanup import (
 )
 from local_operator.stt.clients import (
     DEFAULT_TRANSCRIBE_TIMEOUT_S,
+    GROQ_STT_BASE_URL,
+    GROQ_STT_MODEL,
     ElevenLabsSttClient,
     OpenAiSttClient,
 )
@@ -106,6 +108,12 @@ STT_RUNG_PATHS = (
     AudioPath.PROVIDER_STT_ELEVENLABS,
     AudioPath.PROVIDER_STT_OPENAI,
 )
+
+#: Rung 4, reached only when the caller passes ``include_groq=True`` (the voice
+#: routes). Kept out of :data:`STT_RUNG_PATHS` and out of the default resolver
+#: output: the UI parses ``GET /v1/stt/paths`` strictly and rejects a provider it
+#: does not know (session-voice-groq D1).
+GROQ_STT_RUNG = AudioPath.PROVIDER_STT_GROQ
 
 #: Why the reserved rung reads unavailable. Kept as a constant because it is
 #: surfaced verbatim and a test pins it.
@@ -210,6 +218,16 @@ async def _openai_stt_key(store: AuthStore, session_id: str | None) -> str | Non
     )
 
 
+#: The ``groq`` login's own namespace. Persisted ``api_key`` rows only: an
+#: exported ``GROQ_API_KEY`` never lights the rung (session-voice-groq D5).
+GROQ_STT_NAMESPACE = "groq"
+
+
+async def _groq_stt_key(store: AuthStore, session_id: str | None) -> str | None:
+    """The Groq key the rung would send; the probe and the call read this one row."""
+    return await store.get_persisted_api_key(GROQ_STT_NAMESPACE, session_id, kinds=OPENAI_STT_KINDS)
+
+
 async def _probe_key(store: AuthStore, provider: str, session_id: str | None) -> bool:
     """Whether ``provider`` is LOGGED IN, without letting a probe take the mic down.
 
@@ -255,8 +273,13 @@ async def resolve_audio_path(
     model: object | None = None,
     session_id: str | None = None,
     store: AuthStore | None = None,
+    include_groq: bool = False,
 ) -> AudioPathResolution:
-    """Decide which speech path a submission would take. See module docstring."""
+    """Decide which speech path a submission would take. See module docstring.
+
+    ``include_groq`` adds the Groq rung (rung 4, after OpenAI). It defaults off
+    so the generic paths route keeps its exact payload.
+    """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
@@ -275,6 +298,12 @@ async def resolve_audio_path(
         except Exception:  # a non-AuthStore seam; the real store never raises
             logger.warning("stt probe for openai failed; reporting the rung unavailable")
             openai_available = False
+        groq_available = False
+        if include_groq:
+            try:
+                groq_available = bool(await _groq_stt_key(store, session_id))
+            except Exception:  # a non-AuthStore seam; the real store never raises
+                logger.warning("stt probe for groq failed; reporting the rung unavailable")
     finally:
         if owned:
             store.close()
@@ -299,6 +328,21 @@ async def resolve_audio_path(
             AudioPath.PROVIDER_STT_OPENAI,
             openai_available,
             "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
+        ),
+        *(
+            (
+                RungAvailability(
+                    AudioPath.PROVIDER_STT_GROQ,
+                    groq_available,
+                    (
+                        "A Groq API key is stored."
+                        if groq_available
+                        else "No Groq API key is stored."
+                    ),
+                ),
+            )
+            if include_groq
+            else ()
         ),
         RungAvailability(AudioPath.PROVIDER_STT_SUPERWHISPER, False, SUPERWHISPER_REASON),
         RungAvailability(
@@ -338,6 +382,7 @@ def _rung_label(path: AudioPath) -> str:
         AudioPath.PROVIDER_STT_RADIENT: "Radient",
         AudioPath.PROVIDER_STT_ELEVENLABS: "ElevenLabs",
         AudioPath.PROVIDER_STT_OPENAI: "OpenAI",
+        AudioPath.PROVIDER_STT_GROQ: "Groq",
     }.get(path, str(path))
 
 
@@ -539,6 +584,53 @@ async def _run_openai_rung(
     )
 
 
+async def _run_groq_rung(
+    audio: bytes,
+    *,
+    mime: str,
+    store: AuthStore,
+    session_id: str | None,
+    language: str | None,
+    prompt: str | None,
+    cleanup: CleanupMode = "auto",
+    timeout_s: float,
+    client: Any | None = None,
+) -> _RungResult:
+    """Rung 4: the user's own Groq key, through the OpenAI-compatible client.
+
+    The model is pinned, so the OpenAI fallback id is never tried. WAV passes
+    through untouched (Groq accepts it natively).
+    """
+    key = await _groq_stt_key(store, session_id)
+    if not key:
+        raise APIError("No Groq API key is stored.", status_code=None)
+    groq = OpenAiSttClient(key, base_url=GROQ_STT_BASE_URL, label="Groq", client=client)
+    result = await groq.transcribe(
+        audio,
+        mime=mime,
+        model=GROQ_STT_MODEL,
+        language=normalize_language_hint(language),
+        prompt=prompt,
+        timeout_s=timeout_s,
+    )
+    cleaned = None
+    if cleanup in ("auto", "client"):
+        cleaned = apply_client_rules(
+            result.text,
+            language=choose_cleanup_language(language, getattr(result, "language", None), None),
+        )
+    return _RungResult(
+        text=cleaned.text if cleaned else result.text,
+        raw_text=(result.text if cleaned else getattr(result, "raw_text", result.text)),
+        raw_unavailable=("" if cleaned else getattr(result, "raw_unavailable", "")),
+        language=getattr(result, "language", None),
+        cleanup=(
+            CLIENT_RULES_PROVENANCE if cleaned else (getattr(result, "cleanup", "none") or "none")
+        ),
+        removed=cleaned.removed if cleaned else (),
+    )
+
+
 def _failed_attempt(path: AudioPath, exc: BaseException) -> SttAttempt:
     """One failed rung, with the shared mapper's sentence as the detail."""
     if isinstance(exc, APIError):
@@ -585,8 +677,13 @@ async def transcribe_audio(
     prompt: str | None = None,
     correlation_session_id: str | None = None,
     cleanup: str | None = None,
+    include_groq: bool = False,
+    groq_client: Any | None = None,
 ) -> SttOutcome:
     """Run the STT cascade over one audio file. See module docstring.
+
+    ``include_groq`` adds rung 4 (Groq) to the walk; ``groq_client`` is the
+    test seam that attaches ``httpx.MockTransport``.
 
     ``correlation_session_id`` (PR-3) is the CALLER's conversation id for the
     hub's client correlation header and the emitted spend record — deliberately
@@ -608,9 +705,11 @@ async def transcribe_audio(
             model=model,
             session_id=session_id,
             store=store,
+            include_groq=include_groq,
         )
+        walkable = (*STT_RUNG_PATHS, GROQ_STT_RUNG) if include_groq else STT_RUNG_PATHS
         candidates = [
-            rung.path for rung in resolution.rungs if rung.available and rung.path in STT_RUNG_PATHS
+            rung.path for rung in resolution.rungs if rung.available and rung.path in walkable
         ]
         if not candidates:
             raise SttUnavailable(str(resolution.reason), resolution=resolution)
@@ -672,6 +771,18 @@ async def transcribe_audio(
                             prompt=prompt,
                             cleanup=mode,
                             timeout_s=attempt_timeout,
+                        )
+                    elif path == AudioPath.PROVIDER_STT_GROQ:
+                        attempt = _run_groq_rung(
+                            audio,
+                            mime=mime,
+                            store=store,
+                            session_id=session_id,
+                            language=language,
+                            prompt=prompt,
+                            cleanup=mode,
+                            timeout_s=attempt_timeout,
+                            client=groq_client,
                         )
                     else:
                         attempt = _run_openai_rung(
