@@ -263,8 +263,12 @@ async def test_effort_with_a_level_sets_it_and_says_what_changed() -> None:
         band = _band(app)
         session = app._session
     assert level == "low"
+    # FAIL-CLOSED: the default is the UNSET sentinel, not ``None``. A missing
+    # attribute must FAIL this assertion rather than satisfy it — the whole
+    # point is that the TUI stated the decision to the session, and a test that
+    # tolerates the attribute's absence proves nothing.
     assert (
-        getattr(session, "last_effort_choice", None) == "low"
+        getattr(session, "last_effort_choice", EFFORT_CHOICE_UNSET) == "low"
     ), "the TUI applied but never stated the choice"
     assert "low" in band
     receipt = [n for n in notices if "reasoning effort" in n]
@@ -335,8 +339,9 @@ async def test_effort_auto_returns_to_the_models_own_default() -> None:
         session = app._session
     assert level == "high"
     assert remembered is None
+    # Same fail-closed default: an ABSENT attribute is not a withdrawal.
     assert (
-        getattr(session, "last_effort_choice", "unset") is None
+        getattr(session, "last_effort_choice", EFFORT_CHOICE_UNSET) is None
     ), "the withdrawal was never stated to the session"
 
 
