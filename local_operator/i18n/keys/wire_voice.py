@@ -50,12 +50,56 @@ def not_enabled() -> Msg:
     return Msg("wire.voice.not_enabled", {})
 
 
+def phrase_failed() -> Msg:
+    return Msg("wire.voice.phrase.failed", {})
+
+
+def phrase_on_screen_first() -> Msg:
+    return Msg("wire.voice.phrase.on_screen_first", {})
+
+
+def phrase_still_working() -> Msg:
+    return Msg("wire.voice.phrase.still_working", {})
+
+
+def phrase_switched() -> Msg:
+    return Msg("wire.voice.phrase.switched", {})
+
+
+def phrase_truncated() -> Msg:
+    return Msg("wire.voice.phrase.truncated", {})
+
+
+def phrase_voice_off() -> Msg:
+    return Msg("wire.voice.phrase.voice_off", {})
+
+
+def rate_limited_day() -> Msg:
+    return Msg("wire.voice.rate_limited_day", {})
+
+
+def rate_limited_minute() -> Msg:
+    return Msg("wire.voice.rate_limited_minute", {})
+
+
 def store_busy() -> Msg:
     return Msg("wire.voice.store_busy", {})
 
 
+def stt_unavailable(*, reason: str) -> Msg:
+    return Msg("wire.voice.stt_unavailable", {"reason": reason})
+
+
 def title() -> Msg:
     return Msg("wire.voice.title", {})
+
+
+def unavailable(*, reason: str) -> Msg:
+    return Msg("wire.voice.unavailable", {"reason": reason})
+
+
+def unknown_segment() -> Msg:
+    return Msg("wire.voice.unknown_segment", {})
 
 
 def unknown_session(*, session_id: str) -> Msg:
@@ -64,3 +108,11 @@ def unknown_session(*, session_id: str) -> Msg:
 
 def unknown_source() -> Msg:
     return Msg("wire.voice.unknown_source", {})
+
+
+def unsupported_audio() -> Msg:
+    return Msg("wire.voice.unsupported_audio", {})
+
+
+def upload_too_large(*, limit_mib: str) -> Msg:
+    return Msg("wire.voice.upload_too_large", {"limit_mib": limit_mib})

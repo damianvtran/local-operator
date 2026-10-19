@@ -52,7 +52,9 @@ class VoiceUtteranceResult(BaseModel):
     """``POST /v1/desktop/voice/utterance`` 200.
 
     ``path`` is the ``text_origin`` the caller named for the words (``qwen_s2s``:
-    the rig's Parakeet final), or ``None`` for the plain text door.
+    the rig's Parakeet final), or ``None`` for the plain text door. For a
+    recording it is the STT rung's token (``provider_stt_groq``, ...), recorded
+    as the message's ``input_path``.
     """
 
     text: str
@@ -79,6 +81,25 @@ class GateSource(BaseModel):
 VoiceTextSource = Annotated[Union[MessageSource, GateSource], Field(discriminator="kind")]
 
 
+class PhraseSource(BaseModel):
+    """A fixed catalogue phrase. ``key`` is checked against the closed
+    ``wire.voice.phrase.*`` set by the route: an unknown key is 404
+    ``unknown_source``, so this source cannot carry free text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["phrase"]
+    key: str = Field(min_length=1, max_length=64)
+
+
+#: ``/voice/speech`` adds the phrase source; ``/voice/text`` does not (a phrase
+#: is a fixed sentence the client already knows by key, so there is nothing to
+#: resolve or segment).
+SpeechSource = Annotated[
+    Union[MessageSource, GateSource, PhraseSource], Field(discriminator="kind")
+]
+
+
 class VoiceTextRequest(BaseModel):
     """``POST /v1/desktop/voice/text`` body: a source reference, never free text (V8)."""
 
@@ -100,3 +121,19 @@ class VoiceText(BaseModel):
     text: str
     spoken_chars: int
     truncated: bool
+    segments: list[str]
+
+
+class VoiceSpeechRequest(BaseModel):
+    """``POST /v1/desktop/voice/speech`` body: a source REFERENCE and a segment index.
+
+    The server re-resolves the source and re-segments it (D3), so no free text
+    crosses (V8). ``segment`` indexes the ``segments`` list ``/voice/text``
+    returned for the same source; a phrase has exactly one segment, index 0.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=128)
+    source: SpeechSource
+    segment: int = Field(default=0, ge=0, le=1000)
