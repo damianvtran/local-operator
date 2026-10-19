@@ -430,7 +430,9 @@ def cache_media(
     Peaks are NOT part of the returned block: they are a rendering
     sidecar fetched by digest, never a field every attachment row carries.
 
-    AUDIO also gets its DURATION reconciled here, from the same decode: absent
+    AUDIO also gets its DURATION reconciled here, from a decode of the bytes
+    (its own, alongside the peaks' — two decodes at creation, measured; see
+    ``audiogen.peaks._decode``): absent
     from BYOK vendors, cross-checked where a provider states one. It IS part
     of the block, because the player cannot draw without it (see
     ``audiogen.peaks.compute_duration``).

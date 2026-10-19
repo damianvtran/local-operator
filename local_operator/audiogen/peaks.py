@@ -65,7 +65,15 @@ def _decode(raw: bytes) -> Any | None:
     rather than as an error. Kept in one place so the two derivations cannot
     drift onto different decode settings — a duration taken at another sample
     rate would still be arithmetically right, but a peak grid taken at another
-    rate would not, and one shared call is how that stays impossible.
+    rate would not, and one shared SETTING is how that stays impossible.
+
+    ONE DECODE PER CALL, and the callers are honest about it: ``compute_peaks``
+    and ``compute_duration`` each decode, so an artifact that needs both pays
+    two decodes (measured 207 ms for a 98 s clip; recall the peaks docstring's
+    63.7 ms per decode). That is deliberate for now — merging them would change
+    the peaks entry point that every existing caller and the sidecar contract
+    already use — and it is a one-off cost at artifact creation, never in a
+    render loop.
     """
     if not raw:
         return None
