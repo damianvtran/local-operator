@@ -54,8 +54,9 @@ Existing session rows are not promoted or rewritten. Guards, quotas, provenance 
 host approvals are shared. Explicit role allowlists are never widened; when the
 helper is absent, use read/write/edit URLs with the same scope boundaries.
 
-The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `status` — there
-are no `lop memory remember` or `recall` CLI commands.
+The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `status`,
+`inspect` and `consolidate` — there are no `lop memory remember` or `recall` CLI
+commands.
 
 ## Existing read/write/edit tools
 
@@ -153,11 +154,27 @@ No live-peer interoperability claim follows from isolated loopback tests.
 Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
 `.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
 for policy, quotas and peer exclusions. Human inspection/correction uses
-`lop memory` / `/memory`: list, show, search, move, edit, forget and status. Rows print
+`lop memory` / `/memory`: list, show, search, move, edit, forget, status, inspect and
+consolidate. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
 (automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
 changes only the named fields; `--json` prints machine-readable output.
+
+Bulk maintenance is deliberate. `lop memory forget --scope S [--older-than 30d]
+[--unverified] [--tag T] [--title-matches RE] [--body-matches RE]` is a DRY RUN: it
+prints the filter in words, the exact match count, the tokens it would free and the
+list, and deletes nothing. The confirmation it prints carries an `--expect`
+fingerprint of the previewed revisions; if any fact changed in between, the whole
+command is refused. Confirmation is all-or-nothing, and a second run of the same
+command reports zero matches instead of failing. A filter must name its `--scope`
+explicitly (a bulk removal never inherits the scope set, and `--scope global` must be
+chosen on purpose), and it refuses a whole-scope match or more than half the scope
+unless the preview is confirmed with `--force`. `lop memory consolidate [--scope S]
+[--limit N]` is a READ-ONLY lexical duplicate preview: identical titles, or at least
+70% title+body token overlap, grouped transitively with the shared/differing tokens
+shown. It never deletes or merges; review with `show`, merge with `edit`, retire with
+`forget`. No embedding, model call or new dependency is involved.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.
