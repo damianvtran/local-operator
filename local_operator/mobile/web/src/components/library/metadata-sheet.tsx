@@ -60,7 +60,10 @@ export function MetadataSheet({
 		setAvailable(asset.tags);
 		setNewTag("");
 		setError("");
-	}, [open, asset]);
+		// Keyed on the ID, not the object: a re-read after a PARTIAL write must
+		// update the detail behind this sheet without wiping the form or the
+		// refusal that explains the partial write (review R-5).
+	}, [open, asset.id]);
 
 	useEffect(() => {
 		if (!open) return;
@@ -124,17 +127,35 @@ export function MetadataSheet({
 		}
 		setBusy(true);
 		setError("");
+		let patched = false;
 		try {
 			await patchLibraryAsset(asset.id, {
 				name: name.trim(),
 				description: description.trim(),
 			});
-			await setLibraryTags(asset.id, selected);
+			patched = true;
+			// Preserve the current primary while it is still selected. The sheet
+			// has no primary editor, so sending `null` here would clear a choice
+			// made on another surface (review R-3).
+			const primary = asset.primary_tag && selected.includes(asset.primary_tag)
+				? asset.primary_tag
+				: undefined;
+			await setLibraryTags(asset.id, selected, primary);
 			// Re-read, never patch locally: the relay decides the effective value.
 			const fresh = await getLibraryAsset(asset.id);
 			onSaved(fresh);
 			onClose();
 		} catch (e) {
+			/* A PATCH that landed followed by a failed tag write leaves the
+			   detail showing the old name. Reconcile it and keep the refusal:
+			   the reader must see both what changed and what did not (R-5). */
+			if (patched) {
+				try {
+					onSaved(await getLibraryAsset(asset.id));
+				} catch {
+					// The refusal below already says the save is incomplete.
+				}
+			}
 			setError(String((e as Error).message ?? e));
 		} finally {
 			setBusy(false);

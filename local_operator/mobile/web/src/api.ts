@@ -21,7 +21,6 @@ import type {
 	ProjectView,
 	LibraryAsset,
 	LibraryChatLink,
-	LibraryFacets,
 	LibraryListing,
 	LibraryTag,
 	SessionSummary,
@@ -886,10 +885,6 @@ export function getLibrary(query: LibraryQuery = {}): Promise<LibraryListing> {
 	return request(`/api/library/assets${encoded ? `?${encoded}` : ""}`);
 }
 
-export function getLibraryFacets(): Promise<LibraryFacets> {
-	return request("/api/library/facets");
-}
-
 export function getLibraryAsset(assetId: string): Promise<LibraryAsset> {
 	return request(`/api/library/assets/${encodeURIComponent(assetId)}`);
 }
@@ -939,12 +934,19 @@ export function mergeLibraryTag(tagId: string, into: string): Promise<{ tag: Lib
 export function setLibraryTags(
 	assetId: string,
 	tagIds: string[],
-	primary: string | null = null,
+	primary?: string | null,
 ): Promise<LibraryAsset> {
+	/* `primary` is OMITTED unless the caller states one. The relay (like the
+	   desktop store) reads a present null as "clear the primary", so a metadata
+	   save that only renamed a file must not send one — it silently dropped the
+	   tag the reader had chosen elsewhere (review R-3). Passing an explicit
+	   null still clears, for a caller that means it. */
+	const body: { tags: string[]; primary?: string | null } = { tags: tagIds };
+	if (primary !== undefined) body.primary = primary;
 	return request(`/api/library/assets/${encodeURIComponent(assetId)}/tags`, {
 		method: "PUT",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ tags: tagIds, primary }),
+		body: JSON.stringify(body),
 	});
 }
 
@@ -957,10 +959,6 @@ export function linkLibraryChat(
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ session_id: sessionId }),
 	});
-}
-
-export function unlinkLibraryChat(assetId: string): Promise<{ ok: boolean; cleared: boolean }> {
-	return request(`/api/library/assets/${encodeURIComponent(assetId)}/chat`, { method: "DELETE" });
 }
 
 /** The preview URL for one asset. `download` flips the relay's disposition. */
