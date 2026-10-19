@@ -1995,7 +1995,7 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     except Exception:  # noqa: BLE001 — the store is best-effort here
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
-    if not payload_carries_grant(payload):
+    if not isinstance(payload, dict) or not payload_carries_grant(payload):
         return False
     # A ROW IS NOT A USABLE CREDENTIAL (real-node QA). A registration-only row,
     # an emptied row left by a failed write, or a row whose refresh token the
@@ -2010,10 +2010,11 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     tokens = payload.get("tokens")
     if not isinstance(tokens, dict):
         return False
-    return any(
-        isinstance(tokens.get(field), str) and tokens.get(field).strip()
-        for field in ("access_token", "refresh_token")
-    )
+    for field in ("access_token", "refresh_token"):
+        value = tokens.get(field)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def _live_unconfirmed_send(marker: Any, target: Any) -> bool:

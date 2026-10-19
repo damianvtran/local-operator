@@ -328,9 +328,18 @@ def test_a_placement_row_does_not_make_a_reference_server_oauth(
             by=PEER,
         )
         document.grant(credential_key_for_secret(SECRET), SELF, by=PEER)
-    configs = {
-        "slack": MCPHttpServerConfig(url=URL, **{field: value}),
-    }
+    # Explicit keyword construction: a ``**{field: value}`` unpack makes the
+    # constructor's ``type`` parameter look like it may receive a dict, which the
+    # type checker rejects (review round 5, type-check).
+    config = (
+        MCPHttpServerConfig(url=URL, headers=value)
+        if field == "headers"
+        # ``env`` is an EXTRA field on an HTTP config (``extra="allow"``): the
+        # status pass reads it as a reference source, but the constructor has no
+        # such parameter, so the type checker needs the construct seam.
+        else MCPHttpServerConfig.model_construct(url=URL, env=value)
+    )
+    configs = {"slack": config}
 
     rows = server_states(str(cwd), base=root, configs=configs)
     assert rows["slack"]["shape"] == shape

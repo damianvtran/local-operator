@@ -55555,7 +55555,11 @@ class OperatorApp(App[None]):
                     detail = target
                     if callable(tools_for):
                         try:
-                            detail = f"{target} · {len(tools_for(name))} tools"
+                            from collections.abc import Sized
+
+                            listing = tools_for(name)
+                            if isinstance(listing, Sized):
+                                detail = f"{target} · {len(listing)} tools"
                         except Exception:  # noqa: BLE001 — keep the target
                             detail = target
                 else:
