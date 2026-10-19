@@ -1050,3 +1050,242 @@ async def test_a_child_session_s_own_teardown_stamps_its_running_grandchild(iso)
 
     stamps = ledger.read_stop_receipts(grandchild_dir)
     assert stamps and stamps[0]["actor"] == "parent-teardown", stamps
+
+
+# --- WIP recovery: actual child tools, settlement, resume, and process death ---
+
+
+class WritingChild:
+    """Do one real write, then hang/fail/complete; a resume captures its request."""
+
+    def __init__(self, ending: str = "hang") -> None:
+        self.calls = 0
+        self.ending = ending
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: Any = None):
+        self.requests.append(request)
+        self.calls += 1
+        if self.calls == 1:
+            return _tool_call("bash", {
+                "command": "printf 'saved tracked\\n' > tracked; printf 'saved new\\n' > untracked",
+                "i": "Writing recoverable child work",
+            })
+        if self.ending == "complete":
+            return _text("all work saved")
+
+        async def end():
+            if self.ending == "fail":
+                raise RuntimeError("provider exploded after writing")
+            await asyncio.Event().wait()
+            if False:
+                yield
+
+        return end()
+
+
+def make_git_parent(tmp_path: Path, provider: Any) -> tuple[Session, Path]:
+    from tests.unit.harness.test_wip_checkpoint import make_repo
+
+    repo = make_repo(tmp_path / "repo")
+    parent = Session(
+        model=MODEL, stream_fn=provider, tools=[],
+        transcript=Transcript(tmp_path / "parent"),
+        system_blocks_provider=lambda: ["parent", "env"], cwd=str(repo),
+    )
+    return parent, repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["hang", "fail"])
+async def test_real_child_keeps_wip_and_delivers_cause_step_and_ref(iso, ending):
+    from local_operator.harness.types import SubagentEndEvent
+    from local_operator.incidents import is_cut_off_cause
+    from tests.unit.harness.test_wip_checkpoint import git
+
+    parent, repo = make_git_parent(iso, WritingChild(ending))
+    await parent.async_init()
+    events = []
+    parent.subscribe(events.append)
+    try:
+        job_id = parent._launch_subagent(label="coder", prompt="Write the files.")
+        directory = await wait_child_dir(parent, job_id)
+        await wait_until(lambda: bool(job_of(parent, job_id).last_step))
+        if ending == "hang":
+            await parent.subagent_comms.cancel(job_id)
+        await wait_until(lambda: job_of(parent, job_id).status in ("failed", "cancelled"))
+        await wait_until(lambda: any(isinstance(e, SubagentEndEvent) for e in events))
+        job = job_of(parent, job_id)
+        receipt = json.loads((directory / f"subagent-wip-{job_id}.v1.json").read_text())
+        assert git(repo, "show", f"{job.wip_ref}:tracked") == "saved tracked"
+        assert git(repo, "show", f"{job.wip_ref}:untracked") == "saved new"
+        assert receipt["ref"] == job.wip_ref
+        assert receipt["child_session_id"] == directory.name
+        cause = "child-cancelled" if ending == "hang" else "child-provider-error"
+        assert job.death_cause == cause
+        assert not is_cut_off_cause("child-cancelled")
+        delivery = Session._job_result_message(job_id, "", job).details["text"]
+        assert "last completed step: bash: Writing recoverable child work" in delivery
+        assert f"WIP checkpoint: {job.wip_ref}" in delivery
+        assert ("explicitly cancelled" if ending == "hang" else "provider failed") in delivery
+        end = next(e for e in events if isinstance(e, SubagentEndEvent))
+        assert end.last_step == job.last_step and end.wip_ref == job.wip_ref
+        assert end.death_cause == cause
+        # A new comms registry, no live job row: the durable carrier is not the
+        # strict job-sidecar allowlist, and must survive retention/restart.
+        from tests.unit.harness.test_comms import FakeParent
+        restored = SubagentComms(FakeParent())
+        restored.restore(parent.subagent_comms.snapshot())
+        row = next(r for r in restored.roster() if r.job_id == job_id)
+        assert (row.death_cause, row.last_step, row.wip_ref) == (
+            cause, job.last_step, job.wip_ref,
+        )
+    finally:
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_completed_child_clears_ref_receipt_and_roster_wip(iso):
+    from tests.unit.harness.test_wip_checkpoint import git
+
+    parent, repo = make_git_parent(iso, WritingChild("complete"))
+    await parent.async_init()
+    try:
+        job_id = parent._launch_subagent(label="coder", prompt="Write and finish.")
+        directory = await wait_child_dir(parent, job_id)
+        await wait_until(lambda: job_of(parent, job_id).status == "completed")
+        assert git(repo, "for-each-ref", "refs/lop/wip") == ""
+        assert not (directory / f"subagent-wip-{job_id}.v1.json").exists()
+        assert job_of(parent, job_id).wip_ref == ""
+        row = next(r for r in parent.subagent_comms.roster() if r.job_id == job_id)
+        assert row.wip_ref == "" and row.wip_files == 0 and row.wip_at == 0
+        result = await execute_hub("list", {"op": "list"}, None, None, ctx_for(parent))
+        assert "WIP:" not in body(result)
+    finally:
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["hang", "fail"])
+async def test_resume_first_request_carries_recovery_brief_and_prior_messages(iso, ending):
+    from local_operator.harness.types import Message
+
+    provider = WritingChild(ending)
+    parent, _ = make_git_parent(iso, provider)
+    await parent.async_init()
+    try:
+        job_id = parent._launch_subagent(label="coder", prompt="Write the files.")
+        directory = await wait_child_dir(parent, job_id)
+        await wait_until(lambda: bool(job_of(parent, job_id).last_step))
+        if ending == "hang":
+            await parent.subagent_comms.cancel(job_id)
+        await wait_until(lambda: job_of(parent, job_id).status in ("failed", "cancelled"))
+        await wait_until(lambda: parent.subagent_comms._record(job_id).child is None)
+        await Transcript(directory).append_custom("todo_snapshot", {"items": [
+            {"name": "Recovery", "items": [
+                {"text": "Keep prior work", "status": "done"},
+                {"text": "Commit saved changes", "status": "pending"},
+                {"text": "Wait for review", "status": "blocked"},
+            ]},
+        ]})
+        before = Transcript(directory).build_llm_history()
+        ref = job_of(parent, job_id).wip_ref
+        request_count = len(provider.requests)
+        provider.ending = "complete"
+        new_id, error = parent.subagent_comms.resume(job_id, "Continue and commit.")
+        assert error is None and new_id is not None
+        await wait_until(lambda: len(provider.requests) > request_count)
+        request = provider.requests[request_count]
+        texts = "\n".join(m.text for m in request.messages if isinstance(m, Message))
+        assert "[resume context — the previous attempt ended:" in texts
+        assert ("explicitly cancelled" if ending == "hang" else "provider failed") in texts
+        assert "host disappeared" not in texts
+        assert "Last completed step: bash: Writing recoverable child work" in texts
+        assert f"[WIP checkpoint: {ref}" in texts
+        assert "Commit saved changes" in texts and "Wait for review" in texts
+        assert "Keep prior work" not in texts
+        assert "restore with: git -C" in texts
+        await wait_until(lambda: job_of(parent, new_id).status == "completed")
+        after_ids = {m.id for m in Transcript(directory).build_llm_history()}
+        assert {m.id for m in before} <= after_ids
+    finally:
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+def test_sigkill_survives_with_wip_lane_step_and_never_settled(iso):
+    """SIGKILL cannot execute runner finally: receipts are the actual evidence."""
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    from tests.unit.harness.test_comms import FakeParent
+    from tests.unit.harness.test_wip_checkpoint import git, make_repo
+
+    repo = make_repo(iso / "repo")
+    script = r'''
+import asyncio, json, sys
+from pathlib import Path
+from tests.unit.harness.test_child_attribution import make_git_parent, WritingChild, MODEL
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+async def main():
+    root = Path(sys.argv[1])
+    parent = Session(model=MODEL, stream_fn=WritingChild(), tools=[],
+        transcript=Transcript(root / "parent"), cwd=str(root / "repo"),
+        system_blocks_provider=lambda: ["parent", "env"])
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="killed-coder", prompt="Write files then wait.")
+    while True:
+        directory = parent.subagent_comms.session_dir_of(job_id)
+        if directory is not None:
+            (root / "launch.json").write_text(json.dumps({"job_id": job_id, "session_dir": str(directory)}))
+            break
+        await asyncio.sleep(.05)
+    await asyncio.Event().wait()
+asyncio.run(main())
+'''
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+    env["LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S"] = "0.1"
+    with (iso / "child.log").open("w") as output:
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(iso)], cwd=repo, env=env,
+            stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 45
+            record = None
+            while time.monotonic() < deadline:
+                assert process.poll() is None, (iso / "child.log").read_text()
+                try:
+                    record = json.loads((iso / "launch.json").read_text())
+                    directory = Path(record["session_dir"])
+                    lanes = ledger.read_lane_receipts(directory)
+                    if lanes and lanes[0].get("last_step") and lanes[0].get("wip_ref"):
+                        break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(.05)
+            else:
+                pytest.fail("checkpoint/step never became durable: " + (iso / "child.log").read_text())
+            process.send_signal(signal.SIGKILL)
+            process.wait(timeout=10)
+            assert record is not None
+            lane = ledger.read_lane_receipts(directory)[0]
+            assert git(repo, "show", f"{lane['wip_ref']}:untracked") == "saved new"
+            evidence = ledger.reconcile_lane_evidence([record])
+            assert evidence[0].never_settled
+            assert evidence[0].last_step == "bash: Writing recoverable child work"
+            comms = SubagentComms(FakeParent())
+            comms.restore([{**record, "label": "killed-coder", "outcome": None}])
+            comms.apply_lane_evidence(evidence)
+            row = next(r for r in comms.roster() if r.job_id == record["job_id"])
+            assert row.death_cause == "child-never-settled"
+            assert row.last_step == lane["last_step"] and row.wip_ref == lane["wip_ref"]
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)

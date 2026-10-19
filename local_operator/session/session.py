@@ -19836,6 +19836,17 @@ class Session:
             if summary
             else f"background job '{label}' {status}{pin_clause}."
         )
+        # Background shell jobs register as "bash"; "task" is the child
+        # runner's actual job kind (there is no "subagent" JobType).
+        if status in ("failed", "cancelled") and getattr(job, "type", "") == "task":
+            from local_operator.incidents import render_child_death
+
+            cause = str(getattr(job, "death_cause", "") or getattr(job, "cut_off_cause", "") or "")
+            step = str(getattr(job, "last_step", "") or "not recorded")
+            delivery += " — " + render_child_death(cause, last_step=step)
+            ref = str(getattr(job, "wip_ref", "") or "")
+            if ref:
+                delivery += f"; WIP checkpoint: {ref} (resume with hub op='resume')"
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True

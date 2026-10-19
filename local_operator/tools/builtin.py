@@ -29248,6 +29248,14 @@ def _hub_roster_lines(rows: list[Any]) -> list[str]:
         # provider failure — the recorded cause reached no surface (design D4).
         # Rendered through the same ``render_cut_off_reason`` every other
         # surface uses, so the words cannot drift.
+        if row.last_step:
+            lines.append(f"    last completed step: {row.last_step}")
+        if row.wip_ref:
+            lines.append(f"    WIP: {row.wip_ref} ({row.wip_files} files, {subagent_ledger.format_duration(now - row.wip_at)})")
+        if row.death_cause:
+            from local_operator.incidents import render_child_death
+
+            lines.append(f"    {row.death_cause}: {render_child_death(row.death_cause)}")
         if row.cut_off_cause:
             # FUNCTION-LOCAL import: this module is a denied-module boundary and
             # must not import ``incidents`` at module scope (see the denied-module
