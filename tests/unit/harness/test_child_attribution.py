@@ -1067,10 +1067,15 @@ class WritingChild:
         self.requests.append(request)
         self.calls += 1
         if self.calls == 1:
-            return _tool_call("bash", {
-                "command": "printf 'saved tracked\\n' > tracked; printf 'saved new\\n' > untracked",
-                "i": "Writing recoverable child work",
-            })
+            return _tool_call(
+                "bash",
+                {
+                    "command": (
+                        "printf 'saved tracked\\n' > tracked; " "printf 'saved new\\n' > untracked"
+                    ),
+                    "i": "Writing recoverable child work",
+                },
+            )
         if self.ending == "complete":
             return _text("all work saved")
 
@@ -1089,9 +1094,12 @@ def make_git_parent(tmp_path: Path, provider: Any) -> tuple[Session, Path]:
 
     repo = make_repo(tmp_path / "repo")
     parent = Session(
-        model=MODEL, stream_fn=provider, tools=[],
+        model=MODEL,
+        stream_fn=provider,
+        tools=[],
         transcript=Transcript(tmp_path / "parent"),
-        system_blocks_provider=lambda: ["parent", "env"], cwd=str(repo),
+        system_blocks_provider=lambda: ["parent", "env"],
+        cwd=str(repo),
     )
     return parent, repo
 
@@ -1133,12 +1141,15 @@ async def test_real_child_keeps_wip_and_delivers_cause_step_and_ref(iso, ending)
         assert end.death_cause == cause
         # A new comms registry, no live job row: the durable carrier is not the
         # strict job-sidecar allowlist, and must survive retention/restart.
-        from tests.unit.harness.test_comms import FakeParent
-        restored = SubagentComms(FakeParent())
+        from tests.unit.harness.test_comms import FakeJobs, FakeParent
+
+        restored = SubagentComms(FakeParent(FakeJobs()))
         restored.restore(parent.subagent_comms.snapshot())
         row = next(r for r in restored.roster() if r.job_id == job_id)
         assert (row.death_cause, row.last_step, row.wip_ref) == (
-            cause, job.last_step, job.wip_ref,
+            cause,
+            job.last_step,
+            job.wip_ref,
         )
     finally:
         await asyncio.wait_for(parent.dispose(), timeout=30)
@@ -1181,13 +1192,21 @@ async def test_resume_first_request_carries_recovery_brief_and_prior_messages(is
             await parent.subagent_comms.cancel(job_id)
         await wait_until(lambda: job_of(parent, job_id).status in ("failed", "cancelled"))
         await wait_until(lambda: parent.subagent_comms._record(job_id).child is None)
-        await Transcript(directory).append_custom("todo_snapshot", {"items": [
-            {"name": "Recovery", "items": [
-                {"text": "Keep prior work", "status": "done"},
-                {"text": "Commit saved changes", "status": "pending"},
-                {"text": "Wait for review", "status": "blocked"},
-            ]},
-        ]})
+        await Transcript(directory).append_custom(
+            "todo_snapshot",
+            {
+                "items": [
+                    {
+                        "name": "Recovery",
+                        "items": [
+                            {"text": "Keep prior work", "status": "done"},
+                            {"text": "Commit saved changes", "status": "pending"},
+                            {"text": "Wait for review", "status": "blocked"},
+                        ],
+                    },
+                ]
+            },
+        )
         before = Transcript(directory).build_llm_history()
         ref = job_of(parent, job_id).wip_ref
         request_count = len(provider.requests)
@@ -1219,11 +1238,11 @@ def test_sigkill_survives_with_wip_lane_step_and_never_settled(iso):
     import subprocess
     import sys
 
-    from tests.unit.harness.test_comms import FakeParent
+    from tests.unit.harness.test_comms import FakeJobs, FakeParent
     from tests.unit.harness.test_wip_checkpoint import git, make_repo
 
     repo = make_repo(iso / "repo")
-    script = r'''
+    script = r"""
 import asyncio, json, sys
 from pathlib import Path
 from tests.unit.harness.test_child_attribution import make_git_parent, WritingChild, MODEL
@@ -1239,19 +1258,24 @@ async def main():
     while True:
         directory = parent.subagent_comms.session_dir_of(job_id)
         if directory is not None:
-            (root / "launch.json").write_text(json.dumps({"job_id": job_id, "session_dir": str(directory)}))
+            launch = {"job_id": job_id, "session_dir": str(directory)}
+            (root / "launch.json").write_text(json.dumps(launch))
             break
         await asyncio.sleep(.05)
     await asyncio.Event().wait()
 asyncio.run(main())
-'''
+"""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
     env["LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S"] = "0.1"
     with (iso / "child.log").open("w") as output:
         process = subprocess.Popen(
-            [sys.executable, "-c", script, str(iso)], cwd=repo, env=env,
-            stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+            [sys.executable, "-c", script, str(iso)],
+            cwd=repo,
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
         try:
             deadline = time.monotonic() + 45
@@ -1266,9 +1290,11 @@ asyncio.run(main())
                         break
                 except (OSError, ValueError):
                     pass
-                time.sleep(.05)
+                time.sleep(0.05)
             else:
-                pytest.fail("checkpoint/step never became durable: " + (iso / "child.log").read_text())
+                pytest.fail(
+                    "checkpoint/step never became durable: " + (iso / "child.log").read_text()
+                )
             process.send_signal(signal.SIGKILL)
             process.wait(timeout=10)
             assert record is not None
@@ -1277,7 +1303,7 @@ asyncio.run(main())
             evidence = ledger.reconcile_lane_evidence([record])
             assert evidence[0].never_settled
             assert evidence[0].last_step == "bash: Writing recoverable child work"
-            comms = SubagentComms(FakeParent())
+            comms = SubagentComms(FakeParent(FakeJobs()))
             comms.restore([{**record, "label": "killed-coder", "outcome": None}])
             comms.apply_lane_evidence(evidence)
             row = next(r for r in comms.roster() if r.job_id == record["job_id"])

@@ -7,6 +7,7 @@ to the child (Git cannot reliably attribute concurrent writes). Recovery is
 explicit: inspect the checkpoint before applying ``restore_hint()``. No recovery
 command is executed automatically. Only stdlib/subprocess imports belong here.
 """
+
 from __future__ import annotations
 
 import json
@@ -41,8 +42,14 @@ class WipCheckpointer:
     objects alive across process death and garbage collection.
     """
 
-    def __init__(self, cwd: str | Path, child_dir: str | Path, job_id: str,
-                 label: str, interval_s: float = 30.0) -> None:
+    def __init__(
+        self,
+        cwd: str | Path,
+        child_dir: str | Path,
+        job_id: str,
+        label: str,
+        interval_s: float = 30.0,
+    ) -> None:
         self.cwd = Path(cwd)
         self.child_dir = Path(child_dir)
         self.job_id = job_id
@@ -72,20 +79,35 @@ class WipCheckpointer:
     def _environment() -> dict[str, str]:
         # Routing inherited from a launching Git process must not redirect the
         # snapshot to another repository or to somebody else's alternate index.
-        return {key: value for key, value in os.environ.items()
-                if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}}
+        return {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}
+        }
 
     def _git(self, *args: str, env: dict[str, str] | None = None) -> str:
         return subprocess.run(
             ["git", "-C", str(self.root or self.cwd), *args],
             env=env if env is not None else self._environment(),
-            check=True, capture_output=True, text=True, timeout=15,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
         ).stdout.strip()
 
     def _write(self) -> None:
-        payload = {"version": 1, "artifact": "subagent-wip", "job_id": self.job_id,
-                   "label": self.label, "ref": self.ref, "root": str(self.root or self.cwd), "child_session_id": self.child_session_id,
-                   **self.result, "step": self.step, "last_step_at": self.step_at}
+        payload = {
+            "version": 1,
+            "artifact": "subagent-wip",
+            "job_id": self.job_id,
+            "label": self.label,
+            "ref": self.ref,
+            "root": str(self.root or self.cwd),
+            "child_session_id": self.child_session_id,
+            **self.result,
+            "step": self.step,
+            "last_step_at": self.step_at,
+        }
         fd, name = tempfile.mkstemp(dir=self.child_dir, prefix=f".{self.path.name}.")
         try:
             with os.fdopen(fd, "w") as handle:
@@ -103,7 +125,11 @@ class WipCheckpointer:
         Force bypasses only the time debounce. Comparing tree identities avoids
         empty commits even when the worktree remains dirty relative to HEAD.
         """
-        if not force and time.monotonic() - self.last_snapshot < self.interval_s:
+        if (
+            not force
+            and self.last_snapshot
+            and time.monotonic() - self.last_snapshot < self.interval_s
+        ):
             return self.result
         self.last_snapshot = time.monotonic()
         index = ""
@@ -135,14 +161,29 @@ class WipCheckpointer:
                 return self.result
             self.number += 1
             parents = ["-p", head] if head else []
-            commit = self._git("commit-tree", tree, *parents, "-m",
-                               f"wip(subagent): {self.label} {self.job_id} checkpoint {self.number}",
-                               env=env)
+            commit = self._git(
+                "commit-tree",
+                tree,
+                *parents,
+                "-m",
+                f"wip(subagent): {self.label} {self.job_id} checkpoint {self.number}",
+                env=env,
+            )
             self._git("update-ref", self.ref, commit)
-            files = self._git("diff-tree", "--no-commit-id", "--name-only", "-r",
-                              *( [head, commit] if head else ["--root", commit]))
-            self.result = {"commit": commit, "tree": tree, "head": head,
-                           "files": files.splitlines(), "at": time.time()}
+            files = self._git(
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                *([head, commit] if head else ["--root", commit]),
+            )
+            self.result = {
+                "commit": commit,
+                "tree": tree,
+                "head": head,
+                "files": files.splitlines(),
+                "at": time.time(),
+            }
             self._write()
         except Exception as exc:  # Checkpointing must never end a child run.
             logger.warning("WIP checkpoint skipped: %s", exc)

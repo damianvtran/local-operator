@@ -17,8 +17,11 @@ def git(repo: Path, *args: str) -> str:
     env = os.environ.copy()
     env.update(GIT_CONFIG_SYSTEM=os.devnull, GIT_TERMINAL_PROMPT="0")
     return subprocess.run(
-        ["git", "-C", str(repo), *args], env=env, check=True,
-        capture_output=True, text=True,
+        ["git", "-C", str(repo), *args],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 

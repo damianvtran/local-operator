@@ -225,7 +225,10 @@ def build_lane_payload(
         "bound_s": lane_bound_s(),
         "bound_source": lane_bound_source(),
         "written_at": time.time(),
-        "last_step": "", "last_step_at": None, "wip_ref": "", "state": "running",
+        "last_step": "",
+        "last_step_at": None,
+        "wip_ref": "",
+        "state": "running",
     }
 
 
@@ -253,11 +256,14 @@ def note_lane_step(child_dir: Path, job_id: str, step: str, at: float, wip_ref: 
         # A new recovery ref must be durable with its step even inside the
         # throttle window; ordinary high-frequency tool completions may lag.
         now = time.time()
-        if (now - float(payload.get("step_written_at") or 0) < 5
-                and payload.get("wip_ref", "") == wip_ref):
+        if (
+            now - float(payload.get("step_written_at") or 0) < 5
+            and payload.get("wip_ref", "") == wip_ref
+        ):
             return
-        payload.update(last_step=step, last_step_at=at, wip_ref=wip_ref,
-                       state="running", step_written_at=now)
+        payload.update(
+            last_step=step, last_step_at=at, wip_ref=wip_ref, state="running", step_written_at=now
+        )
         _staged_write(target, payload)
     except (OSError, ValueError, TypeError):
         pass  # Evidence failure must not fail a running child.
@@ -453,9 +459,12 @@ def reconcile_lane_evidence(
                 wip = {}
         except (OSError, ValueError):
             wip = {}
-        recovery = dict(last_step=str(lane.get("last_step") or wip.get("step") or ""),
-                        wip_ref=str(lane.get("wip_ref") or (wip.get("ref") if wip.get("commit") else "") or ""),
-                        wip_files=len(wip.get("files") or []), wip_at=float(wip.get("at") or 0))
+        recovery = dict(
+            last_step=str(lane.get("last_step") or wip.get("step") or ""),
+            wip_ref=str(lane.get("wip_ref") or (wip.get("ref") if wip.get("commit") else "") or ""),
+            wip_files=len(wip.get("files") or []),
+            wip_at=float(wip.get("at") or 0),
+        )
         outcome = record.get("outcome")
         if stops:
             # Newest stop wins: a resume mints a new job id, but a record folded
@@ -467,14 +476,24 @@ def reconcile_lane_evidence(
                     ended_by=str(latest.get("actor") or ""),
                     cancel_reason=str(latest.get("reason") or ""),
                     **recovery,
-                    death_cause=("child-paused" if latest.get("mechanism") == "pause" else
-                                 "child-parent-gone" if latest.get("actor") == "parent-teardown" else "child-cancelled"),
+                    death_cause=(
+                        "child-paused"
+                        if latest.get("mechanism") == "pause"
+                        else (
+                            "child-parent-gone"
+                            if latest.get("actor") == "parent-teardown"
+                            else "child-cancelled"
+                        )
+                    ),
                 )
             )
             continue
         if outcome is None and lanes:
-            out.append(LaneEvidence(job_id=job_id, never_settled=True, **recovery,
-                                    death_cause="child-never-settled"))
+            out.append(
+                LaneEvidence(
+                    job_id=job_id, never_settled=True, **recovery, death_cause="child-never-settled"
+                )
+            )
     return out
 
 
