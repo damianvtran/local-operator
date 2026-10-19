@@ -48,6 +48,9 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 # behind them, which is precisely what made this module unreachable from an
 # episode (see the module docstring). Import nothing heavy into that module.
 from local_operator.harness.message_types import (
+    ASK_RELAY_MESSAGE_TYPE as ASK_RELAY_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE as ASK_RESPONSE_CUSTOM_TYPE,
 )
 from local_operator.harness.message_types import (
@@ -364,6 +367,11 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             PEER_MESSAGE_MESSAGE_TYPE,
             TEAM_BRIDGE_MESSAGE_TYPE,
             MONITOR_PROMPT_MESSAGE_TYPE,
+            # A RELAY'S SETTLE NOTE (#2520) rides the same "the sender formatted
+            # ``details['text']``" shape: the watcher's model must learn in one
+            # line how the ask it pointed at ended, and an unlisted type is
+            # dropped as bookkeeping — the exact trap this tuple documents.
+            ASK_RELAY_CUSTOM_TYPE,
         ):
             # A monitor delivery (a delta, or a lifecycle notice — disabled,
             # stalled, restored) is the same shape: ``Session._deliver_monitor``
