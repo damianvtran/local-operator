@@ -66,6 +66,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -76,10 +77,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
 
 router = APIRouter(tags=["Desktop agent messages"], dependencies=[Depends(require_desktop)])
 
-#: The server mints conversation ids as ``bcv_`` + hex; validating the grammar
-#: BEFORE interpolating an id into an upstream path is the pair lane's rule
-#: (review S-RSA-5) and applies unchanged here.
-_CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
+#: The shared minted grammar (``team_bridge.types.CONVERSATION_ID_PATTERN``):
+#: validating it BEFORE interpolating an id into an upstream path is the pair
+#: lane's rule (review S-RSA-5) and applies unchanged here. Imported rather
+#: than respelled so the agent tool and this route cannot drift apart.
+_CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: The conversation domain's other two interpolated path/query values. Both are
 #: opaque server-minted strings; this route family only has to prove they
 #: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
