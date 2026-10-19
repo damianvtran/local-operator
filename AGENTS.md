@@ -1495,6 +1495,59 @@ gh pr create --draft --base main --head release-next \
 Window (tick as each merges; internal ownership record):
 - [ ] #<n> — <Release: line>
 
+### A green run is a function of the tree it was computed against
+
+**The tag target is the MERGE SHA of the bump PR, after the bump branch has
+been re-verified against current `main` — never the branch's original head.**
+`gh release create vX.Y.Z --target "$MERGE_SHA"`, then confirm the tag with
+`git rev-parse "vX.Y.Z^{commit}"` printing that same SHA. The tag names a SHA
+and everything reachable from it ships, so the SHA is the release.
+
+**And a green run is a function of the tree it was computed against.** A
+verdict from an earlier head is not evidence about a later one, even when the
+later head differs only in a file the verdict never read. So the pre-tag
+proofs are re-run **at the final bump head, after the re-verification** — not
+reused from an earlier head of the same branch. Two different trees, two
+different proofs, and neither is reusable from the other.
+
+**The same rule governs a merge that is waiting on CI.** The authorisation to
+merge is a green run **on the head that will be merged**, and the procedure
+that gets there has two stages, because they are different things:
+
+1. **A hint tells you WHEN TO LOOK.** It is cheap, it is a proxy, and it is
+   never sufficient. A row count that reached zero, a file that appeared, a
+   branch tip that moved — each says "look now", and each can be satisfied
+   while the gate still fails. A hint that is satisfied by a partial state
+   fires exactly when you must NOT act.
+2. **The gate tells you WHEN YOU MAY ACT.** That is the gate's own verdict,
+   computed against the tree that will be merged. For a CI-capacity change
+   it is: the specific job that owns the assertion, green, on the rebased
+   head — not on the head it was green on before.
+
+**Never a proxy where a gate is available.** A merge authorised by a proxy
+rather than by the gate is a merge nobody checked. When the hint fires, merge
+the new base in, prove the reviewed commits survived it unchanged (a
+`git range-diff` over the reviewed range, so the evidence transfers on a
+diff rather than on a promise), and then wait for the gate on that head.
+
+**And name the slow gate, because the fast gate is not the slow gate.** A
+fast job that passes does not imply the slow assertion passes: they can
+disagree about the same debt, and in this repository they do — the fast
+`i18n` job runs `scripts/i18n/check.py`, which validates only the catalogues
+that are PRESENT and demands full key parity for each one, while
+`tests/unit/i18n/test_language_manifest.py` compares key-by-key and treats an
+absent namespace as all-missing. A namespace translated partially therefore
+satisfies the slow gate and fails the fast one with more findings than the
+debt it started from. **So the slow gate is the one that carries the
+assertion, and it is the one that has to be named in the authorisation.** A
+green fast job is evidence of consistency, not of correctness.
+
+**Read the mechanism before you write the trigger.** A trigger written from
+the shape of a fix you assumed is a trigger that waits on a signal which
+cannot arrive, or fires on a state that is worse than the problem. Read the
+code that implements the fix, then write the trigger against what that code
+actually does.
+
 ## Public release notes
 Draft — contents not yet determined.
 Replace using .github/RELEASE_NOTES_TEMPLATE.md before ready/tagging.'
