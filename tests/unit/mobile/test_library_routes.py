@@ -22,8 +22,8 @@ import pytest
 from starlette.testclient import TestClient
 
 from local_operator.library import identity
-from local_operator.library.index import Asset, Catalog, Occurrence
 from local_operator.library import index as library_index
+from local_operator.library.index import Asset, Catalog, Occurrence
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
 
@@ -153,7 +153,10 @@ def test_library_routes_require_authentication(library: dict[str, Any]) -> None:
     assert client.get(f"/api/library/assets/{library['image'].id}").status_code == 401
     assert client.get(f"/api/library/assets/{library['image'].id}/content").status_code == 401
     assert client.post("/api/library/tags", json={"name": "x"}).status_code == 401
-    assert client.patch(f"/api/library/assets/{library['image'].id}", json={"name": "x"}).status_code == 401
+    assert (
+        client.patch(f"/api/library/assets/{library['image'].id}", json={"name": "x"}).status_code
+        == 401
+    )
 
 
 def test_capability_is_advertised(library: dict[str, Any]) -> None:
@@ -204,7 +207,9 @@ def test_cursor_paging_round_trip(library: dict[str, Any]) -> None:
     client = _client()
     first = client.get("/api/library/assets?limit=1&sort=name").json()
     assert len(first["rows"]) == 1 and first["next_cursor"]
-    second = client.get(f"/api/library/assets?limit=1&sort=name&cursor={first['next_cursor']}").json()
+    second = client.get(
+        f"/api/library/assets?limit=1&sort=name&cursor={first['next_cursor']}"
+    ).json()
     assert len(second["rows"]) == 1
     assert second["rows"][0]["id"] != first["rows"][0]["id"]
 
@@ -278,7 +283,9 @@ def test_tag_lifecycle_and_assignment(library: dict[str, Any]) -> None:
 def test_chat_link_requires_a_real_session(library: dict[str, Any]) -> None:
     client = _client()
     asset_id = library["image"].id
-    refused = client.put(f"/api/library/assets/{asset_id}/chat", json={"session_id": "not-a-session"})
+    refused = client.put(
+        f"/api/library/assets/{asset_id}/chat", json={"session_id": "not-a-session"}
+    )
     assert refused.status_code == 422
     assert refused.json()["code"] == "bad_session_id"
 
@@ -341,7 +348,9 @@ def test_thumb_and_non_image_refusal(library: dict[str, Any]) -> None:
     refused = client.get(f"/api/library/assets/{library['markdown'].id}/thumbnail")
     assert refused.status_code == 404
     assert refused.json()["code"] == "not_an_image"
-    assert client.get(f"/api/library/assets/{library['image'].id}/thumbnail?w=nope").status_code == 400
+    assert (
+        client.get(f"/api/library/assets/{library['image'].id}/thumbnail?w=nope").status_code == 400
+    )
 
 
 def test_a_missing_file_reports_content_missing(

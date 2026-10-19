@@ -33,12 +33,12 @@ from typing import Any, Final
 from local_operator.library import classify, identity
 from local_operator.library import index as library_index
 from local_operator.library import service as library_service
-from local_operator.session_files.scan import ORIGINS
 from local_operator.library.metadata import (
     MetadataStore,
     MetadataUnavailable,
     TagRefused,
 )
+from local_operator.session_files.scan import ORIGINS
 
 #: Filter vocabularies the service owns. Imported rather than restated so a new
 #: kind/category/sort cannot be accepted here and refused there (or vice versa).
@@ -132,9 +132,7 @@ def _query(params: dict[str, str]) -> library_service.Query:
         raise library_service.InvalidFilter("session")
     # Session ids have no frozen vocabulary (any 12-hex id can be filtered on),
     # so only the shape is validated below.
-    session_ids = library_service.parse_csv(
-        params.get("sessions") or params.get("session_ids")
-    )
+    session_ids = library_service.parse_csv(params.get("sessions") or params.get("session_ids"))
     for session_id in session_ids:
         if not library_service.SESSION_ID_SHAPE.match(session_id):
             raise library_service.InvalidFilter("sessions")
@@ -167,9 +165,7 @@ def _query(params: dict[str, str]) -> library_service.Query:
 def list_payload(config_dir: str | Path, params: dict[str, str]) -> dict[str, Any]:
     """One list frame: rows, cursor, counts and the tag vocabulary."""
     try:
-        return library_service.list_assets(
-            config_dir, _query(params), display=True
-        )
+        return library_service.list_assets(config_dir, _query(params), display=True)
     except library_service.InvalidCursor as error:
         raise LibraryRouteError(422, "library_invalid_cursor", str(error)) from error
     except library_service.InvalidFilter as error:
@@ -205,9 +201,7 @@ def detail_payload(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
         raise _unavailable(error) from error
 
 
-def patch_payload(
-    config_dir: str | Path, asset_id: str, body: dict[str, Any]
-) -> dict[str, Any]:
+def patch_payload(config_dir: str | Path, asset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """Editable metadata only. Unknown keys are ignored by the service, so a
     newer desktop client's additive field is not fatal to an older relay."""
     try:
@@ -247,9 +241,7 @@ def create_tag_payload(config_dir: str | Path, body: dict[str, Any]) -> dict[str
         raise _unavailable(error) from error
 
 
-def rename_tag_payload(
-    config_dir: str | Path, tag_id: str, body: dict[str, Any]
-) -> dict[str, Any]:
+def rename_tag_payload(config_dir: str | Path, tag_id: str, body: dict[str, Any]) -> dict[str, Any]:
     name = body.get("name")
     if not isinstance(name, str) or not name.strip():
         raise LibraryRouteError(422, "bad_name")
@@ -261,9 +253,7 @@ def rename_tag_payload(
         raise _unavailable(error) from error
 
 
-def merge_tag_payload(
-    config_dir: str | Path, tag_id: str, body: dict[str, Any]
-) -> dict[str, Any]:
+def merge_tag_payload(config_dir: str | Path, tag_id: str, body: dict[str, Any]) -> dict[str, Any]:
     into = body.get("into")
     if not isinstance(into, str) or not into:
         raise LibraryRouteError(422, "bad_target")
@@ -275,9 +265,7 @@ def merge_tag_payload(
         raise _unavailable(error) from error
 
 
-def set_tags_payload(
-    config_dir: str | Path, asset_id: str, body: dict[str, Any]
-) -> dict[str, Any]:
+def set_tags_payload(config_dir: str | Path, asset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     # The desktop write model's body: ``{tags: [...], primary?}``. Kept in
     # lockstep with ``LibraryTagsWrite`` so one request body edits tags on every
     # surface.
@@ -296,9 +284,7 @@ def set_tags_payload(
         # the refreshed ROW, the same shape the desktop route serves: the app's
         # schema reads ``libraryAsset`` from this response, and a tag envelope
         # would make it re-read for values this call already has.
-        library_service.set_tags(
-            config_dir, asset_id, raw, primary=primary, actor="user"
-        )
+        library_service.set_tags(config_dir, asset_id, raw, primary=primary, actor="user")
         # Same re-projection as PATCH: the write returns the desktop row.
         return library_service.get_asset(config_dir, asset_id, display=True)
     except library_service.AssetNotFound as error:
@@ -345,9 +331,7 @@ def content_ref(config_dir: str | Path, asset_id: str) -> library_service.Conten
         raise LibraryRouteError(404, error.code) from error
 
 
-def thumb_ref(
-    config_dir: str | Path, asset_id: str, width: int
-) -> library_service.ContentRef:
+def thumb_ref(config_dir: str | Path, asset_id: str, width: int) -> library_service.ContentRef:
     try:
         return library_service.thumbnail(config_dir, asset_id, width)
     except library_service.AssetNotFound as error:
