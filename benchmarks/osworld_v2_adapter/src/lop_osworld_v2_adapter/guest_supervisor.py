@@ -11,9 +11,19 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, Sequence
 
 from lop_osworld_v2_adapter import guest_disk
+
+
+@dataclass(frozen=True)
+class ReceiptResult:
+    """Only a complete verified read may authorize input on an existing binding."""
+
+    state: Literal["new_restart", "verified_none", "read_failed"]
+    recovery_exhausted: bool = False
+
 
 # ExecStopPost gets the old process's wait status BEFORE Restart replaces it.
 # Keep only four bounded records, including the terminal crash-loop failure.
@@ -22,21 +32,33 @@ import json, os, pathlib, subprocess, sys, time
 unit = sys.argv[1]
 root = pathlib.Path('/var/lib/lop-action-supervisor')
 path = root / (unit + '.json')
-p = subprocess.run(['journalctl', '--no-pager', '-o', 'cat', '-n', '30', '-u', unit],
-    capture_output=True, text=True, timeout=2)
 record = {'restart': time.time_ns(), 'unit': unit,
           'exit_code': os.environ.get('EXIT_CODE', 'unknown'),
           'exit_status': os.environ.get('EXIT_STATUS', 'unknown'),
           'service_result': os.environ.get('SERVICE_RESULT', 'unknown'),
-          'stderr_tail': p.stdout[-4096:]}
+          'stderr_tail': '', 'journal_tail_status': 'pending'}
 try:
-    records = json.loads(path.read_text())
-except (OSError, ValueError):
+    records = json.loads(path.read_text())['records']
+except (OSError, ValueError, KeyError, TypeError):
+    records = []
+if not isinstance(records, list):
     records = []
 records = (records + [record])[-4:]
-tmp = path.with_suffix('.tmp')
-tmp.write_text(json.dumps(records))
-tmp.replace(path)
+def persist():
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'schema_version': 1, 'records': records}))
+    tmp.replace(path)
+# The exit status is authoritative and cheap; persist it BEFORE asking a
+# potentially overloaded journal. Even a timed-out journal must not hide death.
+persist()
+try:
+    p = subprocess.run(['journalctl', '--no-pager', '-o', 'cat', '-n', '30', '-u', unit],
+        capture_output=True, text=True, timeout=2, check=True)
+    record['stderr_tail'] = p.stdout[-4096:]
+    record['journal_tail_status'] = 'ok'
+except Exception:
+    record['journal_tail_status'] = 'unavailable'
+persist()
 """
 
 # Only the action server's private service is eligible. A shared user/session
@@ -68,13 +90,18 @@ if not re.fullmatch(r'[A-Za-z0-9_.-]+\.service', unit):
     raise RuntimeError('unsupported service name')
 props = dict(line.split('=', 1) for line in run('systemctl', 'show', unit,
     '-p', 'MainPID', '-p', 'ExecStart', '-p', 'ExecStartPre', '-p', 'ExecStartPost',
-    '-p', 'ExecStop', '-p', 'ExecStopPost', '-p', 'StandardError', '-p', 'StandardOutput'
+    '-p', 'ExecStop', '-p', 'ExecStopPost', '-p', 'StandardError', '-p', 'StandardOutput',
+    '-p', 'Type', '-p', 'LoadState'
     ).splitlines())
 if props.get('MainPID') != str(pid) or 'main.py' not in props.get('ExecStart', ''):
     raise RuntimeError('service does not exclusively own action server')
 if props.get('StandardError') != 'journal' and not (
         props.get('StandardError') == 'inherit' and props.get('StandardOutput') == 'journal'):
     raise RuntimeError('existing server stderr is not journalled')
+if props.get('Type') == 'oneshot':
+    raise RuntimeError('oneshot action-server service cannot be supervised')
+if props.get('LoadState') != 'loaded':
+    raise RuntimeError('action-server service is not loaded')
 root = pathlib.Path('/var/lib/lop-action-supervisor')
 capture = root / 'capture.py'
 path = pathlib.Path('/etc/systemd/system') / (unit + '.d') / '90-lop-supervisor.conf'
@@ -86,7 +113,8 @@ hook = '+/usr/bin/python3 ' + str(capture) + ' ' + unit
 content = ('[Unit]\nStartLimitIntervalSec=3600\nStartLimitBurst=3\n'
            '[Service]\nRestart=always\nRestartSec=1\nKillMode=process\n'
            'ExecStopPost=' + hook + '\n')
-if path.exists():
+created = not path.exists()
+if not created:
     if path.read_text() != content or capture.read_text() != sys.argv[1]:
         raise RuntimeError('supervisor installation conflict')
 else:
@@ -99,12 +127,45 @@ else:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x') as out:
         out.write(content)
-    try:
+# An initialized empty envelope is distinct from a missing/corrupt receipt.
+# Never let a failed read become evidence that no restart happened.
+receipt = root / (unit + '.json')
+try:
+    if not receipt.exists():
+        with receipt.open('x') as out:
+            json.dump({'schema_version': 1, 'records': []}, out)
+    if created:
         run('systemctl', 'daemon-reload')
-    except Exception:
+    effective = dict(line.split('=', 1) for line in run('systemctl', 'show', unit,
+        '-p', 'Type', '-p', 'LoadState', '-p', 'Restart', '-p', 'KillMode',
+        '-p', 'ExecStopPost', '-p', 'ProtectSystem', '-p', 'ReadOnlyPaths',
+        '-p', 'InaccessiblePaths', '-p', 'RootDirectory', '-p', 'RootImage',
+        '-p', 'StartLimitBurst', '-p', 'StartLimitIntervalUSec', '-p', 'RestartUSec'
+        ).splitlines())
+    if effective.get('Type') == 'oneshot':
+        raise RuntimeError('oneshot action-server service cannot be supervised')
+    if effective.get('LoadState') != 'loaded':
+        raise RuntimeError('action-server service is not loaded')
+    if effective.get('Restart') != 'always':
+        raise RuntimeError('effective Restart is not always')
+    if (effective.get('KillMode') != 'process' or
+            effective.get('StartLimitBurst') != '3' or
+            effective.get('StartLimitIntervalUSec') != '1h' or
+            effective.get('RestartUSec') != '1s'):
+        raise RuntimeError('effective supervisor restart policy was overridden')
+    if str(capture) + ' ' + unit not in effective.get('ExecStopPost', ''):
+        raise RuntimeError('effective supervisor capture hook is missing')
+    if (effective.get('ProtectSystem', 'no') not in ('no', 'false') or
+            any(effective.get(k) for k in ('ReadOnlyPaths', 'InaccessiblePaths',
+                                          'RootDirectory', 'RootImage'))):
+        raise RuntimeError('service sandbox may block supervisor capture')
+except Exception:
+    # Roll back only the drop-in this attempt created, never a pre-existing
+    # installation. Re-entry MUST verify effective config, not trust bytes.
+    if created:
         path.unlink()
         run('systemctl', 'daemon-reload')
-        raise
+    raise
 print(json.dumps({'unit': unit, 'installed': True}))
 """
 
@@ -142,6 +203,28 @@ def report_command(unit: str, password: str) -> Sequence[str]:
 def parse_output(output: str) -> object:
     # The escalation ladder prints one metadata line before the command output.
     return json.loads(output.split("\n", 1)[1])
+
+
+def receipt_records(output: str) -> list[dict[str, Any]]:
+    """An empty initialized envelope proves absence; empty/malformed output does not."""
+    value = parse_output(output)
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("invalid supervisor receipt")
+    records = value.get("records")
+    if not isinstance(records, list):
+        raise ValueError("invalid supervisor records")
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or type(record.get("restart")) is not int
+            or record["restart"] <= 0
+            or any(
+                not isinstance(record.get(key), str)
+                for key in ("exit_code", "exit_status", "service_result", "stderr_tail")
+            )
+        ):
+            raise ValueError("invalid supervisor record")
+    return records
 
 
 def installed_unit(output: str) -> str:

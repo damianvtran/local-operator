@@ -28,7 +28,10 @@ uses the existing `/execute` endpoint to configure the action server's existing
 private systemd service. Installation does not restart or signal a healthy
 server. Discovery follows only the command's `/proc` ancestry and cgroup;
 MainPID must be the server itself, stderr must already go to the journal, and
-services with desktop-affecting start/stop hooks are refused. Shell/session-scope
+services with desktop-affecting start/stop hooks are refused. The effective
+systemd configuration is verified after reload and on idempotent re-entry:
+oneshot/unloaded units, an overridden restart policy or capture hook, and
+service sandboxes that could prevent diagnostic writes are refused. Shell/session-scope
 launches and unsupported guests remain unchanged. No SSH, SSM or new credentials
 are used; privilege escalation is the existing guest-preparation ladder.
 
@@ -45,11 +48,18 @@ prevents service restarts from killing desktop applications descended from old
 server requests. A fixed root-owned `ExecStopPost` helper retains the previous
 process's `EXIT_CODE`, `EXIT_STATUS` (including signal names), `SERVICE_RESULT`
 and a bounded journal tail in `/var/lib/lop-action-supervisor/<unit>.json`.
-Only four records and 4096 tail characters per record are retained. This helper
+The exit fields are written before querying the journal; a journal failure retains
+them and marks `journal_tail_status: unavailable`. The file is an initialized
+`schema_version: 1` envelope containing `records`, so a verified empty history is
+distinct from a missing, malformed or unreadable receipt. Only four records and 4096 tail characters per record are retained. This helper
 writes harness diagnostics only; it does not touch desktop or task paths.
 
 Before each action and observation the adapter checks for a new restart receipt.
-A recovered action batch is **not replayed**: its remaining input is skipped and
+A failed receipt read is retried once; if still unavailable, remaining input is
+skipped and a fresh observation is required, just as for a restart. Evidence
+marks `receipt_unavailable` and `read_failed`; failed reads never authorize input
+on the old binding. Secret-withheld record payloads are marked `records_withheld`,
+not silently represented as clean empty histories. A recovered action batch is **not replayed**: its remaining input is skipped and
 the adapter returns a newly read observation, establishing a fresh binding before
 more input can be accepted. Ambiguous failed input stays explicitly ambiguous in
 `guest-supervisor-recovery.json`; recovery does not claim it was unapplied.

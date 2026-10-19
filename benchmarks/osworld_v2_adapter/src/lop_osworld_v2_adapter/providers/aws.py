@@ -873,63 +873,92 @@ class AwsProvider:
         except Exception:
             logger.warning("guest supervisor evidence unavailable")
 
-    def _recover_guest_supervisor(self, delivery: str = "pre_action") -> bool | None:
-        """Wait for the local manager, never start/restart anything over HTTP.
+    def _recover_guest_supervisor(
+        self, delivery: str = "pre_action"
+    ) -> guest_supervisor.ReceiptResult:
+        """Only a verified receipt may authorize input on an existing binding.
 
-        A bounded wait cannot convert an ambiguous delivery into a replay.
-        The record retains that ambiguity. On recovery the adapter
-        discards the remainder of this batch and rebinds from a fresh frame.
+        A failed read is not evidence of no restart. Retry it once, then record
+        the uncertainty and force the same fresh-frame boundary as a restart.
+        Unreachable-server exhaustion remains distinct from receipt uncertainty.
         """
         if self._supervisor_unit is None:
-            return None
+            return guest_supervisor.ReceiptResult("verified_none")
         for _ in range(6):
             if self._probe_control_server(0.5):
-                try:
-                    result = self._run_guest_command(
-                        guest_supervisor.report_command(
-                            self._supervisor_unit, self._supervisor_password
-                        ),
-                        timeout=5.0,
-                    )
-                    if result.returncode != 0:
-                        return None
-                    records = guest_supervisor.parse_output(result.stdout)
-                    if not isinstance(records, list) or not records:
-                        return None
-                    restart = records[-1].get("restart")
-                    if not isinstance(restart, int) or restart == self._supervisor_restart:
-                        return None
-                    self._supervisor_restart = restart
-                    # Use the console evidence's fail-closed secret treatment;
-                    # stderr can contain arbitrary guest/application output.
-                    safe = guest_loss._scrub(json.dumps(records), self._known_secret_values)
-                    if safe is None:
-                        safe = "[]"
-                    self._supervisor_records = json.loads(safe)
-                    self._write_supervisor_evidence(
-                        "guest-supervisor-recovery.json",
-                        {
-                            "recovered": True,
-                            "failed_action_delivery": delivery,
-                            "remaining_batch": "not_sent",
-                            "records": self._supervisor_records,
-                        },
-                    )
-                    return True
-                except Exception:
-                    return None
+                break
             self._sleep(0.5)
+        else:
+            self._write_supervisor_evidence(
+                "guest-supervisor-recovery.json",
+                {
+                    "recovered": False,
+                    "read_failed": True,
+                    "receipt_unavailable": True,
+                    "records_withheld": False,
+                    "cause": "supervisor recovery budget exhausted; server unreachable",
+                    "records": self._supervisor_records,
+                    "final_guest_record": "not retrieved: action-server transport unavailable",
+                    "guest_record_path": (
+                        f"/var/lib/lop-action-supervisor/{self._supervisor_unit}.json"
+                    ),
+                },
+            )
+            return guest_supervisor.ReceiptResult("read_failed", recovery_exhausted=True)
+
+        for attempt in range(2):
+            try:
+                result = self._run_guest_command(
+                    guest_supervisor.report_command(
+                        self._supervisor_unit, self._supervisor_password
+                    ),
+                    timeout=5.0,
+                )
+                if result.returncode != 0:
+                    raise ValueError("receipt command failed")
+                records = guest_supervisor.receipt_records(result.stdout)
+                if not records or records[-1]["restart"] == self._supervisor_restart:
+                    return guest_supervisor.ReceiptResult("verified_none")
+                restart = records[-1]["restart"]
+                # Keep the console evidence's fail-closed treatment. A withheld
+                # stderr payload is explicitly marked, never a silent clean [].
+                safe = guest_loss._scrub(json.dumps(records), self._known_secret_values)
+                self._supervisor_records = json.loads(safe) if safe is not None else []
+                # Commit the seen generation only after receipt processing has
+                # completed. Otherwise a scrub/parse error could make the retry
+                # mistake this unbound generation for an already accepted one.
+                self._supervisor_restart = restart
+                self._write_supervisor_evidence(
+                    "guest-supervisor-recovery.json",
+                    {
+                        "recovered": True,
+                        "read_failed": False,
+                        "receipt_unavailable": False,
+                        "records_withheld": safe is None,
+                        "failed_action_delivery": delivery,
+                        "remaining_batch": "not_sent",
+                        "records": self._supervisor_records,
+                    },
+                )
+                return guest_supervisor.ReceiptResult("new_restart")
+            except Exception:
+                if attempt == 0:
+                    self._sleep(0.1)
         self._write_supervisor_evidence(
             "guest-supervisor-recovery.json",
             {
                 "recovered": False,
-                "cause": "supervisor recovery budget exhausted; server unreachable",
+                "read_failed": True,
+                "receipt_unavailable": True,
+                "records_withheld": False,
+                "read_attempts": 2,
+                "cause": "supervisor receipt unavailable",
+                "failed_action_delivery": delivery,
+                "remaining_batch": "not_sent",
                 "records": self._supervisor_records,
-                "final_guest_record": "not retrieved: action-server transport unavailable",
-                "guest_record_path": f"/var/lib/lop-action-supervisor/{self._supervisor_unit}.json",
             },
         )
-        return False
+        return guest_supervisor.ReceiptResult("read_failed")
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float
@@ -1634,9 +1663,7 @@ class AwsProvider:
                 # each action, not just the first statement of a long batch.
                 if self._supervisor_unit is not None:
                     recovered = self._recover_guest_supervisor()
-                    if recovered:
-                        raise GuestServerRecovered("action server restarted; refresh binding")
-                    if recovered is False:
+                    if recovered.recovery_exhausted:
                         # Do not send an action just to discover the server came
                         # back after the deadline: that would bypass re-binding.
                         self._capture_guest_console(
@@ -1650,6 +1677,10 @@ class AwsProvider:
                             f"guest down: {cause}; no transport retry",
                             delivery=verdict.delivery,
                         )
+                    if recovered.state != "verified_none":
+                        raise GuestServerRecovered(
+                            "action-server restart or receipt unavailable; refresh binding"
+                        )
                 # Upstream retries failed HTTP requests and logs their full body.
                 # A lost response can already have typed text, so reuse our
                 # single-shot transport, preserving the controller's input patch.
@@ -1658,6 +1689,7 @@ class AwsProvider:
 
                 command = python_source_argv(script)
                 ready: bool | None = None
+                supervisor_exhausted = False
                 for attempt in range(1, _EXECUTE_ATTEMPTS + 1):
                     try:
                         result = self._run_guest_command(command, timeout=GUEST_COMMAND_TIMEOUT_S)
@@ -1670,12 +1702,13 @@ class AwsProvider:
                         )
                         if self._supervisor_unit is not None:
                             recovered = self._recover_guest_supervisor(verdict.delivery)
-                            if recovered:
-                                raise GuestServerRecovered(
-                                    "action server restarted; refresh binding"
-                                ) from None
-                            if recovered is False:
+                            supervisor_exhausted = recovered.recovery_exhausted
+                            if supervisor_exhausted:
                                 ready = False
+                            elif recovered.state != "verified_none":
+                                raise GuestServerRecovered(
+                                    "action-server restart or receipt unavailable; refresh binding"
+                                ) from None
                         if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
                             if ready is None:
                                 ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
@@ -1700,7 +1733,7 @@ class AwsProvider:
                         message = guest_loss.describe_failed_action(index, verdict)
                         if ready is False:
                             cause = self._execute_guest_health_cause()
-                            if self._supervisor_unit is not None:
+                            if supervisor_exhausted:
                                 cause += "; supervisor recovery budget exhausted"
                             message += f"; guest down: {cause}; no transport retry"
                         raise GuestExecutionError(message, delivery=verdict.delivery) from None
