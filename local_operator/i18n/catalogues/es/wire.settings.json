@@ -205,7 +205,7 @@
   "wire.settings.display_images.choice.true.description": "dibujar las imágenes",
   "wire.settings.display_images.help": "Capturas y adjuntos dibujados en la transcripción.",
   "wire.settings.display_images.label": "Imágenes incrustadas",
-  "wire.settings.display_message_timestamp_style.choice.absolute.description": "p. ej. 7:52 PM",
+  "wire.settings.display_message_timestamp_style.choice.absolute.description": "p. ej. 19:52",
   "wire.settings.display_message_timestamp_style.choice.absolute.label": "Absoluta",
   "wire.settings.display_message_timestamp_style.choice.relative.description": "p. ej. hace 5 min",
   "wire.settings.display_message_timestamp_style.choice.relative.label": "Relativa",

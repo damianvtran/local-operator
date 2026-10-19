@@ -207,7 +207,7 @@
   "wire.settings.display_images.label": "Inline images",
   "wire.settings.display_message_timestamp_style.choice.absolute.description": "e.g. 7:52 PM",
   "wire.settings.display_message_timestamp_style.choice.absolute.label": "Absolute",
-  "wire.settings.display_message_timestamp_style.choice.relative.description": "e.g. 5 min ago",
+  "wire.settings.display_message_timestamp_style.choice.relative.description": "e.g. 5m ago",
   "wire.settings.display_message_timestamp_style.choice.relative.label": "Relative",
   "wire.settings.display_message_timestamp_style.help": "Choose absolute clock times or relative ages for message timestamps (desktop app).",
   "wire.settings.display_message_timestamp_style.label": "Timestamp style",
