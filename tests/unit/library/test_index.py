@@ -224,3 +224,62 @@ def test_a_roster_only_change_refreshes_the_family(monkeypatch) -> None:
         "parent.txt",
         "child-one.txt",
     }
+
+
+def test_a_second_build_on_an_unchanged_index_does_not_write(tmp_path, monkeypatch) -> None:
+    """The aggregate is derived from the index; an unchanged index costs no dump.
+
+    ``state == "ready"`` used to force an 11 MB rewrite on every request, which
+    was most of the measured 5.3 s warm build on the operator's corpus.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    first = index.build_catalog(root, budget_s=None)
+
+    writes: list[object] = []
+    monkeypatch.setattr(index, "_write", lambda *args, **kwargs: writes.append(args))
+    second = index.build_catalog(root, budget_s=None)
+
+    assert writes == []
+    assert second is first
+
+
+def test_a_warm_request_path_serves_the_cache_without_a_sweep(tmp_path, monkeypatch) -> None:
+    """Inside the freshness window a poll touches neither journals nor assets."""
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    first = index.build_catalog(root, budget_s=None)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a warm poll must not scan or rebuild")
+
+    monkeypatch.setattr(index, "_visible_sessions", boom)
+    monkeypatch.setattr(index, "_build_assets", boom)
+
+    assert index.build_catalog(root) is first
+
+
+def test_a_partial_merge_keeps_complete_sessions_from_disk(tmp_path, monkeypatch) -> None:
+    """A budget-limited build must not truncate another process's progress.
+
+    The desktop backend, the mobile relay and ``lop serve`` all build this
+    index; a partial build from one used to overwrite the others' complete rows
+    (observed collapsing 490 sessions to 1).
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    session(root, OTHER, write_rows("w2", 2, tmp_path / "b.txt"))
+    index.build_catalog(root, budget_s=None)
+    disk = index._load(index.index_path(root))["sessions"]
+    assert {SESSION, OTHER} <= set(disk)
+
+    # What a partial build that only reached SESSION would hand to the writer.
+    incoming = {SESSION: disk[SESSION]}
+    merged = index._merge_sessions(disk, incoming, keep={SESSION, OTHER})
+
+    assert set(merged) == {SESSION, OTHER}
+    assert merged[OTHER]["complete"] is True
+    # Where both sides have an entry, complete beats incomplete.
+    stale = {"complete": False, "revision": 99.0}
+    fresh = {"complete": True, "revision": 1.0}
+    assert index._merge_sessions({"s": stale}, {"s": fresh}, keep={"s"})["s"] is fresh

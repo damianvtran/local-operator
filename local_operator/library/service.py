@@ -538,8 +538,15 @@ def get_asset(
         raise AssetNotFound(asset_id)
     config = Path(config_dir)
     home = home or str(Path.home())
-    catalog = library_index.build_catalog(config, home=home)
-    asset = next((item for item in catalog.assets if item.id == asset_id), None)
+    # Read-only lookup: the cached/persisted aggregate is enough, and a get must
+    # not pay a session scan (or an index rewrite) just to name one row.
+    catalog = library_index.catalog_for_read(config)
+    asset = _read_catalog_asset(catalog, asset_id)
+    if asset is None:
+        # Same miss rule as content/thumbnail: a just-indexed asset may not be
+        # in the last index write yet. One bounded refresh, then refuse.
+        catalog = library_index.build_catalog(config, home=home, refresh=True)
+        asset = _read_catalog_asset(catalog, asset_id)
     if asset is None:
         raise AssetNotFound(asset_id)
     store = MetadataStore(config)
@@ -717,11 +724,25 @@ class ContentRef:
     modified_at: float = 0.0
 
 
+def _read_catalog_asset(
+    catalog: library_index.Catalog, asset_id: str
+) -> library_index.Asset | None:
+    return next((item for item in catalog.assets if item.id == asset_id), None)
+
+
 def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
+    """Resolve an id for a content/thumbnail read.
+
+    The cached/persisted aggregate answers the normal path without a scan. A
+    MISS may mean an asset was indexed since the last index write, so refresh
+    once (bounded by the request budget) before refusing — the old behaviour,
+    without putting a scan on every hit.
+    """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
-    catalog = library_index.build_catalog(config)
-    asset = next((item for item in catalog.assets if item.id == asset_id), None)
+    asset = _read_catalog_asset(library_index.catalog_for_read(config), asset_id)
+    if asset is None:
+        asset = _read_catalog_asset(library_index.build_catalog(config, refresh=True), asset_id)
     if asset is None:
         raise AssetNotFound(asset_id)
     return asset

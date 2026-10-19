@@ -133,6 +133,9 @@ def library(monkeypatch: pytest.MonkeyPatch) -> Any:
         built_at=1_700_000_200.0,
     )
     monkeypatch.setattr(library_index, "build_catalog", lambda *args, **kwargs: catalog)
+    # Content/thumbnail/get read the cached-or-persisted aggregate instead of
+    # building; the synthetic catalog must be injected at both entry points.
+    monkeypatch.setattr(library_index, "catalog_for_read", lambda *args, **kwargs: catalog)
     # The scanner normally creates these rows as a side effect of indexing; a
     # synthetic catalog has to do it explicitly or a metadata write has no row
     # to land on (``update_fields`` returns ``None`` rather than inventing one).
