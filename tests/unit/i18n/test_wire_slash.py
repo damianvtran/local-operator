@@ -19,7 +19,7 @@ the same discipline.
 from __future__ import annotations
 
 from local_operator.i18n import catalogues
-from local_operator.i18n.keys import wire_slash
+from local_operator.i18n.keys import wire_slash, wire_slash_library
 from local_operator.i18n.messages import render
 from local_operator.slash_commands import SLASH_COMMANDS
 
@@ -41,6 +41,16 @@ REVIEW_COMMAND = "review"
 #: ``/schedule`` repeats the shape once more: a TUI-owned page whose copy lives
 #: in the English-only ``tui.schedule`` namespace.
 SCHEDULE_COMMAND = "schedule"
+#: ``/library`` and ``/librarian`` are the first commands whose copy moved out
+#: of ``wire.slash`` into a TRANSLATED CHILD namespace, ``wire.slash.library``
+#: (keys ``help`` and ``librarian_help``). They stay out of the audited
+#: ``wire.slash`` catalogue so its ledger hash remains valid, and are pinned
+#: against that child namespace by
+#: ``test_library_commands_resolve_through_their_child_namespace`` instead —
+#: the exemption carries coverage rather than hiding a gap.
+LIBRARY_COMMAND = "library"
+LIBRARIAN_COMMAND = "librarian"
+CHILD_NAMESPACE_COMMANDS = (LIBRARY_COMMAND, LIBRARIAN_COMMAND)
 
 PREVIOUS_ENGLISH: dict[str, str] = {
     "help": "List all commands",
@@ -117,9 +127,17 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # `wire.slash`: their copy lives in English-only namespaces so the audited
     # wire.slash hash stays valid, and a missing or extra command raises a
     # KeyError here either way rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 4 == 56
+    # 52 pre-slice rows + the four TUI-owned pages (memory/import/review/
+    # schedule) + the two child-namespace commands (library/librarian).
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 4 + 2 == 58
     for command in SLASH_COMMANDS:
-        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND, REVIEW_COMMAND, SCHEDULE_COMMAND):
+        if command.name in (
+            MEMORY_COMMAND,
+            IMPORT_COMMAND,
+            REVIEW_COMMAND,
+            SCHEDULE_COMMAND,
+            *CHILD_NAMESPACE_COMMANDS,
+        ):
             continue
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 
@@ -132,12 +150,48 @@ def test_the_catalogue_carries_exactly_the_command_descriptions() -> None:
     assert messages == expected
 
 
+def test_library_commands_resolve_through_their_child_namespace() -> None:
+    # `/library` and `/librarian` are the first commands whose copy lives in a
+    # TRANSLATED CHILD namespace instead of the audited `wire.slash` catalogue
+    # (whose hash must stay valid). They are exempt from the `wire.slash` walk
+    # above, so this test is what keeps the exemption honest: the child
+    # namespace must carry exactly their two descriptions, and the generated
+    # per-key functions must resolve to the registry text under `en`.
+    #
+    # Both directions are asserted, so deleting a key or adding a third one
+    # fails here rather than passing silently as "exempt".
+    child = catalogues.load_catalogue("en", "wire.slash.library")
+    assert child == {
+        "wire.slash.library.help": "Browse the global asset library",
+        "wire.slash.library.librarian_help": "Open, pause or run the Librarian",
+    }
+    by_name = {command.name: command for command in SLASH_COMMANDS}
+    assert by_name[LIBRARY_COMMAND].description == child["wire.slash.library.help"]
+    assert (
+        by_name[LIBRARIAN_COMMAND].description
+        == child["wire.slash.library.librarian_help"]
+    )
+    for key, function in (
+        ("wire.slash.library.help", wire_slash_library.help),
+        ("wire.slash.library.librarian_help", wire_slash_library.librarian_help),
+    ):
+        message = function()
+        assert message.code == key
+        assert render(message.code, message.params, locale="en") == child[key]
+
+
 def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
     # The resolution path the registry itself uses — the generated per-key
     # function, rendered through the runtime — asserted under the pinned `en`
     # locale (RFC §7).
     for command in SLASH_COMMANDS:
-        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND, REVIEW_COMMAND, SCHEDULE_COMMAND):
+        if command.name in (
+            MEMORY_COMMAND,
+            IMPORT_COMMAND,
+            REVIEW_COMMAND,
+            SCHEDULE_COMMAND,
+            *CHILD_NAMESPACE_COMMANDS,
+        ):
             continue
         function = getattr(wire_slash, command.name)
         message = function()
