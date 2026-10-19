@@ -24,21 +24,16 @@ import os
 import re
 import stat
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from local_operator.library import classify, identity
 from local_operator.library import index as library_index
-from local_operator.library.metadata import (
-    FIELD_SOURCES,
-    MAX_TAGS_PER_ASSET,
-    MetadataStore,
-    MetadataUnavailable,
-    TagRefused,
-)
+from local_operator.library.metadata import FIELD_SOURCES, MetadataStore, TagRefused
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session_files import service as files_service
+from local_operator.session_files.scan import ORIGINS as _SCAN_ORIGINS
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +56,13 @@ TAG_MODES: Final = ("all", "any")
 SESSION_ID_SHAPE: Final = re.compile(r"^[a-f0-9]{12}$")
 
 THUMB_MAX_WIDTH: Final = 480
+
+#: Re-exported so a route validates against the SAME vocabulary the service
+#: filters with; a second tuple in the route is how a filter it accepts starts
+#: returning nothing.
+CATEGORIES: Final = classify.CATEGORIES
+KINDS: Final = classify.KINDS
+ORIGINS: Final = _SCAN_ORIGINS
 
 
 class InvalidCursor(ValueError):
@@ -152,7 +154,10 @@ def _effective(metadata: dict[str, Any] | None, derived: str, field: str) -> str
     if metadata:
         value = metadata.get(field)
         source = metadata.get(f"{field}_source")
-        if isinstance(value, str) and value and source in ("user", "librarian"):
+        # `agent` is an ordinary agent's own write (not the Librarian): it is
+        # still a deliberate human-facing choice, so derived refreshes must not
+        # overwrite it. Precedence stays user > librarian > agent > derived.
+        if isinstance(value, str) and value and source in ("user", "librarian", "agent"):
             return value
     return derived or ""
 
@@ -186,7 +191,9 @@ def _exists(config_dir: Path, asset: library_index.Asset) -> bool:
     return bool(facts.exists and facts.size is not None)
 
 
-def _occurrence_row(occurrence: library_index.Occurrence, asset: library_index.Asset) -> dict[str, Any]:
+def _occurrence_row(
+    occurrence: library_index.Occurrence, asset: library_index.Asset
+) -> dict[str, Any]:
     # ``intent``/``tool`` are carried on the occurrence from the scan record; the
     # index currently keeps tool but not intent, so a missing value is honest.
     return {
@@ -218,7 +225,11 @@ def _row(
 ) -> dict[str, Any]:
     name = _effective(metadata, asset.derived_name, "name")
     description = _effective(metadata, "", "description")
-    shown = files_service.display_path(asset.path, "", home) if asset.path else (asset.derived_name or "")
+    shown = (
+        files_service.display_path(asset.path, "", home)
+        if asset.path
+        else (asset.derived_name or "")
+    )
     organized = None
     if metadata and metadata.get("organized_at"):
         organized = {
@@ -273,7 +284,9 @@ def _row(
     }
 
 
-def _chat_projection(config_dir: Path, store: MetadataStore, asset_id: str) -> dict[str, Any] | None:
+def _chat_projection(
+    config_dir: Path, store: MetadataStore, asset_id: str
+) -> dict[str, Any] | None:
     link = store.chat(asset_id)
     if not link:
         return None
@@ -291,15 +304,24 @@ def _chat_projection(config_dir: Path, store: MetadataStore, asset_id: str) -> d
 
 
 def _session_title(session_dir: Path) -> str:
+    """The stored title, never a transcript scan.
+
+    ``resume.session_name`` falls back to scanning the journal and costs a cold
+    2-6 s on the first call; a list/detail request cannot pay that per row. A
+    session with no title sidecar shows its id here, while occurrence titles
+    come from the scanner's own opening-line capture.
+    """
     try:
         from local_operator import resume
 
-        return resume.session_name(session_dir)
+        return resume.stored_session_title(session_dir) or session_dir.name
     except Exception:  # noqa: BLE001 - a title is a label, never a request failure
         return session_dir.name
 
 
-def _metadata_for(store: MetadataStore, assets: list[library_index.Asset]) -> dict[str, dict[str, Any]]:
+def _metadata_for(
+    store: MetadataStore, assets: list[library_index.Asset]
+) -> dict[str, dict[str, Any]]:
     found = store.assets(asset.id for asset in assets)
     # ``store.assets`` returns only existing rows; a row absent from SQLite is
     # simply still derived, which the projection already handles.
@@ -434,6 +456,10 @@ def list_assets(
     catalog = library_index.build_catalog(config, budget_s=budget_s, home=home)
     store = MetadataStore(config)
     all_assets = catalog.assets
+    # Materialise a row per asset once, in one transaction: metadata writes
+    # (tags, chat, edit history) key on ``assets.asset_id``, and a list request
+    # is the first place most assets are ever seen.
+    store.ensure_assets((asset.id, asset.key, asset.derived_name) for asset in all_assets)
     metas = _metadata_for(store, all_assets)
     tag_map = store.tags_for_assets(asset.id for asset in all_assets)
     primary_map = store.primary_tags(asset.id for asset in all_assets)
@@ -515,6 +541,7 @@ def get_asset(
     if asset is None:
         raise AssetNotFound(asset_id)
     store = MetadataStore(config)
+    store.ensure_asset(asset_id, asset.key, derived_name=asset.derived_name)
     metadata = store.asset(asset_id)
     tags = store.asset_tags(asset_id)
     primary = store.primary_tags([asset_id]).get(asset_id)
@@ -536,9 +563,22 @@ def get_asset(
 # ---------------------------------------------------------------------------
 
 
-def _known_asset(config_dir: Path, asset_id: str) -> None:
+def _known_asset(config_dir: Path, asset_id: str) -> library_index.Asset:
+    """Resolve an id against the derived catalog; writes may not invent assets.
+
+    A syntactically valid id that names nothing is a 404, not a metadata row:
+    otherwise a typo would create a permanent orphan the Librarian keeps seeing.
+    """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
+    catalog = library_index.build_catalog(config_dir)
+    asset = next((item for item in catalog.assets if item.id == asset_id), None)
+    if asset is None:
+        raise AssetNotFound(asset_id)
+    # Writes key on the SQLite row; a detail/list read creates it for most
+    # assets, but a PATCH directly after indexing must not lose the edit.
+    MetadataStore(config_dir).ensure_asset(asset_id, asset.key, derived_name=asset.derived_name)
+    return asset
 
 
 def update_asset(
@@ -548,13 +588,14 @@ def update_asset(
     *,
     actor: str = "user",
     source: str = "user",
+    confidence: float | None = None,
 ) -> dict[str, Any]:
     """Apply editable metadata. Records an edit row; returns the refreshed row."""
     config = Path(config_dir)
     _known_asset(config, asset_id)
     if source not in FIELD_SOURCES:
         raise TagRefused("bad_source", source)
-    if actor not in ("user", "librarian", "system"):
+    if actor not in ("user", "librarian", "agent", "system"):
         raise TagRefused("bad_actor", actor)
     cleaned: dict[str, Any] = {}
     for name in ("name", "description"):
@@ -569,8 +610,28 @@ def update_asset(
             if not isinstance(value, bool):
                 raise TagRefused(f"bad_{name}", str(value)[:40])
             cleaned[name] = value
+    if "organized" in fields:
+        value = fields["organized"]
+        if not isinstance(value, bool):
+            raise TagRefused("bad_organized", str(value)[:40])
+        if value:
+            cleaned["organized_at"] = time.time()
+            cleaned["organized_by"] = actor
+            if confidence is not None:
+                cleaned["confidence"] = confidence
+        else:
+            cleaned["organized_at"] = None
+            cleaned["organized_by"] = None
+            cleaned["confidence"] = None
     if not cleaned:
         return get_asset(config, asset_id)
+    if actor == "librarian" and ("name" in cleaned or "description" in cleaned):
+        # Applying metadata IS the organization the daily run is measured by;
+        # a row the Librarian only favorited is not "organized".
+        cleaned["organized_at"] = time.time()
+        cleaned["organized_by"] = actor
+        if confidence is not None:
+            cleaned["confidence"] = confidence
     store = MetadataStore(config)
     store.update_fields(asset_id, cleaned, actor=actor, source=source)
     return get_asset(config, asset_id)
@@ -580,16 +641,26 @@ def set_tags(
     config_dir: str | Path,
     asset_id: str,
     tag_ids: list[str],
-    *,
     primary: str | None = None,
+    *,
     actor: str = "user",
-    source: str = "user",
+    source: str | None = None,
+    confidence: float | None = None,
 ) -> dict[str, Any]:
+    """Replace an asset's tag set and return the refreshed row."""
     config = Path(config_dir)
-    _known_asset(config, asset_id)
-    return MetadataStore(config).set_asset_tags(
-        asset_id, tag_ids, primary=primary, actor=actor, source=source
+    asset = _known_asset(config, asset_id)
+    store = MetadataStore(config)
+    store.ensure_asset(asset_id, asset.key, derived_name=asset.derived_name)
+    store.set_asset_tags(
+        asset_id,
+        tag_ids,
+        primary=primary,
+        actor=actor,
+        source=source or actor,
+        confidence=confidence,
     )
+    return get_asset(config, asset_id)
 
 
 def chat_link(config_dir: str | Path, asset_id: str) -> dict[str, Any] | None:

@@ -338,6 +338,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``op='list'`` shows. One token, re-measured.
     "jobs": 347,
     "list_variables": 54,
+    # NEW (Library): the six-op catalog tool's reference — filters, tag and
+    # provenance rules, and the read-tier rationale. Measured through this
+    # file's own renderer; no other entry moved.
+    "library": 1060,
     "lsp": 272,
     "memory": 116,
     "monitor": 353,

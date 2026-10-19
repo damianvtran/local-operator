@@ -201,7 +201,8 @@ PATCH  /v1/desktop/library/assets/{asset_id}
 PUT    /v1/desktop/library/assets/{asset_id}/tags
        {tags:[tag_id...], primary?}
 GET    /v1/desktop/library/assets/{asset_id}/content
-       Range supported; inline disposition; nosniff; no absolute path input
+       Range supported; inline disposition (attachment with ?download=1);
+       nosniff; no absolute path input
 GET    /v1/desktop/library/assets/{asset_id}/thumbnail?w=480
 PUT    /v1/desktop/library/assets/{asset_id}/chat  {session_id}
 DELETE /v1/desktop/library/assets/{asset_id}/chat
@@ -242,7 +243,8 @@ A row:
  "exists": true, "highlighted": false, "highlight_why": null,
  "occurrences": [{"session_id": "...", "session_title": "...",
                   "origin": "generated", "tool": "generate_image",
-                  "at": 0.0, "intent": "..."}],
+                  "at": 0.0, "intent": "...", "first_seq": 0, "last_seq": 0,
+                  "child_id": null}],
  "session_count": 1,
  "chat": {"session_id": "...", "title": "...", "updated_at": 0.0},
  "preview": {"state": "ready|unsupported", "mime_type": "...", "pages": null},

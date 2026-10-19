@@ -538,6 +538,83 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
     # rationale (pydantic copies it into $defs on every request) and several
     # field tails (status enum recital, progress edge cases, description's
     # markdown shape). The enum literals still render from the schema itself.
+    "library": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                "stats",
+                "Catalog totals plus metadata-store counts and building state.",
+            ),
+            ToolDocOp(
+                "list",
+                "Search/filter/sort a page; compact rows with tags and sources.",
+                (
+                    "q",
+                    "category",
+                    "kind",
+                    "origin_group",
+                    "tag",
+                    "session_id",
+                    "limit",
+                    "cursor",
+                ),
+            ),
+            ToolDocOp(
+                "get",
+                "The full row: tags, occurrences, chat, preview, organized state.",
+                ("asset_id",),
+            ),
+            ToolDocOp(
+                "update",
+                "Set name/description/favorite/locked/archived; records provenance "
+                "and an edit row.",
+                (
+                    "asset_id",
+                    "name",
+                    "description",
+                    "favorite",
+                    "locked",
+                    "archived",
+                    "confidence",
+                    "actor",
+                ),
+            ),
+            ToolDocOp(
+                "tags",
+                "List/create/rename/delete/merge the tag registry, or set/clear "
+                "one asset's tags.",
+                (
+                    "action",
+                    "asset_id",
+                    "tags",
+                    "primary",
+                    "tag_id",
+                    "tag_name",
+                    "tag_category",
+                    "into",
+                ),
+            ),
+            ToolDocOp(
+                "conventions",
+                "Read the Librarian's taxonomy; with body, write one convention row.",
+                ("kind_name", "body", "convention_id"),
+            ),
+        ),
+        notes=(
+            "Writes are LOCAL, REVERSIBLE METADATA and never touch a user file, so "
+            "the tool is read-tier.\n"
+            "\n"
+            "- Effective precedence is user > librarian > derived: a derived refresh "
+            "never overwrites a name/description either writer set.\n"
+            "- `locked` protects a row from agent writes; the Librarian skips it.\n"
+            "- An asset may carry at most 12 tags; `primary` must be one of them.\n"
+            "- `actor` defaults to `librarian`; pass `user` only for a user-"
+            "initiated action. `confidence` is recorded on the edit row.\n"
+            "- `update` with a name/description marks the asset organized when "
+            "the actor is the Librarian.\n"
+            "- Content bytes and thumbnails are HTTP surfaces, not tool ops: the "
+            "tool is for finding and naming, not shipping files."
+        ),
+    ),
     "project": ToolDocNotes(
         notes=(
             "Moved off the wire in the slimming wave (audit item 2):\n"

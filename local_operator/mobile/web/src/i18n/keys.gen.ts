@@ -181,6 +181,18 @@ export type MessageParams = {
   "wire.errors.desktop.feed_subscriber_limit": undefined;
   "wire.errors.desktop.feed_subscription_unknown": undefined;
   "wire.errors.desktop.force_requires_confirm_replace": undefined;
+  "wire.errors.desktop.library_asset_not_found": undefined;
+  "wire.errors.desktop.library_bad_cursor": undefined;
+  "wire.errors.desktop.library_bad_filter": { "field": string; "value": string };
+  "wire.errors.desktop.library_chat_session_missing": undefined;
+  "wire.errors.desktop.library_content_denied": undefined;
+  "wire.errors.desktop.library_content_missing": undefined;
+  "wire.errors.desktop.library_metadata_unavailable": undefined;
+  "wire.errors.desktop.library_not_an_image": undefined;
+  "wire.errors.desktop.library_tag_category": { "category": string };
+  "wire.errors.desktop.library_tag_limit": { "max": string };
+  "wire.errors.desktop.library_tag_name": { "name": string };
+  "wire.errors.desktop.library_tag_unknown": undefined;
   "wire.errors.desktop.masked_credential_form": undefined;
   "wire.errors.desktop.move_failed": { "requested": string; "error": string };
   "wire.errors.desktop.packaged_profile_not_found": undefined;
