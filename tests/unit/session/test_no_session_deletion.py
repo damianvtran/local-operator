@@ -853,6 +853,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the tmp FILE of a failed record write",
     ),
+    # The content pass's per-pad manifest. BOTH sides are regular FILES under
+    # `sessions/.cleanup-manifests/`: the target is `<UTC>-<session>.json` and
+    # the temporary is the same name with a leading `.` and a `.tmp` suffix,
+    # renamed in the manifest directory. Neither is a session directory, and
+    # the session's own content goes through `remove_scratchpad_entry`, not
+    # through this call.
+    (
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
+        "os.replace",
+        "tmp FILE -> manifest FILE under sessions/.cleanup-manifests; never a session dir",
+    ),
+    (
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
+        "<path>.unlink",
+        "Only this call's own .<name>.tmp regular FILE after a failed manifest write",
+    ),
     # Store-maintenance completion metadata (2026-09-23). Startup passes the
     # AgentRegistry config root to this worker; session directories are its
     # separate `sessions/<id>` children. The target uses a fixed stamp basename
@@ -3354,6 +3370,9 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
+        # never a session directory (the target is a regular file).
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
         # tmp -> tags/<type>/<id>.json under config_dir()/tags, never sessions/
         "local_operator/session/session_tags.py::_write",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
