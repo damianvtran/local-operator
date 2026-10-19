@@ -4791,9 +4791,7 @@ def _print_scratchpads(audit: Any) -> None:
     """
     print("== Scratchpads ==")
     truncated = (
-        f"; {audit.truncated} walk(s) truncated at the depth/entry cap"
-        if audit.truncated
-        else ""
+        f"; {audit.truncated} walk(s) truncated at the depth/entry cap" if audit.truncated else ""
     )
     print(
         f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
@@ -4818,10 +4816,7 @@ def _print_scratchpads(audit: Any) -> None:
             else:
                 print(f"    .git link → {marker.target}  ({marker.path})")
     if len(audit.pads) > _CLEANUP_TEXT_ROWS:
-        print(
-            f"  ... and {len(audit.pads) - _CLEANUP_TEXT_ROWS} more "
-            "(--json lists every pad)"
-        )
+        print(f"  ... and {len(audit.pads) - _CLEANUP_TEXT_ROWS} more " "(--json lists every pad)")
 
 
 def sessions_cleanup_command(args: argparse.Namespace) -> int:

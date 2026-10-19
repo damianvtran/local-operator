@@ -235,7 +235,7 @@ def _read_pointer(path: str) -> str:
     except OSError:
         return ""
     prefix = "gitdir:"
-    return text[len(prefix):].strip() if text.startswith(prefix) else text
+    return text[len(prefix) :].strip() if text.startswith(prefix) else text
 
 
 def _link_target(path: str) -> str:

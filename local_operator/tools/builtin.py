@@ -23619,9 +23619,7 @@ async def _bridge_action(
     # The payload size is known now, so the cap check can judge the write the
     # page is about to make (the per-write ceiling included), not just the
     # destination's name.
-    pad_refusal = _pad_destination_refusal(
-        tool_call_id, "browser", target, context, len(payload)
-    )
+    pad_refusal = _pad_destination_refusal(tool_call_id, "browser", target, context, len(payload))
     if pad_refusal is not None:
         return pad_refusal
     try:

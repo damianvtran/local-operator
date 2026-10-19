@@ -79,7 +79,6 @@ def _consumer_defaults() -> dict[str, object]:
         OPENAI_USE_MAX_CONTEXT_WINDOW,
         OPENROUTER_RETIRE_BELOW_TPS,
     )
-    from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
 
     # The mesh audit log's three bounds, taken from the module that READS them:
     # `AuditLog.__init__` resolves an absent key against exactly these constants, so
@@ -119,6 +118,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_PINNED_FALLBACK,
         RetrySettings,
     )
+    from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
         DEFAULT_DELEGATED_MAX_AGE_HOURS,
