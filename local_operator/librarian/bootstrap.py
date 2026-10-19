@@ -251,7 +251,6 @@ async def ensure_session(
             exc_info=True,
         )
         return None
-    created: str | None = None
     hers: str | None = None
     try:
         existing = state.session_id_of(root)
@@ -273,7 +272,6 @@ async def ensure_session(
                 # session until the next attempt overwrites it.
                 state.update_state(root, session_id=None, paused_at=None)
                 raise
-            created = session_id
             hers = session_id
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
         logger.warning("librarian: ensure_session could not create the session", exc_info=True)
@@ -281,11 +279,28 @@ async def ensure_session(
     finally:
         await asyncio.to_thread(lock.release)
 
-    if created is not None:
+    # THE PIN IS REASSERTED ON EVERY ENSURE, not only when the directory was
+    # created. QA on #2627 measured the failure that made this load-bearing: a
+    # concurrent first boot left the pin file holding only Aida's id, and every
+    # later boot took the existing-session branch, so the Librarian was never
+    # pinned again — present, titled and armed, but absent from the sidebar
+    # forever. ``set_pin`` is desired-state and writes nothing when the id is
+    # already there, so the steady-state cost is one lock plus one small read.
+    if hers is not None:
         try:
-            from local_operator.tui.sidebar_pins import set_pin
+            from local_operator.tui.sidebar_pins import (
+                SOURCE_BOOTSTRAP,
+                explicitly_unpinned,
+                set_pin,
+            )
 
-            await asyncio.to_thread(set_pin, root, created, True)
+            # A DELIBERATE UNPIN WINS. The reassert exists to repair a pin lost
+            # to the concurrent-boot race, not to overrule a person who removed
+            # the row; the ledger records only human writes (``set_pin`` and
+            # ``toggle_pin``), so a bootstrap reassert can never create or clear
+            # one.
+            if hers not in explicitly_unpinned(root):
+                await asyncio.to_thread(set_pin, root, hers, True, source=SOURCE_BOOTSTRAP)
         except Exception:  # noqa: BLE001 — a pin is decoration; the session is not
             logger.warning("librarian: could not pin her session", exc_info=True)
 

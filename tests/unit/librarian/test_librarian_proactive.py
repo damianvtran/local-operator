@@ -156,7 +156,8 @@ def test_extras_are_bounded_by_the_daily_budget(isolated_root: Path) -> None:
     )
     result = proactive.reconcile([], config_dir=isolated_root, session_id=SID)
     extras = [row for row in result.schedules if row.id.startswith("librarian-extra-")]
-    assert len(extras) == 1 and extras[0].message == "look at the deck"
+    assert len(extras) == 1 and extras[0].message.startswith("look at the deck")
+    assert proactive.QUIET_REPLY in extras[0].message
     assert not state.extras_path(isolated_root).exists()
     # A second request in the same local day is refused, and the note says why.
     state.extras_path(isolated_root).write_text(
@@ -235,3 +236,46 @@ def test_status_is_read_only(isolated_root: Path) -> None:
     assert payload["last_run_at"] is None
     assert payload["max_extra_per_day"] == 1
     assert sorted(p.name for p in isolated_root.rglob("*")) == before
+
+
+@pytest.mark.asyncio
+async def test_external_extras_respect_the_floor_and_pause_removes_them(
+    isolated_root: Path,
+) -> None:
+    """The external drain is held to the same 720-minute floor as the reconcile.
+
+    Measured regression before this: a tray request "in 1h" armed a generic
+    ``w1`` row minutes from the cadence, and pause — which drops only
+    ``librarian-*`` rows — left it firing. The fake clock makes both halves
+    deterministic: the sub-floor request must arm nothing, the allowed one must
+    be a named ``librarian-extra-N``, and pause must cancel it.
+    """
+    base = int(datetime(2023, 11, 14, 12, 0).timestamp() * 1000)
+    _seed(isolated_root)
+    assert await proactive.ensure_armed(isolated_root, SID, now_ms=base) == "armed"
+
+    # 20:00 is 7.5 h from the 03:30 cadence — inside the 12 h floor.
+    state.extras_path(isolated_root).write_text(
+        json.dumps({"requests": [{"in": "8h", "message": "too soon"}]})
+    )
+    assert await proactive.ensure_armed(isolated_root, SID, now_ms=base) == "present"
+    entry = json.loads((isolated_root / "wakes" / f"{SID}.json").read_text())
+    assert [row["id"] for row in entry["schedules"]] == [proactive.CADENCE_ID]
+
+    # 18:00 the next day is 14.5 h from the cadence — outside the floor.
+    state.extras_path(isolated_root).write_text(
+        json.dumps({"requests": [{"in": "30h", "message": "organise a batch"}]})
+    )
+    await proactive.ensure_armed(isolated_root, SID, now_ms=base)
+    entry = json.loads((isolated_root / "wakes" / f"{SID}.json").read_text())
+    extras = [row for row in entry["schedules"] if row["id"].startswith("librarian-extra-")]
+    assert [row["id"] for row in extras] == ["librarian-extra-1"]
+    assert extras[0]["next_due_at"] == base + 30 * 3_600_000
+    assert proactive.QUIET_REPLY in extras[0]["message"]
+
+    outcome = await proactive.pause(isolated_root, SID, now_ms=base)
+    assert set(outcome.cancelled) == {"librarian-cadence", "librarian-extra-1"}
+    entry_path = isolated_root / "wakes" / f"{SID}.json"
+    if entry_path.exists():
+        entry = json.loads(entry_path.read_text())
+        assert not [row for row in entry["schedules"] if proactive.is_librarian_row(row["id"])]

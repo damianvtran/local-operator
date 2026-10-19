@@ -275,11 +275,15 @@ async def post_librarian(body: LibrarianOp, request: Request) -> CRUDResponse[Li
         outcome = await engine.run_now(root, session_id)
         state = _state(root)
         if outcome == "owner":
-            # A LIVE RUNTIME HOLDS THE SESSION: the pass is delivered by that
-            # owner. `held` says who acts next; the request is not an error.
-            state.held = True
-            return CRUDResponse(
-                status=200, message=f"{name} will run a pass in her open session.", result=state
+            # A LIVE RUNTIME HOLDS THE SESSION, so the external writer refused
+            # the row. Reporting 200 here was the defect the review measured:
+            # nothing was scheduled and nothing would run until an unrelated
+            # persist happened to reconcile. There is no durable handoff to
+            # promise — ``arm.py`` refuses precisely because the owner's stale
+            # list would delete the row — so the honest answer is a typed 409.
+            raise HTTPException(
+                409,
+                _wd.librarian_owner_active().envelope(code="librarian_owner_active"),
             )
         if outcome in ("failed", "busy"):
             raise HTTPException(
