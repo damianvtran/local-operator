@@ -173,3 +173,36 @@ def test_directories_and_denied_paths_are_not_mentioned(tmp_path) -> None:
         ],
     )
     assert scan.records == {}
+
+
+def test_a_nameless_tool_call_is_skipped_without_losing_named_mentions(monkeypatch) -> None:
+    import tempfile
+    from pathlib import Path
+
+    work = Path(tempfile.mkdtemp())
+    seen = work / "seen.txt"
+    seen.write_text("x")
+    nameless_path = work / "nameless.txt"
+    nameless_path.write_text("x")
+    scan = FileScan(cwd=str(work), home=str(work))
+    feed(
+        scan,
+        [
+            {
+                "id": "a1",
+                "ts": 1,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "tool_calls": [
+                        {"id": "c0", "arguments": {"path": str(nameless_path)}},
+                        {"id": "c1", "name": "read", "arguments": {"path": str(seen)}},
+                    ],
+                },
+            }
+        ],
+    )
+    assert record(scan, seen).origin == "mentioned"
+    assert f"p:{nameless_path}" not in scan.records

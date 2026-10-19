@@ -438,7 +438,7 @@ class FileScan:
             # `write` upgrade the same key from mentioned to written via `_upsert`.
             # `write`/`edit` name their OUTPUT; the result row records it once.
             # Counting the call too would make one write look like two touches.
-            if name is not None and name not in ("write", "edit"):
+            if name and name not in ("write", "edit"):
                 self._note_argument_mentions(args, name, call_id, seq, ts)
             if name not in _CALL_TOOLS or not isinstance(call_id, str) or not call_id:
                 continue
