@@ -329,6 +329,23 @@ def _is_identifier_control(char: str) -> bool:
     )
 
 
+#: Exactly the break set ``str.splitlines`` uses, and therefore the set
+#: ``SpillStore`` numbers lines by. Position tracking MUST agree with it: a
+#: lone ``\r``/form-feed/``\u2028`` counted as content shifts every later
+#: spill range one line early, and a range landing on an aligned credential
+#: would exempt it (R4-1).
+_LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _strip_line_ending(part: str) -> tuple[str, str]:
+    """``(body, ending)`` for one ``splitlines(keepends=True)`` part."""
+    if part.endswith("\r\n"):
+        return part[:-2], "\r\n"
+    if part and part[-1] in _LINE_BREAKS:
+        return part[:-1], part[-1]
+    return part, ""
+
+
 def _neutralize_identifier_chars(text: str) -> str:
     """Replace marker/placeholder code points in user-controlled text with U+FFFD."""
     if not any(_is_identifier_control(char) for char in text):
@@ -766,10 +783,20 @@ class VariableStore:
 
         def advance(value: str) -> None:
             nonlocal line, column
-            newlines = value.count("\n")
-            if newlines:
-                line += newlines
-                column = len(value) - value.rfind("\n") - 1
+            if not value:
+                return
+            breaks = 0
+            tail = ""
+            for part in value.splitlines(keepends=True):
+                body, ending = _strip_line_ending(part)
+                if ending:
+                    breaks += 1
+                    tail = ""
+                else:
+                    tail = body
+            if breaks:
+                line += breaks
+                column = len(tail)
             else:
                 column += len(value)
 
@@ -781,15 +808,15 @@ class VariableStore:
         def append_span(content: str) -> None:
             nonlocal line, column
             parts.append(content)
-            segments = content.split("\n")
-            for position, segment in enumerate(segments):
-                if segment:
-                    ranges.append((line, column, column + len(segment)))
-                if position + 1 < len(segments):
+            for part in content.splitlines(keepends=True):
+                body, ending = _strip_line_ending(part)
+                if body:
+                    ranges.append((line, column, column + len(body)))
+                if ending:
                     line += 1
                     column = 0
                 else:
-                    column += len(segment)
+                    column += len(body)
 
         index = 0
         length = len(text)
