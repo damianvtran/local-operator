@@ -595,15 +595,28 @@ def test_stale_registry_record_cannot_shadow_relay_stored_fallback(tmp_path: Pat
     # Both the state and counts must be cold: otherwise waiting/delegating can
     # resurrect a dead pid, or a wedged label can falsely claim it is alive.
     peer = PeerRow.from_json(
-        {"state": "stale", "busy": True, "waiting_on": 2, "jobs_running": 3,
-         "subagents_running": 1, "subagents_queued": 1, "pending": "approval"},
+        {
+            "state": "stale",
+            "busy": True,
+            "waiting_on": 2,
+            "jobs_running": 3,
+            "subagents_running": 1,
+            "subagents_queued": 1,
+            "pending": "approval",
+        },
         device_id="d_synthetic",
     )
     assert _live_state(peer) == ""
     cold = SessionRow(
-        SID, 0, "synthetic", live_state=_live_state(peer), pending=peer.pending,
-        waiting_on=peer.waiting_on, jobs_running=peer.jobs_running,
-        subagents_running=peer.subagents_running, subagents_queued=peer.subagents_queued,
+        SID,
+        0,
+        "synthetic",
+        live_state=_live_state(peer),
+        pending=peer.pending,
+        waiting_on=peer.waiting_on,
+        jobs_running=peer.jobs_running,
+        subagents_running=peer.subagents_running,
+        subagents_queued=peer.subagents_queued,
     )
     assert CatalogEntry(cold).status == "Recent"
     assert cold.delegating is None
