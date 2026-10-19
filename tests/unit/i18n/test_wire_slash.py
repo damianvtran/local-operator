@@ -169,10 +169,7 @@ def test_library_commands_resolve_through_their_child_namespace() -> None:
     }
     by_name = {command.name: command for command in SLASH_COMMANDS}
     assert by_name[LIBRARY_COMMAND].description == child["wire.slash.library.help"]
-    assert (
-        by_name[LIBRARIAN_COMMAND].description
-        == child["wire.slash.library.librarian_help"]
-    )
+    assert by_name[LIBRARIAN_COMMAND].description == child["wire.slash.library.librarian_help"]
     for key, function in (
         ("wire.slash.library.help", wire_slash_library.help),
         ("wire.slash.library.librarian_help", wire_slash_library.librarian_help),
