@@ -973,6 +973,19 @@ def _conversation_client(config_manager: ConfigManager):
     return TeamBridgeClient(config_manager.config_dir)
 
 
+def _require_conversation_id(conversation_id: str) -> None:
+    """Refuse a malformed conversation id BEFORE it is interpolated upstream.
+
+    The id comes from the path and the client builds the upstream path from it,
+    so this is the pair lane's review S-RSA-5 rule applied to the new family: a
+    value outside the minted grammar is this route family's 404/400, never a
+    path of the caller's choosing. One helper, so a new route cannot forget it.
+    """
+
+    if _CONVERSATION_ID.fullmatch(conversation_id) is None:
+        _raise_read("invalid_request")
+
+
 async def _conversation_reply(awaitable: Any) -> Any:
     """Map the transport's two refusal families, exactly like the pair routes."""
 
@@ -1039,6 +1052,7 @@ async def get_conversation(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """One conversation: members, read state and latest seq. No body, ever."""
+    _require_conversation_id(conversation_id)
 
     if not _CONVERSATION_ID.fullmatch(conversation_id):
         _raise_read("invalid_request")
@@ -1061,6 +1075,7 @@ async def conversation_archive(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Archive (read-only for every member)."""
+    _require_conversation_id(conversation_id)
 
     if not _CONVERSATION_ID.fullmatch(conversation_id):
         _raise_read("invalid_request")
@@ -1079,6 +1094,7 @@ async def conversation_unarchive(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Unarchive (owner only, server-enforced)."""
+    _require_conversation_id(conversation_id)
 
     if not _CONVERSATION_ID.fullmatch(conversation_id):
         _raise_read("invalid_request")
@@ -1099,6 +1115,7 @@ async def add_conversation_members(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Invite members. Humans are invited; agents stay invited until their owner consents."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     payload = [member.model_dump(exclude_none=True) for member in members]
@@ -1119,6 +1136,7 @@ async def remove_conversation_member(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Remove a human member (owner only; the server owns succession)."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1139,6 +1157,7 @@ async def conversation_consent(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Record an agent owner's participation decision (the agent only then becomes active)."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1163,6 +1182,7 @@ async def conversation_join(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Accept an invitation, or self-join a tenant-visible channel."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1181,6 +1201,7 @@ async def conversation_leave(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Leave. Leaving is the leave/re-add boundary: re-entry needs a fresh invite."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1206,6 +1227,7 @@ async def conversation_history(
 ) -> CRUDResponse[Any]:
     """One history page. Bodies are present only where the server's rule allows them."""
 
+    _require_conversation_id(conversation_id)
     if set(request.query_params) - {
         "tenant_id",
         "limit",
@@ -1222,15 +1244,29 @@ async def conversation_history(
             parsed_limit = int(limit)
         except ValueError:
             _raise_read("invalid_request")
+    # The two cursors are parsed, not interpolated: `int("x")` raises and an
+    # unwrapped raise is a 500 on a caller-controlled value. The server answers
+    # invalid_request for the same shape, so both ends agree on the refusal.
+    parsed_before: int | None = None
+    parsed_after: int | None = None
+    try:
+        parsed_before = int(before_seq) if before_seq else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if (parsed_before is not None and parsed_before < 0) or (
+        parsed_after is not None and parsed_after < 0
+    ):
+        _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
-            client.conversation_history(
+            client.conversation_messages(
                 conversation_id,
                 tenant_id=tenant_id,
                 limit=parsed_limit,
-                before_seq=int(before_seq) if before_seq else None,
-                after_seq=int(after_seq) if after_seq else None,
+                before_seq=parsed_before,
+                after_seq=parsed_after,
                 endpoint_id=endpoint_id,
             )
         )
@@ -1247,6 +1283,7 @@ async def send_conversation_message(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Append one message. The body is returned to the renderer and never stored here."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1274,6 +1311,7 @@ async def conversation_message_body(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """The agent classification fetch: body + binding hash. Not a context path."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1297,6 +1335,7 @@ async def conversation_admit(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Record the harness's screening verdict. A reject is terminal on the server."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1323,6 +1362,7 @@ async def conversation_read(
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Advance the read cursor and/or mute; the answer is the post-state."""
+    _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
     return reply(
