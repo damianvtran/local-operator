@@ -20,11 +20,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
-from local_operator.memory import SCOPES, MemoryError, MemoryIdentity, MemoryStore
+from local_operator.memory import (
+    SCOPES,
+    MemoryError,
+    MemoryIdentity,
+    MemoryStore,
+    quota_relief,
+)
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
 from local_operator.paths import config_dir
 
-OPERATIONS = ("list", "show", "search", "edit", "forget", "status", "inspect")
+OPERATIONS = ("list", "show", "search", "move", "edit", "forget", "status", "inspect")
 #: Fields a flag-based edit may change; everything else is carried over from the
 #: revision being corrected, so a one-word fix never needs the whole record retyped.
 _EDITABLE = (
@@ -43,7 +49,8 @@ _EDITABLE = (
     "replaces",
 )
 USAGE = (
-    "Commands: list · show ID · search WORDS · status · inspect (read-only preview) · "
+    "Commands: list · show ID · search WORDS · move ID [ID…] --to SCOPE · status · "
+    "inspect (read-only preview) · "
     "edit ID --revision REV (--title T | --body B | --tag T | --alias A | --verified) · "
     "forget ID --revision REV --yes. ID is the SCOPE/ID printed by list."
 )
@@ -58,6 +65,7 @@ EPILOG = (
     "  lop memory search staging host\n"
     "  lop memory show global/01a13d37-52d8-70fd-a819-01843005f4b5\n"
     "  lop memory edit global/<id> --revision <rev> --body 'Staging host is stage-2'\n"
+    "  lop memory move global/<id> --to session\n"
     "  lop memory forget global/<id> --revision <rev> --yes\n"
     "Session-scoped facts need the session: add --session ID (inside a session the /memory "
     "command binds it automatically)."
@@ -94,6 +102,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         nargs="*",
         help="show/edit/forget: the SCOPE/ID (or a unique ID prefix) printed by list; "
         "search: the words to look for (quotes optional)",
+    )
+    parser.add_argument(
+        "--to",
+        choices=SCOPES,
+        default=None,
+        help="move: destination scope (session, team, agent or global)",
     )
     parser.add_argument(
         "--revision",
@@ -163,6 +177,26 @@ def _context(args: argparse.Namespace, store: MemoryStore, prefix: str) -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
+def _device_name(device: str, root: Path) -> str:
+    """The mesh's display name for ``device``, or ``""`` when this device has none.
+
+    Best effort by contract: a name is cosmetic, never authority, and an
+    unresolved peer still prints its id. Read-only across the network records so
+    a receipt for a peer in any paired network can be labelled, not only the
+    network the receipt happened to be written under.
+    """
+    try:
+        from local_operator.network import store as network_store
+
+        for record in network_store.list_networks(root):
+            member = record.member(device)
+            if member is not None and member.name:
+                return str(member.name)
+    except Exception:  # noqa: BLE001 — a label must never fail a status read
+        return ""
+    return ""
+
+
 def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     from local_operator.network.memory import peer_status, settings
 
@@ -172,6 +206,12 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     except MemoryError as exc:
         sync_on, sync_scopes, excluded, sync_error = False, [], [], str(exc)
     values = policy(root)
+    # A receipt stores the stable device id; the name is resolved here, at the one
+    # place both the human renderer and `--json` read, so a failing peer is a
+    # machine an operator can recognise rather than an opaque 32-hex token.
+    peers = peer_status(root)
+    for peer in peers:
+        peer["name"] = _device_name(str(peer.get("device") or ""), root)
     return {
         "policy": values,
         "sync": {
@@ -184,7 +224,7 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
             "trust": (
                 "Existing paired receiver-admin peers with memory-sync-v1 only; no new grants."
             ),
-            "peers": peer_status(root),
+            "peers": peers,
             "retention": (
                 "Tombstones/conflicts are retained; bounded saturation refuses new writes, "
                 "never silently evicts facts."
@@ -215,6 +255,10 @@ def execute(
     )
     store = MemoryStore(root, current, directory)
     scope = args.scope
+    if getattr(args, "to", None) and args.operation != "move":
+        # Same rule as --limit: a silently ignored flag reads as if it applied.
+        # Checked BEFORE the status early return, which used to swallow --to.
+        raise MemoryError("--to applies to `move` only.")
     if args.operation == "status":
         return _status(root, store)
     if args.limit is not None and args.operation != "inspect":
@@ -264,6 +308,25 @@ def execute(
         if not words:
             raise MemoryError(f"Search needs words, e.g. {prefix} search staging host.")
         return {"results": store.search(" ".join(words), scope), "query": True, **common}
+    if args.operation == "move":
+        if not args.to:
+            raise MemoryError(f"Move needs a destination: {prefix} move SCOPE/ID --to session.")
+        if not words:
+            raise MemoryError(f"A move needs at least one ID: {prefix} move SCOPE/ID --to session.")
+        if len(words) > 64:
+            raise MemoryError("A move accepts at most 64 memories at once.")
+        try:
+            value = store.move(
+                list(words),
+                args.to,
+                expected_version=args.revision or None,
+                scope=scope,
+            )
+        except MemoryError as exc:
+            if "not found" in str(exc):
+                raise MemoryError(f"{exc} List what you can see with: {prefix} list") from None
+            raise
+        return {**value, "context": common["context"]}
     if not words:
         raise MemoryError(f"An explicit memory ID is required: {prefix} {args.operation} SCOPE/ID.")
     if len(words) > 1:
@@ -450,6 +513,31 @@ def _searched_line(value: dict[str, Any], prefix: str) -> str:
     return line
 
 
+#: What the operator can DO about a non-healthy sync receipt. The peer's own
+#: refusal sentence wins when it has one (it names the exact conflict); these are
+#: the fallbacks so a code whose refusal carried no sentence is still actionable.
+_PEER_REMEDY: dict[str, str] = {
+    "bad_memory": "Resolve the named memory conflict on the refusing peer; memory sync "
+    "retries automatically after about 30 minutes (restarting the retrying device picks it "
+    "up sooner).",
+    # A receiver-side capability refusal (`_push_to_peer` reports `skipped:no_admin`
+    # when the peer does not grant this device the admin the memory stream requires).
+    # Without this row it fell through to advice that could not change the answer.
+    "skipped:no_admin": "Grant receiver-admin to this device on the peer, or exclude "
+    "this peer from memory sync.",
+    "peer_too_old": "Run lop-update on both peers.",
+    "refused": "Grant this device memory access on the peer.",
+    "not_authorised": "Grant this device memory access on the peer.",
+    "capability_denied": "Grant memory-sync-v1 on the peer.",
+    "not_a_member": "Re-pair this device with the peer's network.",
+    "policy": "Review the peer's memory policy.",
+    "unreachable": "The peer is offline; sync resumes when it returns.",
+    "push_failed": "A transport failure; it retries automatically.",
+    "memory_sync_failed": "A local failure while pushing; inspect `lop memory status --json`.",
+    "scope_or_version_mismatch": "Run lop-update on both peers; their memory-sync versions differ.",
+}
+
+
 def _status_text(value: dict[str, Any]) -> str:
     policy_ = value["policy"]
     sync = value["sync"]
@@ -476,13 +564,90 @@ def _status_text(value: dict[str, Any]) -> str:
                 else ""
             )
         )
+    from local_operator.network.memory import HEALTHY_PEER_CODES
+
     peers = sync.get("peers") or []
-    lines.append(f"Peers synced: {len(peers)}" + ("" if peers else " (none yet)"))
+    # A receipt that is not a healthy code is a peer whose memory stream is NOT
+    # moving. Counting it under "synced" was the round-2 defect: the operator was
+    # told everything was fine while every later op queued behind a refusal.
+    failing = [p for p in peers if str(p.get("code") or "") not in HEALTHY_PEER_CODES]
+    summary = f"Peers synced: {len(peers) - len(failing)}"
+    if peers:
+        if failing:
+            summary += f" · {len(failing)} failing"
+    else:
+        summary += " (none yet)"
+    lines.append(summary)
+    for receipt in failing:
+        device = str(receipt.get("device") or "unknown device")
+        code = str(receipt.get("code") or "unknown")
+        # The peer's own sentence names the exact conflict and the way out; the map
+        # is the fallback for a code whose refusal carried no sentence. The sentence
+        # is UNTRUSTED terminal input from a paired peer: strip control sequences
+        # with the repo's own helper BEFORE whitespace collapsing (a newline inside
+        # an OSC payload must not survive), because this is the first route by which
+        # arbitrary peer text reaches the operator's terminal.
+        from local_operator.ansi import strip_control_sequences
+
+        message = " ".join(strip_control_sequences(str(receipt.get("message") or "")).split())
+        fallback = _PEER_REMEDY.get(code, "Run `lop memory status --json` for this peer's receipt.")
+        # Peer verbosity must not own this page's hierarchy: an unbounded sentence
+        # pushed `1 failing` out of a 40-row viewport. The excerpt is bounded, and
+        # the code-keyed remedy is printed separately when the sentence was cut
+        # before it could carry one; the full text stays in `--json`.
+        truncated = len(message) > PEER_EXCERPT_CHARS
+        if truncated:
+            message = message[:PEER_EXCERPT_CHARS].rsplit(" ", 1)[0].rstrip() + " …"
+        # The display name arrives verbatim from a peer's pairing handshake
+        # (`MemberRecord.name`), and an older build may already have stored a
+        # hostile or oversized one. The render point is therefore the boundary
+        # that protects every row, not just names admitted after a fix: strip the
+        # same control sequences as the sentence and bound the width, or a name
+        # is a second unauthenticated route into the terminal.
+        name = " ".join(strip_control_sequences(str(receipt.get("name") or "")).split())
+        if len(name) > PEER_NAME_CHARS:
+            name = name[: PEER_NAME_CHARS - 1].rstrip() + "…"
+        label = name or device
+        if label != device:
+            label = f"{label} ({device})"
+        lines += _shaped(f"Not syncing with {label}: {code}. {message or fallback}")
+        if truncated:
+            if code in _PEER_REMEDY and _PEER_REMEDY[code] not in message:
+                lines += _shaped(f"Remedy: {fallback}")
+            lines += _shaped("Full peer text: `lop memory status --json`.")
     usage = value["usage"]
     lines.append(
         f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
         f"{usage.get('storage_bytes', 0)} bytes"
     )
+    quotas = usage.get("quotas") or []
+    if quotas:
+        # Wrapped at the repo's row bar: a NoticeBlock clips a longer line at the
+        # pane edge instead of wrapping it, and a clipped percentage/headroom is
+        # the one number this line exists to show.
+        lines += _shaped(
+            "Quota: "
+            + " · ".join(
+                f"{row['scope']} {row['used_tokens']}/{row['cap_tokens']} "
+                f"({row['percent']}%, {row['headroom_tokens']} left)"
+                for row in quotas
+            )
+        )
+        near = [row for row in quotas if row["percent"] >= 80]
+        # ONE LINE PER SCOPE, each with its own relief. A combined sentence used to
+        # tell a session at 96% to move facts "to session scope" — a session->session
+        # move the CLI refuses. The advice is `quota_relief`, the same source the
+        # per-write warning reads, so the two surfaces cannot contradict each other.
+        for row in near:
+            advice, hint = quota_relief(str(row["scope"]))
+            lines += _shaped(
+                f"Near cap: {row['scope']} {row['percent']}% "
+                f"({row['used_tokens']}/{row['cap_tokens']}, {row['headroom_tokens']} left). "
+                + advice
+            )
+            if hint:
+                # The command sits on its own line so wrapping never splits it.
+                lines += _shaped(f"Free space: {hint}.")
     lines.append(value["limits"])
     return "\n".join(lines)
 
@@ -493,6 +658,17 @@ _PROPOSALS = {
     "team": "move to a team",
     "review-work-scope": "review as work scope",
 }
+
+#: How much of a peer's refusal sentence the status page shows. A peer controls
+#: its own sentence length; without a bound a 2,448-character diagnostic pushed
+#: the `1 failing` header out of a 40-row viewport. The full text stays in
+#: `lop memory status --json`, and the code-keyed remedy is printed beside it.
+PEER_EXCERPT_CHARS = 240
+
+#: How much of a peer's display name is shown. A name is peer-supplied and was
+#: stored verbatim; bounded at 48 so the name plus the prefix stays under the
+#: 80-column bar even before the stable id is appended.
+PEER_NAME_CHARS = 48
 
 #: The repo's own list-row bar (see ``_row``: "an 80-column terminal never
 #: clips the ID or splits a status"). Every line of this page is shaped to it.
@@ -650,6 +826,25 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
     return "\n".join(lines)
 
 
+def _quota_receipt(value: dict[str, Any]) -> list[str]:
+    """The headroom/warning tail every WRITE receipt carries.
+
+    Centralized because four branches (moved/corrected/forgotten) must agree: the
+    store has always returned ``quota`` and ``warning``, and a receipt that drops
+    them makes the 80/90 warning invisible exactly where a write happened.
+    """
+    lines: list[str] = []
+    quota = value.get("quota") or {}
+    if quota:
+        lines += _shaped(
+            f"Quota: {quota['used_tokens']}/{quota['cap_tokens']} tokens "
+            f"({quota['percent']}%, {quota['headroom_tokens']} left)"
+        )
+    if value.get("warning"):
+        lines += _shaped(value["warning"])
+    return lines
+
+
 def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> str:
     """Readable receipt for CLI and slash command; ``--json`` keeps the raw payload."""
     if failed:
@@ -665,6 +860,20 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         for row in rows:
             lines += _row(row)
         lines.append(f"Next: {prefix} show {rows[0]['scope']}/{rows[0]['id']}{value['context']}")
+        return "\n".join(lines)
+    if value.get("action") == "moved":
+        rows = value["moved"]
+        lines = [f"Moved {len(rows)} fact(s) to {value['destination']}."]
+        for row in rows:
+            # Two UUIDs plus an arrow exceed the 80-column bar; a clipped destination
+            # would hide the half of the receipt that carries the new reference.
+            lines += _shaped(f"  {row['from']} → {row['to']}")
+        if rows:
+            lines += _shaped(
+                f"Next: {prefix} show {rows[0]['to']}{value.get('context', '')} --related "
+                "(the previous scope is shown as moved_from)"
+            )
+        lines += _quota_receipt(value)
         return "\n".join(lines)
     if "items" in value:
         items = value["items"]
@@ -694,6 +903,12 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         ctx = value.get("context", "")
         origin = "captured" if value["status"] == "candidate" else "stated"
         lines = [f"{ref}  [{origin} · {value['status']}]", f"Revision: {value['version']}"]
+        if value.get("moved_from"):
+            source = value["moved_from"]
+            lines += _shaped(
+                f"Moved from: {source['scope']}/{source['id']} "
+                "(its previous location; revisions there are closed)"
+            )
         if fact:
             lines += [
                 fact["title"],
@@ -737,17 +952,19 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
     if "policy" in value:
         return _status_text(value)
     if value.get("action") == "forgotten":
-        return (
-            f"Forgotten {value['reference']} — '{value.get('title', '')}'. The body is removed "
-            "here, and the removal propagates to trusted synced peers when memory sync is on. "
-            "It cannot be undone; store a new fact instead."
+        lines = _shaped(
+            f"Forgotten {value['reference']} — '{value.get('title', '')}'. The body is "
+            "removed here, and the removal propagates to trusted synced peers when memory "
+            "sync is on. It cannot be undone; store a new fact instead."
         )
+        return "\n".join(lines + _quota_receipt(value))
     if value.get("action") == "corrected":
-        return (
+        lines = _shaped(
             f"Corrected {value['reference']} — '{value.get('title', '')}'. New revision "
             f"{value['version']}; the previous one stays in history, and trusted synced "
             "peers receive the correction when memory sync is on."
         )
+        return "\n".join(lines + _quota_receipt(value))
     return f"{value.get('scope', '')}/{value.get('id', '')} [{value.get('status', '')}]"
 
 

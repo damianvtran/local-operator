@@ -62,6 +62,15 @@ def valid_memory_tool_arguments(value: Any) -> bool:
 
 ITEM_TOKENS = 256
 ITEM_BYTES = 8192
+#: Token caps per scope. One authority: the write gate (``_quota``), the move
+#: destination check, the warning state and inventory/status all read these, so
+#: a reported headroom cannot disagree with the number a write is refused on.
+#: Global is the shared bank everyone reads; every other scope is per-owner.
+GLOBAL_TOKENS = 16000
+OWNER_TOKENS = 50000
+#: Percent thresholds that warn ONCE on the write that crosses them, highest
+#: first: a write jumping straight past both reports the endangering one.
+WARNING_THRESHOLDS = (90, 80)
 RECALL_TOKENS = 1200
 RECALL_HARD_TOKENS = 2000
 MAX_DB_BYTES = 64 * 1024 * 1024
@@ -789,6 +798,37 @@ CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n I
 """
 
 
+#: The relief sentence and its command hint for a near-cap scope, shared by the
+#: write warning and `lop memory status`. ONE function because the two surfaces
+#: drifted: the write warning learned that a session->session move is refused,
+#: while status kept prescribing `--to session` at session scope — an impossible
+#: instruction at the exact moment the operator is out of space.
+def quota_relief(scope: str) -> tuple[str, str]:
+    """``(advice, command hint)`` for relieving ``scope`` at 80% or more.
+
+    Every branch returns both halves, and the hint is the command that actually
+    works at that scope: global moves work state to session, session forgets
+    (a session->session move is refused), and team/agent move only facts that
+    belong elsewhere.
+    """
+    if scope == "global":
+        return (
+            "Consolidate stale facts with forget, or move work-state facts to session " "scope.",
+            "`lop memory move ID --to session`",
+        )
+    if scope == "session":
+        return (
+            "Consolidate this session's stale facts with forget — completed steps, "
+            "superseded values and next-step notes from earlier turns are the stale ones; "
+            "move only facts that belong in another scope.",
+            "`lop memory forget SCOPE/ID --revision REV --yes`",
+        )
+    return (
+        "Consolidate stale facts with forget; move only facts that belong in another " "scope.",
+        "`lop memory move ID --to SCOPE`",
+    )
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -931,6 +971,68 @@ class MemoryStore:
             )
 
     @staticmethod
+    def token_cap(scope: str) -> int:
+        return GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
+
+    @classmethod
+    def _quota_view(cls, db: sqlite3.Connection, scope: str, owner: str) -> dict[str, Any]:
+        """Used/percent/headroom for one owner, from the same ``current`` rows ``_quota`` counts."""
+        used = db.execute(
+            "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+            (scope, owner),
+        ).fetchone()[0]
+        cap = cls.token_cap(scope)
+        return {
+            "scope": scope,
+            "owner": owner,
+            "used_tokens": used,
+            "cap_tokens": cap,
+            "percent": round(100.0 * used / cap, 1) if cap else 0.0,
+            "headroom_tokens": cap - used,
+        }
+
+    @classmethod
+    def _quota_notice(
+        cls, db: sqlite3.Connection, scope: str, owner: str
+    ) -> tuple[dict[str, Any], str | None]:
+        """Return the quota view plus a warning only on a NEW 80/90% crossing.
+
+        The state is the highest threshold this owner has been WARNED about, kept
+        beside the store so it survives restarts: without it every subsequent
+        write over the line nags, and with it a drop back below 80% (forget/move
+        out) clears the state so a later recrossing warns again. Writes are the
+        only caller — a read path must never mutate meta or carry a warning.
+        """
+        view = cls._quota_view(db, scope, owner)
+        key = "quota-warn:" + scope + ":" + owner
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        stored = int(row[0]) if row else 0
+        reached = next((line for line in WARNING_THRESHOLDS if view["percent"] >= line), 0)
+        if not reached:
+            if stored:
+                db.execute("DELETE FROM meta WHERE key=?", (key,))
+            return view, None
+        if reached <= stored:
+            return view, None
+        db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(reached)))
+        # The relief must be actionable WHERE it is offered: a session->session move
+        # is refused, so telling a session owner to "move to session" is noise; for
+        # team/agent only a fact that belongs elsewhere can move. The sentences live
+        # in `quota_relief` so the status page cannot drift from this warning.
+        advice, hint = quota_relief(scope)
+        relief = advice + (f" ({hint})" if hint else "")
+        if reached >= 90:
+            guidance = "Consolidate now: writes are refused once the cap is reached. " + relief
+        else:
+            guidance = relief
+        shortfall = "" if view["headroom_tokens"] >= 0 else " (OVER CAP)"
+        return view, (
+            f"Memory quota warning: {scope} crossed {reached}% "
+            f"({view['used_tokens']}/{view['cap_tokens']} tokens, "
+            f"{view['headroom_tokens']} left{shortfall}, {view['percent']}% used). " + guidance
+        )
+
+    @staticmethod
     def _quota(db: sqlite3.Connection, scope: str, owner: str, *, relief: bool = False) -> None:
         """Refuse growth past the caps. ``relief`` (a forget) skips the OP/TOMBSTONE counts:
         a tombstone is the only way to remove a sensitive body, so refusing it at the cap
@@ -946,7 +1048,7 @@ class MemoryStore:
             "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
         if (not relief and (count > MAX_OWNER_OPS or tombs > MAX_TOMBSTONES)) or tokens > (
-            16000 if scope == "global" else 50000
+            GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
         ):
             raise MemoryError(
                 "Memory quota reached (including history/tombstones). Inspect memory://, "
@@ -993,6 +1095,17 @@ class MemoryStore:
         list (``show``) opts in explicitly.
         """
         owner = self.identity.owner(scope)
+        if forget and merge:
+            # A merge forget builds a multi-parent tombstone, which is
+            # indistinguishable on the wire from a move's source tombstone — the
+            # peer-side move guard would refuse a legitimate forget. No shipping
+            # surface passes both (the CLI's --resolve is correction-only), so
+            # refuse the shape instead of keeping a latent false positive: resolve
+            # the conflict with an edit, then forget the revision that was read.
+            raise MemoryError(
+                "Forget cannot merge concurrent revisions. Resolve them with an edit "
+                "(--resolve), then forget the revision you read."
+            )
         if entity is not None:
             safe_segment(entity)
             if not expected_version:
@@ -1033,6 +1146,7 @@ class MemoryStore:
                         "scope": scope,
                         "status": "active",
                         "deduplicated": True,
+                        "quota": self._quota_view(db, scope, owner),
                     }
             heads: list[dict[str, Any]] = []
             if ops:
@@ -1115,6 +1229,9 @@ class MemoryStore:
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
             self._reindex(db, entity)
             self._quota(db, scope, owner, relief=forget)
+            # Headroom/percent every write, but a warning only on a NEW crossing;
+            # the state lives in meta, committed with the write it describes.
+            quota, warning = self._quota_notice(db, scope, owner)
             # A session's portable log is fsync'd before the index commit. If
             # that commit crashes, lazy import reconstructs it idempotently.
             if scope == "session" and self.session_dir:
@@ -1124,12 +1241,318 @@ class MemoryStore:
                 db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
                 db.commit()
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return {
+        result: dict[str, Any] = {
             "id": entity,
             "version": op["op_id"],
             "scope": scope,
             "status": "forgotten" if clean is None else clean["status"],
+            "quota": quota,
         }
+        if warning:
+            result["warning"] = warning
+        return result
+
+    def move(
+        self,
+        targets: str | list[str],
+        destination: str,
+        *,
+        expected_version: str | None = None,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Move one or more facts to ``destination`` atomically, preserving the fact.
+
+        WHY this exists: a fact written to the wrong scope could previously only be
+        forgotten (destroys it) or edited (scope is immutable). The global bank filled
+        to its cap with work state while session scope sat empty, and an agent could
+        not act on the advice to "use session scope instead".
+
+        DESIGN CONSTRAINT: ``apply_ops`` refuses an entity whose ops change scope, so
+        a move cannot rewrite an entity in place. It is represented as two ordinary
+        ops that OLD PEERS ALREADY UNDERSTAND (no protocol bump): a ``put`` at the
+        destination whose first revision PARENTS the source head, and a ``tombstone``
+        at the source. The destination fact is byte-identical (text, provenance,
+        created_at and every other timestamp), ``show`` reports ``moved_from`` from
+        the cross-entity root parent, and the ordinary op stream replicates it. A new
+        op kind was rejected deliberately: a peer running an older release would
+        refuse the whole batch and then sit behind a permanent sequence gap.
+
+        The source tombstone is destructive exactly like a forget — it ends that
+        entity. A move therefore refuses a source that already has unmerged
+        concurrent revisions, and ``apply_ops`` refuses a move tombstone that would
+        destroy a revision the moving device never saw (the tombstone names the
+        destination op as a second parent, which is how a peer tells it apart from a
+        forget without a protocol change).
+
+        All-or-nothing: every target is resolved and validated, the destination
+        quota and the source's history caps are checked, before the single
+        ``BEGIN IMMEDIATE`` transaction inserts any op; any failure before commit
+        leaves the store untouched.
+        """
+        if isinstance(targets, str):
+            targets = [targets]
+        if not targets:
+            raise MemoryError("A move needs at least one memory ID.")
+        if len(targets) > 64:
+            raise MemoryError("A move accepts at most 64 memories at once.")
+        if destination not in SCOPES:
+            raise MemoryError("Unknown move destination; use session, team, agent or global.")
+        dest_owner = self.identity.owner(destination)
+        if expected_version is not None:
+            safe_segment(expected_version)
+        resolved: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            if not isinstance(target, str) or not target.strip():
+                raise MemoryError("Every move target must be an explicit memory ID.")
+            source_scope, entity = self.resolve(target, scope)
+            if (source_scope, entity) in seen:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is listed twice; a move takes each fact once."
+                )
+            seen.add((source_scope, entity))
+            if source_scope == destination:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is already in {destination}; "
+                    "moving it there would do nothing."
+                )
+            resolved.append((source_scope, entity))
+        if expected_version is not None and len(resolved) != 1:
+            raise MemoryError("A revision guards one fact; omit it when moving a batch.")
+        if destination == "session" or any(source == "session" for source, _ in resolved):
+            # A moved/opened session's portable log may hold rows the local index
+            # has not rebuilt yet; moving against a stale index could miss a
+            # conflict or resurrect a forgotten fact on the next import.
+            self.import_session()
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            origin = self._origin(db)
+            # Validate EVERY target before writing anything, so a refusal later in
+            # the batch cannot leave an earlier move half-applied.
+            prepared: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+            needed = 0
+            batch_facts: set[str] = set()
+            source_counts: dict[tuple[str, str], int] = {}
+            for source_scope, entity in resolved:
+                source_owner = self.identity.owner(source_scope)
+                ops = self._ops(db, entity)
+                if not ops or any(
+                    op["scope"] != source_scope or op["owner_key"] != source_owner for op in ops
+                ):
+                    raise MemoryError("Memory not found in the authorized scope.")
+                if any(op["kind"] == "tombstone" for op in ops):
+                    raise MemoryError(
+                        f"{source_scope}/{entity} was forgotten; it cannot be moved. Store it "
+                        "again in the destination scope instead."
+                    )
+                heads = self._heads(ops)
+                if len(heads) > 1:
+                    # Concurrent sibling revisions are a decision a human has to
+                    # make. Moving the newest and tombstoning the entity would
+                    # silently discard the others, so refuse while it is ambiguous.
+                    raise MemoryError(
+                        f"{source_scope}/{entity} has {len(heads)} concurrent revisions; "
+                        "resolve the conflict (edit with --resolve) before moving it."
+                    )
+                head = heads[0]
+                if expected_version is not None and head["op_id"] != expected_version:
+                    raise MemoryError(
+                        "Memory changed concurrently. Read its current revision and retry."
+                    )
+                fact = dict(head["fact"])
+                # A move must never be a route around the guards ``put`` enforces.
+                # The strongest of them is scope-fit: work/lane/progress content is
+                # refused in the global bank, and moving it there would defeat it.
+                scope_fit(destination, fact)
+                if fact["replaces"]:
+                    # ``replaces`` is a same-scope lineage link; carrying it across
+                    # scopes is refused by ``put``'s replacement check. Say so plainly
+                    # rather than fail mid-transaction.
+                    raise MemoryError(
+                        f"{source_scope}/{entity} supersedes another fact in the same "
+                        "scope, so a cross-scope move would break that link. Resolve the "
+                        "supersession first (forget the superseded fact, or keep this "
+                        "one in place)."
+                    )
+                duplicate = db.execute(
+                    "SELECT entity_id FROM current WHERE scope=? AND owner=? "
+                    "AND json_remove(fact,'$.created_at')=json_remove(?,'$.created_at') LIMIT 1",
+                    (destination, dest_owner, _dump(fact)),
+                ).fetchone()
+                if duplicate:
+                    raise MemoryError(
+                        f"{source_scope}/{entity} already has an identical fact at "
+                        f"{destination}/{duplicate[0]}; a move would silently merge them. "
+                        "Resolve one of the two first."
+                    )
+                needed += count_text_tokens(_dump(fact))
+                # Two byte-identical facts in one batch would create two identical
+                # destination rows: ``put``'s idempotence would have refused the
+                # second, and ``move`` bypasses ``put``, so refuse it here.
+                signature = _dump(
+                    {key: value for key, value in fact.items() if key != "created_at"}
+                )
+                if signature in batch_facts:
+                    raise MemoryError(
+                        "Two targets in this batch hold the same fact; moving both would "
+                        "duplicate it at the destination. Keep one."
+                    )
+                batch_facts.add(signature)
+                source_counts[(source_scope, source_owner)] = (
+                    source_counts.get((source_scope, source_owner), 0) + 1
+                )
+                prepared.append((source_scope, entity, head, fact))
+            cap = self.token_cap(destination)
+            current_tokens = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+                (destination, dest_owner),
+            ).fetchone()[0]
+            if current_tokens + needed > cap:
+                raise MemoryError(
+                    f"Memory move refused: {destination} would exceed its {cap}-token cap "
+                    f"(current {current_tokens} tokens, needs {needed} tokens, cap {cap}). "
+                    "Consolidate the destination or move fewer facts; no fact was truncated "
+                    "and nothing was changed."
+                )
+            destination_ops = db.execute(
+                "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                (destination, dest_owner),
+            ).fetchone()[0]
+            if destination_ops + len(prepared) > MAX_OWNER_OPS:
+                raise MemoryError(
+                    f"Memory move refused: {destination} would exceed its operation history "
+                    "cap. Consolidate or export the destination history first."
+                )
+            # The source gains one tombstone per moved fact. Refuse rather than push
+            # a scope past the history caps: the next write there would then be
+            # refused, and tombstones are never collected (review MINOR-5).
+            for (source_scope, source_owner), count in source_counts.items():
+                source_ops = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                source_tombs = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=? AND kind='tombstone'",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                if source_ops + count > MAX_OWNER_OPS or source_tombs + count > MAX_TOMBSTONES:
+                    raise MemoryError(
+                        f"Memory move refused: {source_scope} would exceed its operation/"
+                        "tombstone history cap. Consolidate or export that history first; "
+                        "nothing was changed."
+                    )
+            seq = db.execute(
+                "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
+            ).fetchone()[0]
+            last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
+            clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
+            moved: list[dict[str, Any]] = []
+            affected_sessions: set[str] = set()
+            for source_scope, entity, head, fact in prepared:
+                new_id = _id()
+                operation = {
+                    "v": 1,
+                    "op_id": _id(),
+                    "entity_id": new_id,
+                    "origin_device": origin,
+                    "seq": seq,
+                    "hlc": [clock, 0, origin],
+                    "parents": [head["op_id"]],
+                    "kind": "put",
+                    "scope": destination,
+                    "owner_key": dest_owner,
+                    "fact": fact,
+                    "body_sha": hashlib.sha256(_dump(fact).encode()).hexdigest(),
+                }
+                validate_op(operation)
+                db.execute(
+                    "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        operation["op_id"],
+                        new_id,
+                        origin,
+                        seq,
+                        destination,
+                        dest_owner,
+                        "put",
+                        _dump(operation),
+                    ),
+                )
+                self._reindex(db, new_id)
+                moved.append(
+                    {
+                        "from": f"{source_scope}/{entity}",
+                        "to": f"{destination}/{new_id}",
+                        "version": operation["op_id"],
+                        "title": fact["title"],
+                        "tokens": count_text_tokens(_dump(fact)),
+                    }
+                )
+                seq += 1
+                clock += 1
+                tombstone = {
+                    "v": 1,
+                    "op_id": _id(),
+                    "entity_id": entity,
+                    "origin_device": origin,
+                    "seq": seq,
+                    "hlc": [clock, 0, origin],
+                    "parents": [head["op_id"], operation["op_id"]],
+                    "kind": "tombstone",
+                    "scope": source_scope,
+                    "owner_key": self.identity.owner(source_scope),
+                    "fact": None,
+                    "body_sha": head["body_sha"],
+                }
+                validate_op(tombstone)
+                db.execute(
+                    "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        tombstone["op_id"],
+                        entity,
+                        origin,
+                        seq,
+                        source_scope,
+                        tombstone["owner_key"],
+                        "tombstone",
+                        _dump(tombstone),
+                    ),
+                )
+                self._reindex(db, entity)
+                seq += 1
+                clock += 1
+                if source_scope == "session":
+                    affected_sessions.add(tombstone["owner_key"])
+                if destination == "session":
+                    affected_sessions.add(dest_owner)
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+            self._quota(db, destination, dest_owner)
+            quota, warning = self._quota_notice(db, destination, dest_owner)
+            # Move-out relief must reset the SOURCE's crossing state exactly like a
+            # forget does, or a later recross into that scope warns nothing.
+            for (source_scope, source_owner), _count in source_counts.items():
+                self._quota_notice(db, source_scope, source_owner)
+            # Mirror ``put``/``apply_ops``: a session's portable log is written
+            # before the index commit, so a crash is repaired by lazy import.
+            for owner in sorted(affected_sessions):
+                directory = (
+                    self.session_dir
+                    if owner == self.identity.session_id
+                    else self._session_directory(owner, db)
+                )
+                if directory is not None:
+                    if directory.is_dir() or owner == self.identity.session_id:
+                        self._export(db, owner, directory)
+            db.commit()
+        result: dict[str, Any] = {
+            "action": "moved",
+            "destination": destination,
+            "moved": moved,
+            "quota": quota,
+        }
+        if warning:
+            result["warning"] = warning
+        return result
 
     def _session_directory(self, owner: str, db: sqlite3.Connection | None = None) -> Path | None:
         if owner == self.identity.session_id and self.session_dir:
@@ -1326,6 +1749,12 @@ class MemoryStore:
                             "Memory operation identity cannot be reused with different content."
                         )
                     continue
+                if op["kind"] == "tombstone":
+                    # A move's tombstone must not erase a revision the mover never
+                    # saw; a forget's own guarantee is untouched (see the helper).
+                    conflict = self._move_tombstone_conflict(db, op, old_ops)
+                    if conflict:
+                        raise MemoryError(conflict)
                 if contiguous:
                     seq = db.execute(
                         "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?",
@@ -1478,8 +1907,11 @@ class MemoryStore:
                 [*values, len(target), target],
             ).fetchall()
         if len(rows) > 1:
+            # The query is capped, so a full page means "at least this many" — a
+            # bare count would understate an ambiguity the caller must widen.
+            count = "at least 4" if len(rows) == 4 else str(len(rows))
             raise MemoryError(
-                f"'{target}' matches {len(rows)} memories; type more of the ID "
+                f"'{target}' matches {count} memories; type more of the ID "
                 "(or use the full SCOPE/ID shown by list)."
             )
         if not rows:
@@ -1551,8 +1983,96 @@ class MemoryStore:
                     ]
                 ),
                 "revisions": len(ops),
+                "moved_from": None if tombs else self._moved_from(db, entity, ops),
                 "untrusted": True,
             }
+
+    def _moved_from(
+        self, db: sqlite3.Connection, entity: str, ops: list[dict[str, Any]]
+    ) -> dict[str, str] | None:
+        """The source of a moved fact, from the cross-entity parent ``move`` writes.
+
+        Derived from the entity's ROOT revision, not its head: an ordinary
+        correction parents only the same entity, so after the first edit the head
+        no longer names the move and the receipt's promise would silently vanish.
+        An ordinary creation has no parents, and a ``replaces`` creation's parent
+        is a supersession link (not a move), so this cannot mislabel either.
+        """
+        revisions = [op for op in ops if op["kind"] == "put"]
+        ids = {op["op_id"] for op in revisions}
+        # A root revision has no SAME-ENTITY parent; a correction does.
+        roots = sorted(
+            (op for op in revisions if not any(parent in ids for parent in op["parents"])),
+            key=lambda op: (op["hlc"], op["op_id"]),
+        )
+        if not roots:
+            return None
+        root_fact = roots[0]["fact"] or {}
+        replaced = root_fact.get("replaces") or ""
+        for parent in roots[0]["parents"]:
+            row = db.execute("SELECT scope,entity_id FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if row and row[1] != entity and row[1] != replaced:
+                return {"scope": row[0], "id": row[1]}
+        return None
+
+    def _move_tombstone_conflict(
+        self,
+        db: sqlite3.Connection,
+        op: dict[str, Any],
+        old_ops: list[dict[str, Any]],
+    ) -> str | None:
+        """Refuse a MOVE's source tombstone when it would erase an unseen revision.
+
+        ``move`` names its destination ``put`` as a second parent of the source
+        tombstone; a forget tombstone's parents are all same-entity revisions. That
+        is the protocol-safe marker: an old peer still reads the op as an ordinary
+        tombstone, while a peer that holds a concurrent correction can refuse
+        instead of redacting it. A move is advertised as a relocation, so losing an
+        edit the mover never saw is not a documented forget.
+
+        The destination op may be absent here when this peer's ``network.memory.scopes``
+        filters out the destination scope; the second, unresolvable parent still
+        identifies the op as move-shaped, and coverage comes from the same-entity
+        parents the mover DID send — an unseen sibling is exactly a local head that
+        is not among them.
+
+        Deliberately returns a refusal only for that marker: a real forget must
+        still replicate and redact unconditionally (a tombstone is the only way to
+        remove a sensitive body). An entity already tombstoned locally is allowed
+        through — there is no live revision left to protect.
+        """
+        if any(existing["kind"] == "tombstone" for existing in old_ops):
+            return None
+        local = {existing["op_id"] for existing in old_ops}
+        covered = {parent for parent in op["parents"] if parent in local}
+        unresolved = [parent for parent in op["parents"] if parent not in local]
+        if not unresolved:
+            return None  # an ordinary forget: every parent is a local revision
+        move = False
+        for parent in unresolved:
+            row = db.execute("SELECT data FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if not row:
+                continue
+            foreign = json.loads(row[0])
+            if foreign["entity_id"] != op["entity_id"] and foreign["kind"] == "put":
+                move = True
+        if not move and len(op["parents"]) > 1 and covered:
+            # The destination scope was filtered out of this peer's sync config, so
+            # the destination op never arrived. A forget's parents are ALL local by
+            # construction; a second, unresolvable parent is move-shaped.
+            move = True
+        if not move:
+            return None
+        unseen = [head for head in self._heads(old_ops) if head["op_id"] not in covered]
+        if not unseen:
+            return None
+        return (
+            "Memory move refused: a move from another device would replace a revision "
+            "this device holds but the moving device never saw. Read that revision and "
+            "keep anything it adds (or forget the source fact). Memory sync retries "
+            "automatically after about 30 minutes; restarting this device picks the retry up "
+            "sooner."
+        )
 
     def inventory(
         self, scope: str | None = None, *, limit: int = 20, cursor: str | None = None
@@ -1569,7 +2089,12 @@ class MemoryStore:
                 "available_scopes": [name for name, _ in self.identity.scopes()],
                 "active_tokens": 0,
                 "ops": 0,
-                "limits": {"global_tokens": 16000, "owner_tokens": 50000, "item_tokens": 256},
+                "quotas": [],
+                "limits": {
+                    "global_tokens": GLOBAL_TOKENS,
+                    "owner_tokens": OWNER_TOKENS,
+                    "item_tokens": ITEM_TOKENS,
+                },
             }
         with self.connection() as db:
             page_where = where + (" AND entity_id<?" if cursor else "")
@@ -1583,6 +2108,24 @@ class MemoryStore:
                 f"SELECT coalesce(sum(tokens),0) FROM current WHERE {where}", values
             ).fetchone()[0]
             count = db.execute(f"SELECT count(*) FROM ops WHERE {where}", values).fetchone()[0]
+            pairs = [(scope, self.identity.owner(scope))] if scope else self.identity.scopes()
+            quotas = []
+            for name, owner in pairs:
+                used = db.execute(
+                    "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+                    (name, owner),
+                ).fetchone()[0]
+                cap = self.token_cap(name)
+                quotas.append(
+                    {
+                        "scope": name,
+                        "owner": owner,
+                        "used_tokens": used,
+                        "cap_tokens": cap,
+                        "percent": round(100.0 * used / cap, 1) if cap else 0.0,
+                        "headroom_tokens": cap - used,
+                    }
+                )
             return {
                 "items": [
                     {
@@ -1597,14 +2140,15 @@ class MemoryStore:
                 ],
                 "active_tokens": usage,
                 "ops": count,
+                "quotas": quotas,
                 "next_cursor": rows[-1][0] if len(rows) == limit else None,
                 "storage_bytes": sum(
                     p.stat().st_size for p in self.root.glob("memory.db*") if p.is_file()
                 ),
                 "limits": {
-                    "global_tokens": 16000,
-                    "owner_tokens": 50000,
-                    "item_tokens": 256,
+                    "global_tokens": GLOBAL_TOKENS,
+                    "owner_tokens": OWNER_TOKENS,
+                    "item_tokens": ITEM_TOKENS,
                     "owner_ops": MAX_OWNER_OPS,
                     "revisions": MAX_REVISIONS,
                     "storage_bytes": MAX_DB_BYTES,

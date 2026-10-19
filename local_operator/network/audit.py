@@ -331,6 +331,12 @@ CAUSES: frozenset[str] = frozenset(
         # deliberately-bounded relay as a relay with an internal fault.
         "handshake_cap",
         "policy",
+        # A memory handler refused a batch itself (`bad_memory`): a move whose
+        # source tombstone would erase an unseen local revision, or an invalid
+        # payload. Registered so the refusal reads as itself rather than as
+        # "internal" — that substitution is what made the round-2 silent stall
+        # invisible in the audit file too.
+        "bad_memory",
         "timeout",
         "internal",
         # A member answered ``busy`` and the pass parked it (S3a): a deferral is

@@ -3110,6 +3110,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes the same <config>/imports/.lock file this process created",
     ),
+    # -- memory move: a verb, not a filesystem call ---------------------------
+    # `store.move(...)` relocates a FACT between memory scopes. The receiver is
+    # a MemoryStore, not a Path, and the method takes `(targets, destination,
+    # scope, expected_version)` — no path, no directory, and no session id that
+    # could be mistaken for one. The AST guard matches the NAME on any receiver
+    # by design (see the module docstring), so the shape lands here.
+    (
+        "local_operator/memory_cli.py::execute",
+        "<path>.move",
+        "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
+    (
+        "local_operator/tools/memory_tools.py::_run",
+        "<path>.move",
+        "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}

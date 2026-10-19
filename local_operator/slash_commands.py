@@ -2145,7 +2145,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # parses with that tuple, so a verb missing here is a verb the desktop
         # spends as a model message (or 422s) while the TUI runs it.
         # tests/unit/test_memory_inspect.py pins the two lists together.
-        subcommands=("list", "show", "search", "edit", "forget", "status", "inspect"),
+        subcommands=("list", "show", "search", "move", "edit", "forget", "status", "inspect"),
     ),
     SlashCommand(
         "project",
