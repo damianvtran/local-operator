@@ -147,3 +147,80 @@ def test_a_child_append_is_seen_without_deleting_the_cache(tmp_path, monkeypatch
     }
     assert second.revision != first.revision
     assert index.index_path(root).is_file(), "the incremental path must not force a rebuild"
+
+
+def test_a_roster_only_change_refreshes_the_family(monkeypatch) -> None:
+    """A membership edit with an unchanged parent journal must be seen.
+
+    The roster sidecar is the authoritative family list; the parent transcript
+    can stay byte-identical while a new child (or grandchild) run is added.
+    """
+    import tempfile
+    from pathlib import Path
+
+    work = Path(tempfile.mkdtemp())
+    root = config_root(monkeypatch, work)
+    parent = session(root, SESSION, write_rows("p1", 1, work / "parent.txt"))
+    first = session(root, CHILD, write_rows("c1", 2, work / "child-one.txt"))
+    (first / "origin.json").write_text(json.dumps({"origin": "subagent"}))
+    second_id = "111111111111"
+    second = session(root, second_id, write_rows("g1", 3, work / "grandchild.txt"))
+    (second / "origin.json").write_text(json.dumps({"origin": "subagent"}))
+
+    def roster(extra: bool) -> None:
+        records = [
+            {
+                "job_id": "j1",
+                "label": "scout",
+                "agent_role": "scout",
+                "depth": 1,
+                "session_dir": str(first),
+            }
+        ]
+        if extra:
+            records.append(
+                {
+                    "job_id": "j2",
+                    "label": "grandchild",
+                    "agent_role": "scout",
+                    "depth": 2,
+                    "session_dir": str(second),
+                }
+            )
+        (parent / "subagent-roster.v1.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "generation": 1,
+                    "jobs": [],
+                    "accounting": {},
+                    "records": records,
+                }
+            )
+        )
+
+    roster(False)
+    first_build = index.build_catalog(root, budget_s=None)
+    assert {asset.derived_name for asset in first_build.assets} == {
+        "parent.txt",
+        "child-one.txt",
+    }
+    parent_bytes = (parent / "transcript.jsonl").read_bytes()
+
+    roster(True)
+    second_build = index.build_catalog(root, budget_s=None)
+    assert (parent / "transcript.jsonl").read_bytes() == parent_bytes, "parent must be unchanged"
+    assert {asset.derived_name for asset in second_build.assets} == {
+        "parent.txt",
+        "child-one.txt",
+        "grandchild.txt",
+    }
+    assert second_build.revision != first_build.revision
+
+    # Removing the record retracts the journal from the family on the same path.
+    roster(False)
+    third_build = index.build_catalog(root, budget_s=None)
+    assert {asset.derived_name for asset in third_build.assets} == {
+        "parent.txt",
+        "child-one.txt",
+    }
