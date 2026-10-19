@@ -22,6 +22,7 @@ Pure and dependency-free, like :mod:`local_operator.voice.speakable`.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from local_operator.voice import speakable as voice_speakable
@@ -29,6 +30,12 @@ from local_operator.voice import speakable as voice_speakable
 #: One constant for every rung. Equals ``tts.clients.GROQ_TTS_MAX_CHARS``; this
 #: module stays free of client imports, and the route test pins the two equal.
 VOICE_SEGMENT_MAX_CHARS = 200
+
+#: The cap is counted in Python code points. UNVERIFIED: whether Groq counts code
+#: points, UTF-8 bytes or graphemes is unknown until a live call with the
+#: operator's key. Until then the cap stays in code points and a cut never lands
+#: inside a grapheme cluster, so the choice of unit cannot split a glyph.
+VOICE_SEGMENT_UNIT = "code_points"
 
 #: A clause cut earlier than this throws most of the budget away; a space cut is
 #: better there.
@@ -50,6 +57,36 @@ class SpokenReply:
     segments: tuple[str, ...]
 
 
+_ZWJ = "\u200d"
+
+
+def _is_regional_indicator(char: str) -> bool:
+    return "\U0001f1e6" <= char <= "\U0001f1ff"
+
+
+def _is_cluster_boundary(text: str, index: int) -> bool:
+    """Whether cutting ``text`` before ``index`` leaves every grapheme cluster whole.
+
+    Stdlib approximation of the extended-cluster rules that matter for speech
+    text: combining marks, variation selectors and emoji modifiers attach to the
+    previous character, a ZWJ joins its neighbours, and regional indicators pair
+    into flags.
+    """
+    if index <= 0 or index >= len(text):
+        return True
+    before, after = text[index - 1], text[index]
+    if before == _ZWJ or after == _ZWJ:
+        return False
+    if unicodedata.category(after) in ("Mn", "Me", "Mc") or "\U0001f3fb" <= after <= "\U0001f3ff":
+        return False
+    if _is_regional_indicator(before) and _is_regional_indicator(after):
+        run = 0
+        while index - 1 - run >= 0 and _is_regional_indicator(text[index - 1 - run]):
+            run += 1
+        return run % 2 == 0
+    return True
+
+
 def _cut_point(text: str, limit: int) -> int:
     """Where to cut ``text`` (longer than ``limit``) so the head fits ``limit``.
 
@@ -59,13 +96,22 @@ def _cut_point(text: str, limit: int) -> int:
     candidates = [
         index
         for index in range(limit, 0, -1)
-        if (text[index - 1].isspace() or text[index].isspace()) and text[:index].strip()
+        if (text[index - 1].isspace() or text[index].isspace())
+        and text[:index].strip()
+        and _is_cluster_boundary(text, index)
     ]
     for index in candidates:
         head = text[:index].rstrip()
         if len(head) >= _MIN_CLAUSE_CUT and head[-1] in _CLAUSE_MARKS:
             return index
-    return candidates[0] if candidates else limit
+    if candidates:
+        return candidates[0]
+    # An unbroken run: step back to the nearest whole-cluster boundary. A single
+    # cluster longer than the limit has none, and the cap then wins.
+    for index in range(limit, 0, -1):
+        if _is_cluster_boundary(text, index):
+            return index
+    return limit
 
 
 def _split_to_fit(piece: str, limit: int) -> list[str]:

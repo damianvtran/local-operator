@@ -831,6 +831,73 @@ async def test_unsupported_and_oversized_recordings_cost_nothing(
     assert desktop_voice.MAX_UPLOAD_BYTES == 64  # the patched ceiling, restored on teardown
 
 
+@pytest.mark.asyncio
+async def test_an_oversized_content_length_is_refused_before_the_form_is_parsed(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _enable(rig, SESSION_A)
+    from starlette.requests import Request
+
+    async def _form_must_not_parse(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the multipart form was parsed")
+
+    monkeypatch.setattr(Request, "_get_form", _form_must_not_parse)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        content=b"x",
+        headers={
+            "content-type": "multipart/form-data; boundary=b",
+            "content-length": str(desktop_voice.MAX_UPLOAD_BYTES + 1),
+        },
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "voice_upload_too_large"
+    assert cascades.stt == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", ["10", None])
+async def test_a_lying_or_missing_content_length_is_caught_by_the_read_backstop(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, declared: str | None
+) -> None:
+    await _enable(rig, SESSION_A)
+    monkeypatch.setattr(desktop_voice, "MAX_UPLOAD_BYTES", 64)
+    boundary = b"BND"
+    sep = b"--" + boundary + b"\r\n"
+    body = (
+        sep
+        + b'Content-Disposition: form-data; name="session_id"\r\n\r\n'
+        + SESSION_A.encode()
+        + b"\r\n"
+        + sep
+        + b'Content-Disposition: form-data; name="request_id"\r\n\r\n'
+        + str(uuid.uuid4()).encode()
+        + b"\r\n"
+        + sep
+        + b'Content-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+        + b"Content-Type: audio/wav\r\n\r\n"
+        + _wav_bytes()
+        + b"\r\n--"
+        + boundary
+        + b"--\r\n"
+    )
+
+    async def chunks() -> Any:
+        yield body
+
+    headers = {"content-type": "multipart/form-data; boundary=BND"}
+    if declared is not None:
+        headers["content-length"] = declared  # a lie: far below the real size
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        content=body if declared is not None else chunks(),
+        headers=headers,
+    )
+    assert response.status_code == 413, response.text
+    assert response.json()["detail"]["code"] == "voice_upload_too_large"
+    assert cascades.stt == []
+
+
 def test_the_upload_ceiling_is_16_mib() -> None:
     import importlib
 
@@ -1089,6 +1156,22 @@ async def test_a_phrase_hit_makes_no_cascade_call_and_a_miss_stores_it(
     assert second.headers["content-type"] == "audio/wav"
     assert len(cascades.tts) == 1, "a cache hit reached the cascade"
     assert len(cascades.spend) == 1, "a cache hit was billed"
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_cache_file_is_replaced_not_served(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    source = {"kind": "phrase", "key": "on_screen_first"}
+    first = await _speech(rig, source)
+    (cached,) = (rig.root / "voice" / "phrase-cache").glob("*.wav")
+    cached.write_bytes(first.content[:6])  # cut inside the header
+    again = await _speech(rig, source)
+    assert again.status_code == 200 and "x-voice-cache" not in again.headers
+    assert again.content == first.content
+    assert len(cascades.tts) == 2
+    assert cached.read_bytes() == first.content, "the bad file was not replaced"
 
 
 @pytest.mark.asyncio
