@@ -245,7 +245,7 @@ def test_metadata_patch_and_reread(library: dict[str, Any]) -> None:
     refused = client.patch(f"/api/library/assets/{asset_id}", json={"favorite": "yes"})
     assert refused.status_code == 422
     assert client.patch(f"/api/library/assets/{asset_id}", json={"name": 4}).status_code == 422
-    assert client.patch(f"/api/library/assets/{asset_id}", data="[]").status_code == 400
+    assert client.patch(f"/api/library/assets/{asset_id}", content=b"[]").status_code == 400
 
 
 def test_tag_lifecycle_and_assignment(library: dict[str, Any]) -> None:
