@@ -464,7 +464,7 @@ def test_feed_row_matches_catalogue_pending_and_presence(
     feed._monitor_index = {}
     row = feed._row_for(SID)
     assert row is not None
-    assert row.live_state == ("wedged" if state in {"wedged", "stale"} else "attached")
+    assert row.live_state == {"live": "attached", "wedged": "wedged", "stale": ""}[state]
     assert row.pending == ("approval" if state == "live" else None)
     assert row.waiting_on == (0 if state == "stale" else 2)
     assert row.jobs_running == (None if state == "stale" else 3)
@@ -591,13 +591,25 @@ def test_stale_registry_record_cannot_shadow_relay_stored_fallback(tmp_path: Pat
     peer = PeerRow.from_json(emitted, device_id="d_synthetic")
     cold = SessionRow(SID, 0, "synthetic", live_state=_live_state(peer))
     assert CatalogEntry(cold).status == "Recent"
-    # A mixed-version peer may still emit the old stale shape. Its cached busy
-    # bit must become a not-answering diagnostic, never a working claim.
-    peer = PeerRow.from_json({"state": "stale", "busy": True}, device_id="d_synthetic")
-    assert _live_state(peer) == "wedged"
+    # A mixed-version peer may still emit the old stale shape with work claims.
+    # Both the state and counts must be cold: otherwise waiting/delegating can
+    # resurrect a dead pid, or a wedged label can falsely claim it is alive.
+    peer = PeerRow.from_json(
+        {"state": "stale", "busy": True, "waiting_on": 2, "jobs_running": 3,
+         "subagents_running": 1, "subagents_queued": 1, "pending": "approval"},
+        device_id="d_synthetic",
+    )
+    assert _live_state(peer) == ""
+    cold = SessionRow(
+        SID, 0, "synthetic", live_state=_live_state(peer), pending=peer.pending,
+        waiting_on=peer.waiting_on, jobs_running=peer.jobs_running,
+        subagents_running=peer.subagents_running, subagents_queued=peer.subagents_queued,
+    )
+    assert CatalogEntry(cold).status == "Recent"
+    assert cold.delegating is None
 
 
-def test_local_first_reaping_scan_keeps_only_not_answering_diagnostic(tmp_path: Path) -> None:
+def test_local_first_reaping_scan_is_cold(tmp_path: Path) -> None:
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait(timeout=5)
     registry.publish(
@@ -605,9 +617,10 @@ def test_local_first_reaping_scan_keeps_only_not_answering_diagnostic(tmp_path: 
         root=tmp_path,
     )
     row = decorate_rows(tmp_path, [SessionRow(SID, 0, "synthetic")])[0]
-    assert row.live_state == "wedged"
+    assert row.live_state == ""
     assert row.pending is None
     assert row.waiting_on == 0
     assert row.jobs_running is None
-    assert CatalogEntry(row).status_code == "wedged"
+    assert CatalogEntry(row).status == "Recent"
+    assert CatalogEntry(row).active is False
     assert registry.scan(tmp_path) == []

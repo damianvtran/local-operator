@@ -331,6 +331,11 @@ class PeerRow:
         def _bool(key: str) -> bool:
             return bool(data.get(key))
 
+        # An older relay may forward a stale record on its first reaping scan.
+        # The pid is gone: old counts must not resurrect waiting/delegating even
+        # after the state mapper correctly makes this row cold. A genuinely
+        # wedged live pid keeps its diagnostic snapshot unchanged.
+        stale = str(data.get("state") or "") == "stale"
         return PeerRow(
             session_id=str(data.get("session_id") or ""),
             device_id=device_id,
@@ -360,23 +365,23 @@ class PeerRow:
             pid=peer_whole_int(data.get("pid"), default=0),
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
-            waiting_on=peer_whole_int(data.get("waiting_on"), default=0),
+            waiting_on=0 if stale else peer_whole_int(data.get("waiting_on"), default=0),
             jobs_running=(
                 peer_whole_int(data["jobs_running"], default=0)
-                if data.get("jobs_running") is not None
+                if not stale and data.get("jobs_running") is not None
                 else None
             ),
             subagents_running=(
                 peer_whole_int(data["subagents_running"], default=0)
-                if data.get("subagents_running") is not None
+                if not stale and data.get("subagents_running") is not None
                 else None
             ),
             subagents_queued=(
                 peer_whole_int(data["subagents_queued"], default=0)
-                if data.get("subagents_queued") is not None
+                if not stale and data.get("subagents_queued") is not None
                 else None
             ),
-            busy=_bool("busy"),
+            busy=False if stale else _bool("busy"),
             pending=row_needs_claim(state=data.get("state"), pending=data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
