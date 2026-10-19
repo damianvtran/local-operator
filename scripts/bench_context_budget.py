@@ -1560,18 +1560,21 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # arithmetic because this guard exists to make that an explicit decision, not an
 # unrelated budget increase. Measured by THIS script on an isolated HOME at each
 # tree, same machine:
-#   94a27c3066  parent of #2616's merge   86,162 chars = ~30,994 billed  PASS, 6 headroom
-#   20f23b8b73  #2616 merged              86,204 chars = ~31,009 billed  FAIL by 9
+#   673cb4de62  true first parent of #2616's merge  86,162 chars = ~30,994 billed  PASS, 6 headroom
+#   20f23b8b73  #2616 merged                        86,204 chars = ~31,009 billed  FAIL by 9
 #   = +42 chars of ``tool_schemas``, and all of it is ONE clause in
 #     ``build_memory_tool``'s description: 'move with edit
-#     new_text={"move":"scope"}' (+15 billed). PR #2616's review round 1
-#     REQUIRED the description to name the move payload ("the memory tool
-#     description doesn't name the move payload"), so this is a review-mandated
-#     capability hint landing on a tree that had 6 tokens of headroom.
-# Trimming instead was measured, not assumed: dropping the clause restores
-# 30,994 and reverts that review finding; shortening it to bare 'move with edit'
-# saves only ~29 chars and still lands ~31,002, because the payload shape is the
-# whole point of the clause. The raise is therefore the honest option.
+#     new_text={"move":"scope"}' (+15 billed). #2616's review round 1 raised as a
+#     NIT that the memory tool description did not name the move payload; its
+#     remediation chose to address that nit, and the clause landed on a tree
+#     with 6 tokens of headroom.
+# Trimming was MEASURED on the head tree with this script, not assumed:
+#   bare 'move with edit'                    86,178 chars = ~30,999  PASS by 1 at 31,000
+#   payload-keeping 'move {"move":"scope"}'  86,185 chars = ~31,002  FAIL by 2 at 31,000
+# So a trim that clears the old ceiling does exist — but only by dropping the
+# payload shape the nit asked for, and every variant that keeps it fails. The
+# raise is chosen to keep the payload clue AND leave margin, not to fit by
+# deleting the thing the nit was about.
 BUDGET_BILLED_TOKENS = 31_025
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
