@@ -59,6 +59,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",
         "wire.slash",
+        # `/library` and `/librarian` keep their copy out of the audited
+        # wire.slash catalogue, in a translated CHILD namespace (the same
+        # parent/child shape as wire.errors.desktop).
+        "wire.slash.library",
         "wire.aida_cadence",
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
