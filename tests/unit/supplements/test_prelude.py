@@ -48,12 +48,18 @@ GZIP_CAP = 4608
 #:
 #: PRELUDE_VERSION 3: the ROOT element paints `--lo-canvas`, so a live theme flip keeps the
 #: surface's token instead of the UA canvas. CSS 2,008 -> 2,056 B, gzip 4,562 -> 4,573 B; JS
-#: untouched at 8,047 B. 35 B gzip of headroom against the 4,608 B cap is what is left.
+#: untouched at 8,047 B. This left 35 B gzip of headroom against the 4,608 B cap.
+#:
+#: PRELUDE_VERSION 4: finite-only scales and labelled bar gaps. JS 8,170 B, pair
+#: 10,226 B raw / 4,602 B gzip; 6 B gzip remained under the unchanged cap.
+#:
+#: PRELUDE_VERSION 5: silent null cells, centred per-series bar gaps and labelled line
+#: gaps. Measured equivalent-code trims yield 10,133 B raw / 4,607 B gzip, 1 B headroom.
 PINNED_CSS_BYTES = 2056
-PINNED_JS_BYTES = 8047
-PINNED_GZIP_BYTES = 4573
-PINNED_DIGEST = "8cf8b4902dbadbe8fbc0421d953796febbd79ad16673a8e8f5e2402e5d42f05e"
-PINNED_VERSION = 3
+PINNED_JS_BYTES = 8077
+PINNED_GZIP_BYTES = 4607
+PINNED_DIGEST = "2b590212ff10647304bd34de7da2e0eb057797503afaa39d105bc48f0478b5a8"
+PINNED_VERSION = 5
 
 
 @pytest.fixture
@@ -465,3 +471,114 @@ def test_the_component_draws_no_title_anywhere(tmp_path: Path) -> None:
     # wrap, never a title line before it.
     figure = next(n for n in nodes if n["tag"] == "figure")
     assert figure["text"] == ""
+
+
+@needs_node
+@pytest.mark.parametrize("values", [["$0.15", "$0.60", "$0.015"], [0.15, "N/A", 0.60]])
+def test_assembled_prices_have_finite_bar_geometry(values: list[Any], tmp_path: Path) -> None:
+    """Execute the shipped script with the exact data bytes a document serves."""
+    source = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [list(row) for row in zip(["Input", "Output", "Cached"], values)],
+        }
+    }
+    html = document.assemble_document(
+        "<script>LO.bar(document.getElementById('c'),'d1',{x:'name',y:'price'})</script>", source
+    )
+    match = re.search(r'<script type="application/json" id="lo-data">(.*?)</script>', html)
+    assert match is not None
+    out = _run(
+        {
+            "data": json.loads(match[1]),
+            "steps": [
+                {
+                    "draw": (
+                        "LO.bar(document.getElementById('c'),'d1',"
+                        "{x:'name',y:'price',horizontal:true})"
+                    )
+                }
+            ],
+        },
+        tmp_path,
+    )
+    bars = [n for n in out["nodes"] if n["tag"] == "rect"]
+    assert len(bars) == (2 if "N/A" in values else 3)
+    for bar in bars:
+        for attr in ("x", "y", "width", "height"):
+            assert float(bar["attrs"][attr]) >= 0
+    assert all("NaN" not in str(n) for n in out["nodes"])
+    assert any(n["cls"] == "grid" for n in out["nodes"])
+    if "N/A" in values:
+        assert any(n["text"] == "N/A" for n in out["nodes"])
+
+
+@needs_node
+def test_legacy_table_preserves_formatted_cells(tmp_path: Path) -> None:
+    source = {"d1": {"columns": ["price", "share"], "rows": [["$0.15", "45%"]]}}
+    script = "LO.table(document.getElementById('c'),'d1')"
+    html = document.assemble_document(f'<div id="c"></div><script>{script}</script>', source)
+    match = re.search(r'id="lo-data">(.*?)</script>', html)
+    assert match is not None
+    served = json.loads(match[1])
+    assert served == source
+    out = _run({"data": served, "steps": [{"draw": script}]}, tmp_path)
+    cells = [n["text"] for n in out["nodes"] if n["tag"] == "td"]
+    assert cells == ["$0.15", "45%"]
+
+
+@needs_node
+def test_null_bar_cell_still_paints_nothing(tmp_path: Path) -> None:
+    out = _run(
+        {
+            "data": {"d1": {"columns": ["x", "y"], "rows": [["a", 1], ["b", None]]}},
+            "steps": [{"draw": "LO.bar(document.getElementById('c'),'d1',{x:'x',y:'y'})"}],
+        },
+        tmp_path,
+    )
+    assert len([n for n in out["nodes"] if n["tag"] == "rect"]) == 1
+    assert not any(n["text"] == "–" for n in out["nodes"])
+
+
+@needs_node
+@pytest.mark.parametrize("horizontal", [False, True])
+def test_multiseries_gap_labels_share_bar_centres(horizontal: bool, tmp_path: Path) -> None:
+    rows = [["a", 1, 2], ["b", "N/A", "P50"], ["c", 3, 4]]
+    script = (
+        "LO.bar(document.getElementById('c'),'d1',"
+        + json.dumps({"x": "x", "y": ["y", "z"], "horizontal": horizontal})
+        + ")"
+    )
+    out = _run(
+        {"data": {"d1": {"columns": ["x", "y", "z"], "rows": rows}}, "steps": [{"draw": script}]},
+        tmp_path,
+    )
+    bars = [n["attrs"] for n in out["nodes"] if n["tag"] == "rect"]
+    gaps = [n["attrs"] for n in out["nodes"] if n["text"] in ("N/A", "P50")]
+    axis, size = ("y", "height") if horizontal else ("x", "width")
+    band = (float(bars[2][axis]) - float(bars[0][axis])) / 2
+    for index, gap in enumerate(gaps):
+        expected = float(bars[index][axis]) + band + (float(bars[index][size]) + 1) / 2
+        if horizontal:
+            expected += 4  # text baseline relative to the visual centre
+        else:
+            assert gap["text-anchor"] == "middle"
+        assert float(gap[axis]) == pytest.approx(expected)
+
+
+@needs_node
+def test_all_string_line_column_is_labelled_but_null_is_not(tmp_path: Path) -> None:
+    out = _run(
+        {
+            "data": {
+                "d1": {"columns": ["x", "y"], "rows": [["a", "N/A"], ["b", "P50"], ["c", None]]}
+            },
+            "steps": [{"draw": "LO.line(document.getElementById('c'),'d1',{x:'x',y:'y'})"}],
+        },
+        tmp_path,
+    )
+    assert {"N/A", "P50"} <= {n["text"] for n in out["nodes"]}
+    assert not any(n["text"] == "–" for n in out["nodes"])
+    assert all(
+        "NaN" not in str(n["attrs"]) and "Infinity" not in str(n["attrs"]) for n in out["nodes"]
+    )
