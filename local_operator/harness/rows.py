@@ -938,7 +938,6 @@ def gate_waited_text(details: Mapping[str, Any] | None) -> str:
 #: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
 #: the relay stamps for the phone's tap (an empty ``by`` on the wire).
 _DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
-_DISMISS_REASON_WORDS = {"answered_in_chat": "settled in chat", "moot": "no longer needed"}
 
 
 def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
@@ -969,7 +968,10 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
         by = details.get("by")
         surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
         surface = _DISMISS_SURFACE_WORDS.get(surface, surface)
-        reason = _DISMISS_REASON_WORDS.get(str(details.get("reason") or ""), "no longer needed")
+        # One source for the labels: the response text and this receipt must not drift.
+        from local_operator.asks.render import DISMISS_REASON_LABELS
+
+        reason = DISMISS_REASON_LABELS.get(str(details.get("reason") or ""), "no longer needed")
         via = f" ({surface})" if surface else ""
         return (f"Dismissed by you{via} — {reason} (ask {ask_id})", "info")
     return (f"Answered — delivering (ask {ask_id})", "info")
