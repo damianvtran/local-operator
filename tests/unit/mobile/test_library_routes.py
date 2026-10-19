@@ -130,7 +130,7 @@ def test_library_routes_require_authentication(library: dict[str, Any]) -> None:
     client = TestClient(build_app(MobileDaemon(port=0, password="pw123")), follow_redirects=False)
     assert client.get("/api/library/assets").status_code == 401
     assert client.get(f"/api/library/assets/{library['image'].id}").status_code == 401
-    assert client.get(f"/api/library/assets/{library['image'].id}/bytes").status_code == 401
+    assert client.get(f"/api/library/assets/{library['image'].id}/content").status_code == 401
     assert client.post("/api/library/tags", json={"name": "x"}).status_code == 401
     assert client.patch(f"/api/library/assets/{library['image'].id}", json={"name": "x"}).status_code == 401
 
@@ -230,7 +230,7 @@ def test_tag_lifecycle_and_assignment(library: dict[str, Any]) -> None:
     assert client.post("/api/library/tags", json={"name": "LAUNCH"}).json()["tag"]["id"] == tag_id
 
     assigned = client.put(
-        f"/api/library/assets/{asset_id}/tags", json={"tag_ids": [tag_id], "primary": tag_id}
+        f"/api/library/assets/{asset_id}/tags", json={"tags": [tag_id], "primary": tag_id}
     )
     assert assigned.status_code == 200
     assert assigned.json()["tags"][0]["name"] == "launch"
@@ -245,10 +245,10 @@ def test_tag_lifecycle_and_assignment(library: dict[str, Any]) -> None:
     assert merged.status_code == 200
     assert [tag["id"] for tag in client.get("/api/library/tags").json()["tags"]] == [tag_id]
 
-    unknown_tag = client.put(f"/api/library/assets/{asset_id}/tags", json={"tag_ids": ["tag_nope"]})
+    unknown_tag = client.put(f"/api/library/assets/{asset_id}/tags", json={"tags": ["tag_nope"]})
     assert unknown_tag.status_code == 422
     assert unknown_tag.json()["code"] == "tag_not_found"
-    bad_body = client.put(f"/api/library/assets/{asset_id}/tags", json={"tag_ids": "launch"})
+    bad_body = client.put(f"/api/library/assets/{asset_id}/tags", json={"tags": "launch"})
     assert bad_body.status_code == 422
 
 
@@ -277,7 +277,7 @@ def test_chat_link_requires_a_real_session(library: dict[str, Any]) -> None:
 def test_bytes_inline_range_and_download(library: dict[str, Any]) -> None:
     client = _client()
     asset_id = library["image"].id
-    response = client.get(f"/api/library/assets/{asset_id}/bytes")
+    response = client.get(f"/api/library/assets/{asset_id}/content")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("image/png")
     assert response.headers["x-content-type-options"] == "nosniff"
@@ -285,24 +285,24 @@ def test_bytes_inline_range_and_download(library: dict[str, Any]) -> None:
     assert response.content.startswith(b"\x89PNG")
     assert response.headers["accept-ranges"] == "bytes"
 
-    partial = client.get(f"/api/library/assets/{asset_id}/bytes", headers={"Range": "bytes=0-3"})
+    partial = client.get(f"/api/library/assets/{asset_id}/content", headers={"Range": "bytes=0-3"})
     assert partial.status_code == 206
     assert partial.headers["content-range"].startswith("bytes 0-3/")
     assert partial.content == b"\x89PNG"
 
-    download = client.get(f"/api/library/assets/{asset_id}/bytes?download=1")
+    download = client.get(f"/api/library/assets/{asset_id}/content?download=1")
     assert download.status_code == 200
     assert download.headers["content-disposition"].startswith("attachment;")
     assert download.headers["cache-control"] == "no-store"
 
-    missing = client.get("/api/library/assets/la_" + "0" * 16 + "/bytes")
+    missing = client.get("/api/library/assets/la_" + "0" * 16 + "/content")
     assert missing.status_code == 404
     assert missing.json()["code"] == "library_asset_not_found"
 
 
 def test_html_bytes_are_sandboxed(library: dict[str, Any]) -> None:
     client = _client()
-    response = client.get(f"/api/library/assets/{library['html'].id}/bytes")
+    response = client.get(f"/api/library/assets/{library['html'].id}/content")
     assert response.status_code == 200
     assert response.headers["content-security-policy"] == "sandbox"
     assert response.headers["content-disposition"].startswith("inline;")
@@ -310,15 +310,15 @@ def test_html_bytes_are_sandboxed(library: dict[str, Any]) -> None:
 
 def test_thumb_and_non_image_refusal(library: dict[str, Any]) -> None:
     client = _client()
-    thumb = client.get(f"/api/library/assets/{library['image'].id}/thumb")
+    thumb = client.get(f"/api/library/assets/{library['image'].id}/thumbnail")
     assert thumb.status_code == 200
     assert thumb.headers["content-type"].startswith("image/")
     assert thumb.headers["x-content-type-options"] == "nosniff"
 
-    refused = client.get(f"/api/library/assets/{library['markdown'].id}/thumb")
+    refused = client.get(f"/api/library/assets/{library['markdown'].id}/thumbnail")
     assert refused.status_code == 404
     assert refused.json()["code"] == "not_an_image"
-    assert client.get(f"/api/library/assets/{library['image'].id}/thumb?w=nope").status_code == 400
+    assert client.get(f"/api/library/assets/{library['image'].id}/thumbnail?w=nope").status_code == 400
 
 
 def test_a_missing_file_reports_content_missing(
@@ -326,7 +326,7 @@ def test_a_missing_file_reports_content_missing(
 ) -> None:
     client = _client()
     os.unlink(library["markdown"].path)
-    response = client.get(f"/api/library/assets/{library['markdown'].id}/bytes")
+    response = client.get(f"/api/library/assets/{library['markdown'].id}/content")
     assert response.status_code == 404
     assert response.json()["code"] == "content_missing"
 

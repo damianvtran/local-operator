@@ -273,9 +273,12 @@ def merge_tag_payload(
 def set_tags_payload(
     config_dir: str | Path, asset_id: str, body: dict[str, Any]
 ) -> dict[str, Any]:
-    raw = body.get("tag_ids")
+    # The desktop write model's body: ``{tags: [...], primary?}``. Kept in
+    # lockstep with ``LibraryTagsWrite`` so one request body edits tags on every
+    # surface.
+    raw = body.get("tags")
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-        raise LibraryRouteError(422, "bad_tag_ids")
+        raise LibraryRouteError(422, "bad_tags")
     primary = body.get("primary")
     if primary is not None and not isinstance(primary, str):
         raise LibraryRouteError(422, "bad_primary")

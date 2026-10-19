@@ -944,7 +944,7 @@ export function setLibraryTags(
 	return request(`/api/library/assets/${encodeURIComponent(assetId)}/tags`, {
 		method: "PUT",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ tag_ids: tagIds, primary }),
+		body: JSON.stringify({ tags: tagIds, primary }),
 	});
 }
 
@@ -966,9 +966,9 @@ export function unlinkLibraryChat(assetId: string): Promise<{ ok: boolean; clear
 /** The preview URL for one asset. `download` flips the relay's disposition. */
 export function libraryBytesUrl(assetId: string, download = false): string {
 	const suffix = download ? "?download=1" : "";
-	return `/api/library/assets/${encodeURIComponent(assetId)}/bytes${suffix}`;
+	return `/api/library/assets/${encodeURIComponent(assetId)}/content${suffix}`;
 }
 
 export function libraryThumbUrl(assetId: string, width = 480): string {
-	return `/api/library/assets/${encodeURIComponent(assetId)}/thumb?w=${width}`;
+	return `/api/library/assets/${encodeURIComponent(assetId)}/thumbnail?w=${width}`;
 }
