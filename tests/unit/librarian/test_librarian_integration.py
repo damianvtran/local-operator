@@ -1,12 +1,14 @@
 """Cross-package contracts: the settings registry and the backend's tool.
 
-The ``library`` tool is owned by the backend-core branch
-(``local_operator/tools/library_tool.py``); this package only names it. The
-last test SKIPS until that module lands, and is the one to re-run on the
-merged branch — the brief's integration note.
+The ``library`` tool lives in ``local_operator/tools/library_tool.py`` (owned
+by the backend-core slice). This file drives the REAL tool from a real
+Librarian session, so a change to its ops or its provenance rules fails here
+rather than in an unattended pass.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -38,14 +40,72 @@ def test_the_kill_switch_is_documented_in_the_package() -> None:
     assert bootstrap.state.ENV_DISABLE == "LOCAL_OPERATOR_NO_LIBRARIAN"
 
 
-def test_the_library_tool_is_available_to_the_seed() -> None:
-    """SKIPS until the backend core branch lands ``tools/library_tool.py``."""
-    tool_module = pytest.importorskip(
-        "local_operator.tools.library_tool",
-        reason="backend core owns local_operator/tools/library_tool.py",
+@pytest.mark.asyncio
+async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_path) -> None:
+    """The seed's whole job, exercised through the tool it names.
+
+    A real Librarian session exists (the bootstrap's), a real journal seeds one
+    asset, and every call below is the same ``execute_library`` entry point the
+    runtime registers. The two protections the seed promises are asserted at
+    the store, not in prose: a USER field survives a Librarian write, and a
+    locked row refuses her.
+    """
+    from local_operator.librarian import bootstrap
+    from local_operator.library import index
+    from local_operator.library.metadata import MetadataStore
+    from local_operator.tools.library_tool import execute_library
+    from tests.unit.library._fixtures import session as seed_session
+    from tests.unit.library._fixtures import write_rows
+
+    def text(result) -> str:
+        return "".join(block.text for block in result.content)
+
+    sid = await bootstrap.ensure_session(isolated_root)
+    assert sid
+    report = tmp_path / "weekly.md"
+    report.write_text("the Monday numbers", encoding="utf-8")
+    seed_session(isolated_root, "feedfacecafe", write_rows("w1", 1.0, report))
+    asset = index.build_catalog(isolated_root, budget_s=None).assets[0]
+
+    stats = json.loads(text(await execute_library("c1", {"op": "stats"})))
+    assert stats["assets"] == 1 and stats["state"] == "ready"
+    listed = json.loads(text(await execute_library("c2", {"op": "list", "q": "weekly"})))
+    assert listed["total"] == 1 and listed["rows"][0]["id"] == asset.id
+
+    store = MetadataStore(isolated_root)
+    store.update_fields(asset.id, {"name": "Operator weekly"}, actor="user")
+
+    updated = await execute_library(
+        "c3",
+        {
+            "op": "update",
+            "asset_id": asset.id,
+            "description": "Weekly numbers, as filed on Mondays.",
+            "organized": True,
+            "actor": "librarian",
+            "confidence": 0.8,
+        },
     )
-    # The tool is what the seed drives; its operation vocabulary is the slice
-    # of the design the seed's instructions name.
-    source = tool_module.__doc__ or ""
-    for op in ("stats", "list", "get", "update", "tags", "conventions"):
-        assert op in source or hasattr(tool_module, op), op
+    assert updated.is_error is False
+    row = store.asset(asset.id)
+    assert row["name"] == "Operator weekly" and row["name_source"] == "user"
+    assert row["description_source"] == "librarian"
+    assert row["organized_by"] == "librarian" and row["confidence"] == 0.8
+
+    # The user's own protection wins over the agent that runs unattended.
+    store.update_fields(asset.id, {"locked": True}, actor="user")
+    refused = await execute_library(
+        "c4", {"op": "update", "asset_id": asset.id, "name": "Renamed", "actor": "librarian"}
+    )
+    assert refused.is_error is True
+    assert "asset_locked" in text(refused)
+    assert store.asset(asset.id)["name"] == "Operator weekly"
+
+    # The guarded convention writer and the tool's read op agree on the store.
+    from local_operator.librarian import profile
+
+    assert profile.record("tags.weekly", "tags", "Weekly reports.", config_dir=isolated_root) == (
+        "recorded"
+    )
+    rows = json.loads(text(await execute_library("c5", {"op": "conventions"})))
+    assert [row["id"] for row in rows["conventions"]] == ["tags.weekly"]
