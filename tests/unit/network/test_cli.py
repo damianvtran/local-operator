@@ -49,6 +49,7 @@ ACTIONS = (
     # ask one peer to move to this device's build.
     "update",
     "identity",
+    "install",
     "uninstall",
     # The inviter's half of the pairing human step (mesh-transport-identity §5.3).
     "confirm",
@@ -71,6 +72,15 @@ ACTIONS = (
     # answer it, run it — six verbs under one group, the shape the design froze.
     "approvals",
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_supervision(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CLI fixtures describe their own host; diagnostics must not query the real
+    # user's service manager just because this suite runs on a supported OS.
+    monkeypatch.setattr(
+        relay, "supervision_state", lambda: {"platform": "none", "persistent": False}
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1347,14 +1357,17 @@ def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_
     )
     payload = {"identity_present": True, "checks": checks}
     monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
-    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0  # noqa: SLF001
     machine = json.loads(capsys.readouterr().out)
-    assert machine["ok"] is False and machine["code"] == "unhealthy"
+    assert machine["ok"] is True and machine["link_ok"] is True
+    assert machine["degraded"] is True and machine["code"] == "degraded"
+    repair = next(row for row in machine["checks"] if row["check"] == "credential_repair")
+    assert repair["ok"] is False and repair["class"] == "payload"
     assert "minerva-qa" in machine["message"]
     assert "172.31.22.23" not in machine["message"]
 
     # The human line names the address that works, same treatment as ready's.
-    assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 1  # noqa: SLF001
+    assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 0  # noqa: SLF001
     human = capsys.readouterr().out
     # The shared clause rides the line behind ONE separator spelling, note
     # included (design round 1, D3): the doctor reader gets the provenance too.
@@ -2784,3 +2797,96 @@ def test_the_explain_frame_renders_inherited_readings_as_codes_and_token_first()
     assert lines[1] == "           expiry failed (invite_expired)"
     assert lines[2] == "           secret_tag skipped (no_network_secret)"
     assert all("`" not in line for line in lines)
+
+
+def test_install_dispatches_to_the_restart_on_boot_installer(monkeypatch, capsys) -> None:
+    """The advertised recovery verb reaches the actual service installer."""
+    called = []
+    monkeypatch.setattr(
+        relay, "install", lambda: called.append(True) or {"ok": True, "steps": ["enabled"]}
+    )
+    args = _parser().parse_args(["network", "install", "--json"])
+    assert net_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert called == [True]
+    assert payload == {
+        "ok": True,
+        "steps": ["enabled"],
+        "code": "installed",
+        "message": "relay service installed",
+    }
+
+
+@pytest.mark.parametrize("link_failed", [False, True])
+def test_doctor_separates_link_and_payload_failures(monkeypatch, capsys, link_failed) -> None:
+    """Payload red stays visible without falsifying transport health."""
+    checks = [
+        {
+            "check": "handshake",
+            "ok": not link_failed,
+            "detail": "synthetic handshake rejected" if link_failed else "ok",
+        },
+        {"check": "credential_repair", "ok": False, "detail": "sign in to mcp.qa.gominerva.com"},
+        {"check": "credential_repair", "ok": False, "detail": "sign in to mcp.cloudflare.com"},
+    ]
+    monkeypatch.setattr(
+        net_cli, "_relay_call", lambda *a, **k: {"identity_present": True, "checks": checks}
+    )
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == int(link_failed)
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] is (not link_failed)
+    assert result["link_ok"] is (not link_failed)
+    assert result["degraded"] is True
+    assert result["code"] == ("unhealthy" if link_failed else "degraded")
+    assert len(result["payload_failures"]) == 2
+    assert "mcp.qa.gominerva.com" in result["message"]
+    assert "mcp.cloudflare.com" in result["message"]
+    assert result["checks"][0]["class"] == "link"
+    assert result["checks"][1]["ok"] is False
+    if link_failed:
+        assert "synthetic handshake rejected" in result["message"]
+    else:
+        assert result["message"].startswith("link healthy; credential repair needed:")
+    net_cli._cmd_doctor(Namespace(json=False, peer=""))
+    human = capsys.readouterr().out
+    assert "FAIL credential_repair" in human
+    assert ("the link is healthy" in human) is (not link_failed)
+
+
+def test_doctor_supervision_warning_is_local_and_not_a_link_failure(monkeypatch, capsys) -> None:
+    """An older relay needs no wire-op change to expose local durability."""
+    monkeypatch.setattr(
+        net_cli, "_relay_call", lambda *a, **k: {"identity_present": True, "checks": []}
+    )
+    monkeypatch.setattr(
+        relay, "supervision_state", lambda: {"platform": "systemd", "persistent": False}
+    )
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] and result["link_ok"] and result["degraded"]
+    assert result["code"] == "degraded"
+    assert result["payload_failures"] == []
+    assert result["checks"][0]["class"] == "supervision"
+    assert result["checks"][0]["ok"] is False
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_status_warns_only_for_a_running_nonpersistent_relay(
+    monkeypatch, capsys, persistent
+) -> None:
+    """Healthy supervision keeps the steady-state human block unchanged."""
+    payload = {
+        "installed": True,
+        "supported": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": True,
+        "relay_persistent": persistent,
+        "relay": {"pid": 123},
+        "networks": [],
+        "log": "synthetic.log",
+    }
+    monkeypatch.setattr(relay, "status", lambda **kwargs: payload)
+    net_cli._cmd_status(Namespace(json=False))
+    human = capsys.readouterr().out
+    assert ("durability: not supervised" in human) is (not persistent)

@@ -472,6 +472,28 @@ def is_bus_failure(text: str) -> bool:
     return any(marker in (text or "") for marker in _NO_BUS_MARKERS)
 
 
+def linger_enabled() -> bool:
+    """Read durability independently of whether a user service answers now.
+
+    An enabled unit without linger only follows the login session; a successful
+    start is not evidence it will survive logout or return after reboot.
+    """
+    binary = shutil.which("loginctl")
+    if binary is None:
+        return False
+    user = os.environ.get("USER") or str(os.getuid())
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [binary, "show-user", user, "-p", "Linger"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "Linger=yes" in result.stdout.splitlines()
+
+
 def enable_linger() -> bool:
     """Best-effort ``loginctl enable-linger``; never fatal to an install.
 

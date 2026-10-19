@@ -844,3 +844,109 @@ def test_learning_a_member_is_audited(peer_pair: Devices, monkeypatch: pytest.Mo
     assert events, "the pull recorded nothing"
     assert NEWCOMER in events[0]["detail"]["added"]
     link.close("test")
+
+
+@pytest.mark.parametrize(
+    ("link", "reason", "attempts", "expected"),
+    [
+        (
+            None,
+            "unreachable",
+            [
+                relay.CandidateAttempt(
+                    "host:4097", False, f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError"
+                )
+            ],
+            "relay_down",
+        ),
+        (
+            None,
+            "unreachable",
+            [
+                relay.CandidateAttempt(
+                    "host:4097", False, f"{relay.CONNECT_FAILED_PREFIX}TimeoutError"
+                )
+            ],
+            "address_unreachable",
+        ),
+        (
+            None,
+            "handshake_closed",
+            [relay.CandidateAttempt("host:4097", True, "ok")],
+            "handshake_refused",
+        ),
+        (object(), "", [], "reachable"),
+        (None, "no_endpoint", [], "no_endpoint"),
+        (None, "not_a_member", [], "not_a_member"),
+        (None, relay.NOT_ATTEMPTED_REASON, [], "not_attempted"),
+        (None, "", [], "not_attempted"),
+    ],
+)
+def test_peer_link_state_keeps_host_address_and_handshake_failures_apart(
+    link, reason, attempts, expected
+) -> None:
+    """Keep refusal, black-hole and handshake diagnoses independently actionable."""
+    assert relay.peer_link_state(link, reason, attempts) == expected
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_peer_table_preserves_every_declared_endpoint_attempt(monkeypatch, tmp_path, held) -> None:
+    """A cached link adds no probe; a fresh probe loses no address evidence."""
+    from types import SimpleNamespace
+
+    endpoints = ["private.invalid:4097", "public.invalid:4097"]
+    member = SimpleNamespace(
+        device_id="d_synthetic_peer",
+        name="peer",
+        endpoints=endpoints,
+        active=True,
+        last_seen_at=0,
+        suspect=False,
+    )
+    record = SimpleNamespace(
+        network_id="n_synthetic",
+        self_device_id="d_synthetic_self",
+        active_members=lambda: [member],
+        member=lambda device: member,
+    )
+    monkeypatch.setattr(relay.store, "list_networks", lambda root: [record])
+    server = object.__new__(relay.RelayServer)
+    server.root = tmp_path
+    server.settings = SimpleNamespace(handshake_timeout_s=1)
+    link = (
+        SimpleNamespace(peer_build={"version": "synthetic"}, capabilities=set()) if held else None
+    )
+    monkeypatch.setattr(server, "_link_for", lambda device: link)
+    attempts = [
+        relay.CandidateAttempt(endpoint, False, f"{relay.CONNECT_FAILED_PREFIX}TimeoutError", 5.0)
+        for endpoint in endpoints
+    ]
+    probes = []
+
+    def probe(candidates, **kwargs):
+        probes.append(list(candidates))
+        return relay.CandidateProbe(None, "", attempts, True, "unreachable")
+
+    monkeypatch.setattr(relay, "probe_candidates", probe)
+    row = server.peer_status()[0]
+    assert row["endpoints"] == endpoints
+    assert row["attempts"] == (
+        []
+        if held
+        else [
+            {
+                "endpoint": attempt.endpoint,
+                "connected": False,
+                "detail": attempt.detail,
+                "latency_ms": 5.0,
+            }
+            for attempt in attempts
+        ]
+    )
+    assert probes == ([] if held else [endpoints])
+    assert row["link_state"] == ("reachable" if held else "address_unreachable")
+    assert row["remote_relay"] == ("running" if held else "unknown")
+    assert server._ensure_link_with_reason(member.device_id) == (
+        link,
+        "" if held else "unreachable",
+    )

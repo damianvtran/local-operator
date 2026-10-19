@@ -901,6 +901,30 @@ def probe_candidates(
     )
 
 
+def peer_link_state(
+    link: PeerLink | None, reason: str, attempts: Sequence[CandidateAttempt]
+) -> str:
+    """Keep host refusal, address black holes and handshake rejection distinct.
+
+    A refused TCP connection proves the host answered but no relay listened;
+    a timeout proves neither. A connected socket rejected during handshake is
+    a third state that the aggregate reason alone cannot reliably distinguish.
+    """
+    if link is not None:
+        return "reachable"
+    if reason in ("no_endpoint", "not_a_member"):
+        return reason
+    if reason.startswith(DETAIL_NOT_ATTEMPTED):
+        return "not_attempted"
+    if any(attempt.connected for attempt in attempts):
+        return "handshake_refused"
+    if any(
+        attempt.detail == f"{CONNECT_FAILED_PREFIX}ConnectionRefusedError" for attempt in attempts
+    ):
+        return "relay_down"
+    return "address_unreachable" if attempts else "not_attempted"
+
+
 def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
     """The one line a peer row carries when NO candidate produced a link.
 
@@ -9373,6 +9397,14 @@ class RelayServer:
     def _ensure_link_with_reason(
         self, device_id: str, *, probe_timeout_s: float | None = None
     ) -> tuple["PeerLink | None", str]:
+        # Existing callers retain their two-field refusal contract; only peer
+        # diagnostics need the address evidence behind that aggregate reason.
+        link, reason, _ = self._ensure_link_with_probe(device_id, probe_timeout_s=probe_timeout_s)
+        return link, reason
+
+    def _ensure_link_with_probe(
+        self, device_id: str, *, probe_timeout_s: float | None = None
+    ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
         """``_ensure_link`` plus WHY it failed, for a surface that must say so.
 
         A listing that reports ``reachable: false`` with no reason is the
@@ -9390,11 +9422,12 @@ class RelayServer:
         (:func:`probe_candidates`) — and a member the budget ran out before is
         reported as ``not_attempted`` rather than as unreachable.
         """
+        attempts: list[CandidateAttempt] = []
         found = self._link_for(device_id)
         if found is not None:
-            return found, ""
+            return found, "", attempts
         if probe_timeout_s is not None and probe_timeout_s <= 0:
-            return None, NOT_ATTEMPTED_REASON
+            return None, NOT_ATTEMPTED_REASON, attempts
         deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
         # A probe with a deadline is a listing's probe: cap one address at
         # PROBE_CONNECT_TIMEOUT_S so a black hole costs its own cap and not the
@@ -9411,6 +9444,7 @@ class RelayServer:
                 reason = "no_endpoint"
                 continue
             probe = probe_candidates(member.endpoints, deadline=deadline, connect_cap=cap)
+            attempts.extend(probe.attempts)
             if probe.sock is None:
                 reason = probe.reason
                 continue
@@ -9420,7 +9454,7 @@ class RelayServer:
                 # handshake: "unreachable" would be a claim about the peer when
                 # the truth is a claim about our clock.
                 _close_quietly(probe.sock)
-                return None, handshake_not_attempted_reason(probe.winner)
+                return None, handshake_not_attempted_reason(probe.winner), attempts
             link, dial_reason = self.dial(
                 record.network_id,
                 host=probe.winner,
@@ -9430,9 +9464,9 @@ class RelayServer:
                 expected_device=device_id,
             )
             if link is not None:
-                return link, ""
+                return link, "", attempts
             reason = dial_reason or probe.reason
-        return None, reason
+        return None, reason, attempts
 
     def _open_viewer_stream(self, frame: dict[str, Any]) -> tuple[dict[str, Any], _Stream | None]:
         """The `stream_open` local op: reach a peer and open the pipe.
@@ -12186,11 +12220,12 @@ class RelayServer:
                     continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    link, reason = None, NOT_ATTEMPTED_REASON
+                    link, reason, attempts = None, NOT_ATTEMPTED_REASON, []
                 else:
-                    link, reason = self._ensure_link_with_reason(
+                    link, reason, attempts = self._ensure_link_with_probe(
                         member.device_id, probe_timeout_s=remaining
                     )
+                state = peer_link_state(link, reason, attempts)
                 peers.append(
                     {
                         "device_id": member.device_id,
@@ -12198,6 +12233,15 @@ class RelayServer:
                         "network_id": record.network_id,
                         "reachable": link is not None,
                         "reason": reason,
+                        "link_state": state,
+                        "remote_relay": "running" if link is not None else (
+                            "not_listening" if state == "relay_down" else "unknown"
+                        ),
+                        "attempts": [
+                            {"endpoint": attempt.endpoint, "connected": attempt.connected,
+                             "detail": attempt.detail, "latency_ms": attempt.latency_ms}
+                            for attempt in attempts
+                        ],
                         "endpoints": list(member.endpoints),
                         "last_seen_at": member.last_seen_at,
                         "suspect": member.suspect,
@@ -13697,6 +13741,43 @@ def _service_port() -> int:
     return DEFAULT_PORT
 
 
+def supervision_state() -> dict[str, Any]:
+    """Best-effort, read-only durability evidence, separate from wire health.
+
+    A live control socket proves availability now, not restart-on-boot. Failed
+    supervisor queries conservatively leave persistence unproven, never raise
+    from a diagnostic and never install or start a service as a side effect.
+    """
+    state: dict[str, Any] = {
+        "platform": "none", "unit": "", "installed": False,
+        "enabled": False, "active": False, "linger": None, "persistent": False,
+    }
+    try:
+        supervisor = supervisors.supervisor()
+        if supervisor == supervisors.SYSTEMCTL:
+            state.update(platform="systemd", unit=SYSTEMD_UNIT, linger=False)
+            state["installed"] = systemd_path().exists()
+            # Each query is independent: a missing bus must not hide the unit
+            # file or prevent the remaining read-only evidence from being read.
+            for key, command in (("enabled", "is-enabled"), ("active", "is-active")):
+                try:
+                    result = supervisors.systemctl_user(command, SYSTEMD_UNIT, timeout=5)
+                    state[key] = result.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            state["linger"] = supervisors.linger_enabled()
+            state["persistent"] = bool(state["installed"] and state["enabled"] and state["linger"])
+        elif supervisor == supervisors.LAUNCHCTL:
+            state.update(platform="launchd", unit=LABEL)
+            state["installed"] = plist_path().exists()
+            state["persistent"] = state["installed"]
+            state["enabled"] = state["installed"]
+            state["active"] = _launchctl("print", f"{_domain()}/{LABEL}").returncode == 0
+    except Exception:  # noqa: BLE001 — diagnostics must survive unavailable supervisors
+        pass
+    return state
+
+
 def _supervision_unit_present() -> bool:
     """Whether THIS platform's user supervisor has a relay unit at all.
 
@@ -14375,7 +14456,12 @@ def _service_action_systemd(action: str) -> dict[str, Any]:
     refused = _systemd_guard(action)
     if refused is not None:
         return refused
-    if action in ("start", "restart") and not systemd_path().exists():
+    starting = action in ("start", "restart")
+    if starting:
+        # Repair existing units too: installation may predate linger, and a
+        # successful start alone cannot promise restart-on-boot durability.
+        supervisors.enable_linger()
+    if starting and not systemd_path().exists():
         # THE MISSING-UNIT CASE INSTALLS (slice (b) of remote onboarding): a device
         # that JOINED a network has no unit, and `join`'s path never installed one.
         installed = _install_systemd(DEFAULT_PORT, dry_run=False)
@@ -14387,10 +14473,26 @@ def _service_action_systemd(action: str) -> dict[str, Any]:
             }
         # ``enable --now`` already started the current build, so both start and
         # restart are done here; a restart has no older process to replace.
-        return {"ok": True, "error": ""}
+        #
+        # DURABILITY IS READ WITHOUT QUERYING SERVICE STATE. A full
+        # ``supervision_state()`` here would add ``is-enabled``/``is-active`` to
+        # every start and restart, including the update path's proven-move
+        # restart, whose exact-call contract is a test. The two facts this
+        # result needs are the unit file and linger; both are cheap and neither
+        # claims what the unit is doing right now.
+        linger = supervisors.linger_enabled()
+        return {
+            "ok": True,
+            "error": "",
+            "linger": linger,
+            "persistent": systemd_path().exists() and linger,
+        }
     result = supervisors.systemctl_user(action, SYSTEMD_UNIT)
     ok = result.returncode == 0
+    linger = supervisors.linger_enabled()
     return {
+        "linger": linger,
+        "persistent": systemd_path().exists() and linger,
         "ok": ok,
         "error": "" if ok else supervisors.translate_systemctl_error(result.stderr)[:300],
     }
@@ -14714,7 +14816,10 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
     served_pid = live.get("pid") if isinstance(live, Mapping) else None
     if not isinstance(served_pid, int):
         served_pid = record.pid if record is not None else None
+    supervision = supervision_state()
     payload = {
+        "supervision": supervision,
+        "relay_persistent": supervision["persistent"],
         "installed": _supervision_unit_present(),
         "supported": is_supported(),
         "relay_running": running,

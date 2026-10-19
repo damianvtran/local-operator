@@ -36,6 +36,8 @@ def linux_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: True)
     monkeypatch.setattr(relay.sys, "platform", "linux")
     monkeypatch.setattr(
         relay.shutil,
@@ -283,7 +285,11 @@ def test_service_action_drives_systemctl_when_a_unit_is_there(
     )
 
     assert relay.service_action("restart")["ok"] is True
-    assert seen == [("restart", relay.SYSTEMD_UNIT)]
+    assert seen == [
+        ("restart", relay.SYSTEMD_UNIT),
+        ("is-enabled", relay.SYSTEMD_UNIT),
+        ("is-active", relay.SYSTEMD_UNIT),
+    ]
 
 
 def test_a_restart_that_replaces_nothing_is_not_ok(
@@ -1187,3 +1193,117 @@ def test_refresh_unit_a_raising_probe_is_a_failure_never_an_escape(
     assert outcome.kind == "failed", outcome
     assert "probe exploded" in outcome.detail, outcome.detail
     assert "lop network install" in outcome.detail, outcome.detail
+
+
+@pytest.mark.parametrize(
+    ("installed", "linger", "enabled", "persistent"),
+    [
+        (True, True, True, True),
+        (True, False, True, False),
+        (False, True, True, False),
+        (True, True, False, False),
+    ],
+)
+def test_supervision_state_requires_unit_enabled_and_linger(
+    linux_host, monkeypatch, installed, linger, enabled, persistent
+) -> None:
+    """An active unit alone does not prove restart-on-boot durability."""
+    if installed:
+        unit = _unit(linux_host)
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("(unit)\n")
+    calls = []
+
+    def systemctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0 if args[0] != "is-enabled" or enabled else 1)
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: linger)
+    state = relay.supervision_state()
+    assert state == {
+        "platform": "systemd",
+        "unit": relay.SYSTEMD_UNIT,
+        "installed": installed,
+        "enabled": enabled,
+        "active": True,
+        "linger": linger,
+        "persistent": persistent,
+    }
+    assert calls == [("is-enabled", relay.SYSTEMD_UNIT), ("is-active", relay.SYSTEMD_UNIT)]
+
+
+@pytest.mark.parametrize("linger", [True, False])
+def test_existing_unit_start_repairs_linger_without_failing_the_start(
+    linux_host, monkeypatch, linger
+) -> None:
+    """Existing installations must repair linger, not only missing units."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n")
+    monkeypatch.setattr(relay, "_systemd_guard", lambda action: None)
+    calls = []
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: calls.append("linger") or linger)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: linger)
+    monkeypatch.setattr(
+        supervisors, "systemctl_user", lambda *a, **k: SimpleNamespace(returncode=0, stderr="")
+    )
+    result = relay._service_action_systemd("start")
+    assert calls == ["linger"]
+    assert result["ok"] is True
+    assert result["linger"] is linger and result["persistent"] is linger
+
+
+@pytest.mark.parametrize(
+    "stdout, expected", [("Linger=yes\n", True), ("Linger=no\n", False), ("", False)]
+)
+def test_linger_state_reads_loginctl_without_mutating_it(monkeypatch, stdout, expected) -> None:
+    """Diagnostics query loginctl; only a service action may enable linger."""
+    calls = []
+    monkeypatch.setattr(supervisors.shutil, "which", lambda name: "/usr/bin/loginctl")
+    monkeypatch.setenv("USER", "synthetic-user")
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(supervisors.subprocess, "run", run)
+    assert supervisors.linger_enabled() is expected
+    assert calls == [["/usr/bin/loginctl", "show-user", "synthetic-user", "-p", "Linger"]]
+
+
+def test_supervision_state_without_a_supervisor_is_not_persistent(monkeypatch) -> None:
+    """A host without a manager cannot claim durability."""
+    monkeypatch.setattr(supervisors, "supervisor", lambda: None)
+    state = relay.supervision_state()
+    assert state["platform"] == "none" and not state["persistent"] and not state["installed"]
+
+
+def test_supervision_state_survives_an_unavailable_user_bus(linux_host, monkeypatch) -> None:
+    """Unavailable systemd is diagnostic evidence, never an exception to callers."""
+
+    def unavailable(*args, **kwargs):
+        raise OSError("synthetic bus unavailable")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", unavailable)
+    state = relay.supervision_state()
+    assert not state["enabled"] and not state["active"] and not state["persistent"]
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_launchd_persistence_follows_the_installed_run_at_load_plist(
+    monkeypatch, tmp_path, loaded
+) -> None:
+    """Launchd boot persistence is distinct from whether the job is loaded now."""
+    plist = tmp_path / "relay.plist"
+    plist.write_text("synthetic plist")
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    monkeypatch.setattr(relay, "_domain", lambda: "gui/synthetic")
+    monkeypatch.setattr(
+        relay, "_launchctl", lambda *a: SimpleNamespace(returncode=0 if loaded else 1)
+    )
+    state = relay.supervision_state()
+    assert state["platform"] == "launchd" and state["installed"]
+    assert state["persistent"] and state["active"] is loaded
+    assert state["linger"] is None
