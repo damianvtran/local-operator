@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -290,7 +292,7 @@ def test_a_partial_merge_keeps_complete_sessions_from_disk(tmp_path, monkeypatch
     assert index._merge_sessions({"s": stale}, {"s": fresh}, keep={"s"})["s"] is fresh
 
 
-def _payload_with_extra(root, extra: "os.PathLike[str]") -> dict:
+def _payload_with_extra(root, extra: Path) -> dict[str, Any]:
     """A newer index written by "another process": one session, one asset row."""
     record = {
         "key": identity.key_for(str(extra), None),
