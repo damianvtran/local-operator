@@ -286,3 +286,4 @@ async def test_scope_final_narrows_the_route_listing(api) -> None:
 
     refused = await client.get("/v1/desktop/library/assets", params={"scope": "nope"})
     assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "library_bad_filter"

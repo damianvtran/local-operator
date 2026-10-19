@@ -348,8 +348,17 @@ def _counts(assets: list[library_index.Asset]) -> dict[str, dict[str, int]]:
     return counts
 
 
+def _is_final(asset: library_index.Asset) -> bool:
+    """The operator's kept set: a highlight, or an artifact the agent produced.
+
+    Mentioned and merely-created scratch files are excluded from the ``final``
+    scope; ``all`` still indexes and serves them.
+    """
+    return asset.highlighted or asset.origin_group == "generated"
+
+
 def _matches(asset: library_index.Asset, row: dict[str, Any], query: Query) -> bool:
-    if query.scope == "final" and not (asset.highlighted or asset.origin_group == "generated"):
+    if query.scope == "final" and not _is_final(asset):
         return False
     if query.categories and asset.category not in query.categories:
         return False
@@ -479,9 +488,7 @@ def list_assets(
         # Narrow BEFORE any metadata work: a final listing must not materialise
         # rows (or count/tag) for scratch files the operator never kept. The
         # catalog still indexes everything, so scope=all and get_asset work.
-        all_assets = [
-            asset for asset in all_assets if asset.highlighted or asset.origin_group == "generated"
-        ]
+        all_assets = [asset for asset in all_assets if _is_final(asset)]
     # Materialise a row per asset once, in one transaction: metadata writes
     # (tags, chat, edit history) key on ``assets.asset_id``, and a list request
     # is the first place most assets are ever seen. BEFORE the revision is read

@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Annotated, Any, Iterator, Literal
+from typing import Annotated, Any, Iterator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -241,7 +241,7 @@ async def list_library_assets(
     favorite: bool | None = Query(default=None),
     session: str | None = Query(default=None, max_length=12),
     session_id: str | None = Query(default=None, max_length=512),
-    scope: Literal["all", "final"] = Query(default="all"),
+    scope: str = Query(default="all", max_length=8),
     sort: str = Query(default="recent"),
     order: str | None = Query(default=None),
     limit: int = Query(default=service.DEFAULT_LIMIT, ge=1, le=service.MAX_LIMIT),
