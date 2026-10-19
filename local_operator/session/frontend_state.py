@@ -1029,6 +1029,17 @@ _FRONTEND_LOCAL_SLASHES = {
     # attached. The machine-wide wake index (the desktop's schedules page) is a
     # different subject and is deliberately not what this page reads.
     "schedule",
+    # The Library page reads THIS machine's derived asset catalog and writes
+    # THIS machine's metadata database, both under the config root the page
+    # opens. Routed to an authoritative runtime it would paint the runtime
+    # host's catalog while the user is looking at this screen — `/import`'s
+    # wrong-machine answer, with user-edited names and tags attached.
+    "library",
+    # The Librarian's pause/resume/run hooks read and write THIS machine's
+    # state, and `open` switches THIS terminal onto the pinned conversation
+    # (`/resume`'s local half). A follower routed here would pause or organize
+    # the host's library and then try to attach a session nobody is at.
+    "librarian",
     "provider",
     "search",
     "accounts",

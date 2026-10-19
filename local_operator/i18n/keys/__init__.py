@@ -49,6 +49,7 @@ from . import (
     tui_app,
     tui_hub_links,
     tui_import,
+    tui_library,
     tui_notices,
     tui_projects,
     tui_projects_edit,
@@ -79,6 +80,7 @@ from . import (
     wire_settings_account_policy,
     wire_settings_hub_defaults,
     wire_slash,
+    wire_slash_library,
     wire_tunnel_setup,
 )
 
@@ -124,6 +126,7 @@ __all__ = [
     "tui_app",
     "tui_hub_links",
     "tui_import",
+    "tui_library",
     "tui_notices",
     "tui_projects",
     "tui_projects_edit",
@@ -154,5 +157,6 @@ __all__ = [
     "wire_settings_account_policy",
     "wire_settings_hub_defaults",
     "wire_slash",
+    "wire_slash_library",
     "wire_tunnel_setup",
 ]
