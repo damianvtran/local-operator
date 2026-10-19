@@ -51,6 +51,17 @@ def _normal(text: str) -> str:
     return " ".join(_words(text))
 
 
+def _title_key(title: str) -> str:
+    """Normalised title, but only when it carries some alphanumeric content.
+
+    A punctuation-only title normalises to empty, so two of them compared equal —
+    QA round 1 measured a 254-member "identical" group of exactly that shape. An
+    empty key is not evidence that two facts name the same subject.
+    """
+    key = _normal(title)
+    return key if any(char.isalnum() for char in key) else ""
+
+
 def _tokens(row: dict[str, Any]) -> set[str]:
     return {
         word
@@ -68,7 +79,8 @@ def _pair(left: dict[str, Any], right: dict[str, Any], a: set[str], b: set[str])
     shared = a & b
     a_only = a - b
     b_only = b - a
-    same_title = _normal(left["title"]) == _normal(right["title"])
+    left_title = _title_key(left["title"])
+    same_title = bool(left_title) and left_title == _title_key(right["title"])
     exact = same_title and _normal(left["body"]) == _normal(right["body"])
     return {
         "a": left["id"],
@@ -117,6 +129,11 @@ def _scope_groups(scope: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]
         # Identical titles are a candidate on their own: bodies often drift in one
         # line while the fact still names the same subject, and a combined-text
         # Jaccard would hide that behind a long body.
+        if not tokens[key[0]] and not tokens[key[1]]:
+            # Two facts with no alphanumeric token have no lexical evidence to
+            # compare (two empty sets score Jaccard 1.0); that was the other half
+            # of the punctuation-only false group.
+            return
         if (
             not pair["exact"]
             and not pair["title_equal"]

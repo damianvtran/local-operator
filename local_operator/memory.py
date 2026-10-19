@@ -76,6 +76,12 @@ RECALL_HARD_TOKENS = 2000
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_OWNER_OPS = 20000
 MAX_REVISIONS = 128
+#: One confirmed filter-based forget accepts this many facts. The human preview
+#: must refuse ABOVE it rather than print a confirmation the store will reject:
+#: a command that cannot run is worse than no command. Reachable within the caps
+#: (measured in review round 1: 205 minimal facts fit the global 16,000-token
+#: bank), so the preview checks it before offering anything.
+MAX_BULK_FORGET = 200
 MAX_TOMBSTONES = 5000
 MAX_BATCH_BYTES = 256 * 1024
 INVENTORY_HELP = (
@@ -832,6 +838,73 @@ def quota_relief(scope: str) -> tuple[str, str]:
     )
 
 
+def _contains_unbounded_repeat(text: str) -> bool:
+    """Whether ``text`` contains an unbounded repeat outside a character class."""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            # A quantifier inside a character class is a literal, not a repeat.
+            index += 1
+            if index < len(text) and text[index] == "^":
+                index += 1
+            if index < len(text) and text[index] == "]":
+                index += 1
+            while index < len(text) and text[index] != "]":
+                index += 2 if text[index] == "\\" else 1
+            index += 1
+            continue
+        if char in "*+":
+            return True
+        if char == "{" and re.match(r"\{\d+,\}", text[index:]):
+            return True
+        index += 1
+    return False
+
+
+def _nested_unbounded_repeat(pattern: str) -> bool:
+    """Whether a repeated group contains an unbounded repeat, e.g. ``(a+)+``.
+
+    WHY refuse instead of compile: that shape backtracks exponentially in the
+    subject (measured in review round 1: ``(a+)+$`` on 29 characters ran longer
+    than three seconds), and Python's ``re`` has no timeout. This is a lexical
+    HEURISTIC, not a proof — an overlapping alternation such as ``(a|aa)+`` is not
+    detected — so the contract is "recognised catastrophic shapes are refused",
+    not "every accepted pattern runs in bounded time". Filter subjects are
+    bounded by the store (title <= 160 chars, item <= ITEM_BYTES).
+    """
+    stack: list[int] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            index += 1
+            if index < len(pattern) and pattern[index] == "^":
+                index += 1
+            if index < len(pattern) and pattern[index] == "]":
+                index += 1
+            while index < len(pattern) and pattern[index] != "]":
+                index += 2 if pattern[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "(":
+            stack.append(index)
+        elif char == ")" and stack:
+            start = stack.pop()
+            following = pattern[index + 1 : index + 2]
+            repeated = following in ("*", "+") or bool(re.match(r"\{\d+,\}", pattern[index + 1 :]))
+            if repeated and _contains_unbounded_repeat(pattern[start + 1 : index]):
+                return True
+        index += 1
+    return False
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -1273,8 +1346,8 @@ class MemoryStore:
         """
         if not isinstance(expected, dict) or not expected:
             raise MemoryError("Bulk forget needs at least one memory ID and revision.")
-        if len(expected) > 200:
-            raise MemoryError("A bulk forget accepts at most 200 memories at once.")
+        if len(expected) > MAX_BULK_FORGET:
+            raise MemoryError(f"A bulk forget accepts at most {MAX_BULK_FORGET} memories at once.")
         owner = self.identity.owner(scope)
         for entity, revision in expected.items():
             # Neither value is free text; refusing a malformed one here keeps the
@@ -2325,16 +2398,27 @@ class MemoryStore:
         """Predicate selection over one scope for a bulk-forget preview.
 
         Composable: predicate KINDS are ANDed, repeated ``tags`` are ANY-of.
-        Regexes are case-insensitive and length-capped before compilation so a
-        typo cannot spend unbounded work. Read-only: the caller prints the result
-        and hands the returned ``(id, version)`` pairs to :meth:`forget_many`,
-        which re-checks every revision at commit time.
+        Regexes are case-insensitive and length-capped; a group repeated around an
+        unbounded repeat (``(a+)+``) is refused before compilation because Python's
+        ``re`` has no timeout and that shape backtracks exponentially. The check is
+        a lexical heuristic, not a proof (see ``_nested_unbounded_repeat``), so the
+        contract is "recognised catastrophic shapes are refused", never "every
+        accepted pattern is bounded". Read-only: the caller prints the result and
+        hands the returned ``(id, version)`` pairs to :meth:`forget_many`, which
+        re-checks every revision at commit time.
         """
         patterns: dict[str, re.Pattern[str]] = {}
         for name, value in (("title", title_matches), ("body", body_matches)):
             if value:
                 if len(value) > 500:
                     raise MemoryError(f"--{name}-matches is limited to 500 characters.")
+                if _nested_unbounded_repeat(value):
+                    raise MemoryError(
+                        f"--{name}-matches repeats a group that itself contains an "
+                        "unbounded repeat (for example '(a+)+'); that shape can backtrack "
+                        "exponentially, so it is refused rather than run. Rewrite it "
+                        "without nesting repetitions."
+                    )
                 try:
                     patterns[name] = re.compile(value, re.IGNORECASE)
                 except re.error:
