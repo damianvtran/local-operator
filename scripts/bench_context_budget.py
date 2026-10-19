@@ -1578,21 +1578,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # RAISED 31,025 -> 31,614 for the Team Bridge agent channel tool (#2665),
 # stated with the arithmetic because this guard exists to make that an explicit
 # decision, not an unrelated budget increase. Measured with THIS script on the
-# same machine, isolated HOME, both trees:
-#   8714b008c1  base (origin/main)             86,816 chars = ~31,229 billed
-#   ddad7631ce  pre-round-1 head               88,211 chars = ~31,731 billed
-#   head, after the round-1 prose trim         87,735 chars = ~31,559 billed
-#   = +919 chars of ``tool_schemas`` vs base (59,306 -> 60,225) = ~+330 billed;
+# clean arm (env -i, isolated HOME), same machine, both trees:
+#   8714b008c1  base (origin/main)             86,204 chars = ~31,009 billed
+#   head, after the round-1 prose trim         87,123 chars = ~31,339 billed
+#   = +919 chars of ``tool_schemas`` vs base (58,694 -> 59,613) = ~+330 billed;
 #     every other counter byte-identical. The trim took 476 chars out FIRST
-#     (wire description 376 -> 240, two model docstrings to one line each).
+#     (wire description 376 -> 221, two model docstrings to one line each).
 # The residual is STRUCTURAL, not prose: four op literals, eleven parameter
 # entries and the nested ``ChannelMemberParams`` model are the minimum a model
 # needs to call channels/create/post/history, and every field is load-bearing
 # (name/topic/visibility are request facts; members is the invite shape).
-# Local renders above CI by the config delta this file documents; the CI arm at
-# the pre-trim head was 31,510 (+485), so the same +330 delta lands it at
-# ~31,338 (+313) after the trim. The ceiling is measured head + this file's
-# 55-token band (31,559 + 55), which keeps CI green with margin.
+# The ceiling was set from the first (non-clean) reading at 31,559 + the
+# 55-token band; the clean re-measure is 31,339, so it leaves 275 tokens of
+# headroom rather than 55. CI's clean arm agrees at 31,339 for this head, so
+# the ceiling is kept (a tighten is not part of this remediation).
 BUDGET_BILLED_TOKENS = 31_614
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
@@ -1698,7 +1697,14 @@ BUDGET_BILLED_TOKENS = 31_614
 # audio pair and on the same measurement pass (child arm measured 27,688 billed
 # on this head). The two ceilings move together because the pair is in every
 # session's surface, child included; the difference between them is unchanged.
-BUDGET_CHILD_BILLED_TOKENS = 28_100
+# RAISED 28,100 -> 28,466 with the top arm's #2665 channel-tool raise, on the
+# same clean-arm pass (env -i, isolated HOME, same machine):
+#   base (origin/main 8714b008c1)  78,063 chars = ~28,080 billed
+#   head (this branch)             78,982 chars = ~28,411 billed
+#   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
+#     arm: the channel tool is in every session's surface, children included,
+#     and no child counter moved. Ceiling = measured head + the 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 28_466
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

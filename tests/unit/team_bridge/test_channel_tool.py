@@ -418,6 +418,7 @@ async def test_a_malformed_channel_id_never_reaches_the_client(
     [
         {"account_id": "acc_2", "kind": "human", "endpoint_id": "bep_2"},
         {"account_id": "acc_2", "kind": "agent"},
+        {"account_id": "acc_2", "kind": "agent", "endpoint_id": "   "},
     ],
 )
 async def test_member_shapes_that_could_collide_with_the_actor_are_refused(
@@ -445,3 +446,29 @@ async def test_decide_keeps_its_own_sentence_before_the_endpoint_gate() -> None:
     assert unknown["ok"] is False and unknown["code"] == "invalid_request"
     assert "unknown bridge op" in unknown["error"]
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_human_endpoint_is_absent_not_wired() -> None:
+    """The validators strip; the serializer must strip too, or "   " rides."""
+
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_create",
+            "kind": "channel",
+            "members": [
+                {
+                    "account_id": "acc_2",
+                    "kind": "human",
+                    "endpoint_id": "   ",
+                    "display_label": "Dana",
+                }
+            ],
+        },
+    )
+    assert outcome["ok"] is True
+    members = client.calls[0]["body"]["members"]
+    human = next(member for member in members if member["account_id"] == "acc_2")
+    assert "endpoint_id" not in human

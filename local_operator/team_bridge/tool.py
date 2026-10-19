@@ -71,6 +71,7 @@ from local_operator.harness.types import AgentTool, TextContent, ToolContext, To
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
+from .types import CONVERSATION_ID_PATTERN
 
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
@@ -188,8 +189,9 @@ def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
 
 #: The conversation id family, shared with the desktop routes' S-RSA-5 guard:
 #: a model-supplied id is interpolated upstream, so a value that could reshape
-#: the path (``#``, ``..``, slashes) is refused BEFORE any client call.
-_CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
+#: the path (``#``, ``..``, slashes) is refused BEFORE any client call. The
+#: pattern lives in ``team_bridge.types`` so the two entry points cannot drift.
+_CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -221,19 +223,23 @@ def _channel_members_with_creator(
     """
 
     account_id = str(getattr(owner, "account_id", "") or "")
-    endpoint_id = str(getattr(owner, "endpoint_id", "") or "")
+    endpoint_id = str(getattr(owner, "endpoint_id", "") or "").strip()
     out: list[dict[str, str]] = []
     creator_present = False
     for member in members:
+        # WHITESPACE IS ABSENT: the validators already strip for their checks,
+        # so the serializer must too, or "   " rides the wire as an endpoint
+        # the server will try (and fail) to bind.
+        member_endpoint = member.endpoint_id.strip()
         entry: dict[str, str] = {"account_id": member.account_id, "kind": member.kind}
-        if member.endpoint_id:
-            entry["endpoint_id"] = member.endpoint_id
+        if member_endpoint:
+            entry["endpoint_id"] = member_endpoint
         if member.display_label:
             entry["display_label"] = member.display_label
         if (
             member.kind == "agent"
             and member.account_id == account_id
-            and member.endpoint_id == endpoint_id
+            and member_endpoint == endpoint_id
         ):
             creator_present = True
         out.append(entry)
