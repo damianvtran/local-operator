@@ -1607,6 +1607,15 @@ if [ -x "$branded" ]; then
         if [ -z "$found" ]; then use_branded=""; fi
     fi
 fi
+# A truncated or replaced image passes both checks above and then dies with
+# "Exec format error". The image is a byte copy of the interpreter beside it,
+# so a size mismatch (both read through their symlinks) means it is not one.
+fallback="$gen/tools/local-operator/bin/python3"
+if [ -n "$use_branded" ]; then
+    if [ "$(wc -c < "$branded" 2>/dev/null)" != "$(wc -c < "$fallback" 2>/dev/null)" ]; then
+        use_branded=""
+    fi
+fi
 if [ -n "$use_branded" ]; then
     exec "$branded" "$@"
 fi

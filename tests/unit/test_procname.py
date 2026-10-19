@@ -210,8 +210,9 @@ def hardlink_branded(branded, monkeypatch):
 
     The per-venv hardlink and its dylib pin are one release of insurance
     (decision D2), and every one of their staleness rules still has a caller:
-    a read-only stable root, a non-APFS volume, an interpreter whose tree
-    cannot back an image. Faking the rung unavailable is how those rules are
+    a read-only or full stable root, an interpreter whose tree cannot back an
+    image. (A non-APFS volume is not one: the clone falls back to a byte copy
+    and keeps the runtime rung.) Faking the rung unavailable is how those rules are
     exercised without a read-only filesystem.
     """
     # Start from the per-venv shape this rung exists to serve. ``branded`` has
@@ -1891,6 +1892,66 @@ class TestStableRuntimeImage:
         assert ran.returncode == 0, ran.stderr
         assert ran.stdout.strip() == "fallback", ran.stdout
 
+    @staticmethod
+    def _sized_shim_tree(tmp_path: Path, image: Path, size: int) -> Path:
+        """A shim tree whose fallback ``python3`` is a script of exactly ``size`` bytes.
+
+        The shim's integrity probe compares the image's size with the sibling
+        interpreter's, so a fallback of the image's size isolates the one
+        variable the cell is about: the IMAGE's bytes. The script says
+        ``fallback`` and exits before reading its padding.
+        """
+        from local_operator import update as update_mod
+
+        stable = tmp_path / "stable"
+        (stable / "bin").mkdir(parents=True)
+        shim = stable / "bin" / "python3"
+        shim.write_text(update_mod._DAEMON_SHIM, encoding="utf-8")
+        shim.chmod(0o755)
+        bin_dir = stable / "generations" / "g1" / "tools" / "local-operator" / "bin"
+        bin_dir.mkdir(parents=True)
+        os.symlink("generations/g1", stable / "current")
+        (bin_dir / "Local Operator").symlink_to(image)
+        script = b"#!/bin/sh\necho fallback\nexit 0\n"
+        (bin_dir / "python3").write_bytes(script + b"#" * (size - len(script)))
+        (bin_dir / "python3").chmod(0o755)
+        return shim
+
+    def test_the_daemon_shim_execs_a_healthy_image_of_the_fallbacks_size(self, tmp_path):
+        """Positive control for the shim's size probe: equal sizes run the IMAGE."""
+        real = self._copied_tree(tmp_path)
+        image = procname._plant_runtime(real, tmp_path / "runtime")
+        assert image is not None
+        shim = self._sized_shim_tree(tmp_path, image, image.stat().st_size)
+
+        ran = subprocess.run(
+            [str(shim), "-c", "print('image-ran')"], capture_output=True, text=True, timeout=60
+        )
+
+        assert ran.returncode == 0, ran.stderr
+        assert ran.stdout.strip() == "image-ran", ran.stdout
+
+    def test_the_daemon_shim_falls_back_from_a_truncated_image(self, tmp_path):
+        """Item 3: a truncated image passes ``-x`` and the stdlib probe, then dies.
+
+        Without the size probe the shim exec'd it and every supervised daemon
+        failed with ``Exec format error``; with it the sibling interpreter runs.
+        """
+        real = self._copied_tree(tmp_path)
+        image = procname._plant_runtime(real, tmp_path / "runtime")
+        assert image is not None
+        size = image.stat().st_size
+        with open(image, "r+b") as handle:
+            handle.truncate(12)
+        shim = self._sized_shim_tree(tmp_path, image, size)
+
+        ran = subprocess.run(
+            [str(shim), "-c", "print('image-ran')"], capture_output=True, text=True, timeout=60
+        )
+
+        assert ran.returncode == 0, ran.stderr
+        assert ran.stdout.strip() == "fallback", ran.stdout
+
     def test_concurrent_planters_publish_one_image_and_leak_no_temps(self, tmp_path):
         import concurrent.futures
 
@@ -1906,6 +1967,51 @@ class TestStableRuntimeImage:
         assert not list(root.glob("*.tmp.*")), "every planter must consume its own temp"
         image = results[0]
         assert image is not None and procname._healthy_image(image)
+
+    def test_concurrent_planters_repair_a_corrupt_image_without_a_gap(self, tmp_path):
+        """Review round 2, item 4: the repair used to delete the key IN PLACE.
+
+        ``rmtree(<key>)`` then ``rename(staging)`` left the key missing for as
+        long as the delete ran, and planters that looked in that window answered
+        ``None`` — measured 139 of 240 — each dropping a venv to the hardlink
+        rung. Moving the dead tree aside is atomic; a loser of the final rename
+        re-checks once. Several rounds, because one round can miss the window.
+        """
+        import concurrent.futures
+
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        for _ in range(5):
+            image = procname._plant_runtime(real, root)
+            assert image is not None
+            with open(image, "r+b") as handle:
+                handle.truncate(12)
+            assert not procname._healthy_image(image, real), "precondition: corrupt start"
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: procname._plant_runtime(real, root), range(8)))
+
+            assert all(result is not None for result in results), results
+            assert {str(result) for result in results} == {str(image)}
+            assert [p.name for p in root.iterdir() if p.is_dir()] == [image.parent.parent.name]
+            assert procname._healthy_image(image, real)
+            assert not list(root.glob("*.tmp.*")), "a staging tree was leaked"
+            assert not list(root.glob("*.dead.*")), "a moved-aside tree was leaked"
+
+    def test_a_dead_planters_aside_tree_is_swept_and_a_live_ones_kept(self, tmp_path):
+        """``<key>.dead.<pid>.<thread>`` gets the staging tree's liveness rule."""
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        root.mkdir()
+        dead = root / "cpython-key.dead.999999.1"
+        live = root / f"cpython-key.dead.{os.getppid()}.1"
+        for entry in (dead, live):
+            (entry / "bin").mkdir(parents=True)
+
+        assert procname._plant_runtime(real, root) is not None
+
+        assert not dead.exists(), "a dead planter's aside tree must be reclaimed"
+        assert live.exists(), "a live planter's aside tree must be left alone"
 
     def test_an_unwritable_runtime_root_is_a_rung_not_an_error(self, tmp_path):
         """A sandboxed child cannot publish; it must say so, not raise."""
@@ -1977,6 +2083,81 @@ class TestStableRuntimeImage:
         assert procname._healthy_image(image, real)
         assert procname._executable_image(link, real) == link
 
+    def test_an_image_overwritten_in_place_at_the_same_size_is_repaired(self, tmp_path):
+        """Review round 2, item 1: size alone passed a zeroed header.
+
+        ``open(img, 'r+b').write(b'\\0' * 64)`` keeps the size and the stdlib
+        link, and every spawn then got ``Exec format error``. The write stamps a
+        new mtime, and a clone keeps its source's, so the mtime catches it.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        link = tmp_path / "venv" / "bin" / procname.BRAND
+        link.parent.mkdir(parents=True)
+        os.symlink(image, link)
+
+        with open(image, "r+b") as handle:
+            handle.write(b"\0" * 64)
+
+        assert image.stat().st_size == real.stat().st_size, "precondition: same size"
+        assert not procname._healthy_image(image, real)
+        assert procname._needs_replant(link, real, image)
+        assert procname._executable_image(link, real) is None
+        assert procname._plant_runtime(real, root) == image
+        assert procname._healthy_image(image, real), "the repair republishes the key"
+
+    def test_a_script_restored_to_the_images_size_and_mtime_is_not_an_image(self, tmp_path):
+        """The magic check: size and mtime put back cannot vouch for the bytes."""
+        real = self._copied_tree(tmp_path)
+        image = procname._plant_runtime(real, tmp_path / "runtime")
+        assert image is not None
+        source = real.stat()
+        script = b"#!/bin/sh\nexit 0\n"
+        image.write_bytes(script + b"#" * (source.st_size - len(script)))
+        os.utime(image, ns=(source.st_atime_ns, source.st_mtime_ns))
+
+        assert (image.stat().st_size, image.stat().st_mtime_ns) == (
+            source.st_size,
+            source.st_mtime_ns,
+        ), "precondition: size and mtime both match the source"
+        assert not procname._healthy_image(image, real)
+        assert not procname._healthy_image(image), "the magic is checked without a source too"
+        assert procname._executable_image(image, real) is None
+
+    def test_a_same_size_image_under_another_key_is_replanted(self, branded, monkeypatch):
+        """Mutation (c): the "link names THIS exact image" check in ``_needs_replant``.
+
+        An mtime-only reinstall keeps the size, so the old image is a healthy,
+        same-size file under a DIFFERENT key. Only the path comparison says the
+        link is stale; the health check alone would keep it.
+        """
+        real = procname.real_interpreter()
+        assert real is not None
+        old = Path(os.readlink(branded))
+        moved = old.parent.parent.parent / "cpython-moved-key" / "bin" / procname.BRAND
+        assert procname._healthy_image(old, real), "precondition: the old image is healthy"
+        assert not procname._needs_replant(branded, real, old), "precondition: steady state"
+
+        assert procname._needs_replant(branded, real, moved)
+
+    def test_a_link_straight_at_the_interpreter_is_not_the_runtime_link(self, tmp_path):
+        """Mutation (d): ``_is_runtime_link``'s "target under the runtime root" check.
+
+        A symlink straight at the interpreter executes and its stdlib resolves,
+        so every health question passes — and it reports ``python3.x``, one
+        privacy client per interpreter rather than the image. It must not be
+        kept as if it were the runtime link.
+        """
+        real = self._copied_tree(tmp_path)
+        link = tmp_path / "venv" / "bin" / procname.BRAND
+        link.parent.mkdir(parents=True)
+        os.symlink(real, link)
+        assert procname._healthy_image(link, real), "precondition: it is a healthy image"
+
+        assert not procname._is_runtime_link(link, real)
+
     def test_a_failed_build_never_publishes_a_half_built_directory(self, tmp_path, monkeypatch):
         """m1: the ``except OSError`` caught a failing clone and renamed the staging tree.
 
@@ -2033,6 +2214,76 @@ class TestStableRuntimeImage:
             os.path.realpath(real)
         ), "a venv built on an image must answer the build it was cloned from"
         assert procname.runtime_image(resolved) == image, "no clone of a clone"
+
+    def test_a_venv_on_an_unmapped_image_answers_no_build(self, tmp_path, monkeypatch):
+        """Item 5: no marker, so the clone is the only answer — and it is refused.
+
+        Same venv shape as the cell above (``Local Operator -m venv``), but the
+        image's ``source`` marker is gone. Answering the clone would make the
+        next plant publish a clone of it under a second key; ``None`` means no
+        plant for this venv and nothing else.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        (image.parent.parent / procname._SOURCE_MARKER).unlink()
+        rebuilt = tmp_path / "rebuilt"
+        (rebuilt / "bin").mkdir(parents=True)
+        (rebuilt / "pyvenv.cfg").write_text(
+            f"home = {image.parent}\nexecutable = {image}\n", encoding="utf-8"
+        )
+        (rebuilt / "bin" / "python").symlink_to(image)
+        monkeypatch.setattr(sys, "prefix", str(rebuilt))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "executable", str(rebuilt / "bin" / "python"))
+
+        assert procname.real_interpreter() is None
+        assert procname._real_interpreter_for(rebuilt / "bin" / "python") is None
+        assert [p.name for p in root.iterdir()] == [image.parent.parent.name], "no second key"
+
+    def test_real_interpreter_reads_pyvenv_cfg_not_the_executable(self, tmp_path, monkeypatch):
+        """Mutation (b): skipping ``pyvenv.cfg`` must answer the wrong build.
+
+        No marker anywhere. The venv's ``pyvenv.cfg`` names one interpreter
+        and ``sys.executable`` resolves to a DIFFERENT one, so only reading the
+        config gives the build the venv was created from.
+        """
+        real = self._copied_tree(tmp_path)
+        other = tmp_path / "other" / "bin" / real.name
+        other.parent.mkdir(parents=True)
+        shutil.copy2(real, other)
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+        (venv / "bin" / real.name).symlink_to(other)
+        monkeypatch.setattr(sys, "prefix", str(venv))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "executable", str(venv / "bin" / real.name))
+
+        assert procname.real_interpreter() == Path(os.path.realpath(real))
+
+    def test_a_marker_naming_a_python_inside_the_runtime_tree_is_ignored(
+        self, tmp_path, monkeypatch
+    ):
+        """Mutation (a): the "target outside the publish tree" guard.
+
+        The cell below names the image itself, which the ``python*`` name check
+        refuses anyway, so it passed with this guard removed. A ``python3.12``
+        UNDER the runtime root passes every other check, and is still a clone.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        inside = root / "stray" / "bin" / "python3.12"
+        inside.parent.mkdir(parents=True)
+        shutil.copy2(real, inside)
+        (image.parent.parent / procname._SOURCE_MARKER).write_text(f"{inside}\n", encoding="utf-8")
+
+        assert procname._source_for_image(image) is None
 
     def test_a_marker_naming_a_foreign_binary_is_ignored(self, tmp_path, monkeypatch):
         """m-b: the marker was read unvalidated, so any binary could be the answer.

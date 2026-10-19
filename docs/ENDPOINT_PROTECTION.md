@@ -242,8 +242,8 @@ Two consequences an admin needs, and neither is obvious from the plists alone:
 plainly.** The default plant is a clone — its own inode — so a security tool
 quarantining, reowning, chmod-ing or truncating `Local Operator` reaches OUR
 copy and nothing else. The per-venv hardlink is still planted on machines where
-the runtime image cannot be (a read-only stable root, a non-APFS volume), and
-there the branded `Local Operator` file and the interpreter are one inode:
+the runtime image cannot be (a read-only or full stable root, or an interpreter
+whose own tree cannot back an image), and there the branded `Local Operator` file and the interpreter are one inode:
 anything a security tool does to the file reaches the interpreter every venv on
 the machine resolves to. Measured on this machine, 2026-09-19 ~23:44 local,
 under that layout:
@@ -306,7 +306,11 @@ new generation, or a new worktree venv reuses the same client:
 after upgrading re-prompts once** per service. That prompt is expected;
   granting it is the last one.
 
-Published `<runtime>/<build-key>` directories are never rewritten or collected.
+Published `<runtime>/<build-key>` directories are immutable unless corrupt: a
+published directory whose image fails the integrity check (size and mtime against
+the interpreter it was cloned from, and the Mach-O header) is replaced under the
+same key, because nothing can be executing an image that cannot start. They are
+never collected.
 Nothing here can remove a TCC row, and the product does not try:
 
 - **Stale rows are removed by hand** — System Settings → Privacy & Security,
@@ -1034,12 +1038,15 @@ interpreters left unreadable on 2026-09-19, every 3.12/3.13 venv on the host
 dead until reinstalled). The cost is no extra blocks on APFS: the image is
 logically the interpreter's whole size (18,041,888 bytes for the uv 3.12.14
 build this was measured on) and shares every block with the source while the
-source exists; a volume without clones pays one copy per Python build, not one
-per venv. What it costs instead is a content-staleness rule — the build key —
+source exists; a volume without clones (non-APFS) still takes the runtime rung
+through a `shutil.copy2` full copy, and pays that 18 MB once per Python build,
+not once per venv. What it costs instead is a content-staleness rule — the build key —
 where the inode comparison was. The copy shape's old failure,
 `dyld: Library not loaded: @rpath/libpython3.X.dylib`, is what the `lib` symlink
-beside the image fixes, and it is measured: 20/20 launches through the venv
-symlink, `sys.prefix` still the venv.
+beside the image fixes, and it is measured: 25 of 25 launches through the venv
+symlink (re-measured 2026-10-19 on uv 3.12.14) reported the brand as the process
+name and the runtime image as `proc_pidpath`, with `sys.prefix` still the venv;
+the suite's own cell repeats the brand and `sys.prefix` checks 20 times per run.
 
 ## 6. Where to find this
 
