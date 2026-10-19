@@ -298,7 +298,10 @@ def test_http_gate_and_login_flow() -> None:
     # branch is not the default.
     assert payload["unread"] == {"count": 0, "revision": [0, 0, 0], "degraded": []}
     capabilities = payload["capabilities"]
-    assert sorted(capabilities) == ["features", "i18n", "stt"]
+    # ``library`` is conditional on the module being importable and IS in this
+    # tree; the capability is how the phone knows to offer the destination.
+    assert sorted(capabilities) == ["features", "i18n", "library", "stt"]
+    assert capabilities["library"] == 1
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]
