@@ -104,7 +104,7 @@ const texts = [];
 // class ttl and the dataset title is nowhere in the drawn output".
 const nodes = [];
 const walkNodes = (n) => {
-  if (n.tag) nodes.push({ tag: n.tag, cls: n.attrs.class || "", text: n._text || "" });
+  if (n.tag) nodes.push({ tag: n.tag, cls: n.attrs.class || "", text: n._text || "", attrs: n.attrs });
   for (const c of n.children) if (typeof c === "object") walkNodes(c);
 };
 walkNodes(target);
