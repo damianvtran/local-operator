@@ -49,6 +49,7 @@ from local_operator.server.routes import (
     desktop_code_requests,
     desktop_hub,
     desktop_imports,
+    desktop_library,
     desktop_lifecycle,
     desktop_mcp,
     desktop_mesh,
@@ -929,6 +930,10 @@ app.include_router(desktop_session_files.router)
 # `/utterance` and `/text` children. Literal paths that no template above
 # declares, so declaration order cannot make one swallow them.
 app.include_router(desktop_voice.router)
+# The global Library's own plane. `/v1/desktop/library/*` shares no prefix with
+# the sessions router, so declaration order cannot shadow a session child; the
+# service's own content route is id-addressed and never accepts a path.
+app.include_router(desktop_library.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

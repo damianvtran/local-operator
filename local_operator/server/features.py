@@ -889,6 +889,15 @@ def feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # The global, cross-conversation Library: list/detail/metadata/tags/
+        # content. Its OWN key rather than a bump of `session_files`: the
+        # surfaces (desktop sidebar, TUI /library, phone web, Expo) are new
+        # destinations, so an older backend must be recognisable as "no
+        # Library" and the renderer must not offer the destination at all.
+        # Absent means the surface does not exist — not a degraded Files view.
+        # `1` is the first contract revision; row/occurrence fields are
+        # additive and do not bump it.
+        "library": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
