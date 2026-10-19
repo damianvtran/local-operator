@@ -570,7 +570,7 @@ def test_a_peer_refusal_message_reaches_the_receipt_and_status(tmp_path, monkeyp
     server = _memory_server(tmp_path)
     refusal = (
         "Memory move refused: resolve the conflict on this device. Memory sync retries "
-        "automatically within 30 minutes; restarting this device picks the retry up sooner."
+        "automatically after about 30 minutes; restarting this device picks the retry up sooner."
     )
     link = _StubMemoryLink(
         [
@@ -795,3 +795,83 @@ def test_status_names_a_failing_peer_from_the_network_records(tmp_path):
     assert device in human
     # The machine-readable row carries the same resolved label.
     assert json.loads(text)["sync"]["peers"][0]["name"] == "laptop-b"
+
+
+def _named_peer(tmp_path, name: str) -> str:
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    peer = "d_" + "e" * 32
+    network_store.save(
+        NetworkRecord(
+            network_id="n_0123456789abcdef01234567",
+            name="studio",
+            self_device_id="d_" + "a" * 32,
+            members=[MemberRecord(device_id=peer, name=name, role="admin")],
+        ),
+        tmp_path,
+    )
+    return peer
+
+
+def _seed_receipt(tmp_path, peer: str, message: str = "") -> None:
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + peer,
+                json.dumps(
+                    {
+                        "device": peer,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": message,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+
+
+def _peer_block(human: str) -> list[str]:
+    lines = human.splitlines()
+    start = next(i for i, line in enumerate(lines) if "Not syncing with" in line)
+    end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("Stored:"))
+    return lines[start:end]
+
+
+def test_status_sanitises_a_hostile_peer_name(tmp_path):
+    """A name is peer-supplied and stored verbatim; the render point strips it."""
+    from local_operator.memory_cli import render_human, run
+
+    peer = _named_peer(
+        tmp_path,
+        "safe \x1b[2J\x1b]8;;https://evil.invalid\x07click\x1b]8;;\x07 end",
+    )
+    _seed_receipt(tmp_path, peer)
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "\x1b" not in human
+    assert "\x07" not in human
+    assert "evil.invalid" not in human
+    assert "safe" in human and "end" in human
+    assert all(len(line) <= 80 for line in _peer_block(human))
+
+
+def test_status_bounds_a_300_char_peer_name(tmp_path):
+    from local_operator.memory_cli import render_human, run
+
+    long_name = "n" * 300
+    peer = _named_peer(tmp_path, long_name)
+    _seed_receipt(tmp_path, peer)
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    block = _peer_block(human)
+    assert long_name not in human
+    assert "…" in " ".join(block)
+    assert all(len(line) <= 80 for line in block)

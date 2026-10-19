@@ -806,8 +806,10 @@ CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n I
 def quota_relief(scope: str) -> tuple[str, str]:
     """``(advice, command hint)`` for relieving ``scope`` at 80% or more.
 
-    The hint is empty for a scope whose only honest advice is consolidation, and
-    every hint names a move target that is NOT the scope itself.
+    Every branch returns both halves, and the hint is the command that actually
+    works at that scope: global moves work state to session, session forgets
+    (a session->session move is refused), and team/agent move only facts that
+    belong elsewhere.
     """
     if scope == "global":
         return (
@@ -2068,7 +2070,7 @@ class MemoryStore:
             "Memory move refused: a move from another device would replace a revision "
             "this device holds but the moving device never saw. Read that revision and "
             "keep anything it adds (or forget the source fact). Memory sync retries "
-            "automatically within 30 minutes; restarting this device picks the retry up "
+            "automatically after about 30 minutes; restarting this device picks the retry up "
             "sooner."
         )
 
