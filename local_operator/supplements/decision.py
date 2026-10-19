@@ -89,8 +89,7 @@ FILES_INSTRUCTIONS: Final = (
     "spreadsheet, image or other finished product written for a reader to open. Edits to "
     "source code or configuration, logs, caches, intermediate or scratch files, and files "
     "that were only read are NOT deliverables. When unsure, answer none. Selected files "
-    "enter the user's long-term Library; prefer durable deliverables over incidental "
-    "scratch."
+    "enter the user's long-term Library."
 )
 FILES_NONE_DESCRIPTION: Final = (
     "none of these is a finished deliverable (code edits, scratch, logs, nothing to open)"

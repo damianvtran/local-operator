@@ -95,7 +95,9 @@ def test_reconcile_arms_one_cadence_and_is_idempotent(isolated_root: Path) -> No
     assert second.schedules == first.schedules
     assert second.changed is False
     # The due is mirrored for the one-catch-up rule.
-    assert state.read_state(isolated_root)["cadence_due_ms"] == first.schedules[0].next_due_at
+    assert (state.read_state(isolated_root) or {})["cadence_due_ms"] == first.schedules[
+        0
+    ].next_due_at
 
 
 def test_reconcile_keeps_user_rows(isolated_root: Path) -> None:
@@ -130,7 +132,7 @@ def test_one_catch_up_after_a_missed_day(isolated_root: Path) -> None:
     assert row.id == "librarian-cadence"
     assert row.next_due_at <= now + 5_000, "a missed day is caught up now, not tomorrow"
     # And the catch-up is recorded, so the next pass does not stack another.
-    assert state.read_state(isolated_root)["cadence_due_ms"] == row.next_due_at
+    assert (state.read_state(isolated_root) or {})["cadence_due_ms"] == row.next_due_at
     again = proactive.reconcile(result.schedules, config_dir=isolated_root, session_id=SID)
     assert again.schedules == result.schedules and again.changed is False
 
@@ -177,7 +179,7 @@ async def test_pause_writes_the_key_cancels_rows_and_stamps_held(isolated_root: 
     assert await proactive.ensure_armed(isolated_root, SID) == "armed"
     outcome = await proactive.pause(isolated_root, SID)
     assert proactive.policy(isolated_root).paused is True
-    assert state.read_state(isolated_root)["paused_at"] is not None
+    assert (state.read_state(isolated_root) or {})["paused_at"] is not None
     assert "librarian-cadence" in outcome.cancelled
     # The rowless-entry rule: cancelling her only row removes the index entry
     # entirely, so there is nothing left to stamp ``held_at`` on. ``held`` is

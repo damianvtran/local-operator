@@ -67,9 +67,11 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
     seed_session(isolated_root, "feedfacecafe", write_rows("w1", 1.0, report))
     asset = index.build_catalog(isolated_root, budget_s=None).assets[0]
 
-    stats = json.loads(text(await execute_library("c1", {"op": "stats"})))
+    stats = json.loads(text(await execute_library("c1", {"op": "stats"}, None, None, None)))
     assert stats["assets"] == 1 and stats["state"] == "ready"
-    listed = json.loads(text(await execute_library("c2", {"op": "list", "q": "weekly"})))
+    listed = json.loads(
+        text(await execute_library("c2", {"op": "list", "q": "weekly"}, None, None, None))
+    )
     assert listed["total"] == 1 and listed["rows"][0]["id"] == asset.id
 
     store = MetadataStore(isolated_root)
@@ -85,9 +87,13 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
             "actor": "librarian",
             "confidence": 0.8,
         },
+        None,
+        None,
+        None,
     )
     assert updated.is_error is False
     row = store.asset(asset.id)
+    assert row is not None
     assert row["name"] == "Operator weekly" and row["name_source"] == "user"
     assert row["description_source"] == "librarian"
     assert row["organized_by"] == "librarian" and row["confidence"] == 0.8
@@ -95,11 +101,16 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
     # The user's own protection wins over the agent that runs unattended.
     store.update_fields(asset.id, {"locked": True}, actor="user")
     refused = await execute_library(
-        "c4", {"op": "update", "asset_id": asset.id, "name": "Renamed", "actor": "librarian"}
+        "c4",
+        {"op": "update", "asset_id": asset.id, "name": "Renamed", "actor": "librarian"},
+        None,
+        None,
+        None,
     )
     assert refused.is_error is True
     assert "asset_locked" in text(refused)
-    assert store.asset(asset.id)["name"] == "Operator weekly"
+    locked = store.asset(asset.id)
+    assert locked is not None and locked["name"] == "Operator weekly"
 
     # The guarded convention writer and the tool's read op agree on the store.
     from local_operator.librarian import profile
@@ -107,5 +118,5 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
     assert profile.record("tags.weekly", "tags", "Weekly reports.", config_dir=isolated_root) == (
         "recorded"
     )
-    rows = json.loads(text(await execute_library("c5", {"op": "conventions"})))
+    rows = json.loads(text(await execute_library("c5", {"op": "conventions"}, None, None, None)))
     assert [row["id"] for row in rows["conventions"]] == ["tags.weekly"]

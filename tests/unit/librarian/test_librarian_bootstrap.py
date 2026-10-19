@@ -179,6 +179,7 @@ async def test_a_later_boot_restores_a_missing_pin(
     # Simulate the RACE-LOST state, not a human unpin: the low-level writer
     # leaves no deliberate-unpin marker, which is exactly the shape the bug
     # produced.
+    assert aida_id is not None
     pins._write_pins(isolated_root, [aida_id])
     assert pins.read_pins(isolated_root) == [aida_id]
 
@@ -199,6 +200,7 @@ async def test_an_explicit_unpin_survives_the_next_boot(
     import local_operator.tui.sidebar_pins as pins
 
     librarian_id = await bootstrap.ensure_session(isolated_root)
+    assert librarian_id is not None
     assert pins.set_pin(isolated_root, librarian_id, False) is False
     assert librarian_id in pins.explicitly_unpinned(isolated_root)
 

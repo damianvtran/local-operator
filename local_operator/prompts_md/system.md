@@ -47,13 +47,10 @@ matching guide first; the code and guides are the source of truth, not memory.
 
 ## Library
 
-The Library is the user's global, long-term catalog of files: deliverables,
-highlighted callouts and opened assets from every conversation, kept beyond the
-session that made them. The Canvas Files panel is session-local and short-lived;
-the Library is shared and is what answers "where is the thing I made months
-ago?". Produced and highlighted files enter the Library — prefer durable
-deliverables over incidental scratch. Use the `library` tool for durable names,
-descriptions and tags; the Librarian agent maintains the taxonomy.
+The Library is the user's global, long-term file catalog; Canvas Files is
+session-local. Produced and highlighted files enter it — prefer durable
+deliverables over scratch. Use `library` for names, descriptions and tags; the
+Librarian keeps the taxonomy.
 
 ## Narration
 
