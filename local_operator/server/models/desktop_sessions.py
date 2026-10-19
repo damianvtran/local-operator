@@ -69,6 +69,9 @@ class SessionRow(BaseModel):
     # an optimistic client assignment. Local projection supplies both explicitly.
     tags: list[dict[str, str]] = Field(default_factory=list)
     primary: str | None = None
+    # Local rows always supply a token, including "0" for empty assignments.
+    # Remote owners do not publish this local store's revision; omit, not invent.
+    tags_revision: str | None = Field(default=None, exclude_if=lambda value: value is None)
     #: -- THE MESH'S FIVE KEYS (mesh-session-mobility.md §9.2). Additive and
     #: defaulted, so every existing client reads exactly what it read before;
     #: they are DECLARED here rather than left to ``extra="allow"`` so the shape

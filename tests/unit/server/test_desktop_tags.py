@@ -79,6 +79,8 @@ async def test_registry_assignments_and_catalogue(api) -> None:
     rows = {row["id"]: row for row in response.json()["result"]["sessions"]}
     assert rows[sid]["tags"] == [{"id": a["id"], "name": "Review"}, {"id": b["id"], "name": "Fix"}]
     assert rows[sid]["primary"] == b["id"]
+    assert rows[sid]["tags_revision"] == "1"
+    assert rows[untagged]["tags_revision"] == "0"
     assert rows[untagged]["tags"] == [] and rows[untagged]["primary"] is None
     response = await client.put(
         "/v1/desktop/tags", json={"tags": [{"id": a["id"], "name": "Renamed"}]}
@@ -94,7 +96,12 @@ async def test_registry_assignments_and_catalogue(api) -> None:
     cleared = await client.put(
         f"/v1/desktop/sessions/{sid}/tags", json={"tags": [], "primary": None}
     )
-    assert cleared.json()["result"] == {"session_id": sid, "tags": [], "primary": None}
+    assert cleared.json()["result"] == {
+        "session_id": sid,
+        "tags": [],
+        "primary": None,
+        "tags_revision": "2",
+    }
     rows = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"]
     assert all("tags" in row and "primary" in row for row in rows)
     assert (await client.get("/v1/capabilities")).json()["result"]["features"]["session_tags"] == 1
@@ -149,9 +156,10 @@ async def test_assignment_response_uses_one_registry_snapshot(api, monkeypatch) 
     def registry_snapshot(root):
         nonlocal reads
         reads += 1
-        # Validation and the store's write-result read see the old registry;
-        # the HTTP name-resolution read sees a concurrent category deletion.
-        return original(root) if reads < 3 else []
+        # Store validation sees the old registry; the HTTP name-resolution
+        # snapshot sees a concurrent category deletion. Assignment state is
+        # returned directly by the write so its token cannot race a re-read.
+        return original(root) if reads < 2 else []
 
     monkeypatch.setattr(session_tags, "read_categories", registry_snapshot)
     response = await client.put(
@@ -159,7 +167,12 @@ async def test_assignment_response_uses_one_registry_snapshot(api, monkeypatch) 
         json={"tags": [category["id"]], "primary": category["id"]},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["result"] == {"session_id": sid, "tags": [], "primary": None}
+    assert response.json()["result"] == {
+        "session_id": sid,
+        "tags": [],
+        "primary": None,
+        "tags_revision": "1",
+    }
 
 
 @pytest.mark.asyncio
@@ -237,3 +250,87 @@ async def test_buffered_rename_and_old_name_creation_replays_without_regrouping(
     row = next(row for row in rows if row["id"] == sid)
     assert row["primary"] == old_id
     assert row["tags"] == [{"id": old_id, "name": "Renamed"}]
+
+
+@pytest.mark.asyncio
+async def test_conditional_assignment_conflict_and_aba(api) -> None:
+    client, root = api
+    sid = "aaaaaaaaaaa1"
+    seed(root, sid)
+    tag = (await client.put("/v1/desktop/tags", json={"tags": [{"name": "A"}]})).json()["result"][
+        "tags"
+    ][0]
+    ref = {"id": tag["id"], "name": tag["name"]}
+    url = f"/v1/desktop/sessions/{sid}/tags"
+    body = {"tags": [tag["id"]], "primary": tag["id"]}
+    response = await client.put(url, json={**body, "expected_revision": "0"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["tags_revision"] == "1"
+    store = root / "tags" / "session" / f"{sid}.json"
+    before = (store.read_bytes(), store.stat().st_mtime_ns)
+    response = await client.put(url, json={"tags": [], "primary": None, "expected_revision": 0})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "tags_conflict"
+    assert response.json()["detail"]["result"] == {
+        "session_id": sid,
+        "tags": [ref],
+        "primary": tag["id"],
+        "tags_revision": "1",
+    }
+    assert (store.read_bytes(), store.stat().st_mtime_ns) == before
+    response = await client.put(url, json={"tags": [], "primary": None, "expected_revision": 1})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["tags_revision"] == "2"
+    before = (store.read_bytes(), store.stat().st_mtime_ns)
+    # The initial empty assignment has returned, but zero is still stale (ABA).
+    response = await client.put(url, json={**body, "expected_revision": "0"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["result"] == {
+        "session_id": sid,
+        "tags": [],
+        "primary": None,
+        "tags_revision": "2",
+    }
+    assert (store.read_bytes(), store.stat().st_mtime_ns) == before
+    for invalid in (
+        {"tags": ["unknown"], "primary": None},
+        {"tags": [], "primary": tag["id"]},
+    ):
+        response = await client.put(url, json={**invalid, "expected_revision": "2"})
+        assert response.status_code == 422, response.text
+        assert (store.read_bytes(), store.stat().st_mtime_ns) == before
+    # Legacy clients retain unconditional desired-state writes.
+    response = await client.put(url, json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["tags_revision"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_remote_assignment_still_refused_before_revision_check(api, monkeypatch) -> None:
+    client, root = api
+    sid = "aaaaaaaaaaa1"
+    seed(root, sid)
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_mesh.remote_owner",
+        lambda root_arg, session_id: ("synthetic-peer", "test-box"),
+    )
+    response = await client.put(
+        f"/v1/desktop/sessions/{sid}/tags",
+        json={"tags": [], "primary": None, "expected_revision": "stale"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "session_is_remote"
+    assert not (root / "tags" / "session" / f"{sid}.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_remote_row_model_does_not_invent_local_revision(api) -> None:
+    from local_operator.server.models.desktop_sessions import SessionRow
+
+    client, root = api
+    sid = "aaaaaaaaaaa1"
+    seed(root, sid)
+    row = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"][0]
+    assert row.pop("tags_revision") == "0"
+    row["locality"] = "remote"
+    assert "tags_revision" not in SessionRow.model_validate(row).model_dump(mode="json")

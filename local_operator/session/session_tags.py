@@ -22,6 +22,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from threading import RLock
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -29,6 +30,21 @@ from uuid import uuid4
 class EntityTags(TypedDict):
     tags: list[str]
     primary: str | None
+    revision: int
+
+
+# Serialize conditional read/compare/write within this process only. Other
+# processes retain the store's documented last-writer-wins replace semantics;
+# this is deliberately not a cross-process CAS or registry transaction.
+_assignment_lock = RLock()
+
+
+class TagRevisionConflict(Exception):
+    """A stale assignment token, with the readable snapshot that rejected it."""
+
+    def __init__(self, current: dict[str, Any]) -> None:
+        super().__init__("Tag assignment changed; refresh before retrying")
+        self.current = current
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -246,14 +262,45 @@ def read_entity_tags(
     primary = raw.get("primary")
     if primary not in surviving:
         primary = surviving[0] if surviving else None
-    return {"tags": surviving, "primary": primary}
+    revision = raw.get("revision", 0)
+    if type(revision) is not int or revision < 0:
+        revision = 0
+    return {"tags": surviving, "primary": primary, "revision": revision}
 
 
 def set_entity_tags(
-    root: Path, entity_type: str, entity_id: str, tag_ids: list[str], primary: str | None
+    root: Path,
+    entity_type: str,
+    entity_id: str,
+    tag_ids: list[str],
+    primary: str | None,
+    expected_revision: str | int | None = None,
+) -> EntityTags:
+    # A revision catches add-then-clear (ABA) edits even when tags look unchanged.
+    with _assignment_lock:
+        return _set_entity_tags(root, entity_type, entity_id, tag_ids, primary, expected_revision)
+
+
+def _set_entity_tags(
+    root: Path,
+    entity_type: str,
+    entity_id: str,
+    tag_ids: list[str],
+    primary: str | None,
+    expected_revision: str | int | None,
 ) -> EntityTags:
     path = _entity_path(root, entity_type, entity_id)
     categories = read_categories(root)
+    current = read_entity_tags(root, entity_type, entity_id, categories=categories)
+    if expected_revision is not None and str(expected_revision) != str(current["revision"]):
+        lookup = {item["id"]: item for item in categories}
+        raise TagRevisionConflict(
+            {
+                "tags": [lookup[key] for key in current["tags"]],
+                "primary": current["primary"],
+                "tags_revision": str(current["revision"]),
+            }
+        )
     known = {item["id"] for item in categories}
     if len(tag_ids) > 8 or len(set(tag_ids)) != len(tag_ids):
         raise ValueError("At most 8 distinct tags are allowed")
@@ -261,12 +308,25 @@ def set_entity_tags(
         raise ValueError("Unknown category id")
     if primary is not None and primary not in tag_ids:
         raise ValueError("Primary must be one of the assigned tags or null")
-    previous = read_entity_tags(root, entity_type, entity_id, categories=categories)["tags"]
+    previous = current["tags"]
     ordered = [key for key in previous if key in tag_ids]
     ordered.extend(key for key in tag_ids if key not in ordered)
-    if _write(path, {"version": 1, "primary": primary, "tags": ordered}):
+    resolved_primary = primary if primary is not None else (ordered[0] if ordered else None)
+    # Compare the readable state, not request bytes: reordered existing IDs and
+    # primary=None fallback are retries, not edits. No-op writes must not make
+    # another viewer's otherwise-current token stale (or touch the file).
+    if ordered == current["tags"] and resolved_primary == current["primary"]:
+        return current
+    state: EntityTags = {
+        "tags": ordered,
+        "primary": resolved_primary,
+        "revision": current["revision"] + 1,
+    }
+    # The relay-wide equality marker is independent of this session's ordered
+    # revision; publish it only after the assignment bytes actually changed.
+    if _write(path, {"version": 1, **state}):
         _bump_revision(root)
-    return read_entity_tags(root, entity_type, entity_id)
+    return state
 
 
 def usage_counts(root: Path, entity_type: str = "session") -> dict[str, int]:
