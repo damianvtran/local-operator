@@ -32,11 +32,14 @@ Two facts about a refusal worth keeping beside the code that raises one:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
+
+logger = logging.getLogger(__name__)
 
 #: ``network.credentials.grant_ttl_s``: the longest a lent access token lives on a
 #: borrower before it must ask the owner again. The grant also never outlives the
@@ -73,6 +76,54 @@ def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | No
     from local_operator.network.credentials.store import build_auth_store as _build
 
     return _build(config_dir, db_path=db_path)
+
+
+async def borrowed_provider_key(provider: str, config_dir: Path | None = None) -> str | None:
+    """A provider credential this device may BORROW from a mesh owner, or ``None``.
+
+    THE RUNG THE CLASSIFICATION AND MODEL-LISTING SEAMS WERE MISSING. Those seams
+    historically read ``providers.auth_store.shared_auth_store`` — a plain
+    ``AuthStore`` with no mesh rung — so a provider login that exists only on the
+    head of a mesh was invisible on a node: the Radient leg resolved to nothing and
+    the cascade silently fell through to another vendor, billing the operator on a
+    route they did not choose. ``build_auth_store`` already returns the mesh-aware
+    wrapper on a device with placement; this helper is how a caller that cannot
+    hold that store for the process (the classification probe, the model picker)
+    reaches the same borrow rung once, and closes it.
+
+    ZERO-PEER COST IS ZERO: the placement predicate is checked first, so a device
+    with nothing lent to it never constructs a store, a client or a socket — the
+    pre-slice behaviour, byte for byte.
+
+    Best-effort by construction. A provider leg that cannot resolve is not a failed
+    turn, so every failure — an unreadable document, a refused broker borrow, a
+    closed relay — returns ``None`` rather than propagating. The VALUE is never
+    logged, receipted or written anywhere outside the credential store it came
+    from; the only thing a log line may name is the provider.
+    """
+    store: Any = None
+    try:
+        from local_operator.network.credentials.placement import placement_for_store
+
+        if placement_for_store(config_dir) is None:
+            return None
+        from local_operator.network.credentials.store import build_auth_store as _build
+
+        store = _build(config_dir)
+        key = await store.get_api_key(provider, read_only=True)
+        return key or None
+    except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+        logger.debug("credentials: borrowed provider key unavailable for %s", provider)
+        return None
+    finally:
+        # A close failure must not turn a resolved key into "no credential": the
+        # borrow already happened, and the connection is released on process exit
+        # regardless. Swallow it rather than letting it replace the return value.
+        if store is not None:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("credentials: closing the borrow store failed", exc_info=True)
 
 
 class _LocalOps:
