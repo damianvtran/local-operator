@@ -9394,7 +9394,8 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
         reason = str(status.get("reason") or "")
         if not status:
             if shape == "oauth":
-                state, reason = "needs_operator_login", "no sign-in found here or on a shared device"
+                state = "needs_operator_login"
+                reason = "no sign-in found here or on a shared device"
             elif ref_names:
                 state, reason = "missing_source", f"missing {', '.join(ref_names[:4])}"
             else:

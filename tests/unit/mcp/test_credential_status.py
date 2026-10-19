@@ -421,3 +421,62 @@ def test_a_configured_server_dropped_by_discovery_still_has_a_row(
     rows = server_states(str(root), base=root)
     assert rows["gitlab"]["state"] == "needs_operator_login", rows
     assert rows["gitlab"]["reason"]
+
+
+def test_a_registration_only_row_is_not_a_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M3: ``has_row`` is ANY auth row; a discovered client is not a grant."""
+    import json
+
+    from local_operator.mcp.auth import McpTokenStorage
+    from local_operator.providers.auth_store import AuthStore
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "gitlab": {"type": "http", "url": URL, "auth": {"type": "oauth"}}
+                },
+                "disabledServers": ["gitlab"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save(_record(), root)
+    grants = AuthStore(db_path=root / "auth.db", config_dir=root)
+    McpTokenStorage(URL, grants).seed_client_info("client-1")
+
+    rows = server_states(str(root), base=root)
+
+    assert rows["gitlab"]["state"] == "needs_operator_login", rows
+    assert rows["gitlab"]["shape"] == "oauth"
+
+
+def test_a_ref_free_dropped_server_needs_no_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m3: nothing to authenticate is a vacuous ``synced``, not a login."""
+    import json
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"plain": {"type": "http", "url": URL}},
+                "disabledServers": ["plain"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save(_record(), root)
+
+    rows = server_states(str(root), base=root)
+
+    assert rows["plain"]["shape"] == "none", rows
+    assert rows["plain"]["state"] == "synced", rows
