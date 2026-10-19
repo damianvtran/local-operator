@@ -2194,6 +2194,23 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
     # shared with it, and without this the only convergence trigger was somebody
     # running the CLI. ``in_sync`` covers "this device holds nothing of that
     # peer's", so a member with no share pays a placement read and no dial.
+    # THE PLACEMENT DOCUMENT ITSELF RIDES THE TICK (review M2). The copy pull
+    # below can only follow entries this device already knows about; a share
+    # GRANTED since the last pull leaves no entry here, so without this the
+    # newly granted key stays invisible for ever on the cadence path — the
+    # member would wait for somebody to run the CLI, which is the exact defect
+    # this slice exists to remove. ONE peer, one bounded dial, on the tick's own
+    # 15/60 s floor: no tight loop is possible.
+    try:
+        from local_operator.network.credentials.client import MeshCredentialClient
+
+        placement_client = MeshCredentialClient.for_relay(server)
+        if placement_client is not None:
+            placement_client.pull_placement(only_device=device_id)
+    except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
+        logger.debug(
+            "credentials sync: placement pull for %s failed", device_id, exc_info=True
+        )
     pulled = document_engine.enqueue_placement_pull(device_id)
     # The exchange's own word stays the tick's answer whenever it did anything:
     # existing callers (and the wipe/removal tests) branch on it, and both jobs

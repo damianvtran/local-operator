@@ -1152,6 +1152,22 @@ def test_credentials_cadence_is_independent_of_net_definitions(
     )
     setattr(server, sync._SYNC_ATTR, engine)  # noqa: SLF001 — the engine's own seam
 
+    # THE PLACEMENT DOCUMENT PULL (review M2): a share granted since the last
+    # pull leaves no entry the copy pull can follow, so the tick asks the ONE
+    # peer for its document as well.
+    placement_pulls: list[str] = []
+
+    class StubClient:
+        def pull_placement(self, only_device: str = "") -> dict[str, object]:
+            placement_pulls.append(only_device)
+            return {"ok": True}
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    monkeypatch.setattr(
+        MeshCredentialClient, "for_relay", classmethod(lambda cls, srv: StubClient())
+    )
+
     sync.install()  # idempotent by identity
     assert getattr(sync.credentials_sync_step, "independent_cadence", False) is True
 
@@ -1166,6 +1182,7 @@ def test_credentials_cadence_is_independent_of_net_definitions(
     outcomes = syncer.tick(now=1_000.0)
 
     assert engine.exchanges == [peer], "the credential tick never ran for a drive member"
+    assert placement_pulls == [peer], "the tick never pulled the peer's placement document"
     assert engine.pulls == [peer]
     # AND THE DEFINITIONS HALF IS STILL GATED: credentials do not grant it.
     assert (peer, "skipped:no_admin") in outcomes

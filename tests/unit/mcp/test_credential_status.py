@@ -378,5 +378,46 @@ def test_durable_evidence_beats_a_live_holder_row(
     rows = server_states(str(cwd), base=root, configs=configs)
 
     assert rows["linear"]["state"] == "expired", rows
-    assert "macbook" in rows["linear"]["reason"]
-    assert "sign in again" in rows["linear"]["reason"]
+    assert rows["linear"]["reason"] == "macbook: sign in again", rows["linear"]["reason"]
+    assert "sign in again — sign in again" not in rows["linear"]["reason"]
+
+
+def test_a_configured_server_dropped_by_discovery_still_has_a_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gitlab was configured, absent from ``server_states`` and therefore invisible.
+
+    ``load_all_mcp_configs`` drops disabled entries; the status pass must still
+    name every server the user-scope document declares, because ``/mcp`` is the
+    only place an operator can read why it is not working.
+    """
+    import json
+
+    from local_operator.mcp.config import load_all_mcp_configs
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "gitlab": {
+                        "type": "http",
+                        "url": URL,
+                        "auth": {"type": "oauth"},
+                    }
+                },
+                "disabledServers": ["gitlab"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save(_record(), root)
+
+    loaded, _sources = load_all_mcp_configs(str(root))
+    assert "gitlab" not in loaded, "the fixture must exercise the dropped-server path"
+
+    rows = server_states(str(root), base=root)
+    assert rows["gitlab"]["state"] == "needs_operator_login", rows
+    assert rows["gitlab"]["reason"]

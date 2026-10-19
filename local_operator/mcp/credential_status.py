@@ -94,8 +94,10 @@ def server_states(
     if configs is None:
         loaded, _sources = load_all_mcp_configs(cwd)
         configs = loaded
-    if not configs:
-        return {}
+    # NO EARLY RETURN ON AN EMPTY CONFIG MAP: a server the discovery loader
+    # dropped (disabled, or shaped in a way it rejects) is exactly the case the
+    # supplement below exists for, and returning here hid it completely.
+    configs = dict(configs or {})
     mesh = _mesh_context(root)
     grants = _GrantIndex(root)
     secrets = _SecretIndex(root)
@@ -115,6 +117,28 @@ def server_states(
             )
         except Exception:  # noqa: BLE001 — one row must not fail the document
             rows[str(name)] = _row("unknown", "the credential state could not be read")
+    # A CONFIGURED SERVER THE DISCOVERY LOADER DROPPED IS STILL CONFIGURED.
+    # ``load_all_mcp_configs`` filters disabled/invalid entries out; the
+    # user-scope document is where the writers put servers, and gitlab lived
+    # there while this pass listed it nowhere — so ``/mcp`` could not name a
+    # server the CLI was repairing at all. One extra read of the SAME document
+    # the readiness fact reads, and only for names no config covered.
+    try:
+        from local_operator.network import readiness as readiness_mod
+
+        fact = readiness_mod.mcp_servers_fact(root)
+    except Exception:  # noqa: BLE001 — a missing list must not fail the document
+        fact = {}
+    for entry in fact.get("servers") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name") or "")
+        if not name or name in rows:
+            continue
+        try:
+            rows[name] = _fact_row(entry, mesh=mesh)
+        except Exception:  # noqa: BLE001 — one row must not fail the document
+            rows[name] = _row("unknown", "the credential state could not be read")
     return rows
 
 
@@ -256,6 +280,81 @@ def _server_row(
     )
 
 
+def _fact_row(entry: Mapping[str, Any], *, mesh: dict[str, Any]) -> dict[str, Any]:
+    """A status row for a configured server the discovery loader did not return.
+
+    Everything is taken from the readiness fact (names and booleans only): the
+    refs and their ``set`` states, whether a local grant row exists, whether a
+    placement entry was ever pulled. NO network, no dial — the same contract as
+    every other row here. The state vocabulary is identical, so a caller cannot
+    tell which source produced a row (which is the point).
+    """
+    refs = [
+        {"id": str(ref.get("id") or ""), "set": ref.get("set") is True}
+        for ref in entry.get("refs") or []
+        if isinstance(ref, Mapping)
+    ]
+    bindings = {
+        str(binding.get("field") or "")
+        for ref in entry.get("refs") or []
+        if isinstance(ref, Mapping)
+        for binding in ref.get("bindings") or []
+        if isinstance(binding, Mapping)
+    }
+    shape = "header-ref" if "headers" in bindings else ("env-ref" if "env" in bindings else "oauth")
+    if entry.get("literal_keys"):
+        return _row(
+            "missing_source",
+            "literal not adopted; run lop network mcp credentials --adopt",
+            shape=shape,
+            refs=refs,
+        )
+    if refs:
+        missing = [ref["id"] for ref in refs if ref["set"] is not True]
+        if not missing:
+            return _row("synced", "", shape=shape, refs=refs)
+        if entry.get("has_placement"):
+            return _row(
+                "not_yet_synced",
+                "not yet synced — run lop network mcp credentials --repair",
+                shape=shape,
+                refs=refs,
+            )
+        return _row(
+            "missing_source",
+            f"missing {_named(missing)}; set them here or share them from their owner",
+            shape=shape,
+            refs=refs,
+        )
+    if entry.get("has_row"):
+        return _row("synced", "", shape=shape, refs=refs)
+    url = str(entry.get("url") or "")
+    key = f"mcp:{url}" if url else ""
+    placed = mesh["entries"].get(key) if key else None
+    if placed and placed.get("holder"):
+        owner_name = str(getattr(placed.get("entry"), "owner_device_name", "") or "")
+        return _row(
+            "synced",
+            _bounded(f"borrows from {owner_name}" if owner_name else "borrows from a shared device"),
+            owner=str(getattr(placed.get("entry"), "owner_device", "") or ""),
+            shape=shape,
+            refs=refs,
+        )
+    if placed:
+        return _row(
+            "not_yet_synced",
+            "not yet synced — run lop network mcp credentials --repair",
+            shape=shape,
+            refs=refs,
+        )
+    return _row(
+        "needs_operator_login",
+        "no sign-in found here or on a shared device",
+        shape=shape,
+        refs=refs,
+    )
+
+
 def _oauth_row(
     name: str,
     *,
@@ -297,15 +396,21 @@ def _oauth_row(
         # ``http_401`` means the server refused a bearer the OWNER had just served,
         # which is a different sentence from a refresh the owner could not perform:
         # one says the sign-in is wrong there, the other that it needs a person.
+        # The generic code ALREADY says "sign in again"; prefixing another one
+        # produced "…: sign in again — sign in again there" (node, round 2).
         if code == "refresh_failed":
             detail = "the token refresh failed there"
         elif code == "http_401":
             detail = "the server rejected the sign-in there"
         else:
-            detail = "sign in again there"
+            detail = ""
+        if detail:
+            sentence = f"{owner_name}: sign in again — {detail}" if owner_name else f"sign in again — {detail}"
+        else:
+            sentence = f"{owner_name}: sign in again" if owner_name else "sign in again"
         return _row(
             "expired",
-            _bounded(f"{owner_name}: sign in again — {detail}" if owner_name else detail),
+            _bounded(sentence),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -317,6 +422,34 @@ def _oauth_row(
                 f"{owner_name}: access was revoked; ask its owner for a new share"
                 if owner_name
                 else "access was revoked; ask its owner for a new share"
+            ),
+            owner=owner or str(evidence.get("owner_device") or ""),
+            shape="oauth",
+            refs=refs,
+        )
+    if evidence_state == "synced":
+        # A SUCCESSFUL VALIDATION THAT LEFT NO LOCAL GRANT (a borrow lives only
+        # in the asking process's memory). Without this arm the very next status
+        # pass reads "no sign-in found" beside a proven working borrow — the
+        # gitlab contradiction measured on cloud-node-1.
+        return _row(
+            "synced",
+            _bounded(f"borrows from {owner_name}" if owner_name else "borrows from a shared device"),
+            owner=owner or str(evidence.get("owner_device") or ""),
+            shape="oauth",
+            refs=refs,
+        )
+    if evidence_state == "unavailable":
+        # A TRANSIENT-ONLY VERDICT: the owner could not be reached, so nothing is
+        # proved about the credential either way. Saying "synced" here would make
+        # an unreachable check look like a working server; the next successful
+        # borrow overwrites this row.
+        return _row(
+            "not_yet_synced",
+            _bounded(
+                f"{owner_name}: the owner is unreachable; try again later"
+                if owner_name
+                else "the owner is unreachable; try again later"
             ),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
