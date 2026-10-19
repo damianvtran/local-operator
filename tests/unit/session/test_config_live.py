@@ -417,6 +417,19 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+def _librarian_policy(watcher: Any):
+    """The engine's resolved policy, read from the watcher's own directory."""
+    from local_operator.librarian import proactive
+
+    return proactive.policy(watcher.config_dir)
+
+
+def _librarian_name(watcher: Any) -> str:
+    from local_operator.librarian import bootstrap
+
+    return bootstrap.display_name(watcher.config_dir)
+
+
 # What a non-default value for each LIVE key looks like, and how to observe it
 # ---------------------------------------------------------------------------
 
@@ -783,6 +796,21 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # is proven end to end in ``tests/unit/asks/test_ask_wire.py``
     # (``test_a_running_session_republishes_when_the_window_changes``).
     "asks.lapsed_visible_for": ("1h", lambda s, w: _lapsed_choice(w)),
+    # -- librarian: the cadence engine's own readers ---------------------------
+    # The pause/at/budget keys are read by ``proactive.policy`` at the next
+    # reconcile; ``librarian.name`` by the receipts' display reader. The
+    # session half is ``_aida_reconcile_now`` dispatching to her engine on the
+    # same watcher tick (proven end to end in
+    # ``tests/unit/librarian/test_librarian_proactive.py``).
+    "librarian.enabled": (False, lambda s, w: _librarian_policy(w).enabled),
+    "librarian.name": ("Archivist", lambda s, w: _librarian_name(w)),
+    "librarian.cadence.at": ("05:00", lambda s, w: _librarian_policy(w).at),
+    "librarian.cadence.paused": (True, lambda s, w: _librarian_policy(w).paused),
+    "librarian.cadence.max_extra_per_day": (
+        3,
+        lambda s, w: _librarian_policy(w).max_extra_per_day,
+    ),
+    "librarian.cadence.min_gap_minutes": (30, lambda s, w: _librarian_policy(w).min_gap_minutes),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns

@@ -1186,6 +1186,86 @@ def language_label() -> Msg:
     return Msg("wire.settings.language.label", {})
 
 
+def librarian_description() -> Msg:
+    return Msg("wire.settings.librarian.description", {})
+
+
+def librarian_title() -> Msg:
+    return Msg("wire.settings.librarian.title", {})
+
+
+def librarian_cadence_at_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.help", {})
+
+
+def librarian_cadence_at_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.label", {})
+
+
+def librarian_cadence_at_placeholder() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.placeholder", {})
+
+
+def librarian_cadence_max_extra_per_day_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_max_extra_per_day.help", {})
+
+
+def librarian_cadence_max_extra_per_day_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_max_extra_per_day.label", {})
+
+
+def librarian_cadence_min_gap_minutes_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_min_gap_minutes.help", {})
+
+
+def librarian_cadence_min_gap_minutes_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_min_gap_minutes.label", {})
+
+
+def librarian_cadence_paused_choice_false_description() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.choice.false.description", {})
+
+
+def librarian_cadence_paused_choice_true_description() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.choice.true.description", {})
+
+
+def librarian_cadence_paused_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.help", {})
+
+
+def librarian_cadence_paused_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.label", {})
+
+
+def librarian_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.librarian_enabled.choice.false.description", {})
+
+
+def librarian_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.librarian_enabled.choice.true.description", {})
+
+
+def librarian_enabled_help() -> Msg:
+    return Msg("wire.settings.librarian_enabled.help", {})
+
+
+def librarian_enabled_label() -> Msg:
+    return Msg("wire.settings.librarian_enabled.label", {})
+
+
+def librarian_name_help() -> Msg:
+    return Msg("wire.settings.librarian_name.help", {})
+
+
+def librarian_name_label() -> Msg:
+    return Msg("wire.settings.librarian_name.label", {})
+
+
+def librarian_name_placeholder() -> Msg:
+    return Msg("wire.settings.librarian_name.placeholder", {})
+
+
 def local_providers_base_url_help() -> Msg:
     return Msg("wire.settings.local_providers.base_url.help", {})
 

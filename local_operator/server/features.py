@@ -751,6 +751,12 @@ def feature_flags() -> dict[str, Any]:
         # command surface changes shape — an older renderer simply
         # never hears of this word.
         "aida": 1,
+        # THE LIBRARIAN: the Library header's status/"Organize now" row and the
+        # `/v1/desktop/librarian` pair. ONE key for both halves by the same rule
+        # `projects` states — a row that opened a route an older backend does
+        # not serve is a dead end, and a served route with no row is an orphan.
+        # `1` is the feature's first version; the route shape is frozen.
+        "librarian": 1,
         "projects": 2,
         # THE ONBOARDING APPROVAL SURFACE: GET /v1/desktop/approvals plus the two
         # decision posts (POST /v1/desktop/approvals/{id}/approve|deny). ONE key

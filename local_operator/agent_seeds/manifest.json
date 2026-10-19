@@ -118,6 +118,27 @@
       "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/designer.md"
     },
     {
+      "name": "librarian",
+      "label": "Librarian",
+      "description": "The Library's organizing agent: names, describes and tags the assets the operator keeps, learns their vocabulary, and keeps the global catalog usable.",
+      "when_to_use": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
+      "version": "1.0.0",
+      "instructions_sha256": "ace534b358da4149f8c7176d457897127e751ced5d6bf9a13136a0e36c1f8682",
+      "instructions_chars": 4593,
+      "tools": null,
+      "effort": null,
+      "delegate": true,
+      "tags": [
+        "role",
+        "delegate:yes",
+        "class:proactive"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/librarian.md"
+    },
+    {
       "name": "manager",
       "label": "Manager",
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",

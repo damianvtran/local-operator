@@ -88,7 +88,9 @@ FILES_INSTRUCTIONS: Final = (
     "DELIVERABLE the user asked for or would want pointed out: a report, document, export, "
     "spreadsheet, image or other finished product written for a reader to open. Edits to "
     "source code or configuration, logs, caches, intermediate or scratch files, and files "
-    "that were only read are NOT deliverables. When unsure, answer none."
+    "that were only read are NOT deliverables. When unsure, answer none. Selected files "
+    "enter the user's long-term Library; prefer durable deliverables over incidental "
+    "scratch."
 )
 FILES_NONE_DESCRIPTION: Final = (
     "none of these is a finished deliverable (code edits, scratch, logs, nothing to open)"
