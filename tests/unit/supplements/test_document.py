@@ -230,7 +230,10 @@ def test_only_unambiguous_numeric_cells_are_coerced_at_assembly(value, expected)
     )
 
     source = {"d1": {"title": "$0.15", "columns": ["value"], "rows": [[value]]}}
-    blob = "<data>" + json.dumps(source) + "</data><div></div>"
+    blob = (
+        "<data>" + json.dumps(source) + '</data><div id="c"></div>'
+        '<script>LO.bar(document.getElementById("c"),"d1",{x:"value",y:"value"})</script>'
+    )
     assert split_component(blob)[1] == source  # Provenance still sees the original cells.
     html = assemble_stored_component(blob)
     match = re.search(r'id="lo-data">(.*?)</script>', html)
@@ -238,3 +241,13 @@ def test_only_unambiguous_numeric_cells_are_coerced_at_assembly(value, expected)
     actual = json.loads(match[1])
     assert actual["d1"]["rows"] == [[expected]]
     assert actual["d1"]["title"] == "$0.15"
+
+
+def test_malformed_stored_rows_are_not_restructured() -> None:
+    source = {"d1": {"columns": ["value"], "rows": [["$0.15"], "plain-string", {"k": "$5"}, None]}}
+    html = assemble_document(
+        "<script>LO.bar(document.getElementById('c'),'d1',{x:'x',y:'value'})</script>", source
+    )
+    match = re.search(r'id="lo-data">(.*?)</script>', html)
+    assert match is not None
+    assert json.loads(match[1])["d1"]["rows"] == [[0.15], "plain-string", {"k": "$5"}, None]
