@@ -224,6 +224,25 @@ def _publish(root: Path, session_id: str, kind: str = "complete", anchor: str = 
     return token
 
 
+def _builtin_session_ids(root: Path) -> list[str]:
+    """The assistant sessions the boot hook may create on this root.
+
+    Aida and the Librarian are USER sessions by design (R3/R7), so a fresh
+    config lists their rows and auto-pins beside the test's own. The feed and
+    pin tests below assert exact sets; filter both built-ins by their state
+    files rather than hard-coding only Aida and failing when her twin lands.
+    """
+    ids: list[str] = []
+    for name in ("aida", "librarian"):
+        path = root / name / "state.json"
+        if not path.exists():
+            continue
+        session_id = json.loads(path.read_text()).get("session_id")
+        if session_id:
+            ids.append(session_id)
+    return ids
+
+
 async def _create(client: httpx.AsyncClient, workspace: Path, request_id: str) -> str:
     created = await client.post(
         "/v1/desktop/sessions",
@@ -1133,8 +1152,8 @@ async def test_a_completion_inside_active_reorders_the_list_and_is_announced(
         # the two rows IT created, so her row — cold, and none of this
         # test's business — is filtered out; her presence and pinning are
         # asserted by their own tests.
-        her_id = json.loads((root / "aida" / "state.json").read_text())["session_id"]
-        before_rows = [row for row in before["sessions"] if row["id"] != her_id]
+        builtin_ids = _builtin_session_ids(root)
+        before_rows = [row for row in before["sessions"] if row["id"] not in builtin_ids]
         before_ids = [row["id"] for row in before_rows]
         assert before_ids.index(elder) < before_ids.index(completer), before_ids
         assert all(row["active"] for row in before_rows), before_rows
@@ -1157,7 +1176,7 @@ async def test_a_completion_inside_active_reorders_the_list_and_is_announced(
     # row. Both rows are still Active: this is the resort, not a section move.
     listed = await client.get("/v1/desktop/sessions", params={"limit": 50})
     assert listed.status_code == 200, listed.text
-    after = [row for row in listed.json()["result"]["sessions"] if row["id"] != her_id]
+    after = [row for row in listed.json()["result"]["sessions"] if row["id"] not in builtin_ids]
     assert after[0]["id"] == completer, after
     assert (after[0]["active"], after[1]["active"]) == (True, True), after
     assert (after[0]["status"]["code"], after[0]["status"]["label"]) == (
@@ -1244,9 +1263,9 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
             # hook that created her): the claim under test is that THIS pin
             # write landed and rang the bell, so the file must hold both ids
             # and nothing else.
-            her_id = json.loads((root / "aida" / "state.json").read_text())["session_id"]
+            builtin_ids = _builtin_session_ids(root)
             assert sorted(json.loads((root / "sidebar-pins.json").read_text())) == sorted(
-                [session_id, her_id]
+                [session_id, *builtin_ids]
             )
 
             published = await _await_frames(
