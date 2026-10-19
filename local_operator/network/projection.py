@@ -244,6 +244,12 @@ class PeerRow:
     pid: int = 0
     kind: str = "daemon"
     state: str = ""
+    # Additive claims from mixed-version peers: wait defaults to not parked;
+    # nullable work counts stay unknown, never an invented measured zero.
+    waiting_on: int = 0
+    jobs_running: int | None = None
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
     busy: bool = False
     #: WHAT a person is being waited on (``"approval"``/``"ask"``), the same
     #: ``str | None`` the LOCAL row publishes (``SessionRecord.pending``, carried
@@ -311,6 +317,10 @@ class PeerRow:
             # on #2044). Zero here is the facade's own "no time" answer.
             started_at=self.started,
             capabilities=list(self.capabilities),
+            waiting_on=self.waiting_on,
+            jobs_running=self.jobs_running,
+            subagents_running=self.subagents_running,
+            subagents_queued=self.subagents_queued,
             busy=self.busy,
             pending=self.pending,
             detached=self.detached,
@@ -350,6 +360,22 @@ class PeerRow:
             pid=peer_whole_int(data.get("pid"), default=0),
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
+            waiting_on=peer_whole_int(data.get("waiting_on"), default=0),
+            jobs_running=(
+                peer_whole_int(data["jobs_running"], default=0)
+                if data.get("jobs_running") is not None
+                else None
+            ),
+            subagents_running=(
+                peer_whole_int(data["subagents_running"], default=0)
+                if data.get("subagents_running") is not None
+                else None
+            ),
+            subagents_queued=(
+                peer_whole_int(data["subagents_queued"], default=0)
+                if data.get("subagents_queued") is not None
+                else None
+            ),
             busy=_bool("busy"),
             pending=row_needs_claim(state=data.get("state"), pending=data.get("pending")),
             detached=_bool("detached"),
@@ -378,6 +404,10 @@ class PeerRow:
             "pid": self.pid,
             "kind": self.kind,
             "state": self.state,
+            "waiting_on": self.waiting_on,
+            "jobs_running": self.jobs_running,
+            "subagents_running": self.subagents_running,
+            "subagents_queued": self.subagents_queued,
             "busy": self.busy,
             "pending": self.pending,
             "detached": self.detached,

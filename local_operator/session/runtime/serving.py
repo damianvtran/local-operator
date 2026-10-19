@@ -9962,6 +9962,13 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
         self._publish_subagents()
+        for name, value in (("set_waiting", self.waiting_on()), ("set_jobs", self.job_counts())):
+            publish = getattr(server, name, None)
+            if callable(publish):
+                try:
+                    publish(value)
+                except Exception:  # noqa: BLE001 — presence must not fail a turn
+                    logger.debug("could not publish the job presence", exc_info=True)
 
     def _publish_session_started(self) -> None:
         """Flip the record's ``started`` bit once a real turn has run.
@@ -9980,6 +9987,19 @@ class ServingSessionHandle(SessionHandle):
             setter(True)
         except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
             logger.debug("could not publish the started state", exc_info=True)
+
+    def waiting_on(self) -> int:
+        """Read the foreground wait snapshot, never infer it from busy."""
+        return getattr(self._session, "_waiting_on", 0)
+
+    def job_counts(self) -> int | None:
+        """Count only background tools: task rows already belong to the roster."""
+        try:
+            return sum(
+                row.status == "running" and row.type != "task" for row in self._session.jobs.list()
+            )
+        except Exception:  # noqa: BLE001 — unknown is not a measured zero
+            return None
 
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories, or ``(None, None)``.

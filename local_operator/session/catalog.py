@@ -62,7 +62,7 @@ WEDGED_STATUS = "Not answering · process alive"
 #: ``idle``/``attached`` (a resident terminal is not work in progress, and both
 #: are tier 5) and not the stored outcomes ``interrupted``/``scheduled``/``dormant``.
 RUNNING_STATUS_CODES: frozenset[str] = frozenset(
-    {"approval", "answer", "busy", "wedged", "delegating"}
+    {"approval", "answer", "busy", "wedged", "waiting", "delegating"}
 )
 
 
@@ -210,7 +210,7 @@ class CatalogEntry:
         """
         tier = session_category(
             pending=bool(self.row.pending),
-            busy=self.row.live_state in ("busy", "wedged"),
+            busy=self.row.live_state in ("busy", "wedged") or self.row.waiting_on > 0,
             unseen=self.unseen,
             kind=self.completion_kind,
             live=bool(self.row.live_state),
@@ -259,15 +259,23 @@ class CatalogEntry:
     @property
     def active(self) -> bool:
         """Section membership is independent of the number of ordering categories."""
-        return bool(self.row.pending or self.unseen or self.row.live_state)
+        return bool(
+            self.row.pending or self.unseen or self.row.live_state or self.row.waiting_on > 0
+        )
 
     @property
     def status_code(self) -> str:
         """Stable transport spelling of the same precedence used by ``status``."""
+        # Defense in depth: an old or mixed-version producer may retain a gate
+        # after its heartbeat stops. A non-answering owner cannot serve that gate.
+        if self.row.live_state == "wedged":
+            return "wedged"
         if self.row.pending:
             return "approval" if self.row.pending == "approval" else "answer"
-        if self.row.live_state in {"wedged", "busy"}:
-            return self.row.live_state
+        if self.row.waiting_on > 0:
+            return "waiting"
+        if self.row.live_state == "busy":
+            return "busy"
         if self.shows_completion_mark:
             # ``retired`` normalizes to the ``interrupted`` treatment, mirroring
             # ``transcript_index``'s rail: the sidebar's glyph vocabulary has no
@@ -393,7 +401,9 @@ class CatalogEntry:
 
     @property
     def status(self) -> str:
-        if self.row.pending:
+        # Mirror status_code's defensive suppression of a phantom gate. New
+        # producers clear pending, but readers also consume older peer records.
+        if self.row.pending and self.row.live_state != "wedged":
             return "Approval needed" if self.row.pending == "approval" else "Answer needed"
         # BEFORE the unseen branch, and mirrored by `shows_completion_mark`,
         # which is what the sidebar suppresses the mark on. A row that is
@@ -423,6 +433,8 @@ class CatalogEntry:
         # draining (UX round 2, U8; PR #1108 reconciliation).
         if self.row.leaving:
             return self.row.leaving
+        if self.row.waiting_on > 0:
+            return waiting_label(self.row.waiting_on, self.row.subagents_running or 0)
         if self.row.live_state == "busy":
             return "Working"
         if self.shows_completion_mark:
@@ -560,8 +572,16 @@ class CatalogEntry:
         return f"{base} — {sentence}"
 
 
-def delegating_label(running: int, queued: int) -> str:
-    """The ``delegating`` row's words, from the two counts the record reported.
+def waiting_label(jobs: int, subagents: int = 0) -> str:
+    """Shared sentence-case label for a foreground wait, not generic busy."""
+    head = f"Waiting on {jobs} {'job' if jobs == 1 else 'jobs'}"
+    if subagents > 0:
+        head += f" · {subagents} {'subagent' if subagents == 1 else 'subagents'} running"
+    return head
+
+
+def delegating_label(running: int, queued: int, jobs: int = 0) -> str:
+    """The ``delegating`` row's words, from reported subagent and job counts.
 
     Three shapes, because the two counts answer different questions and either
     can be the whole of the answer:
@@ -591,14 +611,18 @@ def delegating_label(running: int, queued: int) -> str:
     and ``sr-only`` carry verbatim, and naming it lets any surface that wants the
     same sentence ask for it instead of assembling a second vocabulary (U11).
     """
-    noun = "subagent" if running == 1 else "subagents"
-    if running < 1:
-        queued_noun = "subagent" if queued == 1 else "subagents"
-        return f"{queued} {queued_noun} queued"
-    head = f"{running} {noun} running"
-    if queued >= 1:
-        return f"{head} · {queued} queued"
-    return head
+    parts = []
+    if jobs > 0:
+        parts.append(f"{jobs} {'job' if jobs == 1 else 'jobs'} running")
+    if running > 0:
+        parts.append(f"{running} {'subagent' if running == 1 else 'subagents'} running")
+    if queued > 0:
+        parts.append(
+            f"{queued} queued"
+            if running > 0
+            else f"{queued} {'subagent' if queued == 1 else 'subagents'} queued"
+        )
+    return " · ".join(parts)
 
 
 def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEntry:
@@ -1306,6 +1330,8 @@ def decorate_rows(
         # difference between that and "zero children" is what keeps a renderer
         # from asserting "no subagents" about a session it could not ask. Only
         # the live branch below can set them, exactly like ``leaving``.
+        waiting_on = 0
+        jobs_running: int | None = None
         subagents_running: int | None = None
         subagents_queued: int | None = None
         if record_state is not None:
@@ -1321,7 +1347,7 @@ def decorate_rows(
                 # half of this same list asks the same question of the row the
                 # relay federated, and the two must not answer it differently.
                 live_state = live_state_from_flags(record)
-            pending = getattr(record, "pending", None) or None
+            pending = (getattr(record, "pending", None) or None) if state == "live" else None
             # Only a LIVE record has a kind. A cold row keeps "" so the picker
             # says nothing rather than claiming a session is still an exec run
             # after the process that made it that has gone.
@@ -1348,6 +1374,8 @@ def decorate_rows(
             # above and for the same reason: a record written by an OLDER
             # runtime has no such field, and this runs on the poll loop behind
             # ``/resume``.
+            waiting_on = getattr(record, "waiting_on", 0)
+            jobs_running = getattr(record, "jobs_running", None)
             subagents_running = getattr(record, "subagents_running", None)
             subagents_queued = getattr(record, "subagents_queued", None)
         entry = wake_index.get(row.id) or {}
@@ -1372,6 +1400,8 @@ def decorate_rows(
                 live_state=live_state,
                 pending=pending,
                 leaving=leaving,
+                waiting_on=waiting_on,
+                jobs_running=jobs_running,
                 subagents_running=subagents_running,
                 subagents_queued=subagents_queued,
                 wakes=len(schedules),

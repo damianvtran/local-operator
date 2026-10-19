@@ -1457,6 +1457,9 @@ class ToolContext(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
+    # Host-owned presence only: never serialize a callback onto the tool wire.
+    note_waiting: Callable[[int], None] | None = Field(default=None, exclude=True, repr=False)
+
     cwd: str = "."
     #: Explicit host-owned attention-turn identity. No value means the host has
     #: not opted into confirmed send reuse; never infer a turn from a call id

@@ -2069,6 +2069,8 @@ class RuntimeServer:
         #: makes a runtime whose handle cannot report indistinguishable from
         #: one that predates the fields — both are honestly "unreported", and
         #: neither is a measured zero.
+        self._waiting_on = 0
+        self._jobs_running: int | None = None
         self._subagents_running: int | None = None
         self._subagents_queued: int | None = None
         #: True until a terminal attaches. A freshly spawned runtime genuinely
@@ -3733,6 +3735,12 @@ class RuntimeServer:
                 # merely bounding staleness. A handle that does not implement
                 # the probe leaves the counts at ``None`` — unreported, which
                 # is the honest answer and not a zero.
+                waiting = getattr(self._handle, "waiting_on", None)
+                if callable(waiting):
+                    self.set_waiting(waiting())
+                jobs = getattr(self._handle, "job_counts", None)
+                if callable(jobs):
+                    self.set_jobs(jobs())
                 counts = getattr(self._handle, "subagent_counts", None)
                 if callable(counts):
                     # Shape-checked rather than unpacked blind: the probe is
@@ -3763,6 +3771,8 @@ class RuntimeServer:
                         # silently dropping the bit and making a working
                         # session broadcast-invisible.
                         started=self._started,
+                        waiting_on=self._waiting_on,
+                        jobs_running=self._jobs_running,
                         beat_lag_s=lag_s,
                         cpu_since_beat_s=cpu_since_beat_s,
                     )
@@ -5066,6 +5076,21 @@ class RuntimeServer:
         self._record.started = started
         self._republish()
 
+    def set_waiting(self, count: int) -> None:
+        """Publish a changed wait count only; heartbeat polls must be cheap."""
+        count = max(0, int(count))
+        if self._waiting_on == count:
+            return
+        self._waiting_on = count
+        self._republish()
+
+    def set_jobs(self, count: int | None) -> None:
+        """Preserve unknown versus measured zero for non-subagent jobs."""
+        if self._jobs_running == count:
+            return
+        self._jobs_running = count
+        self._republish()
+
     def set_subagents(self, running: int | None, queued: int | None) -> None:
         """Record this runtime's subagent trajectory counts.
 
@@ -5117,6 +5142,8 @@ class RuntimeServer:
                 # same read as ``detached`` because the two answers come from one
                 # snapshot of ``_clients`` (see ``_visible_attach_surfaces``).
                 watching=bool(self.attach_clients()),
+                waiting_on=self._waiting_on,
+                jobs_running=self._jobs_running,
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,
             )

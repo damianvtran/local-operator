@@ -6661,8 +6661,12 @@ class RelayServer:
                     "conversation_name": record.conversation_name,
                     "cwd": record.cwd,
                     "model_label": record.model_label,
+                    "waiting_on": record.waiting_on,
+                    "jobs_running": record.jobs_running,
+                    "subagents_running": record.subagents_running,
+                    "subagents_queued": record.subagents_queued,
                     "busy": record.busy,
-                    "pending": record.pending,
+                    "pending": record.pending if state == "live" else None,
                     "detached": record.detached,
                     # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
                     # report). ``record.started`` is "has run at
