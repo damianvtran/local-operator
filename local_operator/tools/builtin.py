@@ -16223,14 +16223,18 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     return extras
 
 
-def _session_row_brief(row: Mapping[str, Any]) -> str:
+def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = None) -> str:
     """One lean listing line: the fields a caller acts on. The full published
-    row rides in ``details``, which costs no prompt tokens."""
+    row rides in ``details``, which costs no prompt tokens.
+
+    Identifier fields: the conversation title and session id are marked as
+    spans so redaction leaves them readable; neither is a credential.
+    """
     state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     bits = [f"[{state}] {name}"]
     if row.get("session_id"):
-        bits.append(f"session {row['session_id']}")
+        bits.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -16371,9 +16375,6 @@ async def _sessions_list(
             seen.add(session_id)
         deduped.append(row)
     shown = deduped[: params.limit]
-    # Identifier fields: every row's conversation title and session id are
-    # names a caller reads and quotes back; redaction must not apply to them.
-    _note_session_row_identifiers(context, shown)
     details: dict[str, Any] = {
         "op": "list",
         "count": len(shown),
@@ -16383,7 +16384,7 @@ async def _sessions_list(
     }
     if notes:
         details["notes"] = notes
-    lines: list[str] = [_session_row_brief(row) for row in shown]
+    lines: list[str] = [_session_row_brief(row, context) for row in shown]
     if len(deduped) > len(shown):
         if scope == "local":
             lines.append(
@@ -16446,16 +16447,16 @@ async def _sessions_list_query(
             row["pid"] = entry[0].pid
             row["model_label"] = entry[0].model_label
         rows.append(row)
-        name = session_row.name or "(unnamed)"
+        # Identifier fields: the title and id this search row prints are names
+        # a caller quotes back; both are marked spans, not credentials.
+        name = identifier_text(context, session_row.name or "(unnamed)")
+        session_id = identifier_text(context, session_row.id)
         if entry:
-            lines.append(f"- [live] {name}, session {session_row.id}, pid {entry[0].pid}")
+            lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}")
         else:
             age = max(0.0, time.time() - float(session_row.mtime or 0.0))
             age_text = format_duration(int(age * 1000))
-            lines.append(f"- [stored] {name}, session {session_row.id}, last active {age_text} ago")
-    # Identifier fields: the search rows print each session's title and id as
-    # names the caller quotes back; redaction must not apply to either.
-    _note_session_row_identifiers(context, rows)
+            lines.append(f"- [stored] {name}, session {session_id}, last active {age_text} ago")
     details: dict[str, Any] = {
         "op": "list",
         "query": params.query,
@@ -16504,7 +16505,9 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
     return "; ".join(second)
 
 
-def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any]) -> str:
+def _sessions_disk_only_body(
+    facts: _SessionsDiskFacts, extras: Mapping[str, Any], context: ToolContext | None = None
+) -> str:
     """The ``info`` text when no listing row describes the session.
 
     A stored directory can be absent from a listing scan for four reasons,
@@ -16518,7 +16521,9 @@ def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any
     the sentence and the scan cannot disagree. The per-row reads need only
     the id, which is why the answer can be composed here at all.
     """
-    name = facts.name or "(unnamed)"
+    # Identifier field: the stored title is a name the caller reads; it is
+    # marked as a span so redaction leaves it readable.
+    name = identifier_text(context, facts.name or "(unnamed)")
     directory = str(extras.get("session_dir") or "")
     resumable = True
     if extras.get("sidebar_visibility") == "hidden":
@@ -16544,13 +16549,19 @@ def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any
     return first + "\n" + _sessions_facts_line(extras)
 
 
-def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> str:
-    """Two lines: the live-state row, then the durable facts about it."""
+def _sessions_info_body(
+    row: Mapping[str, Any], extras: Mapping[str, Any], context: ToolContext | None = None
+) -> str:
+    """Two lines: the live-state row, then the durable facts about it.
+
+    Identifier fields: the conversation title and session id are marked spans;
+    both are names the caller quotes back, not credentials.
+    """
     state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     parts = [f'"{name}" — {state}']
     if row.get("session_id"):
-        parts.append(f"session {row['session_id']}")
+        parts.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         parts.append(f"pid {row['pid']}")
     if row.get("busy"):
@@ -16594,9 +16605,6 @@ async def _sessions_info_mesh(
         for row in payload.get("sessions") or []
         if isinstance(row, dict) and row.get("locality") == "remote" and row.get("session_id")
     ]
-    # Identifier fields: the row's conversation title and session id are names
-    # the caller quotes back; redaction must leave both readable.
-    _note_session_row_identifiers(context, rows)
     from local_operator.resume import SessionRow
     from local_operator.session.peer_rows import select_peer_session
 
@@ -16613,7 +16621,12 @@ async def _sessions_info_mesh(
         lines = [
             f"{peer} holds {len(candidates)} sessions matching {needle!r} — name one by its id:"
         ]
-        lines.extend(f"  {row.id}  {row.name}" for row in candidates)
+        # Identifier fields: candidate ids and names are names the caller quotes
+        # back to disambiguate; both are marked spans.
+        lines.extend(
+            f"  {identifier_text(context, row.id)}  {identifier_text(context, row.name)}"
+            for row in candidates
+        )
         return _error(tool_call_id, "sessions", "\n".join(lines))
     if found is None:
         return _error(
@@ -16626,8 +16639,10 @@ async def _sessions_info_mesh(
     block = row.get("peer") or {}
     device = str(block.get("name") or block.get("device_id") or peer)
     state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
-    bits = [f"[{state}] {name}", f"session {found.id}"]
+    # Identifier fields: the row's title and session id are names the caller
+    # acts on; both are marked spans, never credentials.
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
+    bits = [f"[{state}] {name}", f"session {identifier_text(context, found.id)}"]
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -16667,9 +16682,7 @@ async def _sessions_info(
         stored_limit=_SESSIONS_STORED_LOOKUP_LIMIT,
     )
     # Identifier fields: the info body prints the session's title and id as
-    # names the caller quotes back; redaction must not apply to either.
-    if row is not None:
-        _note_session_row_identifiers(context, [row])
+    # names the caller quotes back; marks are applied inside the body.
     if row is None:
         if stored:
             # Two situations land here, and until review round 1 they shared
@@ -16685,16 +16698,13 @@ async def _sessions_info(
             extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
             if extras.get("session_dir"):
                 facts = await asyncio.to_thread(_sessions_disk_facts, target.session_id)
-                # Identifier fields: the disk-only body prints the directory's
-                # stored title and the id; both are names, not credentials.
-                note_identifiers(context, facts.name, target.session_id)
                 details = {
                     "op": "info",
                     "session_id": target.session_id,
                     "listed": False,
                     **extras,
                 }
-                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras)
+                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras, context)
                 text, spill = spill_truncate(text, "sessions", context)
                 if spill:
                     details.update(spill)
@@ -16715,7 +16725,7 @@ async def _sessions_info(
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
     details: dict[str, Any] = {"op": "info", **row, **extras}
-    text = _sessions_info_body(row, extras)
+    text = _sessions_info_body(row, extras, context)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -18821,39 +18831,24 @@ def _variable_store(context: ToolContext | None) -> VariableStoreProtocol:
     return VariableStore(cwd=_safe_cwd(context))
 
 
-def note_identifiers(context: ToolContext | None, *values: Any) -> None:
-    """Declare display identifiers a render site is about to print.
+def identifier_text(context: ToolContext | None, value: str) -> str:
+    """Wrap a rendered identifier in the markers redaction honours.
 
-    WHY HERE, at the render site: the shape table cannot tell a project key
-    from a passphrase by spelling, but the op that renders one knows it is an
-    identifier. ``VariableStore.register_identifier`` exempts it from both
-    redaction passes for the rest of the session (LOH-28); a store without the
-    method (an older caller, a test double) simply ignores the declaration.
-
-    Falsy values are skipped: an absent name or title is not an identifier, and
-    ``register_identifier`` would refuse it anyway.
+    WHY AT THE RENDER SITE: only the code that prints the value knows it is a
+    NAME rather than a secret. The mark covers the exact bytes being printed in
+    this result — it cannot exempt the same word elsewhere, or outlive the
+    line — which is what keeps a project key named ``token`` from releasing a
+    later ``token: <secret>`` credential (LOH-28 remediation). A store without
+    ``identifier_span`` (an older caller, a test double) renders the plain
+    value.
     """
-    register = getattr(getattr(context, "variables", None), "register_identifier", None)
-    if not callable(register):
-        return
-    for value in values:
-        if value:
-            register(str(value))
-
-
-def _note_session_row_identifiers(
-    context: ToolContext | None, rows: Iterable[Mapping[str, Any]]
-) -> None:
-    """Declare each session row's title and id before any row is rendered.
-
-    One place because five session verbs render the same row shape, and the two
-    fields are exactly the identifier pair: a conversation title a human chose
-    and the id a caller must quote back. Both must survive redaction here for
-    the same reason (LOH-28) — the row is a NAME, not a secret.
-    """
-    for row in rows:
-        if isinstance(row, Mapping):
-            note_identifiers(context, row.get("conversation_name"), row.get("session_id"))
+    span = cast(
+        Callable[[str], str] | None,
+        getattr(getattr(context, "variables", None), "identifier_span", None),
+    )
+    if not callable(span):
+        return value
+    return span(value)
 
 
 @_guard("list_variables")

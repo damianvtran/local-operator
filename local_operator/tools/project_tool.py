@@ -70,7 +70,7 @@ from local_operator.tools.builtin import (
     _guard,
     _text,
     _validation_error,
-    note_identifiers,
+    identifier_text,
     spill_truncate,
 )
 
@@ -207,13 +207,25 @@ def _estimate_text(project: Project) -> str:
     return f"est {number}{suffix}"
 
 
-def _row(project: Project, *, now: float | None = None, window: float | None = None) -> str:
-    """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS)."""
-    identity = display_name(project) or "- unnamed"
+def _row(
+    project: Project,
+    *,
+    now: float | None = None,
+    window: float | None = None,
+    context: ToolContext | None = None,
+) -> str:
+    """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS).
+
+    Identifier fields: the display title and the parenthesized key are marked
+    spans, so redaction leaves the names a caller addresses projects by.
+    """
+    title = display_name(project)
     if project.title:
         # Title-first with the key as secondary: the key is the addressing
         # handle, so a titled row must keep it recoverable from the listing.
-        identity = f"{identity} ({project.name})"
+        identity = f"{identifier_text(context, title)} ({identifier_text(context, project.name)})"
+    else:
+        identity = identifier_text(context, title or "- unnamed")
     parts = [
         f"- {identity} [{project.status}]",
         _estimate_text(project),
@@ -255,16 +267,25 @@ def _row(project: Project, *, now: float | None = None, window: float | None = N
 
 
 def _field_lines(
-    project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL, window: float | None = None
+    project: Project,
+    *,
+    history_tail: int = HISTORY_DEFAULT_TAIL,
+    window: float | None = None,
+    context: ToolContext | None = None,
 ) -> list[str]:
-    """The ``show`` header block: every stored field, derived status where one exists."""
+    """The ``show`` header block: every stored field, derived status where one exists.
+
+    Identifier fields: the display name on the first line and the ``key:`` line
+    are marked spans — both are names the caller quotes back, never credentials.
+    """
+    title = display_name(project)
     lines = [
-        f"{display_name(project) or '(unnamed)'} [{project.status}]",
+        f"{identifier_text(context, title) if title else '(unnamed)'} [{project.status}]",
     ]
     if project.title:
         # The display title is the first line; the addressing key must stay
         # visible (it is what op='update'/'link' take).
-        lines.append(f"key: {project.name}")
+        lines.append(f"key: {identifier_text(context, project.name)}")
     lines.extend(
         [
             f"description: {project.description or '(unstated)'}",
@@ -299,13 +320,16 @@ def _field_lines(
     return lines
 
 
-def _session_lines(view: dict[str, Any]) -> list[str]:
+def _session_lines(view: dict[str, Any], context: ToolContext | None = None) -> list[str]:
     """Per-session rollup from the ONE shared composition (``build_project_view``).
 
     WORKING sessions and filings are separate sections: the working list is
     what feeds every liveness reading, and a filing (``role='coordination'``)
     is provenance — it is never rendered with a runtime state (there is none on
     the row) so it can never be misread as participation.
+
+    Identifier fields: every row's session id and title are marked spans, so
+    redaction leaves the names a caller resumes or peeks by.
     """
     rows = view.get("sessions") or []
     if not rows:
@@ -319,11 +343,11 @@ def _session_lines(view: dict[str, Any]) -> list[str]:
             runtime = row.get("runtime") or {}
             state = runtime.get("state") or "stopped"
             busy = ", busy" if runtime.get("busy") else ""
-            session_id = row["session_id"]
+            session_id = identifier_text(context, str(row["session_id"]))
             if not row.get("exists"):
                 lines.append(f"  - {session_id} [missing] — no session directory")
                 continue
-            title = row.get("title") or "(untitled)"
+            title = identifier_text(context, str(row.get("title") or "")) or "(untitled)"
             bits = [state + busy]
             agents = row.get("subagents")
             if agents is not None:
@@ -337,11 +361,11 @@ def _session_lines(view: dict[str, Any]) -> list[str]:
     if filed:
         lines.append(f"filed by ({len(filed)}):")
         for row in filed:
-            session_id = row["session_id"]
+            session_id = identifier_text(context, str(row["session_id"]))
             if not row.get("exists"):
                 lines.append(f"  - {session_id} [filed] — no session directory")
                 continue
-            title = row.get("title") or "(untitled)"
+            title = identifier_text(context, str(row.get("title") or "")) or "(untitled)"
             bits = ["filed"]
             if row.get("archived"):
                 bits.append("archived")
@@ -430,12 +454,11 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "guide://projects first."
         )
         return _text(tool_call_id, "project", body)
-    # Identifier fields: every project's key and display title are names a
-    # caller must read and quote back, so redaction must not apply to them.
-    for project in projects:
-        note_identifiers(context, project.name, project.title)
+    # Identifier fields: every project's key and display title are marked
+    # inside the row renderer, so redaction leaves them readable.
     body = "projects:\n" + "\n".join(
-        _row(project, window=stale_after_s(registry.config_dir)) for project in projects
+        _row(project, window=stale_after_s(registry.config_dir), context=context)
+        for project in projects
     )
     body += "\n\nop='show' name='<name>' has the full record plus its sessions."
     text, spill = spill_truncate(body, "project", context)
@@ -458,10 +481,8 @@ async def _op_show(
         project,
         history_tail=history_tail,
         window=stale_after_s(registry.config_dir),
+        context=context,
     )
-    # Identifier fields: the addressing key and the display title are names the
-    # caller must quote back (op='update'/'link' take the key), never secrets.
-    note_identifiers(context, project.name, project.title)
     view: dict[str, Any] | None = None
     try:
         view = build_project_view(project, config_dir=registry.config_dir)
@@ -469,17 +490,9 @@ async def _op_show(
         logger.warning("could not compose project view for %s: %s", project.name, exc)
         lines.append("linked sessions: (view unavailable this call)")
     if view is not None:
-        # Identifier fields: every linked session's id and title are names the
-        # caller acts on; redaction must leave both readable.
-        note_identifiers(
-            context,
-            *(
-                value
-                for row in view.get("sessions") or []
-                for value in (row.get("session_id"), row.get("title"))
-            ),
-        )
-        lines.extend(_session_lines(view))
+        # Identifier fields: every linked session's id and title are marked
+        # inside the row renderer; both are names, not credentials.
+        lines.extend(_session_lines(view, context))
     body = "\n".join(lines)
     text, spill = spill_truncate(body, "project", context)
     return _text(tool_call_id, "project", text, details=spill or None)
@@ -527,9 +540,6 @@ async def _op_create(
         return _error(tool_call_id, "project", readable_error(exc))
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not save project: {exc}")
-    # Identifier fields: the receipt names the new project's key and title; a
-    # mask here would hide the name the caller must use for the next op.
-    note_identifiers(context, project.name, project.title)
     forced = ""
     if (
         params.force_done
@@ -617,9 +627,6 @@ async def _op_update(
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not update project: {exc}")
     updated = outcome.project
-    # Identifier fields: every update receipt names the project's key, and the
-    # refreshed branch also prints the title; neither is a credential.
-    note_identifiers(context, updated.name, updated.title)
     if not outcome.changed:
         return _text(
             tool_call_id,

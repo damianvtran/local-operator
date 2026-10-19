@@ -85,8 +85,6 @@ from tests.unit.secrets.credential_shape_corpus import (
     GITHUB_STATELESS_TOKEN,
     KEBAB_IDENTIFIER,
     KEBAB_IDENTIFIER_FOUR_SEGMENT,
-    KEBAB_IDENTIFIER_LONG,
-    KEBAB_IDENTIFIER_VERY_LONG,
     KEBAB_IDENTIFIER_WITH_DIGIT,
     NEGATIVE_CASES,
     OPAQUE_UUID_VALUE,
@@ -6738,26 +6736,7 @@ _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de
 #:     ``POSITIVE_CASES`` moves 313 -> 323 and ``NEGATIVE_CASES`` 214 -> 220. The six
 #:     negatives are MASKED under ``origin/main``'s module and released under this one; the
 #:     ``=value`` positive is masked under BOTH.
-#:
-#: MOVED ON 2026-10-18 by LOH-28 (the length-free hyphen class):
-#:
-#: 15. **The MODULE change moved NOTHING in the corpus as it stood.** The 543 rows the
-#:     constant above covered (323 positives, 220 negatives), loaded from
-#:     ``origin/main``'s corpus file, grade to the SAME ``c878ef5c…`` digest under the
-#:     base module and this one: zero masked texts, labels, values, windows,
-#:     ``complete`` or ``exposed`` moved. The only rule change is the retired
-#:     32-character bound on the hyphen phrase, and no pre-existing row carried a
-#:     lowercase hyphen value past it under a weak name.
-#:
-#: 16. **The corpus change is the specification:** TEN positives (a long mixed-case
-#:     hyphen value, 40-hex, a UUID, the long slug under three STRONG names, a query
-#:     ``token``, ``--token``, and ``glpat-``/``sk-`` issuer spellings — every way the
-#:     release must NOT reach) and FIVE negatives (the 34- and 60-char lowercase
-#:     hyphen slugs under ``key:``/``key=``, compact JSON, ``?key=`` and
-#:     ``?key=`` query spellings) — and ``POSITIVE_CASES`` moves 323 -> 333 and ``NEGATIVE_CASES``
-#:     220 -> 225. The five negatives are MASKED under ``origin/main``'s module and
-#:     released under this one; all ten positives are masked under BOTH.
-_CORPUS_GRADING_DIGEST = "94bd85e735f6e3e3e32f7780e1abcfa902d8ba2573e6c4ee4555257909da6aaa"
+_CORPUS_GRADING_DIGEST = "c878ef5cc134d864afeda25990359d0af5e0d4ebb78a75d990a361f34146dcb3"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -8372,11 +8351,7 @@ _RELEASE_PROBE_VALUES = (
     # measured on BOTH joins rather than one (the absence that used to be recorded
     # here is now the reverse gap):
     #   hyphen digit cap     -> "quick-brown-fox-123" (3 digits)
-    #   hyphen length cap    -> RETIRED by LOH-28: the class is length-free by
-    #     structure, so "mongo-primary-admin-passphrase-01" MOVED to the released
-    #     set and the two long probes below measure the new boundary (34 and 60
-    #     characters). Its row stays HERE so the movement is measured rather than
-    #     merely declared; a re-added length cap re-masks it and reds.
+    #   hyphen length cap    -> "mongo-primary-admin-passphrase-01" (33 chars)
     #   hyphen alphabet      -> "us-East-1"
     #   hyphen start anchor  -> "2fa-backup-codes"
     #   hyphen separator     -> "bucketv4" too (refused by the missing "-")
@@ -8387,9 +8362,7 @@ _RELEASE_PROBE_VALUES = (
     "us_East_1",  # uppercase -> the alphabet
     "2fa_backup_codes",  # digit-leading -> the start anchor
     "quick-brown-fox-123",  # 3 digits -> the hyphen digit cap
-    "mongo-primary-admin-passphrase-01",  # 33 chars -> RELEASED since LOH-28
-    KEBAB_IDENTIFIER_LONG,  # 34 chars -> the retired hyphen length bound
-    KEBAB_IDENTIFIER_VERY_LONG,  # 60 chars -> the class at any length
+    "mongo-primary-admin-passphrase-01",  # 33 chars -> the hyphen length cap
     "2fa-backup-codes",  # digit-leading -> the hyphen start anchor
     "us-East-1",  # uppercase -> the hyphen alphabet
     "bucket_v4",
@@ -8475,14 +8448,6 @@ def _released_values() -> set[str]:
 #: masked to released by that change; the other four are the class's own
 #: boundary values. The commit carries the trade argument; this note is what
 #: records that ONE decision moved both directions' membership.
-#:
-#: LOH-28 (2026-10-18) moved THREE more on the hyphen join: the class became
-#: length-free by structure (the 32-character bound retired), so
-#: ``mongo-primary-admin-passphrase-01`` (33 chars) released along with the
-#: class's long members ``KEBAB_IDENTIFIER_LONG`` (34) and
-#: ``KEBAB_IDENTIFIER_VERY_LONG`` (60). The underscore join keeps its bound, so
-#: its own length probes stay masked; the movement here is deliberate and
-#: measured, not an accident of a shared cap.
 _RELEASED_WORD_SHAPED = frozenset(
     (
         "admin_pw_01",
@@ -8519,12 +8484,6 @@ _RELEASED_WORD_SHAPED = frozenset(
         "staging_db_pass_02",
         "swordfish",
         "this-is-a-plain-kebab-slug",
-        # LOH-28: the hyphen class is length-free by structure. The 33-char
-        # passphrase moved here with the retired bound; the 34- and 60-char
-        # slugs are the class's own long members.
-        "mongo-primary-admin-passphrase-01",
-        KEBAB_IDENTIFIER_LONG,
-        KEBAB_IDENTIFIER_VERY_LONG,
         "us_east_1",
         "user_1_pass",
         "vault_token_1",
