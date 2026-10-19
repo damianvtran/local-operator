@@ -1156,9 +1156,7 @@ async def remove_conversation_member(
 
     client = _conversation_client(config_manager)
     return reply(
-        await _conversation_reply(
-            client.conversation_remove_member(conversation_id, account_id)
-        )
+        await _conversation_reply(client.conversation_remove_member(conversation_id, account_id))
     )
 
 
@@ -1202,11 +1200,7 @@ async def conversation_join(
     _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
-    return reply(
-        await _conversation_reply(
-            client.conversation_join(conversation_id)
-        )
-    )
+    return reply(await _conversation_reply(client.conversation_join(conversation_id)))
 
 
 @router.post(
@@ -1221,11 +1215,7 @@ async def conversation_leave(
     _require_conversation_id(conversation_id)
 
     client = _conversation_client(config_manager)
-    return reply(
-        await _conversation_reply(
-            client.conversation_leave(conversation_id)
-        )
-    )
+    return reply(await _conversation_reply(client.conversation_leave(conversation_id)))
 
 
 @router.get(
