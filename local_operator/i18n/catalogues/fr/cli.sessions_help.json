@@ -44,5 +44,6 @@
   "cli.sessions_help.sync": "Récupérer une copie d’une conversation détenue par un autre appareil",
   "cli.sessions_help.sync_description": "Mettre à jour la copie locale d’une conversation que cet appareil ne possède pas. La copie est stockée hors du magasin de sessions et n’est jamais ouverte comme session ; `lop sessions move <id> --to local --from-replica` la récupère comme nouvelle session.",
   "cli.sessions_help.sync_session": "l’id de la conversation à récupérer",
-  "cli.sessions_help.sync_owner": "le pair qui la détient (par défaut : demander)"
+  "cli.sessions_help.sync_owner": "le pair qui la détient (par défaut : demander)",
+  "cli.sessions_help.cleanup_scratchpads_only": "Auditez les scratchpads avec --dry-run ; sinon, supprimez uniquement le contenu de build/cache du scratchpad (jamais les transcriptions, jamais vos conversations)."
 }

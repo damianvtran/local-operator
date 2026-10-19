@@ -118,6 +118,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_PINNED_FALLBACK,
         RetrySettings,
     )
+    from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
         DEFAULT_DELEGATED_MAX_AGE_HOURS,
@@ -253,6 +254,11 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
         "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
+        # The pad cap's reader falls back to this module constant when the key is
+        # absent (``scratchpad.scratchpad_budget_bytes``); the registry row
+        # carries a literal because settings_io stays off the write path's
+        # import graph, so this pin is what makes a drift red.
+        "session.scratchpad.max_bytes": SCRATCHPAD_TOTAL_BUDGET_BYTES,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         # Read at every child build by ``subagent.read_slim_child_knowledge``;
         # the constant sits beside that reader, not here, so the registry

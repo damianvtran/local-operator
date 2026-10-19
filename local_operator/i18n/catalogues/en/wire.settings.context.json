@@ -60,5 +60,27 @@
     "tone": "plain",
     "maxCells": 29,
     "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer."
+  },
+  "wire.settings.session_scratchpad.title": {
+    "role": "settings section title",
+    "tone": "plain",
+    "maxCells": 12,
+    "note": "Section heading for the scratchpad size cap. 'Scratchpad' is the product noun for a session's own scratch area (scratchpad://); keep it one word."
+  },
+  "wire.settings.session_scratchpad.description": {
+    "role": "settings section description",
+    "tone": "plain, precise",
+    "note": "Says the cap applies to each session's own scratch area and is checked per write, not at launch. Do not imply a restart."
+  },
+  "wire.settings.session_scratchpad_max_bytes.label": {
+    "role": "numeric setting label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "Row label; 29 cells is the settings page's label budget. It names the MAXIMUM bytes one session's scratchpad may hold (not the current size) and carries the unit because the desktop collapses help behind a disclosure (design D1). Every locale must fit the same 29-cell budget."
+  },
+  "wire.settings.session_scratchpad_max_bytes.help": {
+    "role": "settings help text",
+    "tone": "plain, precise",
+    "note": "Carries both bounds and the default because the page paints help but not min/max. Units are bytes; use the binary prefixes MiB/GiB, not MB/GB."
   }
 }

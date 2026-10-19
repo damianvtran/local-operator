@@ -1201,6 +1201,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=_sh.cleanup_delegated_max_age_hours().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
+        "--scratchpads-only",
+        action="store_true",
+        help=_sh.cleanup_scratchpads_only().envelope(locale=help_locale)["text"],
+    )
+    cleanup_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
 
@@ -4712,7 +4717,51 @@ def _content_row_text(row: Any, verb: str) -> str:
     return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
 
 
-def _print_content(delegated: Any, verb: str) -> None:
+def _confirmation_answer(prompt: str, *, json_mode: bool) -> str:
+    """Read one typed confirmation; in ``--json`` mode the PROMPT goes to stderr.
+
+    ``input()`` writes its prompt to stdout, which put a human sentence in front
+    of the JSON document on the one path that both asks and emits (QA Q2's
+    ``confirmed``). The answer is read the same way either way; only the prompt's
+    stream moves, so a script that parsed before still parses.
+    """
+    if json_mode:
+        print(prompt, end="", file=sys.stderr)
+        try:
+            return sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def _content_switches_off(policy: Any) -> str:
+    """The switch(es) actually keeping the content phase off (QA Q1).
+
+    The gate is ``delegated.enabled AND delegated.scratchpad.enabled``, and the
+    previous sentence named the scratchpad switch unconditionally — wrong when
+    the master delegated switch was the one turned off. Naming what is actually
+    off is the difference between an actionable refusal and a hunt through
+    settings for a row that is already on.
+    """
+    off = [
+        name
+        for name, enabled in (
+            ("session.cleanup.delegated.enabled", policy.delegated_enabled),
+            ("session.cleanup.delegated.scratchpad.enabled", policy.delegated_scratchpad_enabled),
+        )
+        if not enabled
+    ]
+    if not off:
+        return "the delegated content policy"
+    if len(off) == 1:
+        return f"{off[0]} is off"
+    return f"{off[0]} and {off[1]} are both off"
+
+
+def _print_content(delegated: Any, verb: str, policy: Any | None = None) -> None:
     """The scratchpad-content block under the delegated section.
 
     The summary names the pads, the bytes and the per-class counts; the rows
@@ -4723,9 +4772,13 @@ def _print_content(delegated: Any, verb: str) -> None:
     """
     skipped = getattr(delegated, "content_skipped", None)
     if skipped == "disabled":
+        switch = (
+            _content_switches_off(policy) if policy is not None else "the content switch is off"
+        )
         print(
-            "  scratchpad content: off (session.cleanup.delegated.scratchpad.enabled "
-            "is off; --force runs it once)"
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"  scratchpad content: off ({switch}; --force runs it once)"
         )
         return
     if skipped == "disabled during the pass":
@@ -4749,6 +4802,126 @@ def _print_content(delegated: Any, verb: str) -> None:
         print(
             f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
             "(--json lists every row)"
+        )
+
+
+def _scratchpad_shape_summary(pad: Any, limit: int = 4) -> str:
+    """The compact one-line shape summary for an audit row.
+
+    The largest entries first (the audit sorts them), because the question the
+    section answers is "what is holding the bytes". A link keeps its target and
+    shows the link's own allocation — normally 0 B — rather than the tree it
+    points at: a pad that symlinks ``node_modules`` to a shared store holds no
+    copy, and the whole point of the row is to say which case this is.
+    """
+    parts: list[str] = []
+    for shape in pad.shapes[:limit]:
+        name = shape.path.rsplit("/", 1)[-1]
+        if shape.kind == "link":
+            target = shape.target or "(unresolved)"
+            parts.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"{name} link → {target} ({_format_bytes(shape.bytes)})"
+            )
+        else:
+            parts.append(f"{name} {_format_bytes(shape.bytes)}")
+    remaining = len(pad.shapes) - limit
+    if remaining > 0:
+        parts.append(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"+{remaining} more"
+        )
+    return "; ".join(parts)
+
+
+def _print_scratchpads(audit: Any) -> None:
+    """The ``== Scratchpads ==`` section: every pad, largest first, capped.
+
+    Read-only by construction (``session/scratchpad_audit.py``), so this is
+    safe on any run and prints even when BOTH cleanup switches are off: the
+    class split is exactly what an operator needs to see before deciding which
+    switch to turn on. Rows are capped like every other listing; ``--json``
+    carries every pad, every shape and the worktree pointers.
+    """
+    from local_operator.session.scratchpad_audit import pointer_display
+
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        "== Scratchpads =="
+    )
+    truncated = (
+        f"; {audit.truncated} walk(s) truncated at the depth/entry cap" if audit.truncated else ""
+    )
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
+        f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
+    )
+    for pad in audit.pads[:_CLEANUP_TEXT_ROWS]:
+        tags: list[str] = []
+        if pad.over_cap:
+            tags.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "OVER CAP"
+            )
+        if not pad.user_visible:
+            tags.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "delegated"
+            )
+        tag = f"  [{', '.join(tags)}]" if tags else ""
+        print(f"  {pad.session}  {pad.origin or 'user'}  {_format_bytes(pad.bytes)}{tag}")
+        summary = _scratchpad_shape_summary(pad)
+        if summary:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"    shapes: {summary}"
+            )
+        if pad.over_cap:
+            # UX U1: the shapes are a NAME vocabulary, not an accounting of the
+            # pad. Say where the rest is and how to inspect it from the totals
+            # already measured — a second walk here would double the section's
+            # cost, and implying shape cleanup always brings a pad under cap
+            # would be false.
+            shape_bytes = sum(shape.bytes for shape in pad.shapes)
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"    other content: inspect {pad.path} with du; shapes account for "
+                f"{_format_bytes(shape_bytes)} of {_format_bytes(pad.bytes)}"
+            )
+        for marker in pad.git_markers:
+            if marker.kind == "worktree":
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git worktree → {pointer_display(marker)}  ({marker.path})"
+                )
+            elif marker.kind == "repository":
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git repository  ({marker.path})"
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git link → {pointer_display(marker)}  ({marker.path})"
+                )
+    if len(audit.pads) > _CLEANUP_TEXT_ROWS:
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"  ... and {len(audit.pads) - _CLEANUP_TEXT_ROWS} more "
+            "(--json lists every pad)"
         )
 
 
@@ -4777,14 +4950,27 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     confirmation — with its own confirmation sentence.
 
     A class runs when its switch is on (or ``--force``); the parent class also
-    needs a limit. A dry run lists both whatever the switches say and notes it.
+    needs a limit. A dry run lists both whatever the switches say and notes it,
+    and then prints the read-only ``== Scratchpads ==`` audit for every pad in
+    the store (parent and delegated) — that section is the one piece that runs
+    with BOTH switches off, because it changes nothing.
+
+    ``--scratchpads-only`` narrows the command to the content layer. With
+    ``--dry-run`` it prints the audit and the reclaim plan and removes nothing;
+    without, it reclaims content from non-live delegated pads and NEVER runs
+    the record pass or touches the parent class — so cache-shaped data can go
+    without deleting one transcript. ``--force`` still overrides the delegated
+    switches for that one run; the confirmation says "reclaim scratchpad
+    content" and nothing else.
 
     Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
     delegated cleanup off); 2 refused (parent switch off without ``--force`` and
     nothing else to run, or confirmation declined); 3 ran with errors. ``--json``
     always emits a JSON object on stdout, whatever the outcome; its pre-existing
     keys now cover BOTH classes (rows carry ``origin``) and ``parent`` /
-    ``delegated`` hold the per-class detail.
+    ``delegated`` hold the per-class detail. A dry run and
+    ``--scratchpads-only`` add ``scratchpads``, and the latter adds
+    ``scratchpads_only: true``.
     """
     import dataclasses
     import json as _json
@@ -4801,6 +4987,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         DelegatedResult,
         run_delegated_pass,
     )
+    from local_operator.session.scratchpad_audit import audit_scratchpads
 
     root = config_dir()
     policy = policy_from_config(ConfigManager(root))
@@ -4822,6 +5009,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         "or pass --force to run once"
     )
     force = bool(args.force)
+    # A flag, not a mode switch on the policy: the content layer's own gates
+    # (delegated origin, live claim/lease, armed wake/monitor, current session)
+    # still run inside ``run_delegated_pass``. This only skips the RECORD and
+    # PARENT halves of the command.
+    scratchpads_only = bool(getattr(args, "scratchpads_only", False))
     parent_runs = policy.has_any_limit and (policy.enabled or force)
     delegated_runs = policy.delegated_enabled or force
 
@@ -4831,6 +5023,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         *,
         outcome: str,
         confirmed: bool | None = None,
+        scratchpads: Any | None = None,
+        scratchpads_only: bool = False,
     ) -> None:
         both = [parent] + ([delegated] if delegated is not None else [])
 
@@ -4898,7 +5092,183 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 },
             )
             payload["delegated"] = detail
+        if scratchpads is not None:
+            payload["scratchpads"] = scratchpads.as_dict()
+        if scratchpads_only:
+            payload["scratchpads_only"] = True
         print(_json.dumps(payload, indent=2))
+
+    if scratchpads_only and args.dry_run:
+        # ONLY the audit and the content plan: the record halves are not part of
+        # this mode, and printing them would offer rows it will never apply.
+        moment = time.time()
+        with file_logging():
+            preview = run_delegated_pass(
+                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+            )
+        audit = audit_scratchpads(root / "sessions")
+        if args.json:
+            emit_json(
+                CleanupResult(dry_run=True, skipped="not run (--scratchpads-only)"),
+                preview,
+                outcome="dry-run",
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 0
+        _print_scratchpads(audit)
+        print()
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            "== Scratchpad content =="
+        )
+        _print_content(preview, "would reclaim", policy)
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"nothing was removed (dry run); the record of real removals is {record_path}"
+        )
+        return 0
+
+    if scratchpads_only and not args.dry_run:
+        # CONTENT ONLY. The parent class and the record pass are not called at
+        # all, which is the whole point: an operator can reclaim cache-shaped
+        # data without deleting one transcript. ``only=()`` empties the record
+        # candidate list; ``content_only`` re-applies exactly the pads the
+        # preview named, so a pad that became eligible between preview and
+        # confirmation is not taken unseen.
+        content_allowed = force or (
+            policy.delegated_enabled and policy.delegated_scratchpad_enabled
+        )
+        if not content_allowed:
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="not run (--scratchpads-only)"),
+                    None,
+                    outcome="refused",
+                    scratchpads_only=True,
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"refusing to reclaim scratchpad content: "
+                    f"{_content_switches_off(policy)}; turn it on or pass --force to "
+                    "run once",
+                    file=sys.stderr,
+                )
+            return 2
+        moment = time.time()
+        with file_logging():
+            preview = run_delegated_pass(
+                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+            )
+        audit = audit_scratchpads(root / "sessions")
+        if not args.json:
+            _print_scratchpads(audit)
+            print()
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "== Scratchpad content =="
+            )
+            _print_content(preview, "would reclaim", policy)
+        if not preview.content:
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="not run (--scratchpads-only)"),
+                    preview,
+                    outcome="nothing-to-do",
+                    scratchpads=audit,
+                    scratchpads_only=True,
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    "nothing to reclaim"
+                )
+            return 0
+        # ``--yes`` IS a confirmation of the shown plan, not an absence of one
+        # (QA Q2): the JSON says so, so a script can tell "applied after a typed
+        # yes" from "applied without any confirmation".
+        confirmed: bool | None = True if args.yes else None
+        prompt = (
+            f"Reclaim build/cache content from {len(preview.content)} session(s)? "
+            "Transcripts and conversation records will be kept. Type 'yes' to confirm: "
+        )
+        if not args.yes:
+            if not sys.stdin.isatty():
+                if args.json:
+                    emit_json(
+                        CleanupResult(skipped="not run (--scratchpads-only)"),
+                        preview,
+                        outcome="refused",
+                        confirmed=False,
+                        scratchpads=audit,
+                        scratchpads_only=True,
+                    )
+                else:
+                    print(
+                        # i18n: ignore operator CLI output, English-only; owned by the
+                        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                        "refusing: not a terminal and --yes was not given, so nothing "
+                        "was removed",
+                        file=sys.stderr,
+                    )
+                return 2
+            answer = _confirmation_answer(prompt, json_mode=bool(args.json))
+            confirmed = answer.strip().lower() == "yes"
+            if not confirmed:
+                if args.json:
+                    emit_json(
+                        CleanupResult(skipped="not run (--scratchpads-only)"),
+                        preview,
+                        outcome="refused",
+                        confirmed=False,
+                        scratchpads=audit,
+                        scratchpads_only=True,
+                    )
+                else:
+                    print("not confirmed; nothing was removed")
+                return 2
+        with file_logging():
+            result = run_delegated_pass(
+                root,
+                lambda: policy,
+                force=force,
+                actor="cli",
+                now=moment,
+                budget_s=UNBOUNDED,
+                only=(),
+                content_only=[row.session for row in preview.content],
+            )
+        if args.json:
+            emit_json(
+                CleanupResult(skipped="not run (--scratchpads-only)"),
+                result,
+                outcome="removed",
+                confirmed=confirmed,
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 3 if result.errors else 0
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"Reclaimed scratchpad content from {len(result.content)} session(s); "
+            "no transcripts or conversation records were deleted."
+        )
+        if result.errors:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"  {result.errors} error(s); see the log",
+                file=sys.stderr,
+            )
+        print(f"record: {record_path}")
+        return 3 if result.errors else 0
 
     if not parent_runs and not delegated_runs:
         if not policy.has_any_limit:
@@ -4994,18 +5364,38 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 f"{delegated_verb} {len(delegated.removed)}"
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
+            # UX U4: on a store with thousands of kept rows the size view is
+            # buried below them. Name the narrower command BEFORE the kept list
+            # so it is discoverable from the top of the section.
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "  size by pad: lop sessions cleanup --scratchpads-only --dry-run "
+                "(Scratchpads section below)"
+            )
             _print_kept(delegated.protected)
             if delegated_runs:
                 content_verb = (
                     "would reclaim" if delegated_verb == "would remove" else "will reclaim"
                 )
-                _print_content(delegated, content_verb)
+                _print_content(delegated, content_verb, policy)
 
     if args.dry_run:
+        # The read-only store audit runs here whatever BOTH switches say: it is
+        # the section an operator turns the switches on FROM. It never opens a
+        # path for writing (``session/scratchpad_audit.py``).
+        audit = audit_scratchpads(root / "sessions")
         if args.json:
-            emit_json(parent_preview, delegated_preview, outcome="dry-run")
+            emit_json(
+                parent_preview,
+                delegated_preview,
+                outcome="dry-run",
+                scratchpads=audit,
+            )
             return 0
         sections("would remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
+        print()
+        _print_scratchpads(audit)
         print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
@@ -5040,7 +5430,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print("nothing to remove")
         return 0
 
-    confirmed: bool | None = None
+    # Same Q2 rule for the full command: ``--yes`` is a confirmation.
+    confirmed: bool | None = True if args.yes else None
     total = parent_rows + delegated_rows
     if total and content_rows:
         prompt = (
@@ -5051,7 +5442,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         prompt = f"remove {total} session(s)? type 'yes' to confirm: "
     else:
         prompt = (
-            f"reclaim scratchpad content from {content_rows} session(s)? " "type 'yes' to confirm: "
+            f"Reclaim build/cache content from {content_rows} session(s)? "
+            "Transcripts and conversation records will be kept. Type 'yes' to confirm: "
         )
     if not args.yes:
         if not sys.stdin.isatty():
@@ -5063,16 +5455,17 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 2
-        try:
-            answer = input(prompt)
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
+        answer = _confirmation_answer(prompt, json_mode=bool(args.json))
         confirmed = answer.strip().lower() == "yes"
         if not confirmed:
             if args.json:
                 emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
-                print("not confirmed; nothing was removed")
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    "not confirmed; nothing was removed"
+                )
             return 2
 
     # The removal WARNINGs go to the rotating file (`local-operator.log`),
@@ -5111,10 +5504,22 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     print(f"removed {len(removed)} session(s)")
     _print_cleanup_rows(removed, "removed")
     if delegated_result.content:
-        print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+        if removed:
+            print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+        else:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"Reclaimed scratchpad content from {len(delegated_result.content)} session(s); "
+                "no transcripts or conversation records were deleted."
+            )
     if errors:
         print(f"  {errors} error(s); see the log", file=sys.stderr)
-    print(f"record: {record_path}")
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        f"record: {record_path}"
+    )
     return 3 if errors else 0
 
 

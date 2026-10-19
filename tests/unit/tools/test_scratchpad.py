@@ -1086,3 +1086,71 @@ def test_every_content_refusal_ends_with_the_same_elsewhere_sentence(tmp_path: P
             check_scratchpad_write(target, where, url, size)
 
         assert str(excinfo.value).endswith(SCRATCHPAD_ELSEWHERE), url
+
+
+# ---------------------------------------------------------------------------
+# The configurable total cap (``session.scratchpad.max_bytes``)
+# ---------------------------------------------------------------------------
+
+
+def _write_pad_cap(config: Path, value: object) -> None:
+    """A minimal config.yml carrying only the pad cap."""
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "config.yml").write_text(
+        f"values:\n  session:\n    scratchpad:\n      max_bytes: {value}\n", encoding="utf-8"
+    )
+
+
+def test_a_fresh_config_uses_the_shipped_cap(tmp_path: Path, monkeypatch) -> None:
+    """The default is the module constant, unchanged by the new reader.
+
+    Asserted as a number as well as an identity: the settings row carries a
+    literal, and a default that drifted from 256 MiB would still pass an
+    equality against a constant that drifted with it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty"))
+    assert SCRATCHPAD_TOTAL_BUDGET_BYTES == 256 * 1024 * 1024
+    assert scratchpad_module.scratchpad_budget_bytes() == SCRATCHPAD_TOTAL_BUDGET_BYTES
+
+
+def test_a_configured_cap_wins_over_the_constant(tmp_path: Path, monkeypatch) -> None:
+    """The reader is the authority once the key exists; the constant is only
+    the fallback. The constant is patched DOWN to prove the config value is
+    what comes back, not the patch."""
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    _write_pad_cap(tmp_path / "cfg", 64 * 1024 * 1024)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert scratchpad_module.scratchpad_budget_bytes() == 64 * 1024 * 1024
+
+
+def test_an_unusable_configured_cap_falls_back_to_the_constant(tmp_path: Path, monkeypatch) -> None:
+    """A text value is invalid, and the constant (which the fixtures patch) is
+    the answer — this is what keeps every existing budget test in control."""
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 12345)
+    _write_pad_cap(tmp_path / "cfg", "not-a-number")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert scratchpad_module.scratchpad_budget_bytes() == 12345
+
+
+def test_a_write_at_the_configured_boundary_is_allowed_and_one_over_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The boundary judgment reads the CONFIGURED cap, not the constant: a pad
+    exactly at it may take the last legitimate write, and one byte more is the
+    first refusal. The floor is patched so the fixture can be kilobytes rather
+    than the shipped 16 MiB; the clamp itself is what makes a configured value
+    below the floor still safe."""
+    pad = _pad(tmp_path)
+    filled = _fill_pad(pad, 4096)
+    held = _allocated(filled)
+    cap = held + 4096
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+    _write_pad_cap(tmp_path / "cfg", cap)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    assert check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4096) is None
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4097)
+
+    assert f"over the {cap:,}-byte ceiling" in str(excinfo.value)

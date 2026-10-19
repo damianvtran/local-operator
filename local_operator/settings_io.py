@@ -543,6 +543,20 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.session_cleanup_description()),
     ),
+    # LIVE, and its own section rather than a row under ``session``: the cap is
+    # read on EVERY pad write (``scratchpad.scratchpad_budget_bytes``), so the
+    # value applies to a running session on the very next write. ``session`` is
+    # NEW_LAUNCH for its autosave row, and scope is uniform within a section by
+    # construction — putting a per-write row there would label it "takes effect:
+    # new launch", which is not what happens. The config namespace stays
+    # ``session.scratchpad`` because the pad belongs to the session; the SECTION
+    # is only the page grouping.
+    Section(
+        "session_scratchpad",
+        _t(_ws.session_scratchpad_title()),
+        Scope.LIVE,
+        _t(_ws.session_scratchpad_description()),
+    ),
     Section(
         "session_delegated",
         # NOT "Delegated work: subagents and background sessions": at 49 cells
@@ -2894,6 +2908,28 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.auto_save_conversation_choice_true_description()),
             _t(_ws.auto_save_conversation_choice_false_description()),
         ),
+    ),
+    # -- session scratchpad size --------------------------------------------
+    # The BACKSTOP is configurable so a pad that legitimately holds more than
+    # the shipped 256 MiB is not forced onto the shell route around the write
+    # policy (the refusal names this key as the remedy). The bounds are the
+    # ones the reader clamps to as well, and the default literal is pinned to
+    # ``scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES`` by
+    # ``test_settings_io._consumer_defaults``: this module stays off the
+    # writer's import path, so the pair is checked rather than shared.
+    Setting(
+        key="session.scratchpad.max_bytes",
+        path=("session", "scratchpad", "max_bytes"),
+        section="session_scratchpad",
+        label=_t(_ws.session_scratchpad_max_bytes_label()),
+        kind=Kind.INT,
+        default=256 * 1024 * 1024,
+        # Both limits are in the help because the page paints help but not
+        # min/max, and a user hand-editing config.yml needs the range.
+        help=_t(_ws.session_scratchpad_max_bytes_help()),
+        minimum=16 * 1024 * 1024,
+        maximum=8 * 1024 * 1024 * 1024,
+        unit="bytes",
     ),
     # -- runtime ------------------------------------------------------------
     Setting(

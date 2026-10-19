@@ -1923,3 +1923,32 @@ def test_a_running_bridge_with_no_browser_is_not_reported_as_unconfigured(monkey
     assert "lop browser install" not in idle.text
     assert "remembers this browser" in idle.text, idle.text
     assert (idle.details or {}).get("error_code") == "extension_disconnected"
+
+
+def test_screenshot_into_an_over_cap_pad_is_refused_before_cmux(monkeypatch, tmp_path) -> None:
+    """The REAL tool path (review n4b): a screenshot destination is an ordinary
+    path, so it must reach the same pad policy ``write`` does, and the refusal
+    must land before cmux is invoked — not after a PNG exists."""
+    from local_operator import scratchpad as scratchpad_module
+
+    fake = _install(monkeypatch, FakeCmux())
+    pad = tmp_path / "sessions" / "s" / "scratchpad"
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    config = tmp_path / "cfg"
+    config.mkdir()
+    (config / "config.yml").write_text(
+        "values:\n  session:\n    scratchpad:\n      max_bytes: 4095\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+
+    tool = builtin.build_browser_tool(_ctx())
+    ctx = _with_surface()
+    ctx.scratchpad_dir = str(pad)
+    result = _run(tool, "t1", {"action": "screenshot", "path": str(pad / "shot.png")}, ctx)
+
+    assert result.is_error is True, result.text
+    assert "4,095-byte ceiling" in result.text
+    assert not (pad / "shot.png").exists()
+    assert all(call[3] != "screenshot" for call in fake.calls if call[:1] == ["browser"])
