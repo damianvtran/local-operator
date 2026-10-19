@@ -39,7 +39,7 @@ from typing import Any, Final, Iterable, Mapping, Sequence
 
 from local_operator.supplements import fmt as fmt_mod
 from local_operator.supplements.contract import HEIGHT_HINT_MAX, HEIGHT_HINT_MIN
-from local_operator.supplements.document import data_json, split_component
+from local_operator.supplements.document import data_json, numeric_cell, split_component
 from local_operator.supplements.evidence import Dataset
 
 #: Memo §4.2: a component over this size is rejected outright.
@@ -288,6 +288,10 @@ def _component_attrs(raw: str) -> dict[str, str]:
 
 
 def _numeric(value: Any) -> float | None:
+    # The prompt emits plain numbers, but legacy components/evidence may spell the
+    # same datum "$0.15". Use the assembler's conservative reading on BOTH sides;
+    # keep stored cells untouched so provenance never depends on serialisation order.
+    value = numeric_cell(value)
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):

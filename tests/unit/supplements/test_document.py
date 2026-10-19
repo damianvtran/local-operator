@@ -198,3 +198,43 @@ def test_the_fixture_tree_is_what_the_generator_emits() -> None:
         for p in (FIXTURES / sub).glob("*")
     }
     assert on_disk == expected, "run: .venv/bin/python tests/fixtures/supplements/build.py"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("$0.15", 0.15),
+        ("12,500", 12500),
+        (" 0.15 ", 0.15),
+        ("45%", 45),
+        ("-$12.50", -12.5),
+        ("1.2M", "1.2M"),
+        ("3.5x", "3.5x"),
+        ("N/A", "N/A"),
+        ("P50", "P50"),
+        ("about 3", "about 3"),
+        ("12,50", "12,50"),
+        ("001", "001"),
+        ("$45%", "$45%"),
+        ("9007199254740993", "9007199254740993"),
+        ("0.15000000000000000001", "0.15000000000000000001"),
+        ("0." + "0" * 400 + "1", "0." + "0" * 400 + "1"),
+    ],
+)
+def test_only_unambiguous_numeric_cells_are_coerced_at_assembly(value, expected):
+    import json
+
+    from local_operator.supplements.document import (
+        assemble_stored_component,
+        split_component,
+    )
+
+    source = {"d1": {"title": "$0.15", "columns": ["value"], "rows": [[value]]}}
+    blob = "<data>" + json.dumps(source) + "</data><div></div>"
+    assert split_component(blob)[1] == source  # Provenance still sees the original cells.
+    html = assemble_stored_component(blob)
+    match = re.search(r'id="lo-data">(.*?)</script>', html)
+    assert match is not None
+    actual = json.loads(match[1])
+    assert actual["d1"]["rows"] == [[expected]]
+    assert actual["d1"]["title"] == "$0.15"
