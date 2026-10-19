@@ -844,9 +844,25 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
     assert hours["default"] == 48 and hours["gated_by"] == "session.cleanup.delegated.enabled"
     assert hours["section"] == rows["session.cleanup.delegated.enabled"]["section"]
     assert rows["session.cleanup.delegated.enabled"]["default"] is True
+    # The scratchpad cap is the second bounded row whose unit a renderer needs.
+    # Pin it explicitly rather than only tolerating it: the projection must carry
+    # bytes and the reader's own 16 MiB–8 GiB bounds.
+    scratchpad = rows["session.scratchpad.max_bytes"]
+    assert (
+        scratchpad["kind"],
+        scratchpad["minimum"],
+        scratchpad["maximum"],
+        scratchpad["unit"],
+    ) == (
+        "int",
+        16 * 1024 * 1024,
+        8 * 1024 * 1024 * 1024,
+        "bytes",
+    )
+    unit_rows = {hours["key"], scratchpad["key"]}
     assert all(
-        row["unit"] == "" for key, row in rows.items() if key != hours["key"]
-    ), "only the hours row declares a unit"
+        row["unit"] == "" for key, row in rows.items() if key not in unit_rows
+    ), "only the hours and scratchpad rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
