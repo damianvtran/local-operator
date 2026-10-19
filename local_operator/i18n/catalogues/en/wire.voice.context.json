@@ -69,5 +69,70 @@
     "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
     "tone": "concise, neutral, actionable",
     "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unknown_segment": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unavailable": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.stt_unavailable": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unsupported_audio": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.upload_too_large": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.rate_limited_minute": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.rate_limited_day": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.on_screen_first": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.voice_off": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.switched": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.failed": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.still_working": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.truncated": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
   }
 }

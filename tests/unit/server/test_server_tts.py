@@ -431,12 +431,14 @@ def test_the_cascade_is_not_a_second_source_of_the_rung_order() -> None:
 async def test_paths_never_lists_groq_even_with_a_stored_groq_key(
     test_app_client, store_override
 ) -> None:
+    """The WHOLE body is the same with and without a Groq key, not only the rung list.
+
+    A Groq key must change nothing the UI's strict parser reads: ``path``,
+    ``reason``, ``servable`` and every rung's reason included.
+    """
+    store_override(FakeStore({}))
+    baseline = (await test_app_client.get("/v1/tts/paths")).json()
     store_override(FakeStore({"groq": "gsk_stored"}))
-    result = (await test_app_client.get("/v1/tts/paths")).json()["result"]
-    assert [rung["path"] for rung in result["rungs"]] == [
-        "provider_tts_radient",
-        "provider_tts_elevenlabs",
-        "provider_tts_openai",
-    ]
-    assert result["path"] == "none"
-    assert result["servable"] is False
+    with_key = (await test_app_client.get("/v1/tts/paths")).json()
+    assert with_key == baseline
+    assert "groq" not in str(with_key).lower()

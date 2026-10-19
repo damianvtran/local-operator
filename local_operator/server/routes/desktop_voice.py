@@ -7,13 +7,21 @@ The frozen contract, which both repositories build against:
     POST /v1/desktop/voice             body {op: enable|disable, session_id}
         200 {active, replaced}; 404 unknown_session; 409 voice_store_busy
     POST /v1/desktop/voice/utterance   form session_id, request_id (dashed UUID),
-                                       text, text_origin? (qwen_s2s)
-        200 {text, path, admission}; 409 voice_not_enabled | approval_pending;
+                                       EXACTLY ONE of file (a recording) | text,
+                                       text_origin? (qwen_s2s; text door only)
+        200 {text, path, admission}; 409 voice_not_enabled | approval_pending |
+        stt_unavailable; 413 voice_upload_too_large; 429 voice_rate_limited;
         422 invalid_voice_request | empty_transcript
     POST /v1/desktop/voice/text        body {session_id, source}
         source {kind: message, message_id} | {kind: gate, request_id}
-        200 {text, spoken_chars, truncated}; 409 voice_not_enabled;
+        200 {text, spoken_chars, truncated, segments}; 409 voice_not_enabled;
         404 unknown_source
+    POST /v1/desktop/voice/speech      body {session_id, source, segment}
+        source {kind: message, message_id} | {kind: gate, request_id} |
+               {kind: phrase, key}
+        200 audio/wav (X-Voice-Path, X-Voice-Spoken-Chars); 404 unknown_source |
+        unknown_segment; 409 voice_not_enabled | voice_unavailable;
+        429 voice_rate_limited
 
 and the ``type: "voice"`` frame on ``GET /v1/desktop/events`` (published by
 ``server/utils/desktop_feed.py``), ``{active}``, on every slot change.
@@ -22,10 +30,11 @@ Refusals use the i18n envelope with a machine ``code``, the shape
 ``desktop_aida.py`` uses: a client classifies by ``detail.code`` and shows
 ``detail.text``.
 
-NO SPEECH CODE HERE (Q10). Hearing and speaking are the Qwen rig's, in the
-desktop app: this module neither transcribes nor synthesises, and imports
-nothing from ``local_operator.stt`` or ``local_operator.tts``. Words arrive as
-text (the rig's transcript) and leave as text (``/voice/text``).
+NO DUPLICATE SPEECH CODE (session-voice-groq D1, which replaces Q10). Hearing
+and speaking are the harness cascades': ``transcribe_audio`` and
+``synthesize_speech``, both with ``include_groq=True`` (the Groq rung is opt-in
+so the generic ``/v1/stt/paths`` and ``/v1/tts/paths`` stay unchanged). This
+module adds no rung, no client and no retry of its own.
 
 ONE SESSION AT A TIME (V3). Every route but the status read refuses a session
 that is not in the slot, so a stale renderer cannot keep talking to the
@@ -78,15 +87,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import os
+import shutil
+import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import TypeAdapter, ValidationError
 
+from local_operator.clients._http import APIError
+from local_operator.clients.radient_cost import RadientCost, cost_from_headers
 from local_operator.config import ConfigManager
+from local_operator.env import EnvConfig
 from local_operator.i18n.keys import wire_voice as _wv
-from local_operator.server.dependencies import get_config_manager
+from local_operator.providers.auth_store import AuthStore
+from local_operator.server.dependencies import (
+    get_config_manager,
+    get_env_config,
+    get_provider_auth_store,
+)
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import MessageAdmission
 from local_operator.server.models.desktop_voice import (
@@ -94,6 +118,7 @@ from local_operator.server.models.desktop_voice import (
     VoiceControl,
     VoiceControlResult,
     VoiceSettings,
+    VoiceSpeechRequest,
     VoiceStatus,
     VoiceText,
     VoiceTextRequest,
@@ -108,6 +133,10 @@ from local_operator.server.routes.desktop_sessions import (
 )
 from local_operator.server.routes.desktop_sessions import prompt as messages_route
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.server.utils.voice_spend import emit_voice_spend
+from local_operator.stt import AudioPath
+from local_operator.stt import audio as stt_audio
+from local_operator.voice import segments as voice_segments
 from local_operator.voice import slot as voice_slot
 from local_operator.voice import speakable as voice_speakable
 
@@ -121,6 +150,44 @@ _REQUEST_ID = TypeAdapter(RequestID)
 #: rig's Parakeet final. Recorded as the message's ``input_path``. CLOSED, so an
 #: origin is a vocabulary the session's history can be read by, not free text.
 TEXT_ORIGINS = frozenset({"qwen_s2s"})
+
+#: The recording door's ceiling. Larger than ``/messages``' audio block because
+#: this is a multipart upload that never reaches the owner: only the transcript does.
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+#: The containers the door accepts, by SNIFFED bytes, never the client's label.
+ACCEPTED_AUDIO = frozenset({"audio/wav", "audio/webm", "audio/ogg", "audio/mp4"})
+
+#: The STT rungs' vendor labels for the spend record.
+_STT_PROVIDERS = {
+    AudioPath.PROVIDER_STT_ELEVENLABS.value: "elevenlabs",
+    AudioPath.PROVIDER_STT_OPENAI.value: "openai",
+    AudioPath.PROVIDER_STT_GROQ.value: "groq",
+}
+
+#: Every voice TTS call asks for WAV: the page decodes and schedules PCM
+#: sample-accurately (D3), and the Groq rung always answers WAV. ``TtsOutcome``
+#: carries no format, so the route fixes it rather than guessing from the rung.
+VOICE_AUDIO_FORMAT = "wav"
+VOICE_AUDIO_MIME = "audio/wav"
+
+#: The fixed spoken phrases: key -> catalogue message. CLOSED: ``/speech``
+#: resolves a phrase only through this table, so any other key (or free text in
+#: its place) is ``unknown_source``. ``truncated`` is ``speakable``'s closing
+#: sentence, which the segmenter makes its own final segment so it is served
+#: from the phrase cache instead of a paid request.
+PHRASES = {
+    "on_screen_first": _wv.phrase_on_screen_first,
+    "voice_off": _wv.phrase_voice_off,
+    "switched": _wv.phrase_switched,
+    "failed": _wv.phrase_failed,
+    "still_working": _wv.phrase_still_working,
+    "truncated": _wv.phrase_truncated,
+}
+
+#: A 429 with no ``remaining_requests`` falls back to the size of ``retry-after``
+#: (D4): a wait longer than this is a daily limit, not a minute one.
+_DAY_SCOPE_RETRY_S = 60.0
 
 
 def _refuse(status: int, code: str, message: Any) -> HTTPException:
@@ -264,49 +331,203 @@ async def voice_control(
     )
 
 
+# -- 429 -> voice_rate_limited (D4) ---------------------------------------------
+
+
+def _rate_limit_scope(details: dict[str, Any]) -> tuple[str, float | None, int | None]:
+    """``(scope, retry_after_s, remaining_requests)`` from ``APIError.details``.
+
+    ``day`` when the provider reports ZERO requests left today; with no count the
+    size of ``retry-after`` decides. Tolerant of a count that arrives as a string.
+    """
+    retry: float | None
+    try:
+        retry = float(details["retry_after_s"])
+    except (KeyError, TypeError, ValueError):
+        retry = None
+    remaining: int | None
+    try:
+        remaining = int(float(details["remaining_requests"]))
+    except (KeyError, TypeError, ValueError):
+        remaining = None
+    if remaining is not None:
+        scope = "day" if remaining <= 0 else "minute"
+    else:
+        scope = "day" if retry is not None and retry > _DAY_SCOPE_RETRY_S else "minute"
+    return scope, retry, remaining
+
+
+def _rate_limited(error: BaseException | None, rung: Any) -> HTTPException | None:
+    """The 429 refusal built from the error's ``details``, or ``None`` for any other error.
+
+    Built BEFORE ``_speech_refusal`` / the STT classifier, because their 429 arm
+    is a fixed sentence that carries no ``retry_after_s``, and the app needs the
+    number to decide between waiting once and stopping for the day.
+    """
+    if not isinstance(error, APIError) or error.status_code != 429:
+        return None
+    scope, retry, remaining = _rate_limit_scope(dict(error.details or {}))
+    message = _wv.rate_limited_day() if scope == "day" else _wv.rate_limited_minute()
+    detail = message.envelope(code="voice_rate_limited")
+    detail.update(
+        {
+            "scope": scope,
+            "retry_after_s": retry,
+            "remaining_requests": remaining,
+            "rung": getattr(rung, "value", rung),
+        }
+    )
+    headers = {"Retry-After": str(max(1, math.ceil(retry)))} if retry is not None else None
+    return HTTPException(429, detail, headers=headers)
+
+
 # -- POST /v1/desktop/voice/utterance -------------------------------------------
+
+
+async def _save_upload(file: UploadFile) -> tuple[str, Path]:
+    """Copy the upload to a private temp dir, bounded at ``MAX_UPLOAD_BYTES``.
+
+    Returns ``(sniffed mime, path)``; the temp dir is the caller's to remove.
+    The client's filename and content type never steer the path or the format.
+    """
+    temp_dir = tempfile.mkdtemp(prefix="lop-voice-")
+    try:
+        head = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(head) > MAX_UPLOAD_BYTES:
+            raise _refuse(
+                413,
+                "voice_upload_too_large",
+                _wv.upload_too_large(limit_mib=str(MAX_UPLOAD_BYTES // (1024 * 1024))),
+            )
+        info = stt_audio.sniff_audio(head)
+        if info is None or info.mime_type not in ACCEPTED_AUDIO:
+            raise _refuse(422, "invalid_voice_request", _wv.unsupported_audio())
+        path = Path(temp_dir) / f"utterance{stt_audio.extension_for_mime(info.mime_type)}"
+        path.write_bytes(head)
+        return info.mime_type, path
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    finally:
+        await file.close()
+
+
+async def _transcribe(
+    file: UploadFile,
+    *,
+    session_id: str,
+    request_id: str,
+    config_manager: ConfigManager,
+    env_config: EnvConfig,
+    store: AuthStore,
+) -> tuple[str, str]:
+    """Run the STT cascade over the upload; ``(text, path token)``.
+
+    The walk includes the Groq rung (``include_groq=True``). Refuses with
+    ``voice_rate_limited`` (429) when the chosen failure is a 429, with
+    ``stt_unavailable`` (409) when no rung exists, and with the cascade's own
+    classified status when every rung failed. Spend goes through
+    ``emit_voice_spend`` with the session id.
+    """
+    from local_operator.stt.cascade import SttUnavailable, transcribe_audio
+
+    _mime, path = await _save_upload(file)
+    try:
+        try:
+            outcome = await transcribe_audio(
+                path,
+                config_dir=config_manager.config_dir,
+                base_url=env_config.radient_api_base_url,
+                store=store,
+                correlation_session_id=session_id,
+                include_groq=True,
+            )
+        except SttUnavailable as exc:
+            limited = _rate_limited(exc.error, exc.attempts[-1].path if exc.attempts else None)
+            if limited is not None:
+                raise limited from None
+            if not exc.attempts:
+                raise _refuse(
+                    409, "stt_unavailable", _wv.stt_unavailable(reason=exc.resolution.reason)
+                ) from None
+            raise _refuse(
+                exc.status_code or 502,
+                "stt_unavailable",
+                _wv.stt_unavailable(reason=exc.detail or str(exc)),
+            ) from None
+    finally:
+        shutil.rmtree(path.parent, ignore_errors=True)
+    cost = outcome.cost if isinstance(outcome.cost, RadientCost) else None
+    emit_voice_spend(
+        config_manager=config_manager,
+        channel="stt",
+        provider=outcome.provider or _STT_PROVIDERS.get(outcome.path.value, ""),
+        units=None,
+        unit="seconds",
+        cost=cost,
+        session_id=session_id,
+        request_id=request_id,
+    )
+    return outcome.text, outcome.path.value
 
 
 @router.post("/v1/desktop/voice/utterance", response_model=CRUDResponse[VoiceUtteranceResult])
 async def voice_utterance(
     request: Request,
+    config_manager: Annotated[ConfigManager, Depends(get_config_manager)],
+    env_config: Annotated[EnvConfig, Depends(get_env_config)],
+    store: Annotated[AuthStore, Depends(get_provider_auth_store)],
     session_id: str = Form(..., min_length=1, max_length=128),
     request_id: str = Form(...),
+    file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None, max_length=200_000),
     text_origin: Optional[str] = Form(None, max_length=64),
 ) -> CRUDResponse[VoiceUtteranceResult]:
-    """Admit ``text`` to the slot's session as a dictated prompt (or steer).
+    """Transcribe a recording (or take ``text``) and admit it to the slot's session.
 
-    The TEXT DOOR ONLY (Q10): there is no recording field, so this route never
-    transcribes. It has the same authority as ``/messages``: the slot check, the
-    pool's door and the receipt journal all apply.
+    Exactly one of ``file`` and ``text``. The text door has the same authority
+    as ``/messages``: the slot check, the pool's door and the receipt journal all
+    apply; only the STT step is skipped. ``text_origin`` names the text door's
+    source and becomes the message's ``input_path``; it is refused with a
+    recording, whose ``input_path`` is the STT rung's token.
 
-    ``text_origin`` (R3) names where the words came from and becomes the
-    message's ``input_path``.
-
-    ``text`` is optional in the signature only so that its absence is the
-    contract's declared ``invalid_voice_request`` rather than FastAPI's generic
-    field-missing 422, which names nothing a caller could act on.
+    V13 is checked BEFORE STT (a refused recording must cost nothing) and again
+    after it: STT takes seconds, a card can park inside them, and the money is
+    spent by then but the card is not.
     """
     try:
         _REQUEST_ID.validate_python(request_id)
     except ValidationError:
         raise _refuse(422, "invalid_voice_request", _wv.invalid_request_id()) from None
-    if text is None:
+    if (file is None) == (text is None):
         raise _refuse(422, "invalid_voice_request", _wv.invalid_request())
-    if text_origin is not None and text_origin not in TEXT_ORIGINS:
+    if text_origin is not None and (file is not None or text_origin not in TEXT_ORIGINS):
         raise _refuse(422, "invalid_voice_request", _wv.invalid_text_origin())
     require_slot(_config_dir(request), session_id)
     if await _card_pending(request, session_id):
         raise _refuse(409, "approval_pending", _wv.approval_pending())
-    spoken = text.strip()
+
+    if file is not None:
+        spoken, path = await _transcribe(
+            file,
+            session_id=session_id,
+            request_id=request_id,
+            config_manager=config_manager,
+            env_config=env_config,
+            store=store,
+        )
+        if await _card_pending(request, session_id):
+            raise _refuse(409, "approval_pending", _wv.approval_pending())
+    else:
+        spoken, path = text or "", text_origin
+    spoken = spoken.strip()
     if not spoken:
         raise _refuse(422, "empty_transcript", _wv.empty_transcript())
 
-    admission = await _admit(request, session_id, request_id, spoken, text_origin)
+    admission = await _admit(request, session_id, request_id, spoken, path)
     return reply(
         VoiceUtteranceResult(
-            text=spoken, path=text_origin, admission=MessageAdmission.model_validate(admission)
+            text=spoken, path=path, admission=MessageAdmission.model_validate(admission)
         ),
     )
 
@@ -476,7 +697,7 @@ async def voice_text(
         raw = await _gate_text(request, body.session_id, source.request_id)
     if raw is None:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
-    spoken = voice_speakable.speakable(raw, max_chars=_max_spoken_chars(config_manager))
+    spoken = voice_segments.speak_segments(raw, max_chars=_max_spoken_chars(config_manager))
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
     return reply(
@@ -484,5 +705,174 @@ async def voice_text(
             text=spoken.text,
             spoken_chars=len(spoken.text),
             truncated=spoken.truncated,
+            segments=list(spoken.segments),
         )
+    )
+
+
+# -- POST /v1/desktop/voice/speech -----------------------------------------------
+
+
+def _phrase_cache_file(config_dir: Path, rung: str, voice: str, key: str) -> Path:
+    """``<config>/voice/phrase-cache/<rung>-<voice>-<key>.wav``.
+
+    ``key`` is always a member of :data:`PHRASES` and ``rung``/``voice`` are
+    closed vocabularies, so no caller text reaches the path.
+    """
+    return config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{key}.wav"
+
+
+def _store_phrase(path: Path, audio: bytes) -> None:
+    """Write the cache file atomically; a cache that cannot be written is only a miss."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(audio)
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("voice phrase cache write failed", exc_info=True)
+
+
+def _audio_headers(rung: str, chars: int, *, cache: str | None = None) -> dict[str, str]:
+    headers = {
+        "X-Voice-Path": rung,
+        "X-Voice-Spoken-Chars": str(chars),
+        "Cache-Control": "no-store",
+    }
+    if cache is not None:
+        headers["X-Voice-Cache"] = cache
+    return headers
+
+
+@router.post("/v1/desktop/voice/speech")
+async def voice_speech(
+    body: VoiceSpeechRequest,
+    request: Request,
+    config_manager: Annotated[ConfigManager, Depends(get_config_manager)],
+    env_config: Annotated[EnvConfig, Depends(get_env_config)],
+    store: Annotated[AuthStore, Depends(get_provider_auth_store)],
+) -> Response:
+    """Synthesise ONE segment of a source the server resolves itself (V8, D3).
+
+    The server re-resolves the source and re-segments it, so ``segment`` is an
+    index and no free text crosses. A phrase source is one segment (index 0). A
+    segment that is a fixed phrase (a catalogue phrase, or ``speakable``'s
+    closing sentence) is served from the phrase cache and costs no cascade call
+    on a hit.
+
+    200 carries WAV (``audio/wav``: the cascade is asked for it, see
+    :data:`VOICE_AUDIO_FORMAT`) with ``X-Voice-Path`` (the TTS rung that served)
+    and ``X-Voice-Spoken-Chars``. A 429 is ``voice_rate_limited``.
+    """
+    from local_operator.tts import cascade as tts_cascade
+    from local_operator.tts.adapters import Legacy
+    from local_operator.tts.descriptor import descriptor_from_config
+
+    config_dir = _config_dir(request)
+    require_slot(config_dir, body.session_id)
+    source = body.source
+    phrase_key: str | None = None
+    if source.kind == "phrase":
+        phrase = PHRASES.get(source.key)
+        if phrase is None or body.segment != 0:
+            raise _refuse(404, "unknown_source", _wv.unknown_source())
+        phrase_key = source.key
+        text = phrase().envelope()["text"]
+    else:
+        if source.kind == "message":
+            raw = await _message_text(request, body.session_id, source.message_id)
+        else:
+            raw = await _gate_text(request, body.session_id, source.request_id)
+        if raw is None:
+            raise _refuse(404, "unknown_source", _wv.unknown_source())
+        spoken = voice_segments.speak_segments(raw, max_chars=_max_spoken_chars(config_manager))
+        if not spoken.text:
+            raise _refuse(404, "unknown_source", _wv.unknown_source())
+        if body.segment >= len(spoken.segments):
+            raise _refuse(404, "unknown_segment", _wv.unknown_segment())
+        text = spoken.segments[body.segment]
+        if text == voice_speakable.TRUNCATION_TAIL:
+            phrase_key = "truncated"
+
+    descriptor = descriptor_from_config(config_manager)
+    cache_file: Path | None = None
+    if phrase_key is not None:
+        # The rung that WOULD serve decides the cache name: a phrase is paid once
+        # per rung and voice (D3). A fall-forward to another rung is a miss, then
+        # stored under the rung that actually served.
+        resolution = await tts_cascade.resolve_voice_path(
+            config_dir=config_dir,
+            base_url=env_config.radient_api_base_url,
+            store=store,
+            include_groq=True,
+        )
+        if resolution.servable:
+            cache_file = _phrase_cache_file(
+                config_dir, resolution.path.value, descriptor.resolved_gender(), phrase_key
+            )
+            try:
+                cached = cache_file.read_bytes()
+            except OSError:
+                cached = b""
+            if cached:
+                return Response(
+                    content=cached,
+                    media_type=VOICE_AUDIO_MIME,
+                    headers=_audio_headers(resolution.path.value, len(text), cache="hit"),
+                )
+
+    # The uuid suffix keeps two segments spoken inside one millisecond from
+    # sharing a correlation id on the spend row.
+    request_id = f"voice-{body.session_id}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+    try:
+        outcome = await tts_cascade.synthesize_speech(
+            text,
+            config_dir=config_dir,
+            base_url=env_config.radient_api_base_url,
+            store=store,
+            descriptor=descriptor,
+            legacy=Legacy(),
+            response_format=VOICE_AUDIO_FORMAT,
+            correlation_session_id=body.session_id,
+            client_request_id=request_id,
+            include_groq=True,
+        )
+    except tts_cascade.TtsUnavailable as unavailable:
+        if unavailable.error is None:
+            raise _refuse(
+                409, "voice_unavailable", _wv.unavailable(reason=unavailable.resolution.reason)
+            ) from None
+        limited = _rate_limited(unavailable.error, unavailable.failed_path)
+        if limited is not None:
+            raise limited from None
+        from local_operator.server.routes.speech import _speech_refusal
+
+        if isinstance(unavailable.error, APIError):
+            raise _speech_refusal(unavailable.error, rung=unavailable.failed_path) from None
+        logger.error("voice speech failed", exc_info=unavailable.error)
+        raise _refuse(
+            409, "voice_unavailable", _wv.unavailable(reason=str(unavailable.error))
+        ) from None
+
+    emit_voice_spend(
+        config_manager=config_manager,
+        channel="tts",
+        provider=outcome.provider,
+        units=float(len(text)),
+        unit="chars",
+        cost=cost_from_headers(outcome.cost_headers),
+        session_id=body.session_id,
+        request_id=request_id,
+    )
+    if cache_file is not None:
+        info = stt_audio.sniff_audio(outcome.audio)
+        if info is not None and info.mime_type == "audio/wav":
+            served = _phrase_cache_file(
+                config_dir, outcome.path.value, descriptor.resolved_gender(), phrase_key or ""
+            )
+            await asyncio.to_thread(_store_phrase, served, outcome.audio)
+    return Response(
+        content=outcome.audio,
+        media_type=VOICE_AUDIO_MIME,
+        headers=_audio_headers(outcome.path.value, len(text)),
     )

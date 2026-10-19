@@ -12,5 +12,18 @@
   "wire.voice.invalid_request_id": "The request id must be a dashed UUID, so nothing was sent.",
   "wire.voice.invalid_message": "That message was not sent: {reason}",
   "wire.voice.approval_pending": "Answer the question or approval on screen first.",
-  "wire.voice.invalid_text_origin": "text_origin names where the words came from: qwen_s2s, or leave it out."
+  "wire.voice.invalid_text_origin": "text_origin names where the words came from: qwen_s2s, or leave it out.",
+  "wire.voice.unknown_segment": "That reply has no segment with that number.",
+  "wire.voice.unavailable": "This device cannot speak aloud: {reason}",
+  "wire.voice.stt_unavailable": "This device cannot transcribe speech: {reason} Type the message instead.",
+  "wire.voice.unsupported_audio": "That recording format is not supported. Use WAV, WebM, Ogg or MP4.",
+  "wire.voice.upload_too_large": "That recording is too large. Keep it under {limit_mib} MiB.",
+  "wire.voice.rate_limited_minute": "The speech provider's per-minute limit was reached. Try again in a moment.",
+  "wire.voice.rate_limited_day": "The speech provider's daily limit is used up. Try again after it resets.",
+  "wire.voice.phrase.on_screen_first": "Answer the approval on screen first.",
+  "wire.voice.phrase.voice_off": "Voice is off.",
+  "wire.voice.phrase.switched": "Voice is now on this conversation.",
+  "wire.voice.phrase.failed": "I didn't catch that.",
+  "wire.voice.phrase.still_working": "Still working on it.",
+  "wire.voice.phrase.truncated": "That's where I'll stop — the rest is on screen."
 }

@@ -35,6 +35,7 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.config import ConfigManager
 from local_operator.harness.types import ChatRequest
 from local_operator.providers.clients import MockClient
+from local_operator.server.dependencies import get_provider_auth_store
 from local_operator.server.routes import desktop_sessions, desktop_voice
 from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
@@ -149,10 +150,17 @@ async def _parked_bash_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     app = FastAPI()
     app.state.config_manager = ConfigManager(config)
+    app.state.env_config = SimpleNamespace(radient_api_base_url="http://radient.invalid")
     app.state.instance_id = "inst-v13"
     app.state.desktop_sessions = OnePool(config, remote)
     app.include_router(desktop_voice.router)
     app.include_router(desktop_sessions.router)
+
+    async def no_store():
+        return SimpleNamespace(close=lambda: None)
+
+    # The text door never reaches STT, but the route declares the store.
+    app.dependency_overrides[get_provider_auth_store] = no_store
 
     try:
         async with AsyncClient(

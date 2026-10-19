@@ -1369,7 +1369,10 @@ def live_feature_flags() -> dict[str, Any]:
         # the routes are additive, and this is how a renderer learns they exist
         # before it mounts the voice toggle. Absent, the renderer shows no
         # voice affordance and makes no voice request.
-        "voice": 1,
+        # 2 (session-voice-groq D3): `/voice/text` returns `segments`, `/voice/speech`
+        # returns one WAV segment by `(source, segment)`, and 429s carry
+        # `voice_rate_limited`. A renderer on 1 has no speech route.
+        "voice": 2,
         # ``@path`` in an ordinary submitted message, which
         # :meth:`Session.prompt` expands into an
         # ``<operator-references>`` block before the model sees the turn

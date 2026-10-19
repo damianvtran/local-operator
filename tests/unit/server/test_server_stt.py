@@ -633,13 +633,14 @@ async def test_a_request_cleanup_field_still_wins_over_the_setting(
 async def test_paths_never_lists_groq_even_with_a_stored_groq_key(
     test_app_client, store_override
 ) -> None:
+    """The WHOLE body is the same with and without a Groq key, not only the rung list.
+
+    A Groq key must change nothing the UI's strict parser reads: ``path``,
+    ``reason``, ``servable`` and every rung's reason included.
+    """
+    store_override(FakeStore({}))
+    baseline = (await test_app_client.get("/v1/stt/paths")).json()
     store_override(FakeStore({"groq": "gsk_stored"}))
-    result = (await test_app_client.get("/v1/stt/paths")).json()["result"]
-    assert [rung["path"] for rung in result["rungs"]] == [
-        "provider_stt_radient",
-        "provider_stt_elevenlabs",
-        "provider_stt_openai",
-        "provider_stt_superwhisper",
-        "model_audio_sidecar",
-    ]
-    assert result["path"] == "none"
+    with_key = (await test_app_client.get("/v1/stt/paths")).json()
+    assert with_key == baseline
+    assert "groq" not in str(with_key).lower()
