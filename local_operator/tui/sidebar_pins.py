@@ -207,7 +207,9 @@ def set_pin(
     ``source`` separates a human gesture from an always-on agent's boot
     reassert (``SOURCE_BOOTSTRAP``): only a human write records a deliberate
     unpin (or clears one by pinning again), so the next boot can tell a lost
-    pin apart from an intent. Default is the human verb, because every existing
+    pin apart from an intent. A bootstrap pin of a MARKED id is refused
+    (``False``) inside the same lock that guards the marker, so a concurrent
+    human unpin always wins. Default is the human verb, because every existing
     caller is one.
 
     Never raises, like its neighbour: its caller is a route answering a user who
@@ -225,10 +227,18 @@ def set_pin(
             # reassert repairs the file.
             return pinned
         current = read_pins(directory)
+        marked = explicitly_unpinned(directory)
+        if pinned and source == SOURCE_BOOTSTRAP and session_id in marked:
+            # THE CHECK AND THE WRITE ARE ONE LOCKED OPERATION. This used to be
+            # a caller-side read followed by this call, and a human unpin could
+            # land in between: the reassert then re-pinned an id the person had
+            # just removed (review round 2's TOCTOU). Under the same lock the
+            # two orderings are the only possibilities, and both end unpinned —
+            # a human unpin always wins.
+            return False
         if source == SOURCE_USER:
             # A HUMAN write is intent in BOTH directions: pinning clears an
             # earlier deliberate unpin, unpinning records one.
-            marked = explicitly_unpinned(directory)
             if pinned and session_id in marked:
                 _write_unpinned(directory, marked - {session_id})
             elif not pinned and session_id not in marked:
