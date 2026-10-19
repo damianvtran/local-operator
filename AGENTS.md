@@ -1495,59 +1495,6 @@ gh pr create --draft --base main --head release-next \
 Window (tick as each merges; internal ownership record):
 - [ ] #<n> — <Release: line>
 
-### A green run is a function of the tree it was computed against
-
-**The tag target is the MERGE SHA of the bump PR, after the bump branch has
-been re-verified against current `main` — never the branch's original head.**
-`gh release create vX.Y.Z --target "$MERGE_SHA"`, then confirm the tag with
-`git rev-parse "vX.Y.Z^{commit}"` printing that same SHA. The tag names a SHA
-and everything reachable from it ships, so the SHA is the release.
-
-**And a green run is a function of the tree it was computed against.** A
-verdict from an earlier head is not evidence about a later one, even when the
-later head differs only in a file the verdict never read. So the pre-tag
-proofs are re-run **at the final bump head, after the re-verification** — not
-reused from an earlier head of the same branch. Two different trees, two
-different proofs, and neither is reusable from the other.
-
-**The same rule governs a merge that is waiting on CI.** The authorisation to
-merge is a green run **on the head that will be merged**, and the procedure
-that gets there has two stages, because they are different things:
-
-1. **A hint tells you WHEN TO LOOK.** It is cheap, it is a proxy, and it is
-   never sufficient. A row count that reached zero, a file that appeared, a
-   branch tip that moved — each says "look now", and each can be satisfied
-   while the gate still fails. A hint that is satisfied by a partial state
-   fires exactly when you must NOT act.
-2. **The gate tells you WHEN YOU MAY ACT.** That is the gate's own verdict,
-   computed against the tree that will be merged. For a CI-capacity change
-   it is: the specific job that owns the assertion, green, on the rebased
-   head — not on the head it was green on before.
-
-**Never a proxy where a gate is available.** A merge authorised by a proxy
-rather than by the gate is a merge nobody checked. When the hint fires, merge
-the new base in, prove the reviewed commits survived it unchanged (a
-`git range-diff` over the reviewed range, so the evidence transfers on a
-diff rather than on a promise), and then wait for the gate on that head.
-
-**And name the slow gate, because the fast gate is not the slow gate.** A
-fast job that passes does not imply the slow assertion passes: they can
-disagree about the same debt, and in this repository they do — the fast
-`i18n` job runs `scripts/i18n/check.py`, which validates only the catalogues
-that are PRESENT and demands full key parity for each one, while
-`tests/unit/i18n/test_language_manifest.py` compares key-by-key and treats an
-absent namespace as all-missing. A namespace translated partially therefore
-satisfies the slow gate and fails the fast one with more findings than the
-debt it started from. **So the slow gate is the one that carries the
-assertion, and it is the one that has to be named in the authorisation.** A
-green fast job is evidence of consistency, not of correctness.
-
-**Read the mechanism before you write the trigger.** A trigger written from
-the shape of a fix you assumed is a trigger that waits on a signal which
-cannot arrive, or fires on a state that is worse than the problem. Read the
-code that implements the fix, then write the trigger against what that code
-actually does.
-
 ## Public release notes
 Draft — contents not yet determined.
 Replace using .github/RELEASE_NOTES_TEMPLATE.md before ready/tagging.'
@@ -1699,6 +1646,63 @@ in the clone and a re-run put it right in about two minutes. Since the
 downgrade gate that install is refused before it starts (0.64.4 is strictly
 older than the pointer's install), so the mistake is loud — the fix is
 unchanged, advance the clone's own `main` first.
+
+### A green run is a function of the tree it was computed against
+
+**The tag target is the bump's MERGE commit** — which is what "Mechanics, in
+order" step 4 already does with `--target "$(git rev-parse origin/main)"`,
+once the bump has merged and `origin/main` has been fetched. **Never the bump
+branch's own head**, which is a different SHA and is not what ships.
+
+**And a green run is a function of the tree it was computed against.** A
+verdict from an earlier head is not evidence about a later one, even when the
+later head differs only in a file the verdict never read. So the pre-tag
+proofs are re-run **at the final bump head, after the re-verification** — not
+reused from an earlier head of the same branch. Two different trees, two
+different proofs, and neither is reusable from the other.
+
+**Re-verifying the bump branch against current `main` is a merge, not a
+rebase.** Fetch `origin/main`, merge it into the bump branch, and let the
+bump PR's own merge produce the SHA that is tagged. A rebase rewrites the
+bump branch's commits, so the SHA the tag would name is no longer the one the
+owner reviewed. The existing rule for a moved base — prove the content is
+unchanged with `git range-diff` plus byte-identical `+`/`-` line sets, then
+run one convergence round over `<old-head>..<new-head>` — applies here too.
+
+**A hint tells you WHEN TO LOOK; the gate tells you WHEN YOU MAY ACT.** A
+merge waiting on CI has two stages, and the first is a cheap proxy: a count
+that reached zero, a file that appeared, a branch tip that moved. Each says
+look now, and each can be satisfied while the gate still fails — a hint
+satisfied by a partial state fires exactly when you must **not** act. The
+authorisation is the gate's own verdict, computed against the tree that will
+be merged. **Never a proxy where a gate is available**: a merge authorised by
+a proxy rather than by the gate is a merge nobody checked.
+
+**And name the slow gate, because the fast gate is not the slow gate.** The
+`i18n` job runs two scripts — `scripts/i18n/generate.py --check` and
+`scripts/i18n/check.py` — and the second of them cannot see a class of debt
+that the unit test does see. `check.py` **skips a namespace a locale does
+not carry** and validates only the files that are present, demanding full key
+parity for each one it does find; the unit test in
+`tests/unit/i18n/test_language_manifest.py` compares **key-by-key** and
+treats an absent namespace as all-missing. So the two disagree about the
+same debt, and they disagree about its SIZE: `i18n/coverage-allowance.json`
+**records** 105 missing `wire.memory` entries (7 locale pairs x 15), the unit
+test **reports** the ones the allowance does not list (14 on the tree this
+was measured on — the two `wire.memory.capture.locators` keys across seven
+locales), and `check.py` reports **none** of it, because the namespace is
+absent from every locale and an absent namespace is skipped. **A green fast
+job is evidence of consistency, not of correctness**, and a count taken from
+one of those three is not interchangeable with a count from another. So the
+slow gate is the one that carries the assertion, and it is the one that has
+to be named in the authorisation — and the allowance's own rules, stated
+above, are what that slow gate enforces.
+
+**Read the mechanism before you write the trigger.** A trigger written from
+the shape of a fix you assumed is a trigger that waits on a signal which
+cannot arrive, or fires on a state that is worse than the problem. Read the
+code that implements the fix, then write the trigger against what that code
+actually does.
 
 ### Installing over a live fleet
 
