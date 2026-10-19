@@ -27,7 +27,9 @@ from typing import Any
 import pytest
 
 from local_operator.network import store, types, wire
-from local_operator.network.credentials import mcp_state, placement as placement_mod, sync
+from local_operator.network.credentials import mcp_state
+from local_operator.network.credentials import placement as placement_mod
+from local_operator.network.credentials import sync
 from local_operator.providers.auth_store import AuthStore
 
 SELF = "d_" + "1" * 32
@@ -206,9 +208,7 @@ def test_placement_pull_is_scheduled_once_per_owner_and_is_inert_when_empty(
     blocked.set()
 
 
-def test_a_member_repair_grants_nothing(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_member_repair_grants_nothing(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI's member path may pull and validate; every write stays local."""
     from local_operator.network import cli as net_cli
 
@@ -321,9 +321,7 @@ def test_the_cli_falls_back_when_the_relay_lacks_the_pull_op(
     monkeypatch.setattr(
         net_cli,
         "_direct_copy_pull",
-        lambda root_arg, key: (
-            called.append(key) or {"ok": True, "state": "synced", "code": ""}
-        ),
+        lambda root_arg, key: (called.append(key) or {"ok": True, "state": "synced", "code": ""}),
     )
 
     receipt = net_cli._member_repair_receipt(
@@ -382,11 +380,11 @@ def test_a_successful_member_validation_records_synced_with_the_owner(
     The status row then says "synced — borrows from macbook" instead of falling
     back to a bare placement answer, and a later owner-side expiry overwrites it.
     """
+    from types import SimpleNamespace
+
     from local_operator.network import cli as net_cli
     from local_operator.network.credentials import mcp_state
     from local_operator.network.credentials.types import credential_key_for_mcp
-
-    from types import SimpleNamespace
 
     url = "https://linear.test/mcp"
     key = credential_key_for_mcp(url)

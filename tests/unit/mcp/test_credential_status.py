@@ -27,7 +27,8 @@ from local_operator.mcp.config import (
 )
 from local_operator.mcp.credential_status import server_states
 from local_operator.network import store, types, wire
-from local_operator.network.credentials import mcp_state, placement as placement_mod
+from local_operator.network.credentials import mcp_state
+from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.types import (
     credential_key_for_mcp,
     credential_key_for_secret,
@@ -183,9 +184,7 @@ def test_each_state_and_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert rows["linear"]["state"] == "revoked"
 
 
-def test_reference_shapes_and_literals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_reference_shapes_and_literals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "cfg"
     root.mkdir(parents=True)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
@@ -253,9 +252,7 @@ def test_a_share_that_has_not_arrived_is_not_yet_synced(
     _place(root, credential_key_for_secret(SECRET), kind="store-secret")
 
     configs = {
-        "notes": MCPStdioServerConfig(
-            command="/bin/echo", env={"NOTES_TOKEN": "${" + SECRET + "}"}
-        )
+        "notes": MCPStdioServerConfig(command="/bin/echo", env={"NOTES_TOKEN": "${" + SECRET + "}"})
     }
     rows = server_states(str(cwd), base=root, configs=configs)
     assert rows["notes"]["state"] == "not_yet_synced"
@@ -447,9 +444,7 @@ def test_a_registration_only_row_is_not_a_login(
     (root / "mcp.json").write_text(
         json.dumps(
             {
-                "mcpServers": {
-                    "gitlab": {"type": "http", "url": URL, "auth": {"type": "oauth"}}
-                },
+                "mcpServers": {"gitlab": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
                 "disabledServers": ["gitlab"],
             }
         ),
@@ -547,3 +542,49 @@ def test_a_tombstoned_grant_reads_expired_on_both_paths(
     assert "sign in again on this device" in rows["enabled"]["reason"]
     assert rows["dropped"]["state"] == "expired", rows
     assert "sign in again on this device" in rows["dropped"]["reason"]
+
+
+def test_an_unreadable_network_store_keeps_the_artifacts_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m7: an unreadable record store must not downgrade revoked to login.
+
+    The artifacts-only path is what proves a device lost ACCESS; an early return
+    on any read failure skipped it and answered ``needs_operator_login`` for a
+    server whose placement documents were still there.
+    """
+    import json
+
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {"mcpServers": {"linear": {"type": "http", "url": URL, "auth": {"type": "oauth"}}}}
+        ),
+        encoding="utf-8",
+    )
+    store.save(_record(), root)
+    with placement_mod.mutate(NETWORK, root=root, self_device=PEER) as document:
+        document.declare(
+            credential_key_for_mcp(URL),
+            owner_device=PEER,
+            owner_device_name="macbook",
+            provider="mcp-oauth",
+            kind="mcp-rotating",
+            by=PEER,
+        )
+        document.grant(credential_key_for_mcp(URL), SELF, by=PEER)
+
+    def unreadable(*args: object, **kwargs: object) -> list[object]:
+        raise OSError("network store unreadable")
+
+    monkeypatch.setattr("local_operator.network.store.list_networks", unreadable)
+
+    rows = server_states(str(root), base=root)
+
+    assert rows["linear"]["state"] == "revoked", rows
+    assert "revoked" in rows["linear"]["reason"]
