@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -70,6 +71,9 @@ class FakeServer:
     def _ensure_link(self, device: str) -> FakeLink:
         return self.link
 
+    def _ensure_link_with_reason(self, device: str) -> tuple[FakeLink, str]:
+        return self.link, ""
+
     def _next_relay_req(self) -> int:
         self.reqs += 1
         return self.reqs
@@ -107,10 +111,12 @@ def _record(*, self_active: bool = True) -> types.NetworkRecord:
     return record
 
 
-def _place(root: Path, *, kind: str = "api-key-static", holder: bool = True) -> None:
+def _place(
+    root: Path, key: str = KEY, *, kind: str = "api-key-static", holder: bool = True
+) -> None:
     with placement_mod.mutate(NETWORK, root=root, self_device=PEER) as document:
         document.declare(
-            KEY,
+            key,
             owner_device=PEER,
             owner_device_name="macbook",
             provider="stub-provider",
@@ -118,7 +124,7 @@ def _place(root: Path, *, kind: str = "api-key-static", holder: bool = True) -> 
             by=PEER,
         )
         if holder:
-            document.grant(KEY, SELF, by=PEER)
+            document.grant(key, SELF, by=PEER)
 
 
 def _engine(root: Path, link: FakeLink) -> sync.SyncEngine:
@@ -218,3 +224,151 @@ def test_a_member_repair_grants_nothing(
 
     assert [op for op, _ in calls] == ["credential_placement"]
     assert all(op != "credential_grant" for op, _ in calls)
+
+
+def test_pull_copy_sync_applies_through_the_shared_apply_path(root: Path) -> None:
+    """The CLI's direct dialect, end to end: ask the owner, apply, record.
+
+    This is the fallback's real work, so it is driven through the shipped
+    ``MeshCredentialClient`` with a scripted link — the same fake the relay-side
+    pull uses — and the store/evidence assertions are the ones that prove the
+    value landed rather than the sentence being right.
+    """
+    from local_operator.network.credentials import client as client_mod
+    from local_operator.network.credentials.placement import PlacementDocument
+
+    store.save(_record(), root)
+    _place(root)
+    link = FakeLink()
+    client = client_mod.MeshCredentialClient(
+        root=root,
+        self_device=SELF,
+        network_id=NETWORK,
+        placement=PlacementDocument.load(NETWORK, root, self_device=SELF),
+        relay=FakeServer(link),
+    )
+
+    outcome = client.pull_copy_sync(KEY)
+
+    assert outcome == {"ok": True, "state": "synced", "code": ""}
+    assert any(frame.get("kind") == "copy" for frame in link.frames)
+    rows = AuthStore(db_path=root / "auth.db", config_dir=root).list_credentials("stub-provider")
+    assert [row.data["key"] for row in rows] == [VALUE]
+    assert mcp_state.load(NETWORK, root)[KEY]["state"] == "synced"
+
+
+def test_pull_copy_sync_never_dials_for_an_owned_or_unshared_key(root: Path) -> None:
+    from local_operator.network.credentials import client as client_mod
+    from local_operator.network.credentials.placement import PlacementDocument
+
+    store.save(_record(), root)
+    with placement_mod.mutate(NETWORK, root=root, self_device=SELF) as document:
+        document.declare(
+            KEY,
+            owner_device=SELF,
+            owner_device_name="laptop",
+            provider="stub-provider",
+            kind="api-key-static",
+            by=SELF,
+        )
+    link = FakeLink()
+    client = client_mod.MeshCredentialClient(
+        root=root,
+        self_device=SELF,
+        network_id=NETWORK,
+        placement=PlacementDocument.load(NETWORK, root, self_device=SELF),
+        relay=FakeServer(link),
+    )
+
+    outcome = client.pull_copy_sync(KEY)
+
+    assert (outcome["ok"], outcome["code"]) == (False, "local_owner")
+    assert link.frames == []
+    # A cold, never-shared key is not a revocation and writes no evidence.
+    other = "stub-never-shared"
+    assert (client.pull_copy_sync(other)["ok"], client.pull_copy_sync(other)["code"]) == (
+        False,
+        "not_a_holder",
+    )
+    assert mcp_state.load(NETWORK, root) == {}
+
+
+def test_the_cli_falls_back_when_the_relay_lacks_the_pull_op(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old relay is not a dead end: the direct dialect runs instead."""
+    from local_operator.network import cli as net_cli
+    from local_operator.network.credentials.types import credential_key_for_secret
+    from local_operator.network.types import MeshRefusal
+
+    store.save(_record(), root)
+    _place(root, credential_key_for_secret("SLACK_TOKEN"), kind="store-secret")
+    from local_operator.network import identity as identity_mod
+
+    monkeypatch.setattr(
+        identity_mod,
+        "load",
+        lambda *args, **kwargs: SimpleNamespace(device_id=SELF, name="laptop"),
+    )
+
+    def no_op(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any]:
+        if op == "credential_sync_pull":
+            raise MeshRefusal("unknown_op", "this relay does not know that action")
+        return {"kind": "ack", "changed": [], "owners": 0}
+
+    called: list[str] = []
+    monkeypatch.setattr(net_cli, "_relay_answer", no_op)
+    monkeypatch.setattr(
+        net_cli,
+        "_direct_copy_pull",
+        lambda root_arg, key: (
+            called.append(key) or {"ok": True, "state": "synced", "code": ""}
+        ),
+    )
+
+    receipt = net_cli._member_repair_receipt(
+        root, [{"name": "slack", "url": "", "refs": [{"id": "SLACK_TOKEN"}]}]
+    )
+
+    assert receipt["slack"]["fallback"] is True
+    assert [row["ok"] for row in receipt["slack"]["pulled"]] == [True]
+    assert called == [credential_key_for_secret("SLACK_TOKEN")]
+
+
+def test_the_cli_prefers_the_relay_when_it_answers(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import cli as net_cli
+    from local_operator.network.credentials.types import credential_key_for_secret
+
+    store.save(_record(), root)
+    _place(root, credential_key_for_secret("SLACK_TOKEN"), kind="store-secret")
+    from local_operator.network import identity as identity_mod
+
+    monkeypatch.setattr(
+        identity_mod,
+        "load",
+        lambda *args, **kwargs: SimpleNamespace(device_id=SELF, name="laptop"),
+    )
+
+    calls: list[str] = []
+
+    def answers(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any]:
+        calls.append(op)
+        if op == "credential_sync_pull":
+            return {"ok": True, "state": "synced", "code": ""}
+        return {"kind": "ack"}
+
+    monkeypatch.setattr(net_cli, "_relay_answer", answers)
+    monkeypatch.setattr(
+        net_cli,
+        "_direct_copy_pull",
+        lambda *args, **kwargs: pytest.fail("the fallback dialled over a working relay"),
+    )
+
+    receipt = net_cli._member_repair_receipt(
+        root, [{"name": "slack", "url": "", "refs": [{"id": "SLACK_TOKEN"}]}]
+    )
+
+    assert "fallback" not in receipt["slack"]
+    assert calls == ["credential_placement", "credential_sync_pull"]

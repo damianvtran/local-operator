@@ -182,3 +182,34 @@ def test_remove_member_prunes_a_holder_without_deleting_the_row(root: Path) -> N
     assert entry is not None
     assert entry.is_holder(SELF)
     assert not entry.is_holder(PEER)
+
+
+def test_a_cold_not_a_holder_is_not_a_revocation(root: Path) -> None:
+    """Requirement-6 inversion guard: a server nobody shared is not "revoked".
+
+    A just-mirrored server refuses locally with ``not_a_holder`` (no holder row,
+    no dial). Recording that as ``revoked`` made the status claim access had been
+    WITHDRAWN for a server that never had any — the opposite of
+    ``not_yet_synced``/``needs_operator_login``. Only a prior claim can be lost.
+    """
+    store.save(_record(), root)
+    _place(root, holder=False)
+
+    refusal = _client(root).request_grant_sync(KEY)
+    assert getattr(refusal, "code", "") == "not_a_holder"
+    assert mcp_state.load(NETWORK, root) == {}, "a cold refusal wrote evidence"
+
+    client = _client(root)
+    client._remember_evidence(  # noqa: SLF001 — the rule under test
+        KEY,
+        client_mod.BrokerError(code="not_a_holder", key=KEY, owner_device=PEER),
+    )
+    assert mcp_state.load(NETWORK, root) == {}
+
+    # With a grant in hand, the same code IS a revocation.
+    client.grants.put(KEY, "", _grant())
+    client._remember_evidence(  # noqa: SLF001
+        KEY,
+        client_mod.BrokerError(code="not_a_holder", key=KEY, owner_device=PEER),
+    )
+    assert mcp_state.load(NETWORK, root)[KEY]["state"] == "revoked"

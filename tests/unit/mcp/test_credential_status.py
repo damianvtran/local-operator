@@ -28,7 +28,10 @@ from local_operator.mcp.config import (
 from local_operator.mcp.credential_status import server_states
 from local_operator.network import store, types, wire
 from local_operator.network.credentials import mcp_state, placement as placement_mod
-from local_operator.network.credentials.types import credential_key_for_mcp, credential_key_for_secret
+from local_operator.network.credentials.types import (
+    credential_key_for_mcp,
+    credential_key_for_secret,
+)
 
 SELF = "d_" + "1" * 32
 PEER = "d_" + "2" * 32
@@ -72,7 +75,14 @@ def _record(*, self_active: bool = True) -> types.NetworkRecord:
     return record
 
 
-def _place(root: Path, key: str = KEY, *, owner: str = PEER, holder: bool = True, kind: str = "mcp-rotating") -> None:
+def _place(
+    root: Path,
+    key: str = KEY,
+    *,
+    owner: str = PEER,
+    holder: bool = True,
+    kind: str = "mcp-rotating",
+) -> None:
     with placement_mod.mutate(NETWORK, root=root, self_device=owner) as document:
         document.declare(
             key,
@@ -242,7 +252,11 @@ def test_a_share_that_has_not_arrived_is_not_yet_synced(
     store.save(_record(), root)
     _place(root, credential_key_for_secret(SECRET), kind="store-secret")
 
-    configs = {"notes": MCPStdioServerConfig(command="/bin/echo", env={"NOTES_TOKEN": "${" + SECRET + "}"})}
+    configs = {
+        "notes": MCPStdioServerConfig(
+            command="/bin/echo", env={"NOTES_TOKEN": "${" + SECRET + "}"}
+        )
+    }
     rows = server_states(str(cwd), base=root, configs=configs)
     assert rows["notes"]["state"] == "not_yet_synced"
     assert "--repair" in rows["notes"]["reason"]
@@ -277,3 +291,56 @@ def test_zero_peer_is_the_plain_local_answer(
     assert rows["notes"]["state"] == "synced"  # nothing to resolve
     assert not (root / "network").exists()
     assert not (root / "auth.db").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "shape"),
+    [
+        ("headers", {"Authorization": "${" + SECRET + "}"}, "header-ref"),
+        ("env", {"SERVICE_TOKEN": "${" + SECRET + "}"}, "env-ref"),
+    ],
+)
+def test_a_placement_row_does_not_make_a_reference_server_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: dict[str, str], shape: str
+) -> None:
+    """``--repair`` mints ``mcp:<url>`` rows for header/env servers too.
+
+    That placement row is how the holder population is addressed, NOT proof of
+    OAuth. Treating it as proof classified slack as an OAuth server and ignored
+    its ``Authorization`` reference: a set key read ``needs_operator_login`` and
+    a shared-but-uncopied one said sign-in instead of ``not_yet_synced``.
+    """
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    store.save(_record(), root)
+    _place(root)  # the mcp:<url> placement row, as --repair writes it
+    # ...and the SECRET's own share row: the reference is a key in its own right.
+    with placement_mod.mutate(NETWORK, root=root, self_device=PEER) as document:
+        document.declare(
+            credential_key_for_secret(SECRET),
+            owner_device=PEER,
+            owner_device_name="macbook",
+            provider="secret",
+            kind="store-secret",
+            by=PEER,
+        )
+        document.grant(credential_key_for_secret(SECRET), SELF, by=PEER)
+    configs = {
+        "slack": MCPHttpServerConfig(url=URL, **{field: value}),
+    }
+
+    rows = server_states(str(cwd), base=root, configs=configs)
+    assert rows["slack"]["shape"] == shape
+    assert rows["slack"]["state"] == "not_yet_synced"
+
+    from local_operator.secrets import access
+
+    secret_store = access.open_store(root, create=True)
+    secret_store.initialize()
+    secret_store.set(SECRET, PROBE_TEXT.encode())
+    rows = server_states(str(cwd), base=root, configs=configs)
+    assert rows["slack"]["shape"] == shape
+    assert rows["slack"]["state"] == "synced"

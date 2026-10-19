@@ -43,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import definitions, store
+from local_operator.network import definitions, store, wire
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials import sync
 from local_operator.network.credentials.sync import SyncState
@@ -1079,3 +1079,102 @@ def test_member_audit_rows_land_with_actor_and_network(root: Path) -> None:
     assert applied["detail"]["act"] == MEMBER and applied["detail"]["sub"] == OWNER
     assert applied["detail"]["gen"] == 2, applied
     server.audit.close()
+
+
+def test_credentials_cadence_is_independent_of_net_definitions(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DRIVE member still runs the credential tick (measured on cloud-node-1).
+
+    The step was an ordinary definitions sibling, so the dispatcher ran it only
+    after the ``net_definitions`` gate — and ``net_definitions`` is an ADMIN
+    capability. The live node's row is ``drive``: its adopted secrets sat at
+    "not yet synced (gen 1)" forever because the credential cadence never ran.
+    The independent flag is the fix, and this cell pins BOTH halves: the step runs
+    despite the missing definitions authority, and its own ``net_broker`` gate
+    still skips a peer without ``broker_credential``.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network import definitions, types
+
+    self_id = "d_" + "1" * 32
+    peer = "d_" + "2" * 32
+    network = "n_" + "b" * 24
+    record = types.NetworkRecord(
+        network_id=network,
+        name="drive-net",
+        self_device_id=self_id,
+        self_role="drive",
+        # broker_credential WITHOUT admin: the live node's own row (drive keeps
+        # the broker capability, not the definitions one).
+        self_capabilities=[*types.capabilities_for_role("drive"), "broker_credential"],
+        epoch=1,
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id=self_id,
+            public_key=wire.b64u(b"a" * 32),
+            role="drive",
+            capabilities=sorted(types.capabilities_for_role("drive")),
+            added_via="invite",
+        )
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id=peer,
+            public_key=wire.b64u(b"b" * 32),
+            role="drive",
+            capabilities=[*types.capabilities_for_role("drive"), "broker_credential"],
+            added_via="invite",
+        )
+    )
+    store.save(record, root)
+
+    class StubEngine:
+        def __init__(self) -> None:
+            self.exchanges: list[str] = []
+            self.pulls: list[str] = []
+
+        def enqueue_owner_exchange(self, device_id: str) -> str:
+            self.exchanges.append(device_id)
+            return "in_sync"
+
+        def enqueue_placement_pull(self, device_id: str) -> str:
+            self.pulls.append(device_id)
+            return "in_sync"
+
+    engine = StubEngine()
+    server = SimpleNamespace(
+        root=root,
+        identity=SimpleNamespace(device_id=self_id, name="drive-node"),
+        audit=None,
+    )
+    setattr(server, sync._SYNC_ATTR, engine)  # noqa: SLF001 — the engine's own seam
+
+    sync.install()  # idempotent by identity
+    assert getattr(sync.credentials_sync_step, "independent_cadence", False) is True
+
+    syncer = definitions.DefinitionsSyncer(server)  # type: ignore[arg-type]
+    monkeypatch.setattr(syncer, "_targets", lambda: [peer])
+    monkeypatch.setattr(
+        definitions,
+        "push_to_peer",
+        lambda *args, **kwargs: {"ok": True, "code": "in_sync", "message": ""},
+    )
+
+    outcomes = syncer.tick(now=1_000.0)
+
+    assert engine.exchanges == [peer], "the credential tick never ran for a drive member"
+    assert engine.pulls == [peer]
+    # AND THE DEFINITIONS HALF IS STILL GATED: credentials do not grant it.
+    assert (peer, "skipped:no_admin") in outcomes
+
+    # The step's OWN gate stays: a device without broker_credential is skipped by
+    # name. It is THIS device's row the check reads (the op is held HERE), which
+    # is why the capability comes off SELF for this half.
+    # ``unholdable_capability`` reads the RECORD's self_capabilities (what this
+    # device may hold toward a peer), not the member row.
+    record.self_capabilities = sorted(types.capabilities_for_role("drive"))
+    store.save(record, root)
+    assert sync.credentials_sync_step(server, peer) == "skipped:no_broker_credential"
