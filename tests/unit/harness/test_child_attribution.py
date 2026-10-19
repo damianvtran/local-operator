@@ -1143,7 +1143,7 @@ async def test_real_child_keeps_wip_and_delivers_cause_step_and_ref(iso, ending)
         # strict job-sidecar allowlist, and must survive retention/restart.
         from tests.unit.harness.test_comms import FakeJobs, FakeParent
 
-        restored = SubagentComms(FakeParent(FakeJobs()))
+        restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
         restored.restore(parent.subagent_comms.snapshot())
         row = next(r for r in restored.roster() if r.job_id == job_id)
         assert (row.death_cause, row.last_step, row.wip_ref) == (
@@ -1303,7 +1303,7 @@ asyncio.run(main())
             evidence = ledger.reconcile_lane_evidence([record])
             assert evidence[0].never_settled
             assert evidence[0].last_step == "bash: Writing recoverable child work"
-            comms = SubagentComms(FakeParent(FakeJobs()))
+            comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
             comms.restore([{**record, "label": "killed-coder", "outcome": None}])
             comms.apply_lane_evidence(evidence)
             row = next(r for r in comms.roster() if r.job_id == record["job_id"])

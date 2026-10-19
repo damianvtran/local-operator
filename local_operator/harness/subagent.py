@@ -1791,6 +1791,7 @@ def _make_runner(
         event_checkpoint_task: asyncio.Task[None] | None = None
         settled_status = "failed"
         forced_snapshot = False
+        take_checkpoint: Callable[..., Awaitable[None]] | None = None
         child: Session | None = None
         unsubscribe: Callable[[], None] | None = None
         # Mutable cells the relay handler writes into across the run.
@@ -1827,10 +1828,6 @@ def _make_runner(
                     interval = 30.0
             except ValueError:
                 interval = 30.0
-            checkpoint = WipCheckpointer(
-                child._cwd, child._transcript.directory, job_id, label, interval
-            )
-
             checkpoint_lock = asyncio.Lock()
 
             async def checkpoint_now(force: bool = False, *, event_driven: bool = False) -> None:
@@ -1918,6 +1915,11 @@ def _make_runner(
                     await asyncio.sleep(interval)
                     if not checkpoint_lock.locked():
                         await checkpoint_now()
+
+            take_checkpoint = checkpoint_now
+            checkpoint = WipCheckpointer(
+                child._cwd, child._transcript.directory, job_id, label, interval
+            )
 
             checkpoint_task = asyncio.create_task(checkpoint_loop())
             if resume_dir is not None:
@@ -2091,8 +2093,8 @@ def _make_runner(
             # recorded cause is the more specific fact.
             settled_status = "cancelled"
             await stop_checkpoint_background()
-            if checkpoint is not None:
-                await checkpoint_now(force=True)
+            if checkpoint is not None and take_checkpoint is not None:
+                await take_checkpoint(force=True)
             cancelled_cause = str(final.get("cut_off_cause") or "")
             with contextlib.suppress(BaseException):
                 await _settle_child_cleanup(
@@ -2126,8 +2128,8 @@ def _make_runner(
             if not cut_off_cause and child is not None:
                 cut_off_cause = str(getattr(child, "_cut_off_cause", "") or "")
             await stop_checkpoint_background()
-            if checkpoint is not None:
-                await checkpoint_now(force=True)
+            if checkpoint is not None and take_checkpoint is not None:
+                await take_checkpoint(force=True)
             await _finish_child_browser(child, comms, job_id, "failed")
             await _publish_terminal_outcome(
                 comms,
@@ -2143,8 +2145,12 @@ def _make_runner(
             raise
         finally:
             await stop_checkpoint_background()
-            if checkpoint is not None and settled_status != "completed":
-                await checkpoint_now(force=True)
+            if (
+                checkpoint is not None
+                and take_checkpoint is not None
+                and settled_status != "completed"
+            ):
+                await take_checkpoint(force=True)
             if unsubscribe is not None:
                 unsubscribe()
             # WITHDRAW THE LANE RECEIPT. Every settle arm (completed /
