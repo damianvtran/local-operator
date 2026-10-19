@@ -257,8 +257,7 @@ def _row(
         "origin_group": asset.origin_group,
         "origins": list(asset.origins),
         "tags": [
-            {"id": tag["id"], "name": tag["name"], "category": tag["category"]}
-            for tag in tags
+            {"id": tag["id"], "name": tag["name"], "category": tag["category"]} for tag in tags
         ],
         "primary_tag": primary,
         "size_bytes": asset.size_bytes,
@@ -271,9 +270,7 @@ def _row(
         "exists": _exists(config_dir, asset),
         "highlighted": asset.highlighted,
         "highlight_why": None,
-        "occurrences": [
-            _occurrence_row(occurrence, asset) for occurrence in asset.occurrences
-        ],
+        "occurrences": [_occurrence_row(occurrence, asset) for occurrence in asset.occurrences],
         "session_count": len({occurrence.session_id for occurrence in asset.occurrences}),
         "chat": chat,
         "preview": _preview(asset),
@@ -378,9 +375,7 @@ def _matches(asset: library_index.Asset, row: dict[str, Any], query: Query) -> b
                 row["derived_name"],
                 row["ref"]["display_path"],
                 " ".join(tag["name"] for tag in row["tags"]),
-                " ".join(
-                    occurrence.title for occurrence in asset.occurrences if occurrence.title
-                ),
+                " ".join(occurrence.title for occurrence in asset.occurrences if occurrence.title),
             ]
         ).lower()
         if query.q.lower() not in haystack:

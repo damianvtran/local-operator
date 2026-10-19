@@ -7,9 +7,9 @@ import pytest
 
 from local_operator.library.metadata import (
     MAX_TAGS_PER_ASSET,
+    SCHEMA_VERSION,
     MetadataStore,
     MetadataUnavailable,
-    SCHEMA_VERSION,
     TagRefused,
 )
 

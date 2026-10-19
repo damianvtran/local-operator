@@ -240,8 +240,7 @@ class MetadataStore:
         skipping a row.
         """
         connection.execute(
-            "UPDATE state SET value = CAST(value AS INTEGER) + 1 "
-            "WHERE key = 'metadata_revision'"
+            "UPDATE state SET value = CAST(value AS INTEGER) + 1 " "WHERE key = 'metadata_revision'"
         )
 
     def metadata_revision(self) -> int:
@@ -464,8 +463,16 @@ class MetadataStore:
             raise TagRefused("unknown_actor", actor)
         provenance = source if source in FIELD_SOURCES else actor
         stamp = _now() if at is None else at
-        allowed = {"name", "description", "favorite", "locked", "archived", "organized_at",
-                   "organized_by", "confidence"}
+        allowed = {
+            "name",
+            "description",
+            "favorite",
+            "locked",
+            "archived",
+            "organized_at",
+            "organized_by",
+            "confidence",
+        }
         unknown = set(fields) - allowed
         if unknown:
             raise TagRefused("unknown_field", ",".join(sorted(unknown)))
@@ -492,9 +499,7 @@ class MetadataStore:
                     if field == "name":
                         if not isinstance(value, str) or not value.strip():
                             raise TagRefused("name_required")
-                        current_rank = _SOURCE_RANK.get(
-                            before["name_source"] or "derived", 0
-                        )
+                        current_rank = _SOURCE_RANK.get(before["name_source"] or "derived", 0)
                         if before["name"] is not None and write_rank < current_rank:
                             continue
                         assignments.append("name = ?")
@@ -717,8 +722,14 @@ class MetadataStore:
                 "JOIN tags t ON t.id = a.tag_id WHERE a.asset_id = ? ORDER BY LOWER(t.name)",
                 (asset_id,),
             )
-            return [{**(self._tag_row(row) or {}), "source": row["source"],
-                     "confidence": row["confidence"]} for row in rows]
+            return [
+                {
+                    **(self._tag_row(row) or {}),
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                }
+                for row in rows
+            ]
 
     def tags_for_assets(self, asset_ids: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
         ids = list(dict.fromkeys(asset_ids))
@@ -800,10 +811,7 @@ class MetadataStore:
                 connection.executemany(
                     "INSERT INTO asset_tags(asset_id, tag_id, source, confidence, created_at) "
                     "VALUES(?, ?, ?, ?, ?)",
-                    [
-                        (asset_id, tag_id, source or actor, confidence, stamp)
-                        for tag_id in unique
-                    ],
+                    [(asset_id, tag_id, source or actor, confidence, stamp) for tag_id in unique],
                 )
                 if primary is None:
                     connection.execute(

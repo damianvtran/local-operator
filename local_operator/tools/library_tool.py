@@ -300,9 +300,7 @@ def _tags(tool_call_id: str, params: LibraryParams) -> ToolResult:
     if not params.asset_id:
         return _error(tool_call_id, "library", f"tags {action} needs asset_id.")
     if action == "clear":
-        row = service.set_tags(
-            config_dir(), params.asset_id, [], None, actor=params.actor
-        )
+        row = service.set_tags(config_dir(), params.asset_id, [], None, actor=params.actor)
         return _text(tool_call_id, "library", _render(_compact(row)))
     row = service.set_tags(
         config_dir(),

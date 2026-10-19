@@ -129,9 +129,7 @@ def test_a_mentioned_file_is_upgraded_by_a_write(tmp_path) -> None:
                     "kind": "message",
                     "role": "assistant",
                     "content": [],
-                    "tool_calls": [
-                        {"id": "c1", "name": "write", "arguments": {"path": str(path)}}
-                    ],
+                    "tool_calls": [{"id": "c1", "name": "write", "arguments": {"path": str(path)}}],
                 },
             },
             {
