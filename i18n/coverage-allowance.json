@@ -1303,8 +1303,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -3385,8 +3383,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -5858,8 +5854,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -8814,8 +8808,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -10896,8 +10888,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -13369,8 +13359,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -16299,8 +16287,6 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
-        "wire.memory.capture.locators.help",
-        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
