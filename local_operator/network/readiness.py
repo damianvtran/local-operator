@@ -2038,13 +2038,8 @@ def mcp_credential_rows(
         # existing login keeps the login copy: literal handling must not hide a
         # separate OAuth failure.
         literal_only = bool(literals) and not server.get("refs")
-        if (
-            transport not in ("http", "sse")
-            or (
-                literal_only
-                and server.get("has_row") is not True
-                and not server.get("auth_declared")
-            )
+        if transport not in ("http", "sse") or (
+            literal_only and server.get("has_row") is not True and not server.get("auth_declared")
         ):
             row = _mcp_ref_row(
                 member,
