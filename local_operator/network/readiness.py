@@ -2066,12 +2066,13 @@ def _mcp_ref_row(
 ) -> dict[str, Any] | None:
     """A stdio server's row: can the PEER resolve the names its config declares?
 
-    ``None`` when the server declares no references — there is no credential
-    question to answer, and a vacuous ``ok`` row would read as verification of
-    something nobody asked. ``set`` is three-valued (``None`` = the peer's store
-    could not be read); anything that is not a definite ``True`` is reported as
-    not resolved rather than as a pass, the same closed direction the rest of
-    this module takes.
+    Three cases, in the order the operator can act on them: no references but a
+    literal binding (a credential that can NEVER travel until it is adopted — the
+    pre-fix state, now named instead of silently absent); no references and no
+    literal (no question to answer, so no vacuous ``ok`` row); references, whose
+    ``set`` state is three-valued (``None`` = the peer's store could not be read)
+    and where anything but a definite ``True`` is reported as not resolved, the
+    same closed direction the rest of this module takes.
     """
     refs = [
         ref
@@ -2079,7 +2080,31 @@ def _mcp_ref_row(
         if isinstance(ref, Mapping) and str(ref.get("id") or "")
     ]
     if not refs:
-        return None
+        literals = [
+            row
+            for row in server.get("literal_keys") or []
+            if isinstance(row, Mapping) and row.get("has_value")
+        ]
+        if not literals:
+            return None
+        bindings = [
+            f"{_bounded(row.get('field') or '', 20)}.{_bounded(row.get('key') or '', 120)}"
+            for row in literals
+        ]
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_NO_CREDENTIAL,
+            detail=(
+                f"{name} on {peer_label} still holds its credentials as literal "
+                f"values ({', '.join(bindings)}); they never travel over the mesh"
+            ),
+            remedies=[f"run lop network mcp credentials --adopt on {peer_label}"],
+            source=SOURCE_PEER,
+            observed={"server": name, "literal_keys": bindings},
+        )
     names = [str(ref.get("id")) for ref in refs]
     missing = [str(ref.get("id")) for ref in refs if ref.get("set") is not True]
     observed = {"server": name, "refs": names}

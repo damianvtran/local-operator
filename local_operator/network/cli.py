@@ -3110,14 +3110,16 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     if not payload.get("hosts"):
         command += " --host <this device's address:port>"
     adopted = len(adoption.get("adopted") or [])
-    if adoption:
-        # COUNTS ONLY: the names are in the store, and the receipt already says
-        # how many. ``--json`` carries the same counts rather than a per-name list
-        # so an invite body stays free of store inventory.
+    reused = len(adoption.get("reused") or [])
+    conflicts = len(adoption.get("conflicts") or [])
+    if adopted or reused or conflicts:
+        # COUNTS ONLY, and only when there is a count to report: the names are in
+        # the store, and ``--json`` carries the same counts rather than a per-name
+        # list so an invite body stays free of store inventory.
         payload["mcp_credentials"] = {
             "adopted": adopted,
-            "reused": len(adoption.get("reused") or []),
-            "conflicts": len(adoption.get("conflicts") or []),
+            "reused": reused,
+            "conflicts": conflicts,
         }
     lines = [
         f"invite {payload['invite_id']} for role {payload['role']}, "
@@ -3127,10 +3129,10 @@ def _cmd_invite(args: argparse.Namespace) -> int:
         "and --print",
         command,
     ]
-    if adopted:
-        # ONE bounded line, and only when something changed — a mint on a clean
-        # config says nothing extra.
-        conflicts = len(adoption.get("conflicts") or [])
+    if adopted or conflicts:
+        # ONE bounded line when anything needs saying — a conflict is the case
+        # where the value will NOT travel, so a silent mint there would hide the
+        # one state that needs a human decision. A clean config says nothing.
         lines.append(
             f"{adopted} MCP credentials adopted into the encrypted store; " f"{conflicts} conflicts"
         )
@@ -9145,12 +9147,14 @@ def _mcp_server_shape(server: Mapping[str, Any]) -> str:
 def _repair_targets(document: Any, record: Any, server: Mapping[str, Any]) -> list[str]:
     """The active device members a server's reference names are granted to.
 
-    HTTP/SSE: the devices that ALREADY hold that server's ``mcp:<url>`` key — the
-    population the broker would admit, so a grant here is a widening of the same
-    authorisation rather than a new one. Stdio: the population ``step_provision``
-    provisions (active ``device`` members with drive/admin). The owner itself is
-    included when it is a holder/member; a grant to self is the document's normal
-    shape, not a special case.
+    HTTP/SSE: the devices that ALREADY hold that server's ``mcp:<url>`` key, so a
+    grant here WIDENS an existing authorisation rather than inventing one. Stdio:
+    every active device member. In BOTH cases the §1.3 credential-eligibility gate
+    still applies (``kind != pool`` and role drive/admin, the population
+    ``step_provision`` provisions): a ``read`` holder was approved to BORROW a
+    brokered access token, not to receive a class-2 value copy, and a pool member
+    declares no credentials at all. The owner itself is included when it passes
+    the same gate; a grant to self is the document's normal shape.
     """
     from local_operator.network.credentials.types import credential_key_for_mcp
 
@@ -9168,7 +9172,7 @@ def _repair_targets(document: Any, record: Any, server: Mapping[str, Any]) -> li
         member = record.member(device)
         if member is None or not member.active or str(member.kind) != "device":
             continue
-        if transport not in ("http", "sse") and str(member.role) not in ("drive", "admin"):
+        if str(member.role) not in ("drive", "admin"):
             continue
         if device not in targets:
             targets.append(device)
@@ -9313,7 +9317,11 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
                 [row for row in skipped_rows if row.get("server") == name]
             ),
         }
-        if shape == "oauth":
+        if shape == "oauth" and not key_rows:
+            # The note describes the mcp:<url> path only. An OAuth-shaped server
+            # that ALSO declares env/header refs received real copies, and saying
+            # "no copy" over a granted row would hide them (the human line returns
+            # early on any note).
             row["note"] = "brokered; no copy"
         elif not row["refs"]:
             row["note"] = "no referenced credentials"

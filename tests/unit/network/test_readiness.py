@@ -618,6 +618,43 @@ def test_stdio_reference_rows_answer_from_the_peers_ref_states() -> None:
     assert "set MISSING_TOKEN on cloud-node-1" in by_server["absent"]["remedies"][0]
 
 
+def test_a_stdio_server_with_only_literal_credentials_gets_an_adopt_row() -> None:
+    """The pre-fix state, now NAMED: a literal never travels until it is adopted.
+
+    The row is driven by ``literal_keys`` (names only), carries an empty literal
+    as nothing, and sends the operator to the owner-side adopt verb.
+    """
+    servers = {
+        "servers": [
+            {
+                "name": "gh",
+                "transport": "stdio",
+                "refs": [],
+                "literal_keys": [
+                    {"server": "gh", "field": "env", "key": "GITHUB_TOKEN", "has_value": True},
+                    {"server": "gh", "field": "env", "key": "EMPTY", "has_value": False},
+                ],
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+
+    rows = readiness.mcp_credential_rows(
+        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NO_CREDENTIAL
+    assert "literal values" in row["detail"]
+    assert "env.GITHUB_TOKEN" in row["detail"]
+    assert "EMPTY" not in row["detail"]
+    assert row["remedies"] == ["run lop network mcp credentials --adopt on cloud-node-1"]
+    assert row["observed"]["literal_keys"] == ["env.GITHUB_TOKEN"]
+
+
 def test_mcp_servers_fact_publishes_refs_and_literal_keys_for_every_transport(
     root: Path,
 ) -> None:
