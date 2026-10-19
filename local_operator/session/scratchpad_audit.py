@@ -89,7 +89,13 @@ class GitMarker:
 
     path: str
     kind: str  # "worktree", "repository" or "link"
+    #: The raw target the pointer names. Kept unmodified for ``--json``; the
+    #: TEXT row goes through :func:`pointer_display`, because a malformed
+    #: pointer can be multi-line and a row is one line (review m3).
     target: str = ""
+    #: ``""`` for a readable ``gitdir:`` pointer, otherwise what the file is:
+    #: ``"unreadable"`` or ``"not a gitdir pointer"``.
+    status: str = ""
 
 
 @dataclass
@@ -97,6 +103,9 @@ class PadAudit:
     """What one session's pad holds, and whether a policy may still take it."""
 
     session: str
+    #: The pad's absolute path, so an over-cap row can tell the operator where
+    #: to look (UX U1) without a second walk or a root the printer does not have.
+    path: str
     origin: str
     user_visible: bool
     bytes: int
@@ -110,6 +119,7 @@ class PadAudit:
     def as_dict(self) -> dict[str, object]:
         return {
             "session": self.session,
+            "path": self.path,
             "origin": self.origin,
             "user_visible": self.user_visible,
             "bytes": self.bytes,
@@ -127,7 +137,12 @@ class PadAudit:
                 for shape in self.shapes
             ],
             "git_markers": [
-                {"path": marker.path, "kind": marker.kind, "target": marker.target}
+                {
+                    "path": marker.path,
+                    "kind": marker.kind,
+                    "target": marker.target,
+                    "status": marker.status,
+                }
                 for marker in self.git_markers
             ],
         }
@@ -203,9 +218,9 @@ class _Walk:
             except OSError:
                 continue
             for entry in children:
-                self.entries += 1
-                if self.entries > AUDIT_MAX_ENTRIES:
+                if self.entries >= AUDIT_MAX_ENTRIES:
                     return False
+                self.entries += 1
                 try:
                     if entry.is_symlink():
                         self.total += self.count(entry.stat(follow_symlinks=False))
@@ -222,20 +237,47 @@ class _Walk:
         return True
 
 
-def _read_pointer(path: str) -> str:
-    """The target a ``.git`` FILE names, or ``""`` when it is unreadable.
+def _read_pointer(path: str) -> tuple[str, str]:
+    """``(raw target, status)`` for a ``.git`` FILE.
 
-    The gitdir line is ``gitdir: <path>``; the raw text is returned when the
-    file does not carry that prefix, because a malformed pointer is still
-    evidence and reporting nothing would hide it.
+    ``status`` is ``""`` for a readable ``gitdir: <path>`` pointer, else
+    ``"unreadable"`` (an OSError) or ``"not a gitdir pointer"`` (anything the
+    file holds instead — a malformed pointer is still evidence, so its raw text
+    is kept for ``--json`` rather than dropped; the TEXT row prints the status,
+    never the raw multi-line body; review round 1 m3).
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             text = handle.read(4096).strip()
     except OSError:
-        return ""
+        return "", "unreadable"
     prefix = "gitdir:"
-    return text[len(prefix) :].strip() if text.startswith(prefix) else text
+    if text.startswith(prefix):
+        target = text[len(prefix) :].strip()
+        if target:
+            return target, ""
+    return text, "not a gitdir pointer"
+
+
+def pointer_display(marker: GitMarker) -> str:
+    """The one-line TEXT value for a ``.git`` marker.
+
+    Control characters and newlines are stripped because the value is
+    interpolated into a single row: a malformed pointer measured in review
+    produced ``'not a pointer\nline two'`` inside one line. A readable target is
+    also length-capped here — the raw text stays available in ``--json`` — and
+    an empty target never renders as a bare ``→``.
+    """
+    if marker.status:
+        return f"({marker.status})"
+    cleaned = "".join(
+        " " if character in "\r\n\t" else character
+        for character in marker.target
+        if character.isprintable() or character in "\r\n\t"
+    ).strip()
+    if not cleaned:
+        return "(not a gitdir pointer)"
+    return cleaned if len(cleaned) <= 200 else cleaned[:197] + "..."
 
 
 def _link_target(path: str) -> str:
@@ -261,11 +303,11 @@ def _audit_pad(pad: Path, session: str, origin: str, user_visible: bool, cap: in
         except OSError:
             continue
         for entry in children:
-            walk.entries += 1
-            if walk.entries > AUDIT_MAX_ENTRIES:
+            if walk.entries >= AUDIT_MAX_ENTRIES:
                 walk.truncated = True
                 stack.clear()
                 break
+            walk.entries += 1
             name = entry.name
             relative = os.path.relpath(entry.path, pad)
             try:
@@ -304,9 +346,8 @@ def _audit_pad(pad: Path, session: str, origin: str, user_visible: bool, cap: in
                 info = entry.stat(follow_symlinks=False)
                 walk.total += walk.count(info)
                 if name == ".git":
-                    walk.git_markers.append(
-                        GitMarker(relative, "worktree", _read_pointer(entry.path))
-                    )
+                    pointer, status = _read_pointer(entry.path)
+                    walk.git_markers.append(GitMarker(relative, "worktree", pointer, status))
             except OSError:
                 # An entry that vanished or cannot be inspected contributes
                 # nothing; the audit reports what it could see, never a guess.
@@ -314,6 +355,7 @@ def _audit_pad(pad: Path, session: str, origin: str, user_visible: bool, cap: in
     shapes = tuple(sorted(walk.shapes, key=lambda shape: (-shape.bytes, shape.path)))
     return PadAudit(
         session=session,
+        path=os.fspath(pad),
         origin=origin,
         user_visible=user_visible,
         bytes=walk.total,

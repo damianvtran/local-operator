@@ -8282,12 +8282,13 @@ async def test_a_creating_command_is_refused_before_it_runs_on_an_over_cap_pad(
     )
 
     assert result.is_error is True
-    assert "refused before running" in result.text
-    assert f"{held:,} bytes" in result.text
-    assert f"{cap:,}-byte cap" in result.text
+    assert "Scratchpad over cap" in result.text
+    assert f"holds ≥{held:,} bytes, cap {cap:,} bytes" in result.text
     assert "session.scratchpad.max_bytes" in result.text
     assert "git worktree" in result.text
-    assert "did not run" in result.text
+    assert result.text.rstrip().endswith("The command did not run.")
+    # UX U3: the cause leads; the destination follows it.
+    assert result.text.index("Scratchpad over cap") < result.text.index(str(pad))
     assert not (pad / "build" / "sub").exists(), "the command must not have run"
 
 
@@ -8341,3 +8342,73 @@ def test_a_browser_screenshot_destination_under_the_pad_is_checked(tmp_path, mon
         "shot-outside-pad", "browser", str(tmp_path / "shot.png"), context, 16
     )
     assert outside is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        ('cd "{pad}" && mkdir cddir', "cddir"),
+        ('cd "{pad}" && cp bulk.dat copy.dat', "copy.dat"),
+        ('cd "{pad}" && touch newfile.txt', "newfile.txt"),
+        ('cd "$LOCAL_OPERATOR_SCRATCHPAD" && touch relvar.txt', "relvar.txt"),
+    ],
+)
+async def test_a_cd_into_the_pad_does_not_hide_a_creating_command(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """Review M1: ``cd "<pad>" && mkdir d`` was the ordinary idiom and the
+    pre-execution gate judged only absolute targets, so it ran on an over-cap
+    pad. The walk now carries a pad base and expands the two known spellings
+    before it runs.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-cd-refused", {"command": command.format(pad=pad)}, None, None, context
+    )
+
+    assert result.is_error is True, result.text
+    assert "Scratchpad over cap" in result.text
+    assert not (pad / created).exists(), "the command must not have run"
+
+
+@pytest.mark.asyncio
+async def test_a_cd_shrink_and_no_growth_operations_still_run(tmp_path, monkeypatch) -> None:
+    """The recovery path after ``cd``, plus the two no-growth exemptions from
+    review m4: a rename wholly inside the pad and a ``mkdir -p`` whose target
+    already exists add no bytes, so refusing them was a false positive.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+    build = pad / "build"
+    build.mkdir()
+    (build / "out.o").write_bytes(b"x" * 128)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    def run(name: str, command: str):
+        return tools["bash"].execute(name, {"command": command}, None, None, context)
+
+    removed = await run("bash-pad-cd-rm", f'cd "{pad}" && rm -rf build')
+    assert removed.is_error is False, removed.text
+    assert not build.exists()
+
+    renamed = await run("bash-pad-mv", f'mv "{pad}/bulk.dat" "{pad}/bulk2.dat"')
+    assert renamed.is_error is False, renamed.text
+    assert (pad / "bulk2.dat").exists() and not (pad / "bulk.dat").exists()
+
+    noop_pad = await run("bash-pad-mkdir-self", f'mkdir -p "{pad}"')
+    assert noop_pad.is_error is False, noop_pad.text
+
+    (pad / "build").mkdir()
+    noop_child = await run("bash-pad-mkdir-existing", f'mkdir -p "{pad}/build"')
+    assert noop_child.is_error is False, noop_child.text

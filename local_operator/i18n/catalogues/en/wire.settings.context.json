@@ -75,8 +75,8 @@
   "wire.settings.session_scratchpad_max_bytes.label": {
     "role": "numeric setting label",
     "tone": "plain",
-    "maxCells": 24,
-    "note": "Row label; 24 cells fits the settings page's label budget. It is a ceiling on total bytes one session's scratchpad may hold, not a per-file limit."
+    "maxCells": 30,
+    "note": "Row label; 30 cells fits the settings page's label budget. It names the MAXIMUM bytes one session's scratchpad may hold (not the current size) and carries the unit because the desktop collapses help behind a disclosure (design D1)."
   },
   "wire.settings.session_scratchpad_max_bytes.help": {
     "role": "settings help text",

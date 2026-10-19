@@ -7660,7 +7660,13 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
         return ""
     if not _command_names_pad(command, pad):
         return ""
-    for candidate, sources in _bash_created_entries(command):
+    # The pad walk, not the plain one: a relative operand after
+    # ``cd "<pad>"`` is pad-relative (review round 1 M1), and the two known
+    # spellings are expanded so a quoted ``$LOCAL_OPERATOR_SCRATCHPAD`` names
+    # the same target as its literal path.
+    for candidate, sources in _bash_created_entries(
+        _expand_scratchpad_spellings(command, pad), pad=pad
+    ):
         target = _pad_target(candidate, pad)
         if target is None:
             continue
@@ -7812,10 +7818,27 @@ def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
     candidate, and only when the bounded walk says the pad is over
     ``scratchpad_budget_bytes()``. ``ls``, ``rm``, ``du`` and every other read
     or shrink still run — they are the documented way back under the cap, and a
-    gate that refused them would strand the pad's owner. The sentence names the
-    held bytes, the cap and all three remedies, because a refusal that only
-    says no pushes the work into the user's working directory — the littering
-    the pad exists to prevent.
+    gate that refused them would strand the pad's owner. Two no-growth shapes
+    are exempt so the gate refuses only commands that ADD bytes: an ``mv`` whose
+    sources and destination are all inside the pad (a rename), and a
+    ``mkdir``/``touch`` target that already exists as a directory. The pad's two
+    known spellings are expanded before the walk, and a ``cd``/``pushd`` into
+    the pad makes the relative creating operands that follow pad-relative
+    (review round 1 M1: ``cd "<pad>" && mkdir d`` was the bypass).
+
+    KNOWN MISS, stated rather than papered over: a destination assembled from an
+    arbitrary shell variable (``D="$PAD/x"; mkdir "$D"``) is not resolved before
+    the child exists, so this gate cannot see it; the post-hoc pad audit still
+    reports what it left behind. A ``cd`` inside a command substitution, or in a
+    construct the tokenizer cannot follow, is likewise outside the walk's model.
+    Do not read this as complete shell coverage — it closes the ordinary idioms,
+    and the after-the-fact line remains the backstop.
+
+    The sentence leads with the CAUSE and the cap before the destination (UX U3):
+    a tool card's head can otherwise spend its useful width on a long absolute
+    path before reaching why the command was stopped. It names held bytes, the
+    cap, the key, the first destination (or ``first of N``), all three remedies,
+    and closes with "The command did not run."
 
     Returns the refusal sentence, or ``None`` to run the command.
     """
@@ -7827,7 +7850,8 @@ def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
     if not _command_names_pad(command, pad):
         return None
     created: list[Path] = []
-    for candidate, _sources in _bash_created_entries(command):
+    expanded = _expand_scratchpad_spellings(command, pad)
+    for candidate, _sources in _bash_created_entries(expanded, pad=pad):
         target = _pad_target(candidate, pad)
         if target is not None and scratchpad_contains(target, pad):
             created.append(target)
@@ -7837,13 +7861,15 @@ def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
     held, over_budget, _too_wide = scratchpad_footprint(pad, budget)
     if not over_budget:
         return None
+    first = os.fspath(created[0])
+    more = f" (first of {len(created)} destinations)" if len(created) > 1 else ""
     return (
-        f"[scratch] refused before running: this command creates "
-        f"{os.fspath(created[0])} under the session scratchpad, which already "
-        f"holds ≥{held:,} bytes — over its {budget:,}-byte cap "
-        "(session.scratchpad.max_bytes). Move build output to a git worktree (or "
-        "another checkout), delete what is no longer needed with rm, or raise "
-        "session.scratchpad.max_bytes, then retry. The command did not run."
+        f"[scratch] Scratchpad over cap: holds ≥{held:,} bytes, cap {budget:,} bytes "
+        f"(session.scratchpad.max_bytes). This command would create {first}{more} "
+        "under the pad. Move build output to a git worktree (or another checkout), "
+        "delete what is no longer needed with rm, or raise "
+        "session.scratchpad.max_bytes in /settings → Scratchpad, then retry. "
+        "The command did not run."
     )
 
 
@@ -7960,7 +7986,9 @@ def _pad_target(candidate: str, pad: Path) -> Path | None:
         return None
 
 
-def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]:
+def _bash_created_entries(
+    command: str, *, pad: Path | None = None
+) -> Iterator[tuple[str, tuple[str, ...]]]:
     """The candidate paths ``command`` creates, in the order the shell meets
     them, each with the SOURCE operands a copy or move reads from.
 
@@ -7978,24 +8006,71 @@ def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]
     the same candidate stream it always had — the temp arm's targets cannot be
     derived from a source this way — so the richer shape exists for the pad
     audit alone.
+
+    ``pad`` turns on the PAD walk's extra context, and only that caller passes
+    it: ``cd``/``pushd`` operands update a base directory so a relative creating
+    operand after ``cd "<pad>"`` is judged as pad-relative (review round 1 M1 —
+    the idiom was the bypass), the base resets on a ``cd`` elsewhere or a
+    subshell/group boundary the walk cannot follow, and two no-growth shapes are
+    skipped: an ``mv`` whose sources and destination are all inside the pad (a
+    rename), and a ``mkdir``/``touch`` target that already exists as a directory
+    (the command adds no bytes). The exemptions live here rather than in the
+    caller so the post-hoc shape audit and the pre-execution gate agree about
+    what a command created.
     """
     tokens = _bash_tokens(_strip_heredoc_bodies(command))
     index = 0
     at_command = True
+    base: Path | None = None
+
+    def resolved(candidate: str) -> str:
+        """``candidate`` as the shell would resolve it against ``base``.
+
+        Only relative spellings are joined: an absolute path, a home/temp
+        spelling and a scheme are already what they are, and every one of them
+        reaches :func:`_pad_target` unchanged.
+        """
+        if pad is None or base is None:
+            return candidate
+        if not candidate or candidate.startswith(("/", "~", "$")) or "://" in candidate:
+            return candidate
+        return str(base / candidate)
+
     while index < len(tokens):
         kind, text = tokens[index]
         index += 1
         if kind == "redir":
             if index < len(tokens) and tokens[index][0] == "word":
-                yield tokens[index][1], ()
+                yield resolved(tokens[index][1]), ()
                 index += 1
             continue
         if kind == "op":
+            if pad is not None and text == "(":
+                # A subshell cannot be tracked: a ``cd`` inside it must not leak
+                # into the commands that follow the closing parenthesis.
+                base = None
             at_command = True
             continue
         if not at_command:
             continue
         if _ASSIGNMENT.match(text):
+            continue
+        name = text.rsplit("/", 1)[-1]
+        if pad is not None and name in ("cd", "pushd"):
+            operands: list[str] = []
+            while index < len(tokens) and tokens[index][0] == "word":
+                word = tokens[index][1]
+                index += 1
+                if not word.startswith("-"):
+                    operands.append(word)
+            base = _pad_cd_base(operands[0] if operands else None, base, pad)
+            at_command = True
+            continue
+        if pad is not None and text in ("{", "}"):
+            # A brace group is a boundary the token walk cannot open/close with
+            # certainty; reset rather than carry a base across it.
+            base = None
+            at_command = True
             continue
         prefix = _COMMAND_PREFIXES.get(text)
         if prefix is not None:
@@ -8005,26 +8080,90 @@ def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]
             # A stray flag in command position names no command, so nothing behind
             # it is a creation this walk can attribute.
             continue
-        mode = _CREATING_COMMANDS.get(text.rsplit("/", 1)[-1])
+        mode = _CREATING_COMMANDS.get(name)
         if mode is None:
             at_command = False
             continue
-        operands: list[str] = []
+        operands = []
         while index < len(tokens) and tokens[index][0] == "word":
             if not tokens[index][1].startswith("-"):
                 operands.append(tokens[index][1])
             index += 1
         if mode == "last":
             if operands:
-                yield operands[-1], tuple(operands[:-1])
+                destination = resolved(operands[-1])
+                sources = tuple(resolved(source) for source in operands[:-1])
+                if pad is not None and name == "mv" and _pad_only_rename(destination, sources, pad):
+                    continue
+                yield destination, sources
         elif mode == "template":
             for operand in operands:
                 if "X" in operand:
-                    yield operand, ()
+                    yield resolved(operand), ()
         else:
             for operand in operands:
-                yield operand, ()
+                target = resolved(operand)
+                if (
+                    pad is not None
+                    and name in ("mkdir", "touch")
+                    and _pad_existing_dir(target, pad)
+                ):
+                    continue
+                yield target, ()
         at_command = False
+
+
+def _pad_cd_base(operand: str | None, base: Path | None, pad: Path) -> Path | None:
+    """The pad-relative base after a ``cd``/``pushd``, or ``None``.
+
+    ``None`` means "not inside the pad": the walk must not carry a base across a
+    command that left it. A relative operand resolves against the CURRENT base
+    (``cd sub`` twice), an absolute one stands alone, and a destination that is
+    the pad or below it becomes the new base. Anything unresolvable is ``None``
+    — the safe direction, because a base this walk cannot prove is not used to
+    judge a relative creation.
+    """
+    if operand is None:
+        return None  # ``cd`` with no operand goes home; not this pad
+    target = _pad_target(operand, pad)
+    if target is None and base is not None and not operand.startswith(("/", "~", "$")):
+        target = _pad_target(str(base / operand), pad)
+    if target is not None and scratchpad_contains(target, pad):
+        return target
+    return None
+
+
+def _pad_existing_dir(candidate: str, pad: Path) -> bool:
+    """Whether ``candidate`` is already a directory inside the pad.
+
+    ``mkdir -p <pad>`` and ``mkdir -p <pad>/build`` (when it exists) add no
+    bytes; refusing them taught the operator the gate fires on no-ops.
+    """
+    target = _pad_target(candidate, pad)
+    if target is None or not scratchpad_contains(target, pad):
+        return False
+    try:
+        return target.is_dir()
+    except OSError:
+        return False
+
+
+def _pad_only_rename(destination: str, sources: tuple[str, ...], pad: Path) -> bool:
+    """Whether ``mv`` only renames inside the pad, adding no bytes.
+
+    A rename changes names, not the pad's total; refusing it would be the
+    conservatism the pre-execution gate's docstring promises not to apply.
+    """
+    target = _pad_target(destination, pad)
+    if target is None or not scratchpad_contains(target, pad):
+        return False
+    if not sources:
+        return False
+    for source in sources:
+        source_target = _pad_target(source, pad)
+        if source_target is None or not scratchpad_contains(source_target, pad):
+            return False
+    return True
 
 
 def _bash_created_paths(command: str) -> Iterator[str]:
