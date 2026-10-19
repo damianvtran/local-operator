@@ -65,7 +65,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import httpx
 
@@ -1435,6 +1435,289 @@ class TeamBridgeClient:
         if limit is not None:
             params["limit"] = int(limit)
         return await self._send("GET", "/messaging/decisions", params=params, access=access)
+
+
+    # -- conversations ------------------------------------------------------
+    #
+    # The conversation domain (docs/TEAM-BRIDGE-CONVERSATIONS.md): DMs, groups
+    # and channels with human and agent participants. These are thin transport:
+    # every rule (membership, human-only, joined_seq, screening fetch/admit,
+    # unread) lives on the server, and this client must not re-derive any of
+    # it. The desktop routes call these methods and pass the answer through
+    # WITHOUT persisting a body: the conversation store has no local body
+    # cache, exactly like the pair lane.
+
+    async def conversations(
+        self,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One page of the caller's conversations, newest activity first."""
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before:
+            params["before"] = before
+        return await self._send("GET", "/messaging/conversations", params=params or None, access=access)
+
+    async def conversation(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One conversation with its members and the caller's read state."""
+
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        return await self._send(
+            "GET", f"/messaging/conversations/{conversation_id}", params=params, access=access
+        )
+
+    async def create_conversation(
+        self, body: Mapping[str, Any], *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Create (or find, for a dm) a conversation. The body is the wire shape."""
+
+        return await self._send("POST", "/messaging/conversations", body=body, access=access)
+
+    async def conversation_lifecycle(
+        self, conversation_id: str, action: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``."""
+
+        if action not in ("archive", "unarchive"):
+            raise ValueError("action must be 'archive' or 'unarchive'")
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/{action}", access=access
+        )
+
+    async def conversation_members(
+        self,
+        conversation_id: str,
+        members: Sequence[Mapping[str, Any]],
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Invite members (humans become invited; agents become invited until consent)."""
+
+        body: dict[str, Any] = {"members": list(members)}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/members", body=body, access=access
+        )
+
+    async def conversation_remove_member(
+        self, conversation_id: str, account_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Remove a human member. Owner-only; succession is the server's rule."""
+
+        return await self._send(
+            "DELETE",
+            f"/messaging/conversations/{conversation_id}/members/{account_id}",
+            access=access,
+        )
+
+    async def conversation_join(
+        self, conversation_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Accept an invitation, or self-join a tenant-visible channel."""
+
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/join", access=access
+        )
+
+    async def conversation_leave(
+        self, conversation_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Leave. Re-entry requires a fresh invitation (the leave/re-add boundary)."""
+
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/leave", access=access
+        )
+
+    async def conversation_consent(
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        decision: str,
+        consent_version: str,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Accept or decline an AGENT invitation, as the agent's owner.
+
+        This is the only path that activates an agent member, and the version
+        is the server-served ``bridge_agent_participation_v1`` — never the
+        agent-messages consent.
+        """
+
+        body: dict[str, Any] = {"decision": decision, "consent_version": consent_version}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
+            body=body,
+            access=access,
+        )
+
+    async def conversation_join(
+        self, conversation_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Accept a human invitation, or self-join a tenant-visible channel."""
+
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/join", access=access
+        )
+
+    async def conversation_leave(
+        self, conversation_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """Leave. Reads stay allowed under a kill; leaving is not a flow expansion."""
+
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/leave", access=access
+        )
+
+    async def conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+        endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One history page. For an agent member, bodies appear only after admit."""
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        return await self._send(
+            "GET",
+            f"/messaging/conversations/{conversation_id}/messages",
+            params=params or None,
+            access=access,
+        )
+
+    async def conversation_send(
+        self,
+        conversation_id: str,
+        *,
+        client_ref: str,
+        text: str,
+        tenant_id: str | None = None,
+        agent_label: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Append one message. ``client_ref`` is required and idempotent."""
+
+        body: dict[str, Any] = {"client_ref": client_ref, "body": text}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        if agent_label:
+            body["agent_label"] = agent_label
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/messages", body=body, access=access
+        )
+
+    async def conversation_body(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str | None = None,
+        endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The classification fetch for an agent member: body + binding hash."""
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        return await self._send(
+            "GET",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/body",
+            params=params or None,
+            access=access,
+        )
+
+    async def conversation_admit(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        verdict: str,
+        body_hash: str,
+        tenant_id: str | None = None,
+        endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Record the screening verdict. ``reject`` is terminal."""
+
+        body: dict[str, Any] = {"verdict": verdict, "body_hash": body_hash}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        params = {"endpoint_id": endpoint_id} if endpoint_id else None
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/admit",
+            params=params,
+            body=body,
+            access=access,
+        )
+
+    async def conversation_read(
+        self,
+        conversation_id: str,
+        *,
+        seq: int | None = None,
+        muted: bool | None = None,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Advance the cursor and/or mute. A stale seq never moves the cursor back."""
+
+        body: dict[str, Any] = {}
+        if seq is not None:
+            body["seq"] = int(seq)
+        if muted is not None:
+            body["muted"] = bool(muted)
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/read", body=body, access=access
+        )
+
+    async def unread(
+        self, *, tenant_id: str | None = None, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """The ONE badge read: per-conversation counts + an unmuted total."""
+
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        return await self._send("GET", "/messaging/unread", params=params, access=access)
 
 
 def _require_body_within(body: Mapping[str, Any], cap: int) -> None:
