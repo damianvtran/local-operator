@@ -1694,16 +1694,19 @@ class TeamBridgeClient:
         *,
         seq: int | None = None,
         muted: bool | None = None,
+        notify: Literal["all", "mention", "mute"] | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """Advance the cursor and/or mute. A stale seq never moves the cursor back."""
+        """Advance the cursor and/or set the notification policy."""
 
         body: dict[str, Any] = {}
         if seq is not None:
             body["seq"] = int(seq)
         if muted is not None:
             body["muted"] = bool(muted)
+        if notify is not None:
+            body["notify"] = notify
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(

@@ -1016,11 +1016,17 @@ class ConversationReadIn(_Strict):
     tenant_id: str | None = Field(default=None, max_length=128)
     seq: int | None = Field(default=None, ge=0)
     muted: bool | None = None
+    #: The per-member notification policy (agent-server #148). `muted` is the
+    #: legacy spelling of the same fact; the server refuses both at once, so the
+    #: route refuses the pair here rather than forwarding an ambiguous write.
+    notify: Literal["all", "mention", "mute"] | None = None
 
     @model_validator(mode="after")
     def _something_to_do(self) -> "ConversationReadIn":
-        if self.seq is None and self.muted is None:
-            raise ValueError("a read write needs seq, muted, or both")
+        if self.seq is None and self.muted is None and self.notify is None:
+            raise ValueError("a read write needs seq, muted, or notify")
+        if self.muted is not None and self.notify is not None:
+            raise ValueError("muted and notify cannot both be set")
         return self
 
 
@@ -1496,7 +1502,11 @@ async def conversation_read(
     return reply(
         await _conversation_reply(
             client.conversation_read(
-                conversation_id, seq=body.seq, muted=body.muted, tenant_id=body.tenant_id
+                conversation_id,
+                seq=body.seq,
+                muted=body.muted,
+                notify=body.notify,
+                tenant_id=body.tenant_id,
             )
         )
     )
