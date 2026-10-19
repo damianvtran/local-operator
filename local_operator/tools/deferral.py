@@ -92,6 +92,14 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # and the tracked note exist to keep the tool findable, and the
         # deferral PR's A/B measurement ships as the evidence.
         "code_requests",
+        # ``library`` is deferred on the start-context budget's arithmetic: the
+        # tool is new and its published schema + description is 1,379 chars
+        # (514 billed tokens) on a clean arm whose base already sits 115 tokens
+        # under the 31,000 ceiling. The tool stays in the inventory, resolves,
+        # validates and answers ``tool://library``; the first read publishes
+        # its schema. This is the only way to keep every field while passing
+        # the unraised ceiling.
+        "library",
         # ``no_reply`` joins on the design's own reasoning (docs/design/
         # quiet-turns.md §4): the call has NO arguments, so no schema is needed
         # to form it, and calls to tools absent from the array were measured
@@ -126,6 +134,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "read_variable": "read one variable",
     "list_variables": "list variable names",
     "code_requests": "PR/MR status, review rounds, CI",
+    "library": "long-term asset catalog",
     "no_reply": "end a turn silently",
 }
 

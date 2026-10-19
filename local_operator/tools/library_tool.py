@@ -4,6 +4,14 @@ Shape mirrors ``project``: ONE op-based tool (``stats | list | get | update |
 tags | conventions``) rather than six tools, because the provider tools array
 rides in the prompt-cache prefix and a Library operation is rare per turn.
 
+WIRE FOOTPRINT. The schema is DEFERRED (``tools/deferral.py``): the tool stays
+in every session's inventory, validates and answers ``tool://library`` exactly
+as before, but its schema is withheld from the provider array until the first
+``tool://library`` read. The published form measured 1,379 chars (514 billed
+tokens) and the clean start-context arm had only 115 tokens of headroom under
+the unraised 31,000 ceiling; deferral removes 1,354 chars and is the only way
+to keep every field rather than deleting op arguments.
+
 APPROVAL. Read ops are open. Writes here are LOCAL, REVERSIBLE METADATA — a
 name, a description, a tag assignment, a convention row — and never touch a
 user file, so the tool as a whole is read-tier. That is the design's §5.1
