@@ -2734,6 +2734,40 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
     ),
+    # The Library VIEW's flagged calls are heap/Textual operations, not
+    # filesystem ones: the viewport cursor is an in-memory integer, the
+    # metadata row's ``remove`` is a list.remove, and closing the view removes
+    # a mounted Textual widget. None receives a Path or a config/session dir.
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_down",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_down",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView._row_meta",
+        "<path>.remove",
+        "list.remove of a metadata part; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_library_view",
+        "<path>.remove",
+        "Textual widget.remove() of the mounted library view; not a filesystem removal",
+    ),
     (
         "local_operator/evaluation/session_arm.py::declare_action_server",
         "<path>.replace",
