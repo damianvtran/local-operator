@@ -827,11 +827,31 @@ def _spill(text: str, tool_name: str, context: ToolContext | None) -> SpillMeta 
     truncation, which is exactly the behaviour that shipped before this module
     existed — losing expansion is an inconvenience, failing the tool call is a
     bug.
+
+    Span markers are stripped BEFORE the write: the per-session token exists
+    only to protect one rendered result, and a spill file must not preserve it
+    for a later read (LOH-28). A context with no capable store is unchanged.
     """
+    store = getattr(context, "variables", None)
+    spans: list[tuple[int, int, int]] | None = None
+    strip_ranges = cast(
+        Callable[[str], tuple[str, list[tuple[int, int, int]]]] | None,
+        getattr(store, "strip_identifier_spans_with_ranges", None),
+    )
+    if callable(strip_ranges):
+        text, spans = strip_ranges(text)
+    else:
+        strip = cast(
+            Callable[[str], str] | None,
+            getattr(store, "strip_identifier_spans", None),
+        )
+        if callable(strip):
+            text = strip(text)
     return get_store().write(
         text,
         tool_name=tool_name,
         session_id=(context.session_id if context else "") or "",
+        identifier_spans=spans,
     )
 
 
@@ -5870,7 +5890,61 @@ def _capped_list_body(
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
 
 
-def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolResult:
+def _spill_span_map(meta: Any) -> dict[int, list[tuple[int, int]]]:
+    """The sidecar's identifier ranges, grouped by 1-based line."""
+    by_line: dict[int, list[tuple[int, int]]] = {}
+    for line_no, start, end in getattr(meta, "identifier_spans", ()) or ():
+        by_line.setdefault(line_no, []).append((start, end))
+    return by_line
+
+
+def _remark_spill_line(
+    line: str,
+    line_number: int,
+    spans: Mapping[int, list[tuple[int, int]]],
+    context: ToolContext | None,
+    *,
+    window_start: int = 0,
+    window_end: int | None = None,
+    offset: int = 0,
+) -> str:
+    """Re-mint this store's span around stored identifier ranges (R3-2).
+
+    The spill keeps PLAIN text and integer positions, never a marker or
+    token. On a read-back the positions become spans again so the read
+    result's redaction pass leaves the identifier readable; a forged or
+    stale range cannot do more than mark bytes that are already in the
+    plain text, and a missing store leaves the line untouched.
+
+    WINDOW (R4-2): ``line`` may be a slice of the stored line. Only ranges
+    FULLY inside ``[window_start, window_end)`` are marked, mapped through
+    ``offset`` (the slice's decoration). A range cut by the window is
+    dropped rather than re-minted, so no token prefix or U+FFFD can reach
+    a search result; the cut identifier is then masked by redaction.
+    """
+    ranges = spans.get(line_number)
+    if not ranges:
+        return line
+    span = cast(
+        Callable[[str], str] | None,
+        getattr(getattr(context, "variables", None), "identifier_span", None),
+    )
+    if not callable(span):
+        return line
+    limit = len(line) - offset if window_end is None else window_end
+    for start, end in sorted(ranges, reverse=True):
+        if start < window_start or end > limit:
+            continue
+        begin = offset + start - window_start
+        finish = offset + end - window_start
+        if 0 <= begin <= finish <= len(line):
+            line = line[:begin] + span(line[begin:finish]) + line[finish:]
+    return line
+
+
+def _read_spill(
+    tool_call_id: str, target: str, range_spec: str | None, context: ToolContext | None = None
+) -> ToolResult:
     """Serve a ``spill://`` handle: a line range, or a regex search inside it.
 
     Routed here BEFORE the host's internal-URL resolver rather than registered
@@ -5906,7 +5980,7 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
         )
 
     if ref.query:
-        return _search_spill(tool_call_id, store, ref, meta, range_spec)
+        return _search_spill(tool_call_id, store, ref, meta, range_spec, context)
 
     start, end = 1, None
     if range_spec:
@@ -5918,6 +5992,11 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if result is None:
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     selected, total = result
+    span_map = _spill_span_map(meta)
+    selected = [
+        _remark_spill_line(line, start + offset, span_map, context)
+        for offset, line in enumerate(selected)
+    ]
     details: dict[str, Any] = {"url": ref.handle, "range": range_spec or "full"}
     if not selected:
         return _text(
@@ -5967,20 +6046,23 @@ _SPILL_MATCH_CONTEXT_CHARS = 200
 _SPILL_MATCH_LINE_CHARS = 2 * _SPILL_MATCH_CONTEXT_CHARS + 100
 
 
-def _spill_match_window(line: str, regex: re.Pattern[str]) -> str:
-    """``line``, or a window around its first hit when the line is very long.
+def _spill_match_window(line: str, regex: re.Pattern[str]) -> tuple[str, int, int, int]:
+    """``(window_text, start, end, lead)`` around the first hit of a long line.
 
     The window says how much it dropped on each side, so the model knows the
     line continues and can read the whole line with a ``range`` on its number.
+    ``start``/``end`` are offsets in the STORED line; ``lead`` is the length
+    of the decoration prepended to the slice, so an identifier range inside
+    the slice maps to ``start - window_start + lead``.
     """
     if len(line) <= _SPILL_MATCH_LINE_CHARS:
-        return line
+        return line, 0, len(line), 0
     hit = regex.search(line)
     start = max((hit.start() if hit else 0) - _SPILL_MATCH_CONTEXT_CHARS, 0)
     end = min((hit.end() if hit else 0) + _SPILL_MATCH_CONTEXT_CHARS, len(line))
     before = f"[\u2026{start} chars] " if start else ""
     after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
-    return f"{before}{line[start:end]}{after}"
+    return f"{before}{line[start:end]}{after}", start, end, len(before)
 
 
 #: The most matches ONE ``?q=`` call will ask the store to materialize. A page
@@ -5997,6 +6079,7 @@ def _search_spill(
     ref: SpillRef,
     meta: SpillMeta,
     range_spec: str | None,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     """``?q=<regex>`` over one spilled output: line numbers, then a range.
 
@@ -6095,8 +6178,19 @@ def _search_spill(
     regex = re.compile(ref.query)
     rows: list[str] = []
     used = 0
+    span_map = _spill_span_map(meta)
     for number, line in matches:
-        row = f"{number:>{width}}| {_spill_match_window(line, regex)}"
+        window, window_start, window_end, lead = _spill_match_window(line, regex)
+        window = _remark_spill_line(
+            window,
+            number,
+            span_map,
+            context,
+            window_start=window_start,
+            window_end=window_end,
+            offset=lead,
+        )
+        row = f"{number:>{width}}| {window}"
         if rows and used + len(row) + 1 > READ_OUTPUT_LIMIT_CHARS:
             break
         rows.append(row)
@@ -6620,7 +6714,7 @@ async def execute_read(
     # handle is that it answers a RANGE. Checked first so a host that also
     # claims 'spill://' cannot shadow the expansion path a footer promised.
     if target.startswith(SPILL_SCHEME):
-        return _read_spill(tool_call_id, target, params.range)
+        return _read_spill(tool_call_id, target, params.range, context)
 
     # ``read https://…`` is sugar for a web fetch: it delegates to the SAME
     # engine web_fetch uses, returning the same bounded preview + spill handle,
@@ -14971,7 +15065,9 @@ async def execute_send(
         # (`session=`, and `target=` when the needle is a full id) are
         # covered; every other error form returns None before any read; see
         # _peer_holder_hint.
-        hint = await _peer_holder_hint(params.session or "", params.target or "", error or "")
+        hint = await _peer_holder_hint(
+            params.session or "", params.target or "", error or "", context
+        )
         if hint:
             error = hint
         return _error(tool_call_id, "send", error or "no target resolved")
@@ -15065,7 +15161,8 @@ async def execute_send(
         # unchanged — no acknowledged result is NOT an undelivered message — so
         # this must never become the confident arm.
         target = (
-            f"{record.conversation_name or record.session_id} (pid {record.pid})"
+            f"{identifier_text(context, str(record.conversation_name or record.session_id))} "
+            f"(pid {record.pid})"
             if record is not None
             else f"{cold_session_id} (not running)"
         )
@@ -16228,7 +16325,7 @@ async def _sessions_target(
     # THE PEER HINT: the exact-id miss may name a session a PEER holds — in
     # either spelling, `session=` or a full-id `target=`; every other error
     # form is untouched (see _peer_holder_hint).
-    hint = await _peer_holder_hint(params.session or "", params.target or "", error or "")
+    hint = await _peer_holder_hint(params.session or "", params.target or "", error or "", context)
     if hint:
         error = hint
     return _SessionsTarget(None, "", [], False, error or "no session resolved")
@@ -16283,7 +16380,7 @@ _FULL_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _TARGET_MISS_TAIL = "(searched live and stored sessions)"
 
 
-def _peer_holder_sentence(session_id: str) -> str | None:
+def _peer_holder_sentence(session_id: str, context: ToolContext | None = None) -> str | None:
     """The sentence naming the peer that holds ``session_id``, else ``None``.
 
     Blocking (a cache read, and on a miss one bounded relay fan-out): call
@@ -16330,10 +16427,15 @@ def _peer_holder_sentence(session_id: str) -> str | None:
     if row is None or not row.is_remote or not row.owner_device:
         return None
     device = row.owner_device_name or row.owner_device
-    return f"`{session_id}` is held by {device} — pass `peer={device}`"
+    # Identifier field: the session id the caller must pass back.
+    return (
+        f"`{identifier_text(context, session_id)}` is held by {device} — " f"pass `peer={device}`"
+    )
 
 
-async def _peer_holder_hint(session_id: str, target: str, error: str) -> str | None:
+async def _peer_holder_hint(
+    session_id: str, target: str, error: str, context: ToolContext | None = None
+) -> str | None:
     """``_peer_holder_sentence`` for an exact-id miss refusal, else ``None``.
 
     TWO SPELLINGS of one exact id reach the hint, and both mean "this id,
@@ -16361,7 +16463,7 @@ async def _peer_holder_hint(session_id: str, target: str, error: str) -> str | N
         needle = target.strip()
         if not _FULL_ID_RE.match(needle) or not error.endswith(_TARGET_MISS_TAIL):
             return None
-    return await asyncio.to_thread(_peer_holder_sentence, needle)
+    return await asyncio.to_thread(_peer_holder_sentence, needle, context)
 
 
 def _sessions_candidates_text(target: _SessionsTarget) -> str:
@@ -16473,14 +16575,18 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     return extras
 
 
-def _session_row_brief(row: Mapping[str, Any]) -> str:
+def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = None) -> str:
     """One lean listing line: the fields a caller acts on. The full published
-    row rides in ``details``, which costs no prompt tokens."""
+    row rides in ``details``, which costs no prompt tokens.
+
+    Identifier fields: the conversation title and session id are marked as
+    spans so redaction leaves them readable; neither is a credential.
+    """
     state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     bits = [f"[{state}] {name}"]
     if row.get("session_id"):
-        bits.append(f"session {row['session_id']}")
+        bits.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -16630,7 +16736,7 @@ async def _sessions_list(
     }
     if notes:
         details["notes"] = notes
-    lines: list[str] = [_session_row_brief(row) for row in shown]
+    lines: list[str] = [_session_row_brief(row, context) for row in shown]
     if len(deduped) > len(shown):
         if scope == "local":
             lines.append(
@@ -16693,13 +16799,16 @@ async def _sessions_list_query(
             row["pid"] = entry[0].pid
             row["model_label"] = entry[0].model_label
         rows.append(row)
-        name = session_row.name or "(unnamed)"
+        # Identifier fields: the title and id this search row prints are names
+        # a caller quotes back; both are marked spans, not credentials.
+        name = identifier_text(context, session_row.name or "(unnamed)")
+        session_id = identifier_text(context, session_row.id)
         if entry:
-            lines.append(f"- [live] {name}, session {session_row.id}, pid {entry[0].pid}")
+            lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}")
         else:
             age = max(0.0, time.time() - float(session_row.mtime or 0.0))
             age_text = format_duration(int(age * 1000))
-            lines.append(f"- [stored] {name}, session {session_row.id}, last active {age_text} ago")
+            lines.append(f"- [stored] {name}, session {session_id}, last active {age_text} ago")
     details: dict[str, Any] = {
         "op": "list",
         "query": params.query,
@@ -16720,7 +16829,7 @@ async def _sessions_list_query(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
-def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
+def _sessions_facts_line(extras: Mapping[str, Any], context: ToolContext | None = None) -> str:
     """The durable-facts line every ``info`` text ends with.
 
     Shared by the row-backed and the disk-only bodies so the two cannot drift
@@ -16733,11 +16842,13 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
     ]
     opener = extras.get("opened_by")
     if opener:
-        bits = [str(opener.get("agent") or "?")]
+        # Identifier fields: agent/profile name, its label and the opener
+        # session id are names a caller quotes back.
+        bits = [identifier_text(context, str(opener.get("agent") or "?"))]
         if opener.get("label"):
-            bits.append(f"label {opener['label']!r}")
+            bits.append(f"label {identifier_text(context, repr(opener['label']))}")
         if opener.get("session"):
-            bits.append(f"session {opener['session']}")
+            bits.append(f"session {identifier_text(context, str(opener['session']))}")
         second.append("opened by " + ", ".join(bits))
     if extras.get("tags"):
         second.append("tags: " + ", ".join(extras["tags"]))
@@ -16748,7 +16859,9 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
     return "; ".join(second)
 
 
-def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any]) -> str:
+def _sessions_disk_only_body(
+    facts: _SessionsDiskFacts, extras: Mapping[str, Any], context: ToolContext | None = None
+) -> str:
     """The ``info`` text when no listing row describes the session.
 
     A stored directory can be absent from a listing scan for four reasons,
@@ -16762,7 +16875,9 @@ def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any
     the sentence and the scan cannot disagree. The per-row reads need only
     the id, which is why the answer can be composed here at all.
     """
-    name = facts.name or "(unnamed)"
+    # Identifier field: the stored title is a name the caller reads; it is
+    # marked as a span so redaction leaves it readable.
+    name = identifier_text(context, facts.name or "(unnamed)")
     directory = str(extras.get("session_dir") or "")
     resumable = True
     if extras.get("sidebar_visibility") == "hidden":
@@ -16785,16 +16900,22 @@ def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any
     first = f'"{name}" — stored, {why}'
     if resumable:
         first += "; it can still be resumed by its exact session id"
-    return first + "\n" + _sessions_facts_line(extras)
+    return first + "\n" + _sessions_facts_line(extras, context)
 
 
-def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> str:
-    """Two lines: the live-state row, then the durable facts about it."""
+def _sessions_info_body(
+    row: Mapping[str, Any], extras: Mapping[str, Any], context: ToolContext | None = None
+) -> str:
+    """Two lines: the live-state row, then the durable facts about it.
+
+    Identifier fields: the conversation title and session id are marked spans;
+    both are names the caller quotes back, not credentials.
+    """
     state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     parts = [f'"{name}" — {state}']
     if row.get("session_id"):
-        parts.append(f"session {row['session_id']}")
+        parts.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         parts.append(f"pid {row['pid']}")
     if row.get("busy"):
@@ -16807,7 +16928,7 @@ def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> st
         parts.append(f"pending {needs}")
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
-    return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
+    return ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
 
 
 async def _sessions_info_mesh(
@@ -16854,7 +16975,12 @@ async def _sessions_info_mesh(
         lines = [
             f"{peer} holds {len(candidates)} sessions matching {needle!r} — name one by its id:"
         ]
-        lines.extend(f"  {row.id}  {row.name}" for row in candidates)
+        # Identifier fields: candidate ids and names are names the caller quotes
+        # back to disambiguate; both are marked spans.
+        lines.extend(
+            f"  {identifier_text(context, row.id)}  {identifier_text(context, row.name)}"
+            for row in candidates
+        )
         return _error(tool_call_id, "sessions", "\n".join(lines))
     if found is None:
         return _error(
@@ -16867,8 +16993,10 @@ async def _sessions_info_mesh(
     block = row.get("peer") or {}
     device = str(block.get("name") or block.get("device_id") or peer)
     state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
-    bits = [f"[{state}] {name}", f"session {found.id}"]
+    # Identifier fields: the row's title and session id are names the caller
+    # acts on; both are marked spans, never credentials.
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
+    bits = [f"[{state}] {name}", f"session {identifier_text(context, found.id)}"]
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -16907,6 +17035,8 @@ async def _sessions_info(
         include_stored=stored,
         stored_limit=_SESSIONS_STORED_LOOKUP_LIMIT,
     )
+    # Identifier fields: the info body prints the session's title and id as
+    # names the caller quotes back; marks are applied inside the body.
     if row is None:
         if stored:
             # Two situations land here, and until review round 1 they shared
@@ -16928,7 +17058,7 @@ async def _sessions_info(
                     "listed": False,
                     **extras,
                 }
-                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras)
+                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras, context)
                 text, spill = spill_truncate(text, "sessions", context)
                 if spill:
                     details.update(spill)
@@ -16949,7 +17079,7 @@ async def _sessions_info(
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
     details: dict[str, Any] = {"op": "info", **row, **extras}
-    text = _sessions_info_body(row, extras)
+    text = _sessions_info_body(row, extras, context)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -17697,10 +17827,14 @@ async def _sessions_peek_mesh(
     }
     if not rows:
         text = (
-            f"{session_id} on {peer}: no steps with text are shown on that device's " "display yet"
+            f"{identifier_text(context, session_id)} on {peer}: no steps with text "
+            "are shown on that device's display yet"
         )
     else:
-        header = f"{session_id} on {peer} — the newest {len(rows)} step(s)"
+        # Identifier field: the session id a caller addresses on that peer.
+        header = (
+            f"{identifier_text(context, session_id)} on {peer} — " f"the newest {len(rows)} step(s)"
+        )
         if payload.get("has_older"):
             header += " (older steps are loaded there too)"
         lines = [header + ":"]
@@ -17805,9 +17939,10 @@ async def _sessions_peek(
                 text = payload.miss
             else:
                 name = await asyncio.to_thread(_peek_name)
+                # Identifier fields: the header quotes the title and id.
                 text = _peek_body(
-                    name,
-                    session_id,
+                    identifier_text(context, name),
+                    identifier_text(context, session_id),
                     mode,
                     payload,
                     anchor=str(params.before_id or params.around_id or ""),
@@ -18264,10 +18399,14 @@ def _sessions_disk_facts(session_id: str) -> _SessionsDiskFacts:
     )
 
 
-def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> str:
+def _sessions_open_body(
+    params: SessionsParams, details: Mapping[str, Any], context: ToolContext | None = None
+) -> str:
     """The one-line-ish receipt (§5.4): what was opened, where it shows up,
     and — for a hidden run — how each side still reaches it."""
-    name = str(details.get("name") or "")
+    # Identifier fields: the title, session id and opener identity are names
+    # a caller quotes back or addresses.
+    name = identifier_text(context, str(details.get("name") or ""))
     # Two spellings, because the spaces differ per branch: ``named`` carries
     # no trailing space and ``where`` starts with one, so composing them
     # directly produced a double space in the resume receipt (review round 1,
@@ -18277,7 +18416,7 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     lead = f"{named} " if named else ""
     bits = []
     if details.get("session_id"):
-        bits.append(f"session {details['session_id']}")
+        bits.append(f"session {identifier_text(context, str(details['session_id']))}")
     if details.get("job_id"):
         bits.append(f"job {details['job_id']}")
     if details.get("pid"):
@@ -18288,11 +18427,11 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     opener = details.get("opener") or {}
     opened_by = ""
     if opener.get("agent"):
-        opened_by = f" opened by {opener['agent']}"
+        opened_by = f" opened by {identifier_text(context, str(opener['agent']))}"
         if opener.get("label"):
-            opened_by += f" (label {opener['label']!r})"
+            opened_by += f" (label {identifier_text(context, repr(opener['label']))})"
         if opener.get("session"):
-            opened_by += f" from session {opener['session']}"
+            opened_by += f" from session {identifier_text(context, str(opener['session']))}"
         opened_by += "."
     if params.op == "resume":
         if details.get("readiness") == "starting":
@@ -18351,7 +18490,8 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     elif details.get("sidebar_visibility") == "hidden":
         text += (
             " The operator reaches it through `lop sessions` (the live run); your "
-            f"route back is `lop exec --resume {details['session_id']}`."
+            f"route back is `lop exec --resume "
+            f"{identifier_text(context, str(details['session_id']))}`."
         )
     return text
 
@@ -18433,9 +18573,11 @@ async def _sessions_spawn_mesh(
         return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
     minted = str(payload.get("session_id") or "")
     name = str(params.name or "").strip()
-    head = f'created "{name}" on {peer}' if name else f"created on {peer}"
+    # Identifier fields: the title the caller chose and the minted id.
+    shown_name = identifier_text(context, name)
+    head = f'created "{shown_name}" on {peer}' if name else f"created on {peer}"
     if minted:
-        head += f" (session {minted})"
+        head += f" (session {identifier_text(context, minted)})"
     lines = [head]
     if str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
@@ -18720,14 +18862,16 @@ async def _sessions_open(
             return _text(
                 tool_call_id,
                 "sessions",
-                _sessions_open_body(params, details) + f" Tags not applied: {exc}. "
+                _sessions_open_body(params, details, context) + f" Tags not applied: {exc}. "
                 "Once listed, the operator can re-tag it from the sidebar Tags… picker; "
                 "do not repeat the spawn to retry tags.",
                 details=details,
             )
     if params.op == "resume":
         details["visibility_changed"] = False
-    return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)
+    return _text(
+        tool_call_id, "sessions", _sessions_open_body(params, details, context), details=details
+    )
 
 
 async def _sessions_resume_batch(
@@ -18824,7 +18968,10 @@ async def _sessions_resume_batch(
         ]
         for session_id, name in rows:
             age = format_age(max(0.0, time.time() - mtime_by_id[session_id]))
-            lines.append(f'- {session_id}  "{name}"  ({age})')
+            lines.append(
+                f"- {identifier_text(context, session_id)}  "
+                f'"{identifier_text(context, name)}"  ({age})'
+            )
         if not rows:
             lines = [f"resume set ({sets_name}): no stored sessions match{capped_note}."]
         text, spill = spill_truncate("\n".join(lines), "sessions", context)
@@ -18867,12 +19014,14 @@ async def _sessions_resume_batch(
     for outcome in outcomes:
         if outcome.ok:
             lines.append(
-                f'- ok    {outcome.session_id}  "{outcome.name}"  '
+                f"- ok    {identifier_text(context, outcome.session_id)}  "
+                f'"{identifier_text(context, outcome.name)}"  '
                 f"({outcome.status}, job {outcome.job_id})"
             )
         else:
             lines.append(
-                f'- FAIL  {outcome.session_id}  "{outcome.name}"  — '
+                f"- FAIL  {identifier_text(context, outcome.session_id)}  "
+                f'"{identifier_text(context, outcome.name)}"  — '
                 f"{outcome.detail or outcome.status}"
             )
     text, spill = spill_truncate("\n".join(lines), "sessions", context)
@@ -19053,6 +19202,26 @@ def _variable_store(context: ToolContext | None) -> VariableStoreProtocol:
     from local_operator.variables import VariableStore
 
     return VariableStore(cwd=_safe_cwd(context))
+
+
+def identifier_text(context: ToolContext | None, value: str) -> str:
+    """Wrap a rendered identifier in the markers redaction honours.
+
+    WHY AT THE RENDER SITE: only the code that prints the value knows it is a
+    NAME rather than a secret. The mark covers the exact bytes being printed in
+    this result — it cannot exempt the same word elsewhere, or outlive the
+    line — which is what keeps a project key named ``token`` from releasing a
+    later ``token: <secret>`` credential (LOH-28 remediation). A store without
+    ``identifier_span`` (an older caller, a test double) renders the plain
+    value.
+    """
+    span = cast(
+        Callable[[str], str] | None,
+        getattr(getattr(context, "variables", None), "identifier_span", None),
+    )
+    if not callable(span):
+        return value
+    return span(value)
 
 
 @_guard("list_variables")
