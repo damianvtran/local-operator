@@ -29,6 +29,7 @@ from local_operator.compaction.carry import (
     CARRIED_DECISIONS_KEY,
     CARRIED_DECISIONS_LIMIT,
     CARRIED_TIER_ID_PREFIX,
+    CARRIED_TIER_KEY,
     read_recent_decisions,
     read_unresolved_asks,
     render_carried_tier,
@@ -413,16 +414,40 @@ def test_the_renderer_marks_the_row_as_harness_output():
     assert extract_preserved_user_turns([row], {row.id}) == []
 
 
-def test_an_explicitly_superseded_decision_is_not_carried(tmp_path):
-    """A status the store has been TOLD is dead is not a "current decision".
-
-    Excluding `superseded` is not the supersession inference the docstring
-    declines to make: nothing derives it, but when it is present the store is
-    saying the fact is settled, and carrying it would contradict that.
-    """
-    store = MemoryStore(
+def _decision_store(tmp_path) -> MemoryStore:
+    return MemoryStore(
         tmp_path / "config", MemoryIdentity("sess", "", ""), origin="device-test"
     )
+
+
+@pytest.mark.parametrize("status", ["active", "candidate", "disputed"])
+def test_a_decision_with_a_live_status_is_carried(tmp_path, status):
+    """All three non-dead statuses are carried. Pinning only ``active`` would
+    let an over-exclusion of ``candidate`` or ``disputed`` pass unnoticed."""
+    store = _decision_store(tmp_path)
+    body = f"LIVE-{status.upper()}"
+    store.put(
+        "session",
+        {
+            "title": "live decision",
+            "body": body,
+            "tags": ["decision"],
+            "status": status,
+            "created_at": 1_700_000_000,
+        },
+    )
+    assert body in [item["body"] for item in read_recent_decisions(store)]
+
+
+@pytest.mark.parametrize("status", ["superseded", "expired"])
+def test_a_decision_the_store_treats_as_dead_is_not_carried(tmp_path, status):
+    """A status the store has been TOLD is dead is not a "current decision".
+
+    Excluding these is not a content-based inference: nothing derives the
+    status, but when it is present the store is saying the fact is settled, and
+    carrying it would contradict that.
+    """
+    store = _decision_store(tmp_path)
     store.put(
         "session",
         {
@@ -432,20 +457,75 @@ def test_an_explicitly_superseded_decision_is_not_carried(tmp_path):
             "created_at": 1_700_000_000,
         },
     )
+    body = f"DEAD-{status.upper()}"
     store.put(
         "session",
         {
             "title": "dead decision",
-            "body": "SUPERSEDED-DECISION",
+            "body": body,
             "tags": ["decision"],
-            "status": "superseded",
+            "status": status,
+            "created_at": 1_700_000_100,
+        },
+    )
+    bodies = [item["body"] for item in read_recent_decisions(store)]
+    assert "ACTIVE-DECISION" in bodies
+    assert body not in bodies
+
+
+def test_a_fact_replaced_by_an_explicit_edge_is_not_carried(tmp_path):
+    """The documented ``replaces`` edge IS honoured, exactly as search honours it.
+
+    The replaced fact is knowably dead: a later fact explicitly names it. The
+    store hides it from search, so the carried tier must not resurrect it. This
+    is the MAJOR from review round 2; the previous reader returned both.
+    """
+    store = _decision_store(tmp_path)
+    old = store.put(
+        "session",
+        {
+            "title": "old decision",
+            "body": "OLD-DECISION",
+            "tags": ["decision"],
+            "created_at": 1_700_000_000,
+        },
+    )
+    store.put(
+        "session",
+        {
+            "title": "new decision",
+            "body": "NEW-DECISION",
+            "tags": ["decision"],
+            "replaces": old["id"],
             "created_at": 1_700_000_100,
         },
     )
 
-    bodies = [item["body"] for item in read_recent_decisions(store)]
-    assert "ACTIVE-DECISION" in bodies
-    assert "SUPERSEDED-DECISION" not in bodies
+    carried = read_recent_decisions(store)
+    bodies = [item["body"] for item in carried]
+    assert "NEW-DECISION" in bodies
+    assert "OLD-DECISION" not in bodies
+
+    row = render_carried_tier([], carried)
+    assert row is not None
+    assert "NEW-DECISION" in row.text
+    assert "OLD-DECISION" not in row.text
+
+    # The documented reader agrees: the replaced fact is not searchable.
+    assert not [
+        item for item in store.search("OLD-DECISION") if item["body"] == "OLD-DECISION"
+    ]
+
+
+def test_the_persistence_guard_rejects_a_payload_flag_only_carried_row():
+    """NIT-2's regression pin: a row whose id looks ordinary but whose payload
+    carries the flag must still be refused."""
+    from local_operator.session.session import _is_persistable_message
+
+    row = Message.user("looks like an ordinary turn")
+    row.provider_payload = {CARRIED_TIER_KEY: True}
+    assert _is_persistable_message(row) is False
+    assert _is_persistable_message(Message.user("a genuine turn")) is True
 
 
 @pytest.mark.asyncio

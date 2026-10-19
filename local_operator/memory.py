@@ -905,6 +905,20 @@ def _nested_unbounded_repeat(pattern: str) -> bool:
     return False
 
 
+#: SQL predicate that honours the documented ``replaces`` edge: the outer
+#: ``current`` row must not be the TARGET of an explicit replacement from an
+#: authorised sibling. Shared by every read that hides a replaced fact
+#: (``search`` and ``tagged``) so two readers cannot develop two definitions of
+#: "replaced"; the outer table must be aliased ``c``.
+_NOT_REPLACED_SQL = (
+    "NOT EXISTS (SELECT 1 FROM ops p "
+    "JOIN causal_edges e ON e.parent=p.op_id JOIN ops child ON child.op_id=e.op_id "
+    "WHERE p.entity_id=c.entity_id AND child.entity_id<>c.entity_id "
+    "AND p.scope=c.scope AND p.owner=c.owner "
+    "AND child.scope=c.scope AND child.owner=c.owner)"
+)
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -2466,19 +2480,19 @@ class MemoryStore:
         that wants the most recent decisions, and because ``scan`` has no date
         order at all.
 
-        **This is a RECENCY window, not supersession.** The store has no
-        DERIVATION of supersession: the ``replaces`` edge only parents the new
-        op, nothing propagates it to the target's status, and content is never
-        compared, so the store cannot compute which of two decisions is
-        current. A decision a later one contradicts may therefore still appear
-        in this list. Callers must label the result "most recently written",
-        never "in force".
+        **EXPLICIT replacement is honoured; content-based supersession is not.**
+        A fact replaced through the documented ``replaces`` edge is hidden,
+        exactly as :meth:`search` hides it — both use
+        :data:`_NOT_REPLACED_SQL`, so the two readers cannot develop two
+        definitions of "replaced". What the store does NOT do is DERIVE that
+        two facts say the same thing: content is never compared, so a
+        contradicted decision with no explicit edge may still appear. Callers
+        must label the rest "most recently written", never "in force".
 
-        What IS dropped is what the store has been TOLD is dead: a past
+        Also excluded, because the store already treats them as settled: a past
         ``expires_at``, a stored ``expired`` status, and a stored
-        ``superseded`` status. Excluding those needs no derivation — the store
-        already treats them as settled — so this is not the supersession
-        inference the paragraph above declines to invent.
+        ``superseded`` status. That is status the store was TOLD, not an
+        inference about content.
         """
         if not isinstance(tag, str) or not tag or len(tag) > 64:
             raise MemoryError("A memory tag is a short non-empty string.")
@@ -2489,13 +2503,14 @@ class MemoryStore:
         where, values = self._where(None)
         with self.connection() as db:
             rows = db.execute(
-                f"SELECT entity_id,scope,fact FROM current WHERE {where} AND EXISTS ("
-                "SELECT 1 FROM json_each(json_extract(current.fact,'$.tags')) AS tag_row "
-                "WHERE tag_row.value=?) "
-                "AND (json_extract(current.fact,'$.expires_at') IS NULL "
-                "OR json_extract(current.fact,'$.expires_at')>?) "
-                "AND json_extract(current.fact,'$.status') NOT IN ('expired','superseded') "
-                "ORDER BY json_extract(current.fact,'$.created_at') DESC, entity_id DESC "
+                f"SELECT c.entity_id,c.scope,c.fact FROM current c WHERE {where} "
+                "AND EXISTS (SELECT 1 FROM json_each(json_extract(c.fact,'$.tags')) "
+                "AS tag_row WHERE tag_row.value=?) "
+                f"AND {_NOT_REPLACED_SQL} "
+                "AND (json_extract(c.fact,'$.expires_at') IS NULL "
+                "OR json_extract(c.fact,'$.expires_at')>?) "
+                "AND json_extract(c.fact,'$.status') NOT IN ('expired','superseded') "
+                "ORDER BY json_extract(c.fact,'$.created_at') DESC, c.entity_id DESC "
                 "LIMIT ?",
                 [*values, tag, time.time(), limit],
             ).fetchall()
@@ -2570,11 +2585,7 @@ class MemoryStore:
             rows = db.execute(
                 "SELECT c.entity_id,c.scope,c.op_id,c.fact FROM recall JOIN current c "
                 "ON c.entity_id=recall.entity_id WHERE recall MATCH ? AND "
-                f"{where} AND NOT EXISTS (SELECT 1 FROM ops p "
-                "JOIN causal_edges e ON e.parent=p.op_id JOIN ops child ON child.op_id=e.op_id "
-                "WHERE p.entity_id=c.entity_id AND child.entity_id<>c.entity_id "
-                "AND p.scope=c.scope AND p.owner=c.owner "
-                "AND child.scope=c.scope AND child.owner=c.owner) "
+                f"{where} AND {_NOT_REPLACED_SQL} "
                 "AND (json_extract(c.fact,'$.expires_at') IS NULL "
                 "OR json_extract(c.fact,'$.expires_at')>?) "
                 "AND (?=0 OR json_extract(c.fact,'$.status')<>'disputed') "

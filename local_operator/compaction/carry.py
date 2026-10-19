@@ -89,14 +89,14 @@ CARRIED_ASKS_LIMIT = 50
 
 #: How many decision facts a pass may carry, newest first.
 #:
-#: **This is a RECENCY window, not supersession.** The memory layer has no
-#: DERIVATION of supersession: the ``replaces`` edge parents the new op and
-#: nothing propagates it to the target, no content is compared, so "current"
-#: cannot be computed and a decision a later one contradicts may still appear.
-#: What IS excluded is what the store has been TOLD is dead — a past
-#: ``expires_at``, an ``expired`` status, a ``superseded`` status — because
-#: that needs no inference. Callers must treat the rest as "most recently
-#: written", never "in force".
+#: **EXPLICIT replacement is honoured; content-based supersession is not.**
+#: A fact replaced via the documented ``replaces`` edge is excluded exactly as
+#: memory search excludes it (one shared SQL predicate), so read the
+#: replacement. The store does NOT derive that two facts say the same thing:
+#: content is never compared, so a contradicted decision with no explicit edge
+#: may still appear. Facts the store was TOLD are dead — a past ``expires_at``,
+#: an ``expired`` status, a ``superseded`` status — are also excluded. Treat
+#: the rest as "most recently written", never "in force".
 CARRIED_DECISIONS_LIMIT = 20
 
 #: The synthetic row's id IS this prefix (the cut-point predicate matches by
@@ -246,11 +246,11 @@ def read_recent_decisions(
     The read itself is :meth:`MemoryStore.tagged`; this only projects the
     payload shape.
 
-    **RECENCY, NOT SUPERSESSION.** See :data:`CARRIED_DECISIONS_LIMIT`: the
-    memory layer cannot DERIVE which decision is current, so this returns the
-    most recently created ones and a contradicted decision may still appear.
-    Facts the store is explicitly told are dead (past ``expires_at``,
-    ``expired``, ``superseded``) are filtered by :meth:`MemoryStore.tagged`.
+    **EXPLICIT REPLACEMENT, NOT CONTENT-BASED SUPERSESSION.** See
+    :data:`CARRIED_DECISIONS_LIMIT`: :meth:`MemoryStore.tagged` hides a fact
+    replaced through the documented ``replaces`` edge, as memory search does,
+    and the store's dead statuses. It cannot derive that two facts say the same
+    thing, so a contradicted decision with no explicit edge may still appear.
 
     Any failure -> carry nothing. Memory is an enhancement to a compaction
     pass, never a condition of one.
