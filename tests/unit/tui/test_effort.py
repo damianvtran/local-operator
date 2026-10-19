@@ -20,6 +20,7 @@ from rich.cells import cell_len
 from textual.geometry import Size
 from textual.widgets import Static
 
+from local_operator.harness.types import EFFORT_CHOICE_UNSET
 from local_operator.model.configure import build_model_spec
 from local_operator.model.effort import EFFORT_ORDER, default_effort, supported_efforts
 from local_operator.paths import DEFAULT_CONFIG_DIRNAME
@@ -63,8 +64,15 @@ class EffortSession(FakeSession):
     def model(self) -> Any:
         return self._spec
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: Any,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         self._spec = model
+        self.last_effort_choice = effort_choice
 
 
 class EffortProviderController(FakeProviderController):

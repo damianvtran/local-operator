@@ -43495,7 +43495,16 @@ class OperatorApp(App[None]):
         if session is None or spec is None or not hasattr(session, "set_model"):
             return False
         self._effort_choice = level if remember else None
-        session.set_model(spec.model_copy(update={"reasoning_effort": level}))
+        # The session owns the DURABLE half of the same decision: an explicit
+        # level is a choice, and `remember=False` (`/effort auto`) is a
+        # WITHDRAWAL. Passed explicitly rather than left for the session to
+        # infer from the spec, because a withdrawal can leave the spec level
+        # untouched and a failover clamp can move it without a decision (review
+        # round 1, M1/M3).
+        session.set_model(
+            spec.model_copy(update={"reasoning_effort": level}),
+            effort_choice=(level if remember else None),
+        )
         # READ BACK rather than trusting the write. A host is free to accept a
         # spec and keep its own, and the whole value of this return is that a
         # receipt is never printed for a level the session is not carrying —
@@ -43787,6 +43796,12 @@ class OperatorApp(App[None]):
             destination = restored or "auto"
             scope = "(the model's own default)" if restored else "(nothing sent)"
             if restored == current:
+                # THE LEVEL DID NOT MOVE, BUT THE CHOICE MAY HAVE. A spec
+                # already sitting on its seed can still be holding a chosen
+                # level that a narrower route clamped onto the seed; the no-op
+                # voice must not skip the withdrawal, or that held level comes
+                # back on the next switch (review round 1, M3).
+                self._apply_effort(restored, remember=False)
                 notice(f"reasoning effort: already {destination} {scope}")
                 return
             # U2: the withdrawal is CONVERSATION-scoped and the user is told the one
@@ -43825,6 +43840,10 @@ class OperatorApp(App[None]):
             # out in full, so the shorter form still points at the state it means.
             # Kept word for word in `_effort_slash_result`, or a phone and a
             # terminal answer one command two ways.
+            # Same reason as the `auto` no-op above, mirrored: typing the
+            # level the band already shows RE-AFFIRMS it, which matters when
+            # the held choice is a different one a narrow route clamped away.
+            self._apply_effort(wanted)
             self._system_notice(
                 f"reasoning effort: already {wanted} — /effort auto restores the default"
             )
@@ -54183,7 +54202,7 @@ class OperatorApp(App[None]):
                     text=f"reasoning effort: already {destination} {scope}",
                     style="info",
                 )
-            # Word for word the sibling site above, including the session scope and
+            # Word for word the sibling site above, including the saved scope and
             # the route to making the withdrawal stick (U2): the two surfaces exist
             # so a phone and a terminal get the SAME answer from one set of rules,
             # and an answer that omitted the durability clause here would be the one
@@ -54192,7 +54211,7 @@ class OperatorApp(App[None]):
                 kind="notice",
                 text=(
                     f"reasoning effort: {current or 'auto'} → {destination} "
-                    f"(this session) — /settings sets auto"
+                    f"(saved) — /settings sets auto"
                 ),
                 style="info",
             )
@@ -54208,6 +54227,10 @@ class OperatorApp(App[None]):
         if wanted == current:
             # Word for word the sibling site above, including its cell budget: the
             # two surfaces exist so one command gets one answer whatever renders it.
+            # The re-affirmation is applied for the same reason as the sibling:
+            # a held choice a narrow route clamped onto this level must be
+            # replaced by the level the user just typed (review round 1, M3).
+            self._apply_effort(wanted)
             return SlashResult(
                 kind="notice",
                 text=f"reasoning effort: already {wanted} — /effort auto restores the default",

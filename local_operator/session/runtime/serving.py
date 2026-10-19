@@ -5206,7 +5206,17 @@ class ServingSessionHandle(SessionHandle):
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
-        self._session.set_model(spec, explicit=True)
+        #
+        # ``effort_choice`` is passed ONLY when the CALLER named a level: a
+        # level-less switch carries one (or clamps it for display) without
+        # deciding anything, and letting ``set_model`` infer a choice from the
+        # resulting spec would record a failover clamp as the user's choice
+        # (review round 1, M1). An explicit ``auto`` is a withdrawal, which
+        # ``_normalise_effort_choice`` turns into ``None``.
+        switch: dict[str, Any] = {"explicit": True}
+        if effort:
+            switch["effort_choice"] = effort
+        self._session.set_model(spec, **switch)
         self._refresh_state()
         # The claim follows the model it is about: a switch can land on a
         # provider this host has no credential for, and a reader must not keep
@@ -5635,7 +5645,9 @@ class ServingSessionHandle(SessionHandle):
                 raise ValueError(f"{spec.model_id} has no reasoning-effort levels; drop --effort")
             ladder = ", ".join(spec.reasoning_efforts)
             raise ValueError(f"{spec.model_id} accepts {ladder} \u2014 not '{effort}'")
-        self._session.set_model(spec.model_copy(update={"reasoning_effort": effort}))
+        self._session.set_model(
+            spec.model_copy(update={"reasoning_effort": effort}), effort_choice=effort
+        )
         self._refresh_state()
         return f"effort: {effort}"
 
