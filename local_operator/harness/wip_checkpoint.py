@@ -30,7 +30,14 @@ def restore_hint(root: str | Path, commit: str) -> str:
     somebody else's concurrent work. Callers must not execute this automatically.
     """
     quoted_root = shlex.quote(str(root))
-    return f"git -C {quoted_root} archive {shlex.quote(commit)} | tar -x -C {quoted_root}"
+    # archive is not a recovery primitive: export-ignore/export-subst may
+    # omit or rewrite captured files. A private index reads the saved tree
+    # directly, overlays its files, and leaves unrelated files/index untouched.
+    return (
+        '(tmp=$(mktemp) && trap \'rm -f "$tmp"\' EXIT && rm -f "$tmp" && '
+        f'GIT_INDEX_FILE="$tmp" git -C {quoted_root} read-tree {shlex.quote(commit)} && '
+        f'GIT_INDEX_FILE="$tmp" git -C {quoted_root} checkout-index -a -f)'
+    )
 
 
 class WipCheckpointer:
@@ -163,7 +170,27 @@ class WipCheckpointer:
             self._git("add", "-A", "--", ".", env=env)
             tree = self._git("write-tree", env=env)
             clean = bool(head) and tree == self._git("rev-parse", f"{head}^{{tree}}")
+            if self.result.get("commit"):
+                self.result["head_moved"] = head != self.result.get("head")
+                self.result["worktree_clean"] = clean
+            if clean and self.result.get("commit"):
+                saved_commit = str(self.result["commit"])
+                try:
+                    self._git("merge-base", "--is-ancestor", saved_commit, head)
+                except subprocess.CalledProcessError as exc:
+                    if exc.returncode != 1:
+                        raise
+                    # A normal commit does not contain the synthetic WIP
+                    # commit in its ancestry. Preserve that evidence, but never
+                    # recommend blindly overlaying it onto newer clean HEAD.
+                    pass
+                else:
+                    self.clear()
+                    self.result = {"superseded": True, "head": head, "at": time.time()}
+                    return self.result
             if tree == self.result.get("tree") or clean:
+                if self.result.get("superseded"):
+                    return self.result
                 if not self.result.get("commit"):
                     self.result = {"skipped": "clean worktree", "at": time.time()}
                 self._write()
@@ -213,16 +240,16 @@ class WipCheckpointer:
         """Remember a completed tool, throttling durable receipt churn to 5s."""
         self.step = f"{tool_name}: {intent}" if intent else tool_name
         self.step_at = at
-        if time.monotonic() - self.last_receipt >= 5:
+        if not self.result.get("superseded") and time.monotonic() - self.last_receipt >= 5:
             try:
                 self._write()
             except OSError:
                 logger.warning("Could not write WIP step", exc_info=True)
 
     def restore_hint(self) -> str:
-        """Restore tracked AND untracked archived files, never auto-apply them.
+        """Restore tracked AND untracked captured files, never auto-apply them.
 
-        Archive overlays files; inspect deletions separately against the saved
+        Checkout-index overlays files; inspect deletions separately against the saved
         HEAD before recovery. This avoids deleting concurrent work on recovery.
         """
         return restore_hint(self.root or self.cwd, str(self.result.get("commit") or self.ref))

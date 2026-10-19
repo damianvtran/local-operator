@@ -166,3 +166,67 @@ def test_tracked_deletion_is_saved_without_touching_the_worktree(tmp_path):
     assert result["files"] == ["tracked"]
     assert "tracked" not in git(repo, "ls-tree", "--name-only", cp.ref).splitlines()
     assert not (repo / "tracked").exists()
+
+
+def test_clean_newer_history_retires_superseded_checkpoint(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    cp = checkpoint(repo, tmp_path)
+    (repo / "tracked").write_text("checkpoint contents\n")
+    saved = cp.snapshot(force=True)
+    # Adopt the synthetic commit, then move beyond it. Recovery must not
+    # overwrite this newer committed work with the old checkpoint tree.
+    git(repo, "update-ref", "HEAD", saved["commit"])
+    (repo / "tracked").write_text("newer committed contents\n")
+    git(repo, "add", "tracked")
+    git(repo, "commit", "-m", "newer work")
+    assert cp.snapshot(force=True)["superseded"] is True
+    assert not cp.path.exists()
+    assert git(repo, "for-each-ref", cp.ref) == ""
+    assert not cp.snapshot(force=True).get("commit")
+    assert not cp.path.exists()
+    assert (repo / "tracked").read_text() == "newer committed contents\n"
+
+
+def test_clean_nonancestor_head_move_requires_inspection_before_restore(tmp_path):
+    from local_operator.harness.subagent import _resume_context
+
+    repo = make_repo(tmp_path / "repo")
+    cp = checkpoint(repo, tmp_path)
+    (repo / "tracked").write_text("checkpoint contents\n")
+    saved = cp.snapshot(force=True)
+    (repo / "tracked").write_text("newer unrelated commit\n")
+    git(repo, "add", "tracked")
+    git(repo, "commit", "-m", "commit without synthetic ancestor")
+    result = cp.snapshot(force=True)
+    assert result["commit"] == saved["commit"]
+    assert result["head_moved"] and result["worktree_clean"]
+    assert json.loads(cp.path.read_text())["head_moved"] is True
+    brief = _resume_context(cp.child_dir)
+    assert "worktree is clean while HEAD moved since the checkpoint" in brief
+    assert f"diff {cp.ref} HEAD before restoring" in brief
+    assert "only after inspection" in brief
+    assert "if the worktree is clean, restore with:" not in brief
+
+
+def test_recovery_ignores_archive_export_attributes(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text(
+        "tracked export-ignore export-subst\nuntracked export-ignore export-subst\n"
+    )
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-m", "archive attributes")
+    tracked = b"tracked\x00$Format:%H$\r\n"
+    untracked = b"untracked\x00$Format:%H$\r\n"
+    (repo / "tracked").write_bytes(tracked)
+    (repo / "untracked").write_bytes(untracked)
+    cp = checkpoint(repo, tmp_path)
+    cp.snapshot(force=True)
+    clone = tmp_path / "clean clone"
+    subprocess.run(["git", "clone", str(repo), str(clone)], check=True, capture_output=True)
+    git(clone, "fetch", str(repo), f"{cp.ref}:{cp.ref}")
+    cp.root = clone
+    index_before = (clone / ".git" / "index").read_bytes()
+    subprocess.run(cp.restore_hint(), shell=True, check=True)
+    assert (clone / "tracked").read_bytes() == tracked
+    assert (clone / "untracked").read_bytes() == untracked
+    assert (clone / ".git" / "index").read_bytes() == index_before

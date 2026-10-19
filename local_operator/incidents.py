@@ -1753,7 +1753,7 @@ CHILD_DEATH_CAUSES = {
     "child-paused": "the child was deliberately paused and can be resumed",
     "child-cancelled": "the child was explicitly cancelled or paused",
     "child-parent-gone": "the parent session ended and stopped the child",
-    "child-tool-timeout": "the child's tool timed out",
+    "child-failed": "the child run failed",
     "child-provider-error": "the child's provider failed",
     "child-host-kill": "the child host disappeared without an exit record",
     "child-never-settled": "the child was launched but never recorded an outcome",

@@ -1665,6 +1665,24 @@ def _effective_prompt(
     return head + escalation_preamble(target.reports_to) + effective_prompt, profile
 
 
+def _child_failure_cause(evidence: str) -> str:
+    """Name a provider only when its own renderer attests to the refusal.
+
+    Startup/filesystem/programming errors can occur before any model request;
+    an arbitrary error string is not evidence that a provider was involved.
+    """
+    from local_operator.providers.failover import (
+        is_rendered_auth_error,
+        is_rendered_out_of_credits_error,
+    )
+
+    return (
+        "child-provider-error"
+        if is_rendered_auth_error(evidence) or is_rendered_out_of_credits_error(evidence)
+        else "child-failed"
+    )
+
+
 def _note_checkpoint_cause(directory: Path, job_id: str, cause: str) -> None:
     """Retain settle classification where a restart-only resume can read it."""
     import json
@@ -1711,7 +1729,7 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     if cause:
         pass
     elif facts.get("error_text"):
-        cause = "child-provider-error"
+        cause = _child_failure_cause(str(facts["error_text"]))
     elif stop.get("mechanism") == "cancel":
         cause = "child-parent-gone" if stop.get("actor") == "parent-teardown" else "child-cancelled"
     elif stop.get("mechanism") == "pause":
@@ -1730,17 +1748,37 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
                 pending.append(str(item.get("text") or item.get("content") or ""))
     blocks = []
     if cause or step:
+        detail = str(facts.get("error_text") or "") if cause == "child-failed" else ""
+        rendered_cause = render_child_death(cause, detail=detail)
         blocks.append(
-            f"[resume context — the previous attempt ended: {render_child_death(cause)}. "
+            f"[resume context — the previous attempt ended: {rendered_cause}. "
             f"Last completed step: {step or 'not recorded'}.]"
         )
     if wip.get("commit"):
         command = restore_hint(str(wip.get("root") or directory), str(wip["commit"]))
         ref = facts.get("wip_ref") or wip.get("ref")
+        if wip.get("head_moved"):
+            import shlex
+
+            root = shlex.quote(str(wip.get("root") or directory))
+            inspect = f"git -C {root} diff {shlex.quote(str(ref))} HEAD"
+            reading = (
+                "The worktree is clean while HEAD moved since the checkpoint. "
+                if wip.get("worktree_clean")
+                else "HEAD moved since the checkpoint. "
+            )
+            guidance = (
+                reading + f"Inspect {inspect} before restoring; only after inspection, "
+                f"the recovery overlay is: {command}"
+            )
+        else:
+            guidance = (
+                "Check whether these changes are present; if the worktree is clean, "
+                f"restore with: {command}"
+            )
         blocks.append(
             f"[WIP checkpoint: {ref} ({len(wip.get('files', []))} files, at {wip.get('at')}). "
-            "Check whether these changes are present; if the worktree is clean, "
-            f"restore with: {command}]"
+            f"{guidance}]"
         )
     if pending:
         blocks.append("[Open work: " + "; ".join(f"- {item}" for item in pending) + "]")
@@ -2144,6 +2182,7 @@ def _make_runner(
                 job_id=job_id,
                 label=label,
                 status="failed",
+                failure_evidence=str(final.get("error") or ""),
                 error_text=str(exc),
                 cut_off_cause=cut_off_cause,
                 cut_off=str(final.get("cut_off") or ""),
@@ -2384,6 +2423,7 @@ async def _publish_terminal_outcome(
     result_text: str | None = None,
     cut_off_cause: str = "",
     cut_off: str = "",
+    failure_evidence: str = "",
 ) -> tuple[str, str | None, str | None]:
     """Resolve and deliver the one terminal fact owned by a child run.
 
@@ -2415,9 +2455,7 @@ async def _publish_terminal_outcome(
         elif status == "cancelled":
             death_cause = "child-cancelled"
         else:
-            # A provider timeout is still a provider error; guessing "tool"
-            # from prose would misattribute it. Specific loop cause wins above.
-            death_cause = "child-provider-error" if error_text else ""
+            death_cause = _child_failure_cause(failure_evidence or error_text or "")
     if job is not None:
         job.death_cause = death_cause
         job.last_step = last_step
