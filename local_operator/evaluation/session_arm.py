@@ -2472,7 +2472,7 @@ async def run_session_episode(
     # sink's own sentence, never a traceback: nothing was allocated, so there is
     # nothing to rescue.
     try:
-        record = RecordSink(record_root / "events.jsonl")
+        record = RecordSink(record_root / "events.jsonl", artifact_root=config.artifact_root)
     except RecordSinkError as error:
         return SessionArmOutcome(
             status="failed_pre_bundle",
