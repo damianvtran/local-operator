@@ -7706,9 +7706,7 @@ def build_app(daemon: MobileDaemon):
             return denied
         from local_operator.paths import config_dir
 
-        return await _library_call(
-            "list_payload", config_dir(), dict(request.query_params)
-        )
+        return await _library_call("list_payload", config_dir(), dict(request.query_params))
 
     async def api_library_facets(request: Request) -> Response:
         """Counts, tags and build state without a page of rows."""
@@ -7872,11 +7870,14 @@ def build_app(daemon: MobileDaemon):
         from urllib.parse import quote
 
         name = (ref.name or "asset").replace("\r", "").replace("\n", "")
-        ascii_name = "".join(
-            character
-            for character in name
-            if character not in '"\\' and 31 < ord(character) < 127
-        ) or "asset"
+        ascii_name = (
+            "".join(
+                character
+                for character in name
+                if character not in '"\\' and 31 < ord(character) < 127
+            )
+            or "asset"
+        )
         disposition = "attachment" if download else "inline"
         headers = {
             "X-Content-Type-Options": "nosniff",
