@@ -59,6 +59,8 @@ ECHO_POLICY = {
     # landed there, or nothing at all when the user cancels — and both are
     # strictly more informative than echoing the typed word. `/approvals`' rule.
     "copy": False,
+    # The local read-only page is the receipt; no path reaches the model.
+    "view": False,
     # Same shape as `/copy` above and the same rule: the receipt is the browser
     # opening or a warning naming why it did not, and nothing here reaches the
     # model.
@@ -221,6 +223,8 @@ PROMPT_POLICY = {
     # (`/copy me` and `/copy <n>` are deliberately not built — the picker is the
     # answer to "which message", and a typed selector would be a second one.)
     "copy": False,
+    # The local read-only page is the receipt; no path reaches the model.
+    "view": False,
     # Takes no argument at all, for `/copy`'s reason: WHICH url is chosen in the
     # picker the command opens, so there is nothing typed for an inline engage
     # to consume.
