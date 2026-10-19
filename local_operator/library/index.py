@@ -358,35 +358,31 @@ def _entry_revision_value(entry: Any) -> float:
 
 
 def _merge_sessions(
-    disk: dict[str, Any], incoming: dict[str, Any], *, keep: set[str] | None
+    disk: dict[str, Any], incoming: dict[str, Any], *, keep: set[str]
 ) -> dict[str, Any]:
     """Merge a build into what another process may have persisted meanwhile.
 
-    ``keep`` names the sessions still visible to THIS build. A partial build
-    never reached every session, so a complete disk entry for a visible session
-    it did not refresh must survive. When both sides hold an entry, complete
-    wins over incomplete and the higher revision wins a tie.
+    A COMPLETE incoming entry is authoritative for the key it covers: this
+    build either refreshed it from the journal or verified its signature, and a
+    revision comparison cannot decide freshness — retracting a child lowers the
+    parent's revision below the stale disk entry's. An INCOMPLETE incoming entry
+    must not replace a complete disk entry (a budget-limited scan that started
+    and ran out); disk keeps the complete rows. ``keep`` names the sessions
+    still visible to this build, so a complete disk entry for a session this
+    build did not reach also survives.
     """
-    merged: dict[str, Any] = {}
+    merged: dict[str, Any] = {
+        session_id: entry for session_id, entry in incoming.items() if isinstance(entry, dict)
+    }
     for session_id, entry in disk.items():
         if not isinstance(entry, dict):
             continue
-        if keep is not None and session_id not in incoming:
-            if not (session_id in keep and entry.get("complete")):
-                continue
-        merged[session_id] = entry
-    for session_id, entry in incoming.items():
-        if not isinstance(entry, dict):
-            continue
         held = merged.get(session_id)
-        if not isinstance(held, dict):
-            merged[session_id] = entry
-            continue
-        held_complete, new_complete = bool(held.get("complete")), bool(entry.get("complete"))
-        if new_complete != held_complete:
-            if new_complete:
+        if isinstance(held, dict):
+            if not held.get("complete") and entry.get("complete"):
                 merged[session_id] = entry
-        elif _entry_revision_value(entry) >= _entry_revision_value(held):
+            continue
+        if session_id in keep and entry.get("complete"):
             merged[session_id] = entry
     return merged
 
@@ -414,7 +410,6 @@ def _persist(
     sessions: dict[str, Any],
     *,
     visible: set[str],
-    partial: bool,
     force: bool = False,
 ) -> tuple[dict[str, Any], float, bool] | None:
     """Read-merge-write under the cross-process lock.
@@ -430,21 +425,9 @@ def _persist(
         disk = _load(path)
         raw = disk.get("sessions")
         disk_sessions: dict[str, Any] = raw if isinstance(raw, dict) else {}
-        if partial:
-            # A partial build did not reach every session: layer it over disk so
-            # another process's complete entries survive.
-            merged = _merge_sessions(disk_sessions, sessions, keep=visible)
-        else:
-            # A ready build scanned every visible session, so it is authoritative
-            # about membership and about common entries: merging a common key
-            # could resurrect a retracted child whose aggregate revision was
-            # higher than the parent's fresh one. A complete disk entry for a
-            # still-visible session this build omitted (unreadable journal) is
-            # kept — never reduce the number of complete sessions.
-            merged = {k: v for k, v in sessions.items() if isinstance(v, dict)}
-            for session_id, entry in disk_sessions.items():
-                if session_id not in merged and session_id in visible and entry.get("complete"):
-                    merged[session_id] = entry
+        # ``sessions`` is authoritative for what it contains; ``visible`` lets a
+        # complete disk entry survive for a session this build did not reach.
+        merged = _merge_sessions(disk_sessions, sessions, keep=visible)
         built_at = float(disk.get("built_at") or 0.0)
         if merged == disk_sessions:
             return merged, built_at, False
@@ -875,38 +858,66 @@ def build_catalog(
 def catalog_for_read(config_dir: str | Path) -> Catalog:
     """The aggregate for content/thumbnail/get reads.
 
-    Never enumerates sessions and never writes. A warm Catalog is returned as
-    is (past the freshness window too), otherwise the persisted index is loaded
-    and its assets built once. A thumbnail therefore cannot trigger a journal
-    scan or an 11 MB rewrite on the request path.
+    Never enumerates sessions and never writes. A warm Catalog is returned only
+    when the index file is still the one it was built from; otherwise the
+    persisted index is loaded and its assets built once. A thumbnail therefore
+    cannot trigger a journal scan or an 11 MB rewrite on the request path.
+
+    The stat is captured BEFORE the read and compared after the asset build.
+    A writer that lands in between replaces the file atomically; caching the
+    old payload under the new stat would make the fast path serve a catalog
+    that predates that write (and made ``refresh=True`` skip the new session).
+    One retry handles the race; a second move leaves the catalog uncached.
     """
     config = Path(config_dir)
     path = index_path(config)
     key = _cache_key(config)
     cached = _cached(key)
-    if cached is not None:
+    if cached is not None and cached[0] == _index_stat(path):
         return _serve(key, cached[2])
     with _asset_lock_for(key):
         cached = _cached(key)
-        if cached is not None:
+        stat = _index_stat(path)
+        if cached is not None and cached[0] == stat:
             return _serve(key, cached[2])
-        payload = _load(path)
-        raw = payload.get("sessions")
-        sessions: dict[str, Any] = raw if isinstance(raw, dict) else {}
         catalog = Catalog(
-            assets=_build_assets(sessions),
-            revision=int(payload.get("revision") or 0)
-            or int(sum(_entry_revision_value(entry) for entry in sessions.values())),
-            state="ready" if sessions else "building",
-            sessions_total=len(sessions),
-            sessions_scanned=sum(
+            assets=[],
+            revision=0,
+            state="building",
+            sessions_total=0,
+            sessions_scanned=0,
+            built_at=0.0,
+        )
+        for _attempt in range(2):
+            payload = _load(path)
+            raw = payload.get("sessions")
+            sessions: dict[str, Any] = raw if isinstance(raw, dict) else {}
+            complete = sum(
                 1
                 for entry in sessions.values()
                 if isinstance(entry, dict) and entry.get("complete")
-            ),
-            built_at=float(payload.get("built_at") or 0.0),
-        )
-        _remember(key, _index_stat(path), catalog)
+            )
+            # A partial index is how a cold/incremental build looks on disk;
+            # a reader must not call it ready just because it has rows.
+            incomplete = any(
+                isinstance(entry, dict) and not entry.get("complete") for entry in sessions.values()
+            )
+            catalog = Catalog(
+                assets=_build_assets(sessions),
+                revision=int(payload.get("revision") or 0)
+                or int(sum(_entry_revision_value(entry) for entry in sessions.values())),
+                state="building" if not sessions or incomplete else "ready",
+                sessions_total=len(sessions),
+                sessions_scanned=complete,
+                built_at=float(payload.get("built_at") or 0.0),
+            )
+            stat_after = _index_stat(path)
+            if stat_after == stat:
+                _remember(key, stat_after, catalog)
+                return _serve(key, catalog)
+            stat = stat_after
+        # The file moved twice while we read it: answer from what we have, but
+        # do not record an identity that would make the next read trust it.
         return _serve(key, catalog)
 
 
@@ -918,6 +929,7 @@ def _build_locked(
     budget_s: float | None,
     home: str,
 ) -> Catalog:
+    stat_before = _index_stat(path)
     payload = _load(path)
     raw_sessions = payload.get("sessions")
     cached_sessions: dict[str, Any] = raw_sessions if isinstance(raw_sessions, dict) else {}
@@ -1017,9 +1029,8 @@ def _build_locked(
 
     state = "building" if building else "ready"
     changed = sessions != cached_sessions
-    fresh_stat = _index_stat(path)
     cached = _cached(key)
-    if not changed and cached is not None and cached[0] == fresh_stat:
+    if not changed and cached is not None and cached[0] == stat_before:
         # Every persisted entry already matched its journal, and the cached
         # aggregate was built from this exact file: no rebuild, no write. Return
         # it directly — this build is finished, so its own in-flight marker must
@@ -1034,7 +1045,6 @@ def _build_locked(
             path,
             sessions,
             visible={session_id for session_id, *_ in visible},
-            partial=building,
             # An unbounded build (background finisher, CLI, tests) must land its
             # result; only the poll path trades persistence for latency.
             force=budget_s is None,
@@ -1048,12 +1058,12 @@ def _build_locked(
             merged, disk_built_at, wrote = persisted
             built_at = disk_built_at
             if wrote:
-                fresh_stat = _index_stat(path)
+                stat_before = _index_stat(path)
             elif cached is not None:
                 # Rate-limited non-structural churn: keep the last aggregate and
                 # let a later poll persist; refresh its freshness window so the
                 # next poll does not repeat the scan for the same churn.
-                _remember(key, fresh_stat, cached[2])
+                _remember(key, stat_before, cached[2])
                 return _serve(key, cached[2])
 
     if changed:
@@ -1070,10 +1080,12 @@ def _build_locked(
         sessions_scanned=scanned,
         built_at=built_at or time.time(),
     )
-    # The aggregate may be ahead of the file when a rate-limited write was
-    # skipped; the stat is still the identity of the index this process read,
-    # so the freshness window can serve the newer aggregate for the next poll.
-    _remember(key, fresh_stat, catalog)
+    stat_after = _index_stat(path)
+    if wrote or stat_after == stat_before:
+        # Only an identity that matches the payload these assets came from may
+        # be cached. A writer that landed while this build scanned (and that we
+        # did not perform) leaves the aggregate uncached; the next read reloads.
+        _remember(key, stat_after, catalog)
     return catalog
 
 
