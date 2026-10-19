@@ -83,6 +83,7 @@ def test_stamp_serialization_and_validation():
     spec = ModelSpec(provider="anthropic", model_id="claude-test")
     event = StreamUsageEvent(usage=Usage(usd_cost=1))
     stamped = _stamp_serving_spec(event, spec, access=SimpleNamespace(kind="oauth"))
+    assert isinstance(stamped, StreamUsageEvent)
     assert (
         Usage.model_validate(stamped.usage.model_dump()).billing_basis
         == "subscription_api_equivalent"
@@ -93,7 +94,7 @@ def test_stamp_serialization_and_validation():
 
 
 def test_mixed_child_components_reconcile():
-    grouped = {}
+    grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
     for basis, cost in [("subscription_api_equivalent", 11.62), ("billed", 0.79)]:
         _merge_accounting_component(
             grouped,
@@ -142,6 +143,7 @@ def test_report_splits_one_model_by_payment_basis(tmp_path):
     )
     store.record_batch([child])
     report = store.session_report("s1")
+    assert report.descendants_aggregate is not None
     assert report.descendants_aggregate.cost_micro == 11620000
     assert report.descendants_by_basis["subscription_api_equivalent"].cost_micro == 11620000
     store.close()
@@ -156,6 +158,7 @@ def test_env_oauth_overrides_legacy_key_wrapper(monkeypatch):
         access=OAuthAccess("synthetic-env-oauth", 0, kind="api_key"),
         key="synthetic-env-oauth",
     )
+    assert isinstance(stamped, StreamUsageEvent)
     assert stamped.usage.billing_basis == "subscription_api_equivalent"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-env-oauth")
     ambiguous = _stamp_serving_spec(
@@ -164,6 +167,7 @@ def test_env_oauth_overrides_legacy_key_wrapper(monkeypatch):
         access=OAuthAccess("synthetic-env-oauth", 0, kind="api_key"),
         key="synthetic-env-oauth",
     )
+    assert isinstance(ambiguous, StreamUsageEvent)
     assert ambiguous.usage.billing_basis == "billed"
 
 
@@ -178,6 +182,7 @@ def test_child_rounding_and_unknown_basis_reconcile():
     )
     assert not unknown
     assert all(micro >= 0 for micro in bases.values())
+    assert total is not None
     assert sum(bases.values()) == round(total * 1_000_000)
     assert bases["not_tracked"] == 9999
 

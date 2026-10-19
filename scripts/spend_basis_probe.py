@@ -13,6 +13,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -29,7 +30,11 @@ from local_operator.harness.types import (  # noqa: E402
 from local_operator.model.configure import SessionStreamFn  # noqa: E402
 from local_operator.model.costs import cost_summary_by_basis  # noqa: E402
 from local_operator.providers.auth_store import OAuthAccess  # noqa: E402
-from local_operator.providers.failover import stream_with_failover  # noqa: E402
+from local_operator.providers.failover import (  # noqa: E402
+    ClientFactory,
+    FailoverAuthStore,
+    stream_with_failover,
+)
 from local_operator.session.channel_spend import (  # noqa: E402
     ChildrenSnapshot,
     InferenceSnapshot,
@@ -58,7 +63,7 @@ class SyntheticClient:
         yield StreamEndEvent(stop_reason="stop", usage=usage)
 
 
-async def probe(root: Path) -> dict:
+async def probe(root: Path) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     path = root / "basis-probe.db"
     if path.exists():
@@ -78,7 +83,14 @@ async def probe(root: Path) -> dict:
     usages = []
     for kind in ("oauth", "api_key"):
         auth.kind = kind
-        events = stream_with_failover(request, auth, {"retry": {"enabled": False}}, client_for)
+        # These minimal doubles implement only the successful dispatch path;
+        # the broader protocols also include retry/auth recovery we never use.
+        events = stream_with_failover(
+            request,
+            cast(FailoverAuthStore, auth),
+            {"retry": {"enabled": False}},
+            cast(ClientFactory, client_for),
+        )
         async for event in fn._record_stream(request, events):
             if isinstance(event, StreamUsageEvent):
                 usages.append(event.usage)
