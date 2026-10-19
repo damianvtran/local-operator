@@ -188,6 +188,8 @@ def _classname_to_path(classname: str, repo: Path) -> str | None:
     to rely on across pytest versions, so trailing components are trimmed
     until the remainder names a file that exists.
     """
+    if not classname:
+        return None
     parts = classname.split(".")
     while parts:
         candidate = Path(*parts).with_suffix(".py")
@@ -204,7 +206,14 @@ def aggregate(xml_paths: list[Path], repo: Path = REPO) -> dict[str, float]:
         root = ET.parse(xml_path).getroot()
         for case in root.iter("testcase"):
             classname = case.get("classname") or ""
-            path = _classname_to_path(classname, repo)
+            # A MODULE-level skip (`pytest.skip(..., allow_module_level=True)`)
+            # is reported with an EMPTY `classname` and the module's dotted path
+            # in `name` -- pytest 8, observed on CI 2026-10-19 with
+            # `tests/unit/tui/test_hub_links_capture.py`. The empty string used
+            # to reach `Path(*parts).with_suffix`, which raises
+            # `ValueError: PosixPath('.') has an empty name` and took the whole
+            # documented CI regeneration route down with it.
+            path = _classname_to_path(classname or case.get("name") or "", repo)
             if path is None:
                 unresolved.add(classname)
                 continue
