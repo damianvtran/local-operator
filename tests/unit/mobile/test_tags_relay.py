@@ -420,7 +420,7 @@ def test_an_older_store_without_the_marker_is_still_detected() -> None:
     (config_dir() / "tags" / "revision").unlink()
 
     daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
-    assert daemon.table.tags_snapshot() == {}
+    assert _warm(daemon) == {}
     queue: asyncio.Queue[None] = asyncio.Queue()
     daemon.table.list_subscribers.add(queue)
 
@@ -433,3 +433,146 @@ def test_an_older_store_without_the_marker_is_still_detected() -> None:
     assert daemon.table.tags_snapshot()[SESSION_A]["tags"] == [
         {"id": review["id"], "name": "Review"}
     ]
+
+
+def test_the_body_shape_is_exactly_two_keys() -> None:
+    """Review round 1, MINOR-1: absent/extra keys are 422, never a default.
+
+    ``body.get("primary")`` made a malformed request a real re-primary: the
+    conversation's stored primary was overwritten with ``None`` and the client
+    was told it succeeded. The desktop model refuses both shapes, and the
+    relay's own ``_TAG_BODY_ERROR`` already promised both keys.
+    """
+    _seed_session(SESSION_A)
+    review, ops = _catalogue("Review", "Ops")
+    client = _login()
+    assert _put_tags(client, SESSION_A, [review["id"]], review["id"]).status_code == 200
+    path = config_dir() / "tags" / "session" / f"{SESSION_A}.json"
+    before = path.read_bytes()
+    revision = session_tags.read_tags_revision(config_dir())
+
+    malformed = (
+        {"tags": [review["id"], ops["id"]]},
+        {"tags": [], "primary": None, "archived": True},
+    )
+    for body in malformed:
+        refused = client.put(f"/api/sessions/{SESSION_A}/tags", json=body)
+        assert refused.status_code == 422, body
+        assert refused.json() == {
+            "error": "tags (a list of category ids) and primary (an id or null) are required"
+        }
+        assert path.read_bytes() == before, "a refused body must not touch the assignment"
+        assert session_tags.read_tags_revision(config_dir()) == revision
+
+
+def test_a_live_entry_without_a_directory_is_not_admitted(monkeypatch) -> None:
+    """Review round 1, MINOR-2: a live entry alone must not admit a write.
+
+    The tag store prunes no orphans (unlike ``read_pins``), so admitting an id
+    with no ``sessions/<id>/`` directory stored an assignment no surface lists.
+    """
+    monkeypatch.setattr(
+        "local_operator.mobile.daemon._entry_for_session", lambda *args: object()
+    )
+    review = _catalogue("Review")[0]
+    orphan = "eeee99990000"
+    client = _login()
+    refused = client.put(
+        f"/api/sessions/{orphan}/tags", json={"tags": [review["id"]], "primary": review["id"]}
+    )
+    assert refused.status_code == 404
+    assert refused.json() == {"error": "unknown session"}
+    assert not (config_dir() / "tags" / "session" / f"{orphan}.json").exists()
+
+    _seed_session(SESSION_A)
+    accepted = _put_tags(client, SESSION_A, [review["id"]], review["id"])
+    assert accepted.status_code == 200
+
+
+def test_an_older_writer_that_does_not_bump_is_still_detected() -> None:
+    """Review round 1, MINOR-3: stats are compared even when a token exists.
+
+    An older build replaces an assignment without knowing the token; a
+    revision-only marker would make that write invisible forever after the
+    first marker-aware write created the file.
+    """
+    import os
+
+    _seed_session(SESSION_A)
+    review = _catalogue("Review")[0]
+    assert session_tags.read_tags_revision(config_dir()) is not None
+    session_tags.set_entity_tags(config_dir(), "session", SESSION_A, [], None)
+    daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
+    assert _warm(daemon)[SESSION_A] == {"tags": [], "primary": None}
+
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    path = config_dir() / "tags" / "session" / f"{SESSION_A}.json"
+    scratch = path.with_name(".legacy-writer.tmp")
+    scratch.write_text(json.dumps({"version": 1, "tags": [review["id"]], "primary": review["id"]}))
+    os.replace(scratch, path)  # the OLD writer's write: no marker bump
+
+    asyncio.run(daemon.refresh_tags_if_changed())
+    assert not queue.empty(), "a token-unaware assignment replace must still wake the list"
+    assert daemon.table.tags_snapshot()[SESSION_A]["tags"] == [
+        {"id": review["id"], "name": "Review"}
+    ]
+
+
+def test_a_concurrent_read_does_not_spend_the_wake() -> None:
+    """QA round 1, Q-1: a read that rebuilds the projection must not swallow it.
+
+    ``GET /api/sessions`` (or past/search) advances the table's cache token;
+    the watcher must compare against what it last PUBLISHED, or an open
+    SSE-only client is never told about the external write.
+    """
+    _seed_session(SESSION_A)
+    review = _catalogue("Review")[0]
+    daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
+    assert _warm(daemon) == {}
+
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    session_tags.set_entity_tags(config_dir(), "session", SESSION_A, [review["id"]], review["id"])
+    # A concurrent request path rebuilds the projection first, consuming the
+    # cache token -- exactly the read that used to suppress the wake.
+    daemon.table.tags_snapshot()
+
+    asyncio.run(daemon.refresh_tags_if_changed())
+    assert not queue.empty(), "the read must not spend the watcher's wake"
+    assert daemon.table.tags_snapshot()[SESSION_A]["tags"] == [
+        {"id": review["id"], "name": "Review"}
+    ]
+
+
+def test_the_scan_tick_wakes_the_stream(monkeypatch) -> None:
+    """Review round 1, MINOR-5: the wiring itself, not just the helper.
+
+    Removing ``await self.refresh_tags_if_changed()`` from ``_scan_once`` must
+    fail here: the tick is what makes an external write reach an idle phone.
+    """
+    from local_operator.session import attention
+
+    _seed_session(SESSION_A)
+    review = _catalogue("Review")[0]
+    daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    monkeypatch.setattr(attention.AttentionStore, "revision", lambda self: "stable")
+    daemon._attention_revision = "stable"
+
+    # The first tick adopts the current store state without a repaint.
+    asyncio.run(daemon._scan_once())
+
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+    daemon.table._summaries_cache = [{"session_id": SESSION_A}]
+    daemon.table._summaries_at = 1.0
+
+    session_tags.set_entity_tags(config_dir(), "session", SESSION_A, [review["id"]], review["id"])
+    asyncio.run(daemon._scan_once())
+
+    assert not queue.empty(), "the scan tick must wake the list for an external write"
+    assert daemon.table._summaries_cache is None, "the merge cache must be dropped"
+    assert daemon.table._summaries_at == 0.0

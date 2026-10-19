@@ -2,12 +2,14 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.session.session_tags import (
     read_categories,
     read_entity_tags,
+    read_tags_revision,
     resolve_category_names,
     set_entity_tags,
     usage_counts,
@@ -204,8 +206,6 @@ def test_the_revision_token_moves_only_on_real_mutations(tmp_path: Path) -> None
     moved: every identical save the TUI or an agent retries would repaint every
     open phone list, and the 2 s tick would do a store walk for nothing.
     """
-    from local_operator.session.session_tags import read_tags_revision
-
     assert read_tags_revision(tmp_path) is None
     review = write_categories(tmp_path, [(None, "Review")])[0]
     first = read_tags_revision(tmp_path)
@@ -250,10 +250,53 @@ def test_the_revision_token_moves_only_on_real_mutations(tmp_path: Path) -> None
     ],
 )
 def test_missing_or_unreadable_revision_is_none(tmp_path: Path, contents: str) -> None:
-    from local_operator.session.session_tags import read_tags_revision
-
     assert read_tags_revision(tmp_path) is None
     path = tmp_path / "tags" / "revision"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents)
     assert read_tags_revision(tmp_path) is None
+
+
+def test_a_failed_marker_write_removes_the_stale_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A landed assignment must stay observable when its marker cannot be written.
+
+    The window is the one review round 1 MAJOR-1 reproduced: the assignment
+    replace lands, then the marker write raises. Raising alone leaves an
+    old-but-valid token, and the client's identical retry writes no bytes
+    (``_write`` returns False), so nothing ever bumps it. The recovery is
+    removing the stale marker, which makes readers use the stats fingerprint
+    the landed assignment has already moved.
+    """
+    from local_operator.session import session_tags
+
+    (tmp_path / "sessions" / SID).mkdir(parents=True)
+    review = write_categories(tmp_path, [(None, "Review")])[0]
+    marker = tmp_path / "tags" / "revision"
+    assert read_tags_revision(tmp_path) is not None
+
+    real_write = session_tags._write
+    failures = {"left": 2}
+
+    def flaky(path: Path, value: dict[str, Any]) -> bool:
+        if path == marker and failures["left"]:
+            failures["left"] -= 1
+            raise OSError("injected marker write failure")
+        return real_write(path, value)
+
+    monkeypatch.setattr(session_tags, "_write", flaky)
+
+    # Both attempts fail; the assignment write itself still lands.
+    assert set_entity_tags(tmp_path, "session", SID, [review["id"]], review["id"]) == {
+        "tags": [review["id"]],
+        "primary": review["id"],
+    }
+    assert failures["left"] == 0, "the retry must actually be attempted"
+    assert not marker.exists(), "the stale marker must be removed"
+    assert read_tags_revision(tmp_path) is None
+
+    # Not one-way: the next real write recreates the marker.
+    monkeypatch.setattr(session_tags, "_write", real_write)
+    set_entity_tags(tmp_path, "session", SID, [], None)
+    assert read_tags_revision(tmp_path) is not None

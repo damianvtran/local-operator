@@ -75,17 +75,47 @@ def _bump_revision(root: Path) -> None:
     only ask "is it different from the one I saw", so a clock that steps or two
     writes inside one filesystem tick cannot make a change invisible.
 
-    A failed marker write is allowed to raise, like every other store write.
-    The assignment itself has already landed at that point; the request fails
-    and its retry is idempotent, which is the same last-writer-wins contract
-    the rest of this module states. Swallowing the error would instead leave
-    readers serving their cached projection until some unrelated token move.
+    THE ASSIGNMENT MAY HAVE ALREADY LANDED when this runs, so a marker
+    failure cannot simply be raised past: the old token is still valid and
+    EQUAL, and a client retry writes identical bytes (``_write`` returns
+    ``False``) so it never reaches this function to bump it. Readers would
+    then serve the pre-write projection until some unrelated real mutation.
+
+    Recovery, in order: retry the write once (the realistic failure --
+    ENOSPC/EIO/EACCES on ``tags/`` -- is transient); if the retry also fails,
+    REMOVE the stale marker, because a marker that cannot be bumped is worse
+    than none: readers then fall back to the stats fingerprint, which the
+    landed assignment has already moved. Only if that removal fails too does
+    the residual case remain -- a landed mutation no reader can observe until
+    the next real write -- and then the marker write's error is re-raised,
+    since there is nothing left to report.
     """
-    _write(Path(root) / "tags" / "revision", {"version": 1, "token": uuid4().hex})
+    marker = Path(root) / "tags" / "revision"
+    # ``except ... as name`` unbinds the name at the end of the clause, so the
+    # first error is copied out to survive to the residual raise below.
+    first_error: OSError | None = None
+    try:
+        _write(marker, {"version": 1, "token": uuid4().hex})
+        return
+    except OSError as exc:
+        first_error = exc
+    try:
+        _write(marker, {"version": 1, "token": uuid4().hex})
+    except OSError as second_error:
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError:
+            raise second_error from first_error
+        return
 
 
 def read_tags_revision(root: Path) -> str | None:
     """The store's current change token, or None for a store without one.
+
+    This is the STORE-WIDE projection marker: it moves when any category or
+    assignment changes. It is NOT the per-session assignment revision, and it
+    is never valid as ``expected_revision`` -- the two are independent
+    counters, so comparing them fails closed with a guaranteed conflict.
 
     None covers both cases readers must treat alike -- a store written by a
     build older than this marker, and an unreadable/malformed one -- and the

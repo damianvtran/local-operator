@@ -598,9 +598,10 @@ def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | 
 
 
 def _tags_stats(root: Path) -> tuple[Any, ...]:
-    """A fingerprint of the two places a tag write lands, for stores with no
-    revision token (see :func:`_tags_marker`). STATS ONLY: this runs on the
-    scan tick and must never walk the assignment directory.
+    """A fingerprint of the two places a tag write lands, carried by every
+    shape of :func:`_tags_marker` (see there for why the token alone is not
+    enough). STATS ONLY: this runs on the scan tick and must never walk the
+    assignment directory.
 
     The directory's own ``st_mtime_ns`` moves when a same-directory
     ``os.replace`` lands in it, which is how every assignment write in the
@@ -622,30 +623,35 @@ def _tags_stats(root: Path) -> tuple[Any, ...]:
     return (stat(root / "tags" / "session"), stat(root / "tags" / "categories.json"))
 
 
-def _tags_marker(root: Path) -> tuple[str, Any]:
+def _tags_marker(root: Path) -> tuple[Any, ...]:
     """The equality marker for the shared tag store on this tick.
 
-    Two shapes, and the second exists only because older readers and writers
-    coexist with this build:
+    Two shapes, and the stats component exists in BOTH because older readers
+    and writers coexist with this build:
 
-    * ``("revision", token)`` -- the store's own change token, bumped by every
-      real ``write_categories``/``set_entity_tags`` mutation (see
-      ``session.session_tags``). One small file read, and no false move from a
-      no-op rewrite.
-    * ``("stats", fingerprint)`` -- a store with no revision file yet, which
-      is either one no build with the marker has written or one another build
-      is writing. Such a writer cannot bump a token it does not know about, so
-      the fallback watches the filesystem directly and STILL does not scan.
+    * ``("revision", token, stats)`` -- the store's own change token, bumped
+      by every real ``write_categories``/``set_entity_tags`` mutation (see
+      ``session.session_tags``). No false move from a no-op rewrite.
+    * ``("stats", stats)`` -- a store with no revision file yet, which is
+      either one no build with the marker has written or one another build
+      is writing.
+
+    THE STATS ARE COMPARED EVEN WHEN THE TOKEN EXISTS. An older build that
+    replaces an assignment without knowing about the token would otherwise be
+    invisible forever once any marker-aware write created the file -- the
+    fallback would end at the first marker. Two stats per scan tick, and still
+    no directory walk; a no-op write moves neither the token nor the stats.
 
     Either shape is compared for equality only: a marker is never an order and
     never a timestamp a reader may reason about.
     """
     from local_operator.session.session_tags import read_tags_revision
 
+    stats = _tags_stats(root)
     token = read_tags_revision(root)
     if token is not None:
-        return ("revision", token)
-    return ("stats", _tags_stats(root))
+        return ("revision", token, stats)
+    return ("stats", stats)
 
 
 def _read_tags_projection(root: Path) -> dict[str, dict[str, Any]]:
@@ -790,9 +796,11 @@ class SessionTable:
         #: The marker the projection above was built from. ``None`` means "no
         #: marker has ever been read", which is distinct from every real marker
         #: (both shapes are tuples), so the first read always builds.
-        self._tags_token: tuple[str, Any] | None = None
+        self._tags_token: tuple[Any, ...] | None = None
 
-    def tags_snapshot(self) -> dict[str, dict[str, Any]]:
+    def tags_snapshot(
+        self, marker: tuple[Any, ...] | None = None
+    ) -> dict[str, dict[str, Any]]:
         """The tag projection, rebuilt only when the store's marker moved.
 
         BLOCKING WORK: one marker read on every call, plus ONE categories read
@@ -804,11 +812,16 @@ class SessionTable:
         The projection is keyed by session id and holds plain JSON-ready
         values. Values are SHARED between rows and frames and must never be
         mutated by a reader (``_tag_fields`` copies what a row carries).
+
+        ``marker`` lets the scan watcher hand over a marker it already read,
+        so one tick costs ONE marker read rather than two; every other caller
+        omits it and this reads its own.
         """
         from local_operator.paths import config_dir
 
         root = config_dir()
-        marker = _tags_marker(root)
+        if marker is None:
+            marker = _tags_marker(root)
         cached = self._tags_snapshot
         if cached is not None and marker == self._tags_token:
             return cached
@@ -3109,6 +3122,13 @@ class MobileDaemon:
         # and subscriber ownership are all gone.
         self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+        #: The tag marker this daemon last PUBLISHED to the list stream (or
+        #: adopted on its first scan pass). Deliberately separate from the
+        #: table's ``_tags_token``, which any read path may advance by
+        #: rebuilding the projection: a read that consumed a change must not
+        #: make the watcher believe the change was already announced
+        #: (QA round 1, Q-1). ``None`` until the first pass.
+        self._tags_notified: tuple[Any, ...] | None = None
         self._phone_attaches: dict[str, AttachClient] = {}
         self._phone_generations: dict[str, tuple[int, str]] = {}
         self._phone_attach_tasks: dict[str, asyncio.Task[None]] = {}
@@ -3987,14 +4007,29 @@ class MobileDaemon:
         mutation, so an identical rewrite (the TUI saving the same assignment,
         an agent retrying a dropped response) leaves the marker still and this
         pass silent.
+
+        THE WAKE IS NOT CONSUMED BY A READER. ``table.tags_snapshot`` advances
+        the table's cache token whenever any request path rebuilds the
+        projection, so comparing against that token let a concurrent
+        ``GET /api/sessions`` spend an external write's change and leave an
+        open SSE-only client unrepainted (QA round 1, Q-1). This pass compares
+        against ``_tags_notified`` instead -- the marker the daemon last
+        PUBLISHED -- which only this pass and the daemon's own route write.
         """
         from local_operator.paths import config_dir
 
         table = self.table
         marker = await asyncio.to_thread(_tags_marker, config_dir())
-        if table._tags_snapshot is not None and marker == table._tags_token:
+        if self._tags_notified is None:
+            # The daemon's first pass ADOPTS the current store state: the warm
+            # read already served it, so a first-tick repaint would be a frame
+            # no client asked for (NIT-2).
+            self._tags_notified = marker
             return
-        await asyncio.to_thread(table.tags_snapshot)
+        if marker == self._tags_notified:
+            return
+        await asyncio.to_thread(table.tags_snapshot, marker)
+        self._tags_notified = marker
         table._summaries_cache = None
         table._summaries_at = 0.0
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
@@ -5761,13 +5796,21 @@ def build_app(daemon: MobileDaemon):
           more than 8, or a primary outside ``tags`` -- using the store's
           sentence verbatim. That sentence is what the desktop surface shows;
           re-wording it here would be a second vocabulary for one rule.
-        * 422 for a malformed body (types only, so the store is never handed a
-          value it would raise ``TypeError`` on).
-        * 404 for an id this machine has no conversation for -- bad shape,
-          unknown, or a REMOTE/mesh id. A remote row is listed (see
-          ``_list_frame``) but its assignment lives in the other device's
-          store and this relay has no directory to write; refusing is what
-          keeps a tag from binding to a conversation this surface cannot see.
+        * 422 for a malformed body: exactly two keys, ``tags`` (a list of
+          category ids) and ``primary`` (an id or null), are required -- an
+          absent ``primary`` or an unknown/extra key is refused rather than
+          defaulted, because a defaulted ``primary`` silently re-primaries
+          the conversation (review round 1, MINOR-1). Types only, so the
+          store is never handed a value it would raise ``TypeError`` on.
+        * 404 for an id this machine has no conversation for: bad shape,
+          unknown, or a REMOTE/mesh id. The rule is the desktop route's own --
+          a folder under ``sessions/`` -- not merely a live entry, because a
+          live generation in the window before its folder materialises would
+          leave an assignment no surface lists (review round 1, MINOR-2). A
+          remote row is listed (see ``_list_frame``) but its assignment lives
+          in the other device's store and this relay has no directory to
+          write; refusing is what keeps a tag from binding to a conversation
+          this surface cannot see.
 
         The read-back is canonical: names resolved from ONE registry snapshot
         AFTER the write, orphan ids pruned, and the settled primary -- so the
@@ -5783,15 +5826,24 @@ def build_app(daemon: MobileDaemon):
         # than a 422 about a category.
         if not re.fullmatch(r"[a-f0-9]{12}", session_id):
             return JSONResponse({"error": "unknown session"}, status_code=404)
-        entry = _entry_for_session(daemon, session_id)
-        if entry is None and _durable_user_session_dir(session_id) is None:
+        # The desktop route's own admission rule: the conversation must have a
+        # durable directory. A live entry alone is not enough -- the tag store
+        # has no directory prune (unlike ``read_pins``), so accepting one would
+        # store an assignment that no listing ever resolves against.
+        if not await asyncio.to_thread(_session_folder_exists, session_id):
             return JSONResponse({"error": "unknown session"}, status_code=404)
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError):
             return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
-        tag_ids = body.get("tags") if isinstance(body, dict) else None
-        primary = body.get("primary") if isinstance(body, dict) else None
+        # EXACTLY TWO KEYS. An absent ``primary`` cannot default to null: that
+        # turns a malformed request into a real, user-visible re-primary, and
+        # an unknown key would be silently ignored where the desktop model
+        # refuses it (``extra="forbid"``).
+        if not isinstance(body, dict) or set(body) != {"tags", "primary"}:
+            return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
+        tag_ids = body["tags"]
+        primary = body["primary"]
         # TYPES ONLY: every value-level rule (cap, duplicates, unknown ids,
         # primary membership) is the store's, in the store's words.
         if (
@@ -5825,6 +5877,12 @@ def build_app(daemon: MobileDaemon):
             state = await asyncio.to_thread(apply)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
+        # PUBLISH THIS WRITE'S MARKER BEFORE WAKING. The scan watcher compares
+        # against ``_tags_notified`` rather than the table's cache token, so
+        # recording the marker this route just produced keeps the next tick
+        # from repainting the same change twice -- while an external write in
+        # the window still differs and still wakes (QA round 1, Q-1).
+        daemon._tags_notified = await asyncio.to_thread(_tags_marker, config_dir())
         # THE STREAM WAKE IS THE LOOP'S, never the worker's (same rule the pin
         # route states): ``notify_list_changed`` puts onto asyncio queues. Every
         # connected client repaints with this row's new tags, and the writer's

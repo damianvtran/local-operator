@@ -501,13 +501,18 @@ this relay is one more reader of that store. Three additive pieces:
 * **`PUT /api/sessions/{id}/tags`**, body `{tags: [ids], primary: id | null}`
   → `{session_id, tags: [{id, name}], primary}`. Desired state, applied
   atomically: empty list plus `null` clears, and a retried request lands on
-  the same state. Refusals are the desktop route's: 422 with the store's own
+  the same state. Exactly those two keys are required: a body without
+  `primary` (or with an unknown/extra key) is 422, never a silent re-primary.
+  Refusals are the desktop route's: 422 with the store's own
   sentence (unknown id, duplicate ids, more than 8, primary outside `tags`)
   and no file change; 404 `{"error": "unknown session"}` for an unknown,
-  badly shaped or REMOTE id. Auth and the same-origin mutation gate are the
-  pin route's. On success the route invalidates the summaries cache and wakes
-  the list stream, so the writer sees the canonical read-back immediately and
-  every other client repaints.
+  badly shaped or REMOTE id, and for a live entry with no durable
+  `sessions/<id>/` directory (the desktop route's own rule — the tag store
+  prunes no orphans, so admitting one would store an assignment no surface
+  lists). Auth and the same-origin mutation gate are the pin route's. On
+  success the route invalidates the summaries cache and wakes the list
+  stream, so the writer sees the canonical read-back immediately and every
+  other client repaints.
 
 Remote/mesh rows (`?include_peers`) carry `tags: []` and `primary: null`
 explicitly: their assignment lives in the other device's store, and this relay
@@ -525,9 +530,13 @@ within one scan tick (~2 s) without the tick walking the assignment directory:
 `session_tags` publishes an additive equality marker (`tags/revision`, bumped
 only by a REAL mutation — an identical re-write does not move it), and the
 scan pass reads that one small file, rebuilding the projection and waking the
-list only when it moved. A store with no marker (written by an older build)
-is watched by cheap stats of the two write sites instead; no path scans on an
-unchanged tick.
+list only when it moved. The marker also carries cheap stats of the two write
+sites, compared even when the token exists: an older-build writer that
+replaces an assignment without bumping the token is still detected, and a
+no-op write moves neither the token nor the stats. No path scans on an
+unchanged tick. A read that repaints the list does not consume the change for
+other clients: the wake compares against what the daemon last published, not
+the list's own cache token.
 
 ## Failure modes and rules
 
