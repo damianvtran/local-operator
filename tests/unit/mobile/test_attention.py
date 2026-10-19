@@ -92,7 +92,7 @@ async def test_summary_receipts_are_one_batch_off_the_event_loop(monkeypatch) ->
     monkeypatch.setattr(
         table,
         "_merge_summaries",
-        lambda durable: [
+        lambda durable, tags=None: [
             {
                 "session_id": state["conversation_id"].split("/", 1)[1],
                 "unseen": state["unseen"],

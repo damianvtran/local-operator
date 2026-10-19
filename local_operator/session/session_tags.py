@@ -39,12 +39,20 @@ def _read(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _write(path: Path, value: dict[str, Any]) -> None:
+def _write(path: Path, value: dict[str, Any]) -> bool:
+    """Replace ``path`` atomically; True iff the bytes on disk changed.
+
+    The return value is what keeps the change marker honest: an identical
+    re-write returns False, so a caller that only wants to notice real
+    mutations does not have to re-read the file to find out. Nothing about the
+    on-disk layout changed -- the identical-content early return was already
+    here.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(value, ensure_ascii=False) + "\n"
     try:
         if path.read_text() == data:
-            return
+            return False
     except OSError:
         pass
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=".tags-", suffix=".tmp")
@@ -54,6 +62,67 @@ def _write(path: Path, value: dict[str, Any]) -> None:
         os.replace(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
+    return True
+
+
+def _bump_revision(root: Path) -> None:
+    """Publish a new equality token after a REAL store mutation.
+
+    Mobile's 2 s scan tick cannot re-walk every assignment file to find out
+    whether the desktop, the TUI, an agent or auto-tagging changed something;
+    it reads this one small file instead and rescans only when the token moves.
+    The token is an EQUALITY MARKER, never an order or a timestamp: readers may
+    only ask "is it different from the one I saw", so a clock that steps or two
+    writes inside one filesystem tick cannot make a change invisible.
+
+    THE ASSIGNMENT MAY HAVE ALREADY LANDED when this runs, so a marker
+    failure cannot simply be raised past: the old token is still valid and
+    EQUAL, and a client retry writes identical bytes (``_write`` returns
+    ``False``) so it never reaches this function to bump it. Readers would
+    then serve the pre-write projection until some unrelated real mutation.
+
+    Recovery, in order: retry the write once (the realistic failure --
+    ENOSPC/EIO/EACCES on ``tags/`` -- is transient); if the retry also fails,
+    REMOVE the stale marker, because a marker that cannot be bumped is worse
+    than none: readers then fall back to the stats fingerprint, which the
+    landed assignment has already moved. Only if that removal fails too does
+    the residual case remain -- a landed mutation no reader can observe until
+    the next real write -- and then the marker write's error is re-raised,
+    since there is nothing left to report.
+    """
+    marker = Path(root) / "tags" / "revision"
+    # ``except ... as name`` unbinds the name at the end of the clause, so the
+    # first error is copied out to survive to the residual raise below.
+    first_error: OSError | None = None
+    try:
+        _write(marker, {"version": 1, "token": uuid4().hex})
+        return
+    except OSError as exc:
+        first_error = exc
+    try:
+        _write(marker, {"version": 1, "token": uuid4().hex})
+    except OSError as second_error:
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError:
+            raise second_error from first_error
+        return
+
+
+def read_tags_revision(root: Path) -> str | None:
+    """The store's current change token, or None for a store without one.
+
+    This is the STORE-WIDE projection marker: it moves when any category or
+    assignment changes. It is NOT the per-session assignment revision, and it
+    is never valid as ``expected_revision`` -- the two are independent
+    counters, so comparing them fails closed with a guaranteed conflict.
+
+    None covers both cases readers must treat alike -- a store written by a
+    build older than this marker, and an unreadable/malformed one -- and the
+    daemon's fallback fingerprint is what keeps the first case observable.
+    """
+    token = _read(Path(root) / "tags" / "revision").get("token")
+    return token if isinstance(token, str) and token else None
 
 
 def read_categories(root: Path) -> list[dict[str, str]]:
@@ -118,7 +187,11 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
         categories.append({"id": key, "name": name})
         ids.add(key)
         names.add(folded)
-    _write(Path(root) / "tags" / "categories.json", {"version": 1, "categories": categories})
+    if _write(
+        Path(root) / "tags" / "categories.json",
+        {"version": 1, "categories": categories},
+    ):
+        _bump_revision(root)
     return categories
 
 
@@ -191,7 +264,8 @@ def set_entity_tags(
     previous = read_entity_tags(root, entity_type, entity_id, categories=categories)["tags"]
     ordered = [key for key in previous if key in tag_ids]
     ordered.extend(key for key in tag_ids if key not in ordered)
-    _write(path, {"version": 1, "primary": primary, "tags": ordered})
+    if _write(path, {"version": 1, "primary": primary, "tags": ordered}):
+        _bump_revision(root)
     return read_entity_tags(root, entity_type, entity_id)
 
 
