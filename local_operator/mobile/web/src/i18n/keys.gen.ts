@@ -15,6 +15,7 @@ export type MessageParams = {
   "relay.account_policy.scope": undefined;
   "relay.account_policy.title": undefined;
   "relay.account_policy.unavailable": undefined;
+  "relay.library.count": { "count": number };
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;
   "relay.login.password.label": undefined;

@@ -47,9 +47,15 @@ describe("retainConfigStream", () => {
 		// existing repaint channel. Pin ownership identities independently, then
 		// derive the initial revision count; never suppress same-locale updates.
 		// The rebase unioned both branches' slices: relay.session (main, C2) and
-		// relay.account_policy (LOH-12) join relay.shell in OWNED_SPA_NAMESPACES.
+		// relay.account_policy (LOH-12) join relay.shell in OWNED_SPA_NAMESPACES;
+		// relay.library is the phone Library's own en-only copy (plural count).
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
-		expect(ownedNamespaces).toEqual(["relay.account_policy", "relay.session", "relay.shell"]);
+		expect(ownedNamespaces).toEqual([
+			"relay.account_policy",
+			"relay.library",
+			"relay.session",
+			"relay.shell",
+		]);
 		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: ownedNamespaces.length });
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();

@@ -18,6 +18,9 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.account_policy.title": "Computer settings",
     "relay.account_policy.unavailable": "Account routing settings are unavailable on this relay. Update Local Operator on this computer.",
   },
+  "relay.library": {
+    "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
+  },
   "relay.session": {
     "relay.session.directory.path_placeholder": "or type another path\u2026",
     "relay.session.directory.sheet_title": "working directory",
