@@ -146,7 +146,7 @@ def test_section_renders_the_published_table() -> None:
     # The basis footer reconciles: the buckets plus the count account for the
     # whole total, with no count sitting inside a dollar sentence.
     assert "By basis:" in text
-    assert "billed $0.061" in text
+    assert "Total split: $0.061 billed" in text
     assert "basis not recorded $0.900" in text
     assert "1 call with no price recorded" in text
     # No internal vocabulary.
@@ -209,7 +209,7 @@ def test_money_column_is_aligned_across_rows() -> None:
     lines = [
         line
         for line in text.splitlines()
-        if "$" in line and not line.strip().startswith("By basis")
+        if "$" in line and not line.strip().startswith(("By basis", "Total split:"))
     ]
     ends = set()
     for line in lines:
@@ -554,3 +554,29 @@ def test_cancelled_and_partial_reasons_survive_80_columns() -> None:
     partial_line = next(line for line in partial.splitlines() if "classification" in line)
     assert "some unknown" in partial_line, partial_line
     assert "+$0" not in partial_line, partial_line
+
+
+def test_payment_split_qualifies_total_and_child_money():
+    """The parent's and child's plan equivalents must never read as billed."""
+    snapshot = combine(
+        [],
+        children=ChildrenSnapshot(
+            total_micro=12410000,
+            by_basis={"billed": 790000, "subscription_api_equivalent": 11620000},
+        ),
+        tracked=True,
+    )
+    text = rendered(
+        replace(runtime(), spend_channels=FrontendSpendChannels.model_validate(snapshot)), width=100
+    )
+    assert "$0.790 billed" in text and "$11.62 included (API-equivalent)" in text
+    assert "subagents · included in total" in text
+    assert "basis not recorded $12.41" not in text
+    narrow = rendered(
+        replace(runtime(), spend_channels=FrontendSpendChannels.model_validate(snapshot)), width=65
+    )
+    assert "included (API-equivalent)" in narrow
+    assert "mixed basis" in narrow  # the child row only, not a repeated Total qualifier
+    assert "By basis:" not in text
+    total_line = next(line for line in text.splitlines() if line.strip().startswith("Total "))
+    assert "billed" not in total_line and "included" not in total_line

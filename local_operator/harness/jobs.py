@@ -415,7 +415,7 @@ def job_subtree_summary(
     disagree on ``at_ms`` is priced at the wall clock (see the merge). The footer
     total has always been priced that way, and the row now agrees with it.
     """
-    grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+    grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
     for component in job_subtree_components(job, detach=False, live=live, problems=problems):
         if type(component) is not Usage:
             # A follower's rows carry frozen ``Usage`` subclasses; the merge
@@ -426,7 +426,7 @@ def job_subtree_summary(
 
 
 def _merge_accounting_component(
-    grouped: dict[tuple[str | None, str | None, str], Usage], component: Usage
+    grouped: dict[tuple[str | None, str | None, str, str | None], Usage], component: Usage
 ) -> None:
     """Bound a subtree summary without erasing receipt-vs-estimate provenance."""
     from local_operator.model.configure import _usage_cost
@@ -435,7 +435,7 @@ def _merge_accounting_component(
     estimate = _usage_cost({"usd_cost": component.estimated_usd_cost})
     mode = "reported" if receipt is not None else "estimated" if estimate is not None else "unknown"
     component = component.model_copy(update={"usd_cost": receipt, "estimated_usd_cost": estimate})
-    key = (component.provider, component.model_id, mode)
+    key = (component.provider, component.model_id, mode, component.billing_basis)
     total = grouped.get(key)
     if total is None:
         total = component.model_copy(deep=True)
@@ -925,7 +925,7 @@ class AsyncJobManager:
         # Terminal rows hand their subtree into this bounded accumulator before
         # retention can remove them. The owning parent runner later copies this
         # snapshot onto its AsyncJob; polling never participates in durability.
-        self._settled_accounting: dict[tuple[str | None, str | None, str], Usage] = {}
+        self._settled_accounting: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
         # The status band reads this ledger every second. Cache the bounded
         # aggregate and propagate invalidations through live manager edges so
         # unchanged reads never recurse through the subagent tree.
@@ -1102,7 +1102,7 @@ class AsyncJobManager:
         """
         if self._tasks:
             raise RuntimeError("accounting restore requires a fresh job manager")
-        grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+        grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
         for component in components:
             _merge_accounting_component(grouped, component)
         self._settled_accounting = grouped
@@ -1281,7 +1281,7 @@ class AsyncJobManager:
                     f"logical task {logical_id!r} is already running as job {prior.id}"
                 )
             inherited = [*prior.attempt_aliases, prior.id, *inherited]
-            grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+            grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
             for component in [
                 *current.prior_attempt_usage,
                 *prior.prior_attempt_usage,
