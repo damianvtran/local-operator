@@ -37,6 +37,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from local_operator.team_bridge.types import (
     ACK_TARGETS,
+    SCREENING_CATEGORIES,
     AckTarget,
     FeedSeq,
     InboxCursor,
@@ -78,12 +79,11 @@ _V3_TABLES = frozenset(
         "screening_breaker",
     }
 )
-#: The closed screening-category set (mirrors screening.SCREENING_CATEGORIES;
-#: duplicated here so the store validates persisted receipts without an
-#: import cycle). Unknown strings are damaged proof, never re-emitted.
-_CLOSED_CATEGORIES = frozenset(
-    {"prompt_injection", "social_engineering", "harassment", "malicious_link", "spam"}
-)
+#: The closed screening-category set, from the ONE cycle-free definition in
+#: :mod:`....types`. The pipeline and the persisted-proof validator share it, so
+#: a new category cannot be accepted on write and rejected on replay. Unknown
+#: strings are damaged proof, never re-emitted.
+_CLOSED_CATEGORIES = frozenset(SCREENING_CATEGORIES)
 
 #: The V4 addition: the schedule table is NEW in V4 — a stamped-V3 store
 #: legitimately lacks it (R5: an own R4-era V3 backup was declared sound and
@@ -2335,8 +2335,8 @@ class Store:
         old epoch stale and the commit refuses (H3-Q3). Monotonic: the epoch
         only advances, and a template FLOOR is enforced — once a template
         hash is accepted, a different one may only arrive as a later
-        explicitly-known version (today only byte-equal bridge-screen-v1 is
-        accepted upstream; the floor row is what a future version bumps).
+        explicitly-known version (the client accepts only byte-equal embedded
+        bridge-screen-v1/v2 today; the floor row is what a future version bumps).
         """
 
         with self._connect() as conn:
