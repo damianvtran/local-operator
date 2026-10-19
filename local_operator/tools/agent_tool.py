@@ -693,12 +693,12 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     # The highest-intent moment in the flow: someone has just read a role's
     # guidance and decided they want it. Every other op ends by naming the next
     # command; this one used to stop at "not installed" and leave them there.
-    body += f"\n\nlaunch with task(agent={identifier_text(context, profile.name)!r})"
+    body += f"\n\nlaunch with task(agent={identifier_text(context, repr(profile.name))})"
     if not profile.agent_id:
-        body += f", or op='install' name={identifier_text(context, profile.name)!r} to edit it"
+        body += f", or op='install' name={identifier_text(context, repr(profile.name))} to edit it"
     elif divergence is not None and divergence[2] == "installed":
         body += (
-            f", or op='reset' name={identifier_text(context, profile.name)!r} "
+            f", or op='reset' name={identifier_text(context, repr(profile.name))} "
             "to restore the packaged version"
         )
     elif divergence is not None:

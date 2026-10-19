@@ -14,6 +14,8 @@ Both directions are the gate: the incident's long slug must survive at its
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
@@ -27,7 +29,7 @@ from local_operator.tools.builtin import (
     identifier_text,
 )
 from local_operator.tools.project_tool import execute_project
-from local_operator.tools.team_tool import execute_team
+from local_operator.tools.team_tool import execute_team, execute_team_delete
 from local_operator.variables import (
     IDENTIFIER_SPAN_CLOSE,
     IDENTIFIER_SPAN_OPEN,
@@ -68,6 +70,17 @@ def _plain(text: str) -> str:
 
 def _has_private_use(text: str) -> bool:
     return any(ord(char) in (0xE000, 0xE001) or 0xF000 <= ord(char) <= 0xF8FF for char in text)
+
+
+def _assert_no_marker_text(text: str) -> None:
+    """No live PUA marker and no six-character ``\\ue00x`` escape either.
+
+    A ``!r`` over a marked value escapes the markers into ASCII text, which
+    looks harmless but is not a span; both spellings are failures here.
+    """
+    assert IDENTIFIER_SPAN_OPEN not in text and IDENTIFIER_SPAN_CLOSE not in text
+    assert "\\ue000" not in text and "\\ue001" not in text
+    assert _has_private_use(text) is False
 
 
 # --- the protocol itself -----------------------------------------------------
@@ -131,7 +144,7 @@ def test_a_credential_named_identifier_does_not_release_a_later_credential(
 
 
 ADVERSARIAL_VALUES = (
-    "sk-" + "abcdefghijklmnop",
+    SK_VALUE,
     'quoted "name"',
     "back`ticked",
     "line\nbreak",
@@ -332,3 +345,103 @@ def test_identifier_text_is_a_no_op_without_a_capable_store() -> None:
     assert identifier_text(ToolContext(cwd=".", variables=store), SLUG).startswith(
         IDENTIFIER_SPAN_OPEN
     )
+
+
+# --- rendered reprs and receipts (round-2 self-check) ------------------------
+
+
+def test_the_adversarial_issuer_value_is_the_assembled_one() -> None:
+    """The redacted-on-write failure must not recur: the source carries SK_VALUE.
+
+    A literal ``sk-`` value written here was masked by the transcript pass, so
+    the case silently stopped testing an issuer value. The tuple member is the
+    assembled constant; the AST-level fact pinned here is that the SOURCE names
+    it rather than a literal.
+    """
+    assert ADVERSARIAL_VALUES[0] == SK_VALUE
+    assert ADVERSARIAL_VALUES[0].startswith("sk-")
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert "    SK_VALUE," in source
+
+
+@pytest.mark.asyncio
+async def test_agent_and_team_reprs_never_leak_escaped_markers(tmp_path) -> None:
+    """``!r`` over a marked value escapes the PUA chars, so the repr is marked."""
+    store = VariableStore(cwd=".")
+    agent_registry = AgentRegistry(tmp_path / "agents")
+    fields = {
+        "name": SLUG,
+        "label": "Project Keys Export",
+        "description": "Export status reports for the platform rollout.",
+        "tags": ["role", "tools:bash"],
+    }
+    agent_registry.create_agent(AgentEditFields(**fields))
+    agent_ctx = ToolContext(cwd=".", agent_registry=agent_registry, variables=store)
+    shown = await execute_agent("tc", {"op": "show", "name": SLUG}, None, None, agent_ctx)
+    assert IDENTIFIER_SPAN_OPEN in shown.text
+    assert repr(SLUG) in shown.text.replace(IDENTIFIER_SPAN_OPEN, "").replace(
+        IDENTIFIER_SPAN_CLOSE, ""
+    )
+
+    team_registry = TeamRegistry(tmp_path / "teams")
+    team_registry.create_team(
+        TeamEditFields(
+            name=SLUG,
+            label="Project Keys Export",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    team_ctx = ToolContext(cwd=".", team_registry=team_registry, variables=store)
+    updated = await execute_team(
+        "tc", {"op": "update", "name": SLUG, "description": "updated"}, None, None, team_ctx
+    )
+    deleted = await execute_team_delete("tc", {"name": SLUG}, None, None, team_ctx)
+    for result in (shown, updated, deleted):
+        scrubbed, report = store.redact_with_report(result.text)
+        _assert_no_marker_text(scrubbed)
+        assert SLUG in scrubbed
+        assert report.labels == ()
+        assert report.reached_model is False
+
+
+@pytest.mark.asyncio
+async def test_project_receipts_and_fields_mark_token_and_keep_credentials(tmp_path) -> None:
+    """The class's receipts and non-key fields: marked, and never a global pass."""
+    store = VariableStore(cwd=".")
+    registry = ProjectRegistry(tmp_path / "config")
+    context = ToolContext(
+        cwd=".", session_id="4e92693767fa", project_registry=registry, variables=store
+    )
+    created = await execute_project(
+        "tc",
+        {
+            "op": "create",
+            "name": "token",
+            "title": "Blocker regression",
+            "team": "password",
+            "description": "receipt and field marking",
+        },
+        None,
+        None,
+        context,
+    )
+    updated = await execute_project(
+        "tc",
+        {"op": "update", "name": "token", "progress": "still marked"},
+        None,
+        None,
+        context,
+    )
+    shown = await execute_project("tc", {"op": "show", "name": "token"}, None, None, context)
+    for result in (created, updated, shown):
+        assert IDENTIFIER_SPAN_OPEN in result.text
+        # A fresh store per receipt: the first pass registers the hit, so a
+        # reused store would mask by exact value and report no LABEL.
+        fresh = VariableStore(cwd=".")
+        scrubbed, report = fresh.redact_with_report(result.text + "\ntoken: " + HEX_32)
+        assert "token" in scrubbed
+        assert HEX_32 not in scrubbed
+        assert report.labels == ("credential-assignment",)
+        assert report.reached_model is False
+        _assert_no_marker_text(scrubbed)
