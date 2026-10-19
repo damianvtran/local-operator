@@ -132,6 +132,31 @@ on a new status word. The catalog row gains `credential_state` and
 * No network record → the plain `AuthStore` path, byte-identical; adoption and
   repair are explicit owner operations.
 
+## 7. Provider logins are the same failure class (scope extension)
+
+Measured on `cloud-node-1`: classification ran through `openrouter/jev-1.13` while
+the head classifies through `radient/jev`. Inference worked (the deepseek key is
+copied), but the Radient leg resolved to nothing on the node and the cascade fell
+through. There is a mesh-aware store on the node (`build_auth_store` returns
+`MeshAwareAuthStore`, borrow works), but `classification/vendors.py` resolves
+through `providers.auth_store.shared_auth_store` — a plain `AuthStore` with no
+mesh rung — so a provider login that exists only on the head is invisible to
+classification (and to `model/configure.py`, which reads the same seam).
+
+The shape table gains the provider classes already defined in
+`mesh-credentials.md` §1: provider OAuth (class 3) stays **broker-only** (the
+owner refreshes; no refresh token moves), provider API keys (class 4) are copied,
+device-bound providers refuse. The fix is not a new mechanism: route every
+provider-read seam that a session can use through the mesh-aware resolver
+(`build_auth_store`), and keep the zero-peer path byte-identical.
+
+**A fall-through must say so.** When the cascade skips a preferred leg because
+its credential is absent on this device, the decision and the spend row carry the
+skipped leg and the reason (`not synced to this device`, `needs reauth on
+<owner>`), rather than presenting the fallback as the choice. A silent downgrade
+changes what the operator is billed and misattributes the ledger; it is worse
+than a missing tool.
+
 ## Test matrix (the deliverable)
 
 Real paired node `cloud-node-1`, from this Mac:
@@ -145,6 +170,11 @@ Real paired node `cloud-node-1`, from this Mac:
    status says `revoked`.
 4. **Offline refresh**: take the member's relay down across a head-side refresh,
    bring it back, reconcile, connect.
+5. **Provider login**: classification on the node resolves `radient` (the head's
+   login) and reports `radient/jev`; with the login deliberately absent, it names
+   the skipped leg and falls through visibly, never silently.
+6. **Provider refresh**: expire the head's Radient access token, force a refresh,
+   show the node's next classification still resolves through `radient`.
 
 Unit and two-relay link tests cover the same branches deterministically; the
 real-node matrix is the independent QA evidence.
