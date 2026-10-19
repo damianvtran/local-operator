@@ -1484,6 +1484,34 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the runtime-stop.json FILE the ladder's own refusal withdraws (never a directory)",
     ),
+    # Checkpoints own only fixed receipt FILES and their temporary siblings,
+    # never the child directory or its transcript. The two snapshot unlinks
+    # cover the empty mkstemp index before read-tree and that same index on exit.
+    (
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write",
+        "os.replace",
+        "Sibling mkstemp FILE -> fixed subagent-wip-<job>.v1.json sidecar in the CHILD's "
+        "own transcript directory; cannot name a session directory or transcript file.",
+    ),
+    (
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write",
+        "os.unlink",
+        "Only the sibling mkstemp FILE created for that fixed sidecar write; "
+        "cannot name a session directory or transcript file.",
+    ),
+    (
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer.snapshot",
+        "os.unlink",
+        "Both calls remove only the same mkstemp alternate-index FILE: before read-tree "
+        "and on exit; neither can name a session directory or transcript file.",
+        2,
+    ),
+    (
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer.clear",
+        "<path>.unlink",
+        "Only the fixed subagent-wip-<job>.v1.json sidecar in the CHILD's own transcript "
+        "directory; cannot name a session directory or transcript file.",
+    ),
     # The child-attribution ledger (``session/subagent_ledger.py``) is the SAME
     # artifact shape one level in: its staged write puts a temp FILE beside a
     # FILE it then renames onto, inside the CHILD's own transcript directory

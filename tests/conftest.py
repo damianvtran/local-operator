@@ -135,6 +135,10 @@ _AMBIENT_VARS = (
     # deliberately, per test, which is the visible opt-in). Scrub it for every test
     # at once rather than trusting each cell to remember.
     "LOCAL_OPERATOR_SUBAGENT_LANE_BOUND_S",
+    # An inherited cadence override makes checkpoint timing depend on the
+    # developer's shell and can slow or starve tests. Tests needing a different
+    # cadence set their own value explicitly.
+    "LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S",
     # The episode boot's secret-resolution bound override
     # (``evaluation/runner/host_secrets.RESOLUTION_TIMEOUT_ENV``, read by the
     # evaluation host resolvers). The same ESCAPE-HATCH class as the lane bound
