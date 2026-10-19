@@ -95,11 +95,12 @@ async def capture(output: Path) -> None:
                 await pilot.pause()
                 await settled(pilot, app)
                 await pilot.pause()
-                # Keep the requested raw Textual SVG as well as the faithful
-                # cell-grid capture and its geometry sidecar (repo convention).
+                # Both export locations use calibrated cell geometry. The raw/
+                # companion is the first capture, not legacy Rich geometry;
+                # save_capture writes its matching geometry sidecar as well.
                 raw = output / "raw"
                 raw.mkdir(parents=True, exist_ok=True)
-                app.save_screenshot(f"{state}-{grid}.svg", path=str(raw))
+                save_capture(app, raw / f"{state}-{grid}.svg")
                 save_capture(app, output / f"{state}-{grid}.svg")
                 await pilot.pause()
                 save_capture(app, output / f"{state}-{grid}-settled.svg")
