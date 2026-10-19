@@ -1717,3 +1717,40 @@ def _publish_live_record_for(root: Path, session_id: str) -> None:
         ),
         root,
     )
+
+
+def test_a_handler_refusal_is_recorded_locally_with_its_code(root: Path) -> None:
+    """Round-2 MAJOR: the refusing device kept NO trace of the refusal.
+
+    The peer's receipt is the sender's view; the device that said no must also be
+    able to answer "why is memory sync stuck" from its own audit file. `bad_memory`
+    is a registered cause, so the row names the real refusal instead of `internal`.
+    """
+    from local_operator.network import audit
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    frame = {"op": "net_memory", "req": 11}
+
+    def _handler(_link: object, _frame: dict[str, object]) -> None:
+        raise types.MeshRefusal(
+            "bad_memory",
+            "Memory move refused: resolve the conflict on this device. Memory sync "
+            "retries automatically after about 30 minutes; restarting this device picks the "
+            "retry up sooner.",
+        )
+
+    link: Any = Namespace(device_id="d_" + "b" * 32, network_id=NETWORK, epoch=2)
+    reply = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
+        link,
+        frame,
+        _handler,
+        None,  # type: ignore[arg-type] — the refusal branch never reads it
+    )
+    assert reply["code"] == "bad_memory"
+    rows = [row for row in server.audit.tail(limit=20) if row["event"] == "authorisation_refused"]
+    assert rows, "the refusal left no local audit record"
+    assert rows[-1]["outcome"] == "refused"
+    assert rows[-1]["cause"] == "bad_memory"
+    assert "bad_memory" in audit.CAUSES

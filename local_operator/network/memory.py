@@ -339,6 +339,35 @@ def _peer_code(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) and value in allowed else fallback
 
 
+#: Receipt codes that mean the peer is receiving normally. Everything else is shown
+#: as a failing peer in `lop memory status`; a code this module has never heard of is
+#: treated as failing too, because claiming "synced" is the failure mode we are fixing.
+HEALTHY_PEER_CODES = frozenset(
+    {
+        "in_sync",
+        "catching_up",
+        # Some origins are withheld from this scope (an unknown device); the peer is
+        # receiving everything authorised, so this is not a stalled stream.
+        "withheld",
+        # Nothing is shared BY CONFIGURATION; there is no failure to report.
+        "no_shared_scopes",
+    }
+)
+
+
+def _peer_message(value: Any) -> str:
+    """A peer's sentence, flattened and bounded for a receipt/status line.
+
+    Peer text is UNTRUSTED display input, not a protocol field: a newline would
+    break the one-line status receipt, and an unbounded sentence would bloat the
+    meta row rewritten on every tick. The peer's refusal sentences are value-free
+    by construction (MemoryError paths), but this bounds them anyway.
+    """
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:500]
+
+
 def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
     enabled, scopes, excluded = settings(server.root)
     if not enabled or not scopes or device_id in excluded:
@@ -385,6 +414,9 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                 if isinstance(state, dict)
                 else "state_failed"
             ),
+            # The only actionable sentence in a refusal is the PEER's; dropping it
+            # here left the operator with a code and no remedy (round-2 MAJOR).
+            "message": _peer_message(state.get("message")) if isinstance(state, dict) else "",
         }
     remote = state.get("detail", state)
     if (
@@ -430,6 +462,7 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                     if isinstance(answer, dict)
                     else "push_failed"
                 ),
+                "message": _peer_message(answer.get("message")) if isinstance(answer, dict) else "",
                 "batches": batches,
             }
         reply = answer.get("detail", answer)
@@ -485,6 +518,10 @@ def push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                         "batches": result.get("batches", 0),
                         "last_withheld": result.get("withheld")
                         or previous_receipt.get("last_withheld", []),
+                        # A healthy answer has no message, which CLEARS a stale
+                        # refusal sentence from the previous receipt; otherwise a
+                        # recovered peer would keep showing its old failure reason.
+                        "message": _peer_message(result.get("message")),
                     }
                     db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, _dump(receipt)))
                     db.commit()
