@@ -485,7 +485,14 @@ def _searched_line(value: dict[str, Any], prefix: str) -> str:
 #: refusal sentence wins when it has one (it names the exact conflict); these are
 #: the fallbacks so a code whose refusal carried no sentence is still actionable.
 _PEER_REMEDY: dict[str, str] = {
-    "bad_memory": "Resolve the named memory conflict on the refusing peer, then sync again.",
+    "bad_memory": "Resolve the named memory conflict on the refusing peer; memory sync "
+    "retries automatically within 30 minutes (restarting the retrying device picks it "
+    "up sooner).",
+    # A receiver-side capability refusal (`_push_to_peer` reports `skipped:no_admin`
+    # when the peer does not grant this device the admin the memory stream requires).
+    # Without this row it fell through to advice that could not change the answer.
+    "skipped:no_admin": "Grant receiver-admin to this device on the peer, or exclude "
+    "this peer from memory sync.",
     "peer_too_old": "Run lop-update on both peers.",
     "refused": "Grant this device memory access on the peer.",
     "not_authorised": "Grant this device memory access on the peer.",
@@ -543,8 +550,15 @@ def _status_text(value: dict[str, Any]) -> str:
         device = str(receipt.get("device") or "unknown device")
         code = str(receipt.get("code") or "unknown")
         # The peer's own sentence names the exact conflict and the way out; the map
-        # is the fallback for a code whose refusal carried no sentence.
-        remedy = str(receipt.get("message") or "").strip() or _PEER_REMEDY.get(
+        # is the fallback for a code whose refusal carried no sentence. The sentence
+        # is UNTRUSTED terminal input from a paired peer: strip control sequences
+        # with the repo's own helper BEFORE whitespace collapsing (a newline inside
+        # an OSC payload must not survive), because this is the first route by which
+        # arbitrary peer text reaches the operator's terminal.
+        from local_operator.ansi import strip_control_sequences
+
+        message = " ".join(strip_control_sequences(str(receipt.get("message") or "")).split())
+        remedy = message or _PEER_REMEDY.get(
             code, "Run `lop memory status --json` for this peer's receipt."
         )
         lines += _shaped(f"Not syncing with {device}: {code}. {remedy}")

@@ -568,7 +568,10 @@ def test_a_peer_refusal_message_reaches_the_receipt_and_status(tmp_path, monkeyp
     store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
     store.put("global", {"title": "Sync proof", "body": "Durable preference for tea"})
     server = _memory_server(tmp_path)
-    refusal = "Memory move refused: resolve the conflict on this device, then sync again."
+    refusal = (
+        "Memory move refused: resolve the conflict on this device. Memory sync retries "
+        "automatically within 30 minutes; restarting this device picks the retry up sooner."
+    )
     link = _StubMemoryLink(
         [
             {
@@ -621,3 +624,84 @@ def test_bad_memory_is_a_policy_refusal_not_a_fast_retry():
     from local_operator.network import definitions
 
     assert "bad_memory" in definitions.POLICY_REFUSAL_CODES
+
+
+def test_peer_refusal_text_reaches_the_terminal_inert(tmp_path):
+    """A paired peer must not be able to paint the operator's terminal.
+
+    The refusal sentence is the first peer-controlled text rendered by a `lop`
+    status surface. It is stripped with the repo's own `strip_control_sequences`
+    (which removes OSC payloads with their terminator) and then flattened, so an
+    erase-screen or hyperlink sequence is inert while the ordinary words — the
+    ones that name the remedy — still read.
+    """
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "c" * 32
+    hostile = (
+        "safe-start \x1b[2J middle "
+        "\x1b]8;;https://evil.invalid\x07click here\x1b]8;;\x07 safe-end"
+    )
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": hostile,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "\x1b" not in human
+    assert "\x07" not in human
+    assert "safe-start" in human and "safe-end" in human
+    # OSC 8's visible label is ordinary text and stays; its URL is device data and
+    # is removed with the terminator, so no clickable link can be forged.
+    assert "click here" in human
+    assert "evil.invalid" not in human
+    assert "bad_memory" in human and "Peers synced: 0" in human
+
+
+def test_a_missing_admin_grant_has_a_real_remedy(tmp_path):
+    """`skipped:no_admin` used to fall through to circular advice."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "d" * 32
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "skipped:no_admin",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": "",
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "skipped:no_admin" in human
+    # Wrapped at the row bar, so assert the distinctive word rather than the phrase.
+    assert "receiver-admin" in human
+    assert "exclude" in human
