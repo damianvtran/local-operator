@@ -493,6 +493,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
     # boundary as the three leg-1 verbs, a different direction of travel.
     "credential_revoke",
+    # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
+    # same boundary rule — this device's own relay is told to pull one copy from
+    # its owner now, and the link it needs lives in that process.
+    "credential_sync_pull",
     # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
     # peer, or one named peer, and bring its user-scope MCP servers up to date.
     # A local op for the same reason ``definitions_sync`` is one — this device's

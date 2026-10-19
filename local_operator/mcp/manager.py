@@ -2271,7 +2271,12 @@ class McpManager:
                 # is the one thing they can do about it. A server that REFUSED
                 # us (McpAuthChallengeError) lands here too, so the opaque
                 # "Server returned an error response" never reaches the splash.
-                message = self._auth_failure_text(name, exc, store=self._effective_auth_store())
+                message = self._auth_failure_text(
+                    name,
+                    exc,
+                    store=self._effective_auth_store(),
+                    credential_hint=self._credential_hint(name),
+                )
                 result.errors[name] = message
                 # An authorization shape is never a transport failure, so the
                 # flag stays clear: the reauth/login command this line names is
@@ -2305,7 +2310,11 @@ class McpManager:
                 # DNS failure could only render the hostless fallback.
                 url = self._server_url(name)
                 message = self._auth_failure_text(
-                    name, exc, url, store=self._effective_auth_store()
+                    name,
+                    exc,
+                    url,
+                    store=self._effective_auth_store(),
+                    credential_hint=self._credential_hint(name),
                 )
                 result.errors[name] = message
                 # The flag comes from the EXCEPTION, not from the rendered text:
@@ -3360,6 +3369,7 @@ class McpManager:
         exc: "McpAuthRequiredError | McpAuthChallengeError",
         *,
         brokered_owner: str | None = None,
+        credential_hint: str = "",
     ) -> str:
         """The startup-toast wording for a server that needs an OAuth login.
 
@@ -3400,6 +3410,12 @@ class McpManager:
         falls back to a lookup.
         """
         has_stored_grant = getattr(exc, "has_stored_grant", None)
+        if credential_hint:
+            # THE DURABLE STATUS KNOWS MORE THAN THE EXCEPTION DOES, and the
+            # sentence is composed where the status lives (credential_status.py)
+            # so every surface says one thing. The hint already names the owner
+            # and/or the command that fixes it; see ``_credential_hint``.
+            return credential_hint
         if brokered_owner:
             # A BORROWING DEVICE IS A DIFFERENT CASE, and answering it with the local
             # verbs is wrong twice over (review round 1, R1). ``/mcp login <name>`` here
@@ -3442,7 +3458,11 @@ class McpManager:
 
     @staticmethod
     def _auth_challenge_text(
-        name: str, exc: McpAuthChallengeError, *, brokered_owner: str | None = None
+        name: str,
+        exc: McpAuthChallengeError,
+        *,
+        brokered_owner: str | None = None,
+        credential_hint: str = "",
     ) -> str:
         """The wording for a server that REFUSED us with 401/403.
 
@@ -3471,12 +3491,16 @@ class McpManager:
           There is no command to lead with here, so the status code earns its
           place as the concrete fact the user can act on.
         """
+        if credential_hint:
+            return credential_hint
         if not exc.oauth_available:
             return (
                 f"{name} rejected our credentials ({exc.status_code}) — "
                 "set its API key or headers"
             )
-        return McpManager._auth_required_text(name, exc, brokered_owner=brokered_owner)
+        return McpManager._auth_required_text(
+            name, exc, brokered_owner=brokered_owner, credential_hint=credential_hint
+        )
 
     @staticmethod
     def _brokered_owner(store: Any, exc: BaseException) -> str | None:
@@ -3548,6 +3572,7 @@ class McpManager:
         url: str | None = None,
         *,
         store: Any = None,
+        credential_hint: str = "",
     ) -> str:
         """Actionable wording for EITHER auth failure shape.
 
@@ -3580,9 +3605,13 @@ class McpManager:
         """
         brokered_owner = cls._brokered_owner(store, exc)
         if isinstance(exc, McpAuthChallengeError):
-            return cls._auth_challenge_text(name, exc, brokered_owner=brokered_owner)
+            return cls._auth_challenge_text(
+                name, exc, brokered_owner=brokered_owner, credential_hint=credential_hint
+            )
         if isinstance(exc, McpAuthRequiredError):
-            return cls._auth_required_text(name, exc, brokered_owner=brokered_owner)
+            return cls._auth_required_text(
+                name, exc, brokered_owner=brokered_owner, credential_hint=credential_hint
+            )
         reason_code = getattr(exc, "reason_code", None)
         if reason_code is not None:
             return _REFRESH_REFUSAL_TEXT.get(reason_code, REFRESH_REFUSAL_UNKNOWN_TEXT)
@@ -3620,6 +3649,51 @@ class McpManager:
         cfg = self._configs.get(name)
         url = getattr(cfg, "url", None) if cfg is not None else None
         return url if isinstance(url, str) and url else None
+
+    def _credential_row(self, name: str) -> dict[str, Any]:
+        """This server's credential-status row, or ``{}``. No dial, never raises.
+
+        The manager's cwd is the session's, which is the folder whose ``mcp.json``
+        defined the server being reported. A status read that fails degrades to
+        the exception's own wording, which is exactly what every surface said
+        before this row existed.
+        """
+        try:
+            from local_operator.mcp.credential_status import server_states
+
+            return dict((server_states(self.cwd) or {}).get(name) or {})
+        except Exception:  # noqa: BLE001 — a hint never replaces the error
+            return {}
+
+    def credential_reason(self, name: str) -> str:
+        """WHY ``name`` is not usable, in the status vocabulary. CHEAP: no dial.
+
+        The public accessor for surfaces that want the sentence without the auth
+        exception path (the ``/mcp`` block, the desktop catalog). Empty when the
+        status has nothing to add, which is the ``synced`` and ``unknown`` cases —
+        a reason for either would be noise a reader has to discard.
+        """
+        return str(self._credential_row(name).get("reason") or "")
+
+    def _credential_hint(self, name: str) -> str:
+        """The composed remedy line for an auth failure, or ``""``.
+
+        Kept separate from :meth:`credential_reason` because the surfaces differ:
+        a row wants the bare reason, while the toast/transcript line IS the remedy
+        and must carry the command. The owner prefix is already inside an
+        owner-carrying reason (``credential_status`` composes it), so it is not
+        added twice here.
+        """
+        row = self._credential_row(name)
+        state = str(row.get("state") or "")
+        reason = str(row.get("reason") or "")
+        if not reason or state in ("synced", "unknown", ""):
+            return ""
+        if state == "needs_operator_login":
+            return f"/mcp login {name} — {reason}"
+        if state == "expired" and not row.get("owner"):
+            return f"/mcp reauth {name} — {reason}"
+        return reason
 
     def auth_recovery_hint(self, rendered_error: str) -> str | None:
         """The truthful remedy line for an MCP auth failure in ``rendered_error``.
@@ -3680,7 +3754,9 @@ class McpManager:
                 oauth_available=OAUTH_CHALLENGES.get(url, True),
                 has_stored_grant=server_has_stored_grant(url, store),
             )
-            return self._auth_failure_text(name, exc, store=store)
+            return self._auth_failure_text(
+                name, exc, store=store, credential_hint=self._credential_hint(name)
+            )
         except Exception:  # noqa: BLE001 — a hint must never replace the error
             logger.debug("MCP auth recovery hint could not be derived", exc_info=True)
             return None
@@ -3705,7 +3781,12 @@ class McpManager:
         try:
             sink(
                 name,
-                self._auth_failure_text(name, exc, store=self._effective_auth_store()),
+                self._auth_failure_text(
+                    name,
+                    exc,
+                    store=self._effective_auth_store(),
+                    credential_hint=self._credential_hint(name),
+                ),
             )
             self._auth_toasted.add(name)
         except Exception:  # noqa: BLE001 — UI hooks must never break the manager
@@ -3880,6 +3961,7 @@ class McpManager:
                                 name,
                                 auth_exc,
                                 store=self._effective_auth_store(),
+                                credential_hint=self._credential_hint(name),
                             ),
                         )
                         # Arm the recovery notice. This line MUST stay INSIDE
@@ -3943,6 +4025,7 @@ class McpManager:
                         auth_exc,
                         self._server_url(name),
                         store=self._effective_auth_store(),
+                        credential_hint=self._credential_hint(name),
                     ),
                     # Classified from ``auth_exc`` — the SAME value the text is
                     # composed from — so a group that wraps both an auth
@@ -4869,7 +4952,12 @@ class McpManager:
                 try:
                     sink(
                         name,
-                        self._auth_failure_text(name, exc, store=self._effective_auth_store()),
+                        self._auth_failure_text(
+                            name,
+                            exc,
+                            store=self._effective_auth_store(),
+                            credential_hint=self._credential_hint(name),
+                        ),
                     )
                     # Arm the recovery notice — INSIDE the ``if sink is not
                     # None`` branch, deliberately: the gate means "the MODEL

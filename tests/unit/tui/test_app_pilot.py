@@ -7094,6 +7094,11 @@ class FakeMcpManager:
         #: after-boot grant expiry through the sink the app installed, rather
         #: than waiting for a real grant to lapse.
         self.on_auth_required: Any = None
+        #: What ``/mcp``'s detail column renders for a down server, and the tools
+        #: a connected one is holding — the two facts the block gained when the
+        #: status moved out of one crammed string.
+        self._reasons: dict[str, str] = {}
+        self._tools: dict[str, list[Any]] = {}
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -7110,6 +7115,12 @@ class FakeMcpManager:
 
     def get_server_config(self, name: str) -> Any:
         return self._configs.get(name)
+
+    def get_server_tools(self, name: str) -> list[Any]:
+        return list(self._tools.get(name) or [])
+
+    def credential_reason(self, name: str) -> str:
+        return str(self._reasons.get(name) or "")
 
     async def disconnect_server(self, name: str) -> None:
         self.disconnects.append(name)
@@ -7347,6 +7358,40 @@ async def test_mcp_command_puts_the_status_in_a_column() -> None:
         # The detail after the status column lines up too, or the padding only
         # moved the ragged edge one field to the right.
         assert rows[0].index("npx") == rows[1].index("command not found"), rows
+
+
+@pytest.mark.asyncio
+async def test_mcp_block_shows_the_credential_reason_and_the_tool_count() -> None:
+    """``/mcp`` answers WHY a server is down, and how much a live one carries.
+
+    The status word alone ("disconnected") and the target alone ("npx -y …") left
+    the reader to work out both facts; the reason is the durable per-key status,
+    and the count is the manager's own accessor.
+    """
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    manager = FakeMcpManager(["github", "linear"], ["github"])
+    manager._reasons = {
+        "linear": "macbook: sign in again — the token refresh failed there",
+    }
+    manager._tools = {"github": ["tool-a", "tool-b", "tool-c"]}
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 24)) as pilot:
+        await await_session_boot(app)
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        configs = {
+            "github": MCPStdioServerConfig(command="npx -y server-github"),
+            "linear": MCPStdioServerConfig(command="npx -y server-linear"),
+        }
+        with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
+            block = app._mcp_block()
+        assert block is not None
+        listing = _renderable_plain(block.renderable)
+        assert "macbook: sign in again — the token refresh failed there" in listing
+        assert "3 tools" in listing
 
 
 @pytest.mark.asyncio
