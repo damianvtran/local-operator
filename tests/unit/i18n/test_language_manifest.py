@@ -333,3 +333,17 @@ def test_allowance_growth_reports_only_added_key_ids(i18n_check) -> None:
     base = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
     head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one", "demo.two"]}]}
     assert i18n_check.allowance_growth(base, head) == {("fr", "demo", "demo.two")}
+
+
+def test_allowance_growth_skips_without_a_base_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """An isolated fixture or exported tarball has no base ref; that is a skip.
+
+    Treating an unknown base as a catalogue problem broke every ``check.py``
+    caller that runs in a temp tree, so this pins the non-fatal path.
+    """
+    monkeypatch.setattr(i18n_check, "REPO", tmp_path)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    assert i18n_check.check_allowance_growth("definitely-not-a-ref") == []
