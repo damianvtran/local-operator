@@ -39,6 +39,7 @@ from local_operator.tools.builtin import (
     _redact_tool_text,
     _session_row_brief,
     _sessions_info_body,
+    _spill,
     execute_read,
     identifier_text,
 )
@@ -868,3 +869,80 @@ def test_extractor_scales_to_megabyte_text(store: VariableStore) -> None:
         elapsed = time.process_time() - started
         assert len(extracted) == spans
         assert elapsed < ceiling, f"{megabytes}MB took {elapsed:.1f}s"
+
+
+# --- round 4: splitlines parity and search-window marking -------------------
+
+_LINE_BREAKS = ["\n", "\r", "\r\n", "\x0c", "\v", "\x85", "\u2028", "\u2029", "\x1c"]
+
+
+@pytest.mark.parametrize("breaker", _LINE_BREAKS)
+@pytest.mark.asyncio
+async def test_spill_ranges_count_every_splitlines_break(breaker: str) -> None:
+    """R4-1: range lines must be the lines SpillStore numbers by."""
+    store = VariableStore(cwd=".")
+    identifier = "a" * 32
+    text = (
+        ("padding line\n" * 50)
+        + "x\n"
+        + "token: "
+        + HEX_32
+        + breaker
+        + "  key: "
+        + store.identifier_span(identifier)
+        + "\ntail\n"
+    )
+    context = ToolContext(cwd=".", variables=store)
+    meta = _spill(text, "project", context)
+    assert meta is not None
+
+    plain, ranges = store.strip_identifier_spans_with_ranges(text)
+    lines = plain.splitlines()
+    identifier_line = next(index + 1 for index, line in enumerate(lines) if identifier in line)
+    assert any(line_no == identifier_line for line_no, _start, _end in ranges)
+
+    read = await execute_read("tc", {"path": meta.handle}, None, None, context)
+    scrubbed, report = store.redact_with_report(read.text)
+    assert identifier in scrubbed
+    assert HEX_32 not in scrubbed
+    assert report.labels == ("credential-assignment",)
+    assert report.reached_model is False
+    assert "\ufffd" not in scrubbed
+    _assert_no_marker_text(scrubbed)
+
+
+@pytest.mark.asyncio
+async def test_spill_search_windows_before_marking_ranges() -> None:
+    """R4-2: a query window must not cut a live span prefix open."""
+    store = VariableStore(cwd=".")
+    identifier = "a" * 32
+    line = (
+        "p" * 210
+        + store.identifier_span(identifier)
+        + ("q" * 150)
+        + "NEEDLE"
+        + " token: "
+        + HEX_32
+        + ("z" * 300)
+    )
+    text = "first line\n" + line + "\nlast line\n"
+    context = ToolContext(cwd=".", variables=store)
+    meta = _spill(text, "project", context)
+    assert meta is not None
+
+    read = await execute_read("tc", {"path": meta.handle + "?q=NEEDLE"}, None, None, context)
+    assert "NEEDLE" in read.text
+    assert "\ufffd" not in read.text
+    # Every OPEN in the window carries the COMPLETE own prefix: a window cut
+    # inside the marker would leave a token suffix here (the R4-2 defect).
+    assert read.text.count(IDENTIFIER_SPAN_OPEN) == read.text.count(IDENTIFIER_SPAN_CLOSE)
+    for trailing in read.text.split(IDENTIFIER_SPAN_OPEN)[1:]:
+        assert trailing.startswith(store._span_token + ":")
+
+    scrubbed, report = store.redact_with_report(read.text)
+    assert identifier in scrubbed
+    assert HEX_32 not in scrubbed
+    assert report.labels == ("credential-assignment",)
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+    assert "\ufffd" not in scrubbed

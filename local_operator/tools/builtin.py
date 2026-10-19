@@ -5893,6 +5893,10 @@ def _remark_spill_line(
     line_number: int,
     spans: Mapping[int, list[tuple[int, int]]],
     context: ToolContext | None,
+    *,
+    window_start: int = 0,
+    window_end: int | None = None,
+    offset: int = 0,
 ) -> str:
     """Re-mint this store's span around stored identifier ranges (R3-2).
 
@@ -5901,6 +5905,12 @@ def _remark_spill_line(
     result's redaction pass leaves the identifier readable; a forged or
     stale range cannot do more than mark bytes that are already in the
     plain text, and a missing store leaves the line untouched.
+
+    WINDOW (R4-2): ``line`` may be a slice of the stored line. Only ranges
+    FULLY inside ``[window_start, window_end)`` are marked, mapped through
+    ``offset`` (the slice's decoration). A range cut by the window is
+    dropped rather than re-minted, so no token prefix or U+FFFD can reach
+    a search result; the cut identifier is then masked by redaction.
     """
     ranges = spans.get(line_number)
     if not ranges:
@@ -5911,9 +5921,14 @@ def _remark_spill_line(
     )
     if not callable(span):
         return line
+    limit = len(line) - offset if window_end is None else window_end
     for start, end in sorted(ranges, reverse=True):
-        if 0 <= start <= end <= len(line):
-            line = line[:start] + span(line[start:end]) + line[end:]
+        if start < window_start or end > limit:
+            continue
+        begin = offset + start - window_start
+        finish = offset + end - window_start
+        if 0 <= begin <= finish <= len(line):
+            line = line[:begin] + span(line[begin:finish]) + line[finish:]
     return line
 
 
@@ -6021,20 +6036,23 @@ _SPILL_MATCH_CONTEXT_CHARS = 200
 _SPILL_MATCH_LINE_CHARS = 2 * _SPILL_MATCH_CONTEXT_CHARS + 100
 
 
-def _spill_match_window(line: str, regex: re.Pattern[str]) -> str:
-    """``line``, or a window around its first hit when the line is very long.
+def _spill_match_window(line: str, regex: re.Pattern[str]) -> tuple[str, int, int, int]:
+    """``(window_text, start, end, lead)`` around the first hit of a long line.
 
     The window says how much it dropped on each side, so the model knows the
     line continues and can read the whole line with a ``range`` on its number.
+    ``start``/``end`` are offsets in the STORED line; ``lead`` is the length
+    of the decoration prepended to the slice, so an identifier range inside
+    the slice maps to ``start - window_start + lead``.
     """
     if len(line) <= _SPILL_MATCH_LINE_CHARS:
-        return line
+        return line, 0, len(line), 0
     hit = regex.search(line)
     start = max((hit.start() if hit else 0) - _SPILL_MATCH_CONTEXT_CHARS, 0)
     end = min((hit.end() if hit else 0) + _SPILL_MATCH_CONTEXT_CHARS, len(line))
     before = f"[\u2026{start} chars] " if start else ""
     after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
-    return f"{before}{line[start:end]}{after}"
+    return f"{before}{line[start:end]}{after}", start, end, len(before)
 
 
 #: The most matches ONE ``?q=`` call will ask the store to materialize. A page
@@ -6109,10 +6127,6 @@ def _search_spill(
     store_has_matches = bool(matches)
     if range_spec:
         matches = matches[first_match_index - 1 : page_end]
-    span_map = _spill_span_map(meta)
-    matches = [
-        (number, _remark_spill_line(line, number, span_map, context)) for number, line in matches
-    ]
     # The page the caller asked for decides the NEXT page's width: continuing a
     # "1-5" page with "6-10" is what they were reading.
     page_size = max(len(matches), 1)
@@ -6154,8 +6168,19 @@ def _search_spill(
     regex = re.compile(ref.query)
     rows: list[str] = []
     used = 0
+    span_map = _spill_span_map(meta)
     for number, line in matches:
-        row = f"{number:>{width}}| {_spill_match_window(line, regex)}"
+        window, window_start, window_end, lead = _spill_match_window(line, regex)
+        window = _remark_spill_line(
+            window,
+            number,
+            span_map,
+            context,
+            window_start=window_start,
+            window_end=window_end,
+            offset=lead,
+        )
+        row = f"{number:>{width}}| {window}"
         if rows and used + len(row) + 1 > READ_OUTPUT_LIMIT_CHARS:
             break
         rows.append(row)
