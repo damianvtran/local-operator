@@ -360,6 +360,7 @@ def record_publish_origin(
     *,
     hub_id: str,
     origin: LinkOrigin | None,
+    accepted: Mapping[str, Any] | None = None,
 ) -> bool:
     """Attach the origin an ACCEPTED publication proved.
 
@@ -374,17 +375,38 @@ def record_publish_origin(
     A scope that conflicts with the record is REFUSED (``origin-conflict``),
     never silently relinked: the record's own tenant has to be the one the
     target names, and the record's hub id has to be the row that was
-    published. A record that already carries an identity is left alone.
+    published. An already matching identity returns True without rewriting it;
+    False refuses all downstream receipt mutation. A first publication creates
+    a baseline from the accepted canonical comparable fields, never local text.
 
-    ``False`` is not a failure: the publication stands, and the link honestly
-    stays without an origin.
+    ``False`` does not undo the hub publication: it refuses local bookkeeping
+    so the original link and its outbound ancestry remain untouched.
     """
 
     if origin is None or not hub_id:
         return False
     record = prov.read_baseline(config_dir, kind, local_id)
     if record is None:
-        return False
+        if not accepted:
+            return False
+        # The accepted canonical document, not the local authored copy, is the
+        # inbound ancestor. Generalization may have changed it; using L as B
+        # would allow a future pull to overwrite unintegrated local edits.
+        fields = (
+            prov.team_fields(
+                description=str(accepted.get("description") or ""),
+                manager=str(accepted.get("manager") or ""),
+                members=accepted.get("members"),
+                instructions=str(accepted.get("instructions") or ""),
+                project=str(accepted.get("project") or ""),
+            )
+            if kind == "team"
+            else {
+                "instructions": prov.norm(accepted.get("instructions")),
+                "description": prov.norm(accepted.get("description")),
+            }
+        )
+        record = prov.make_record(kind, local_id, hub_id, origin.tenant_id, fields, "publish")
     if record.hub_id != hub_id or record.tenant_id != origin.tenant_id:
         logger.warning(
             "the published scope for %s %s does not match the linked row; leaving it untouched",
@@ -403,7 +425,10 @@ def record_publish_origin(
                 kind,
                 local_id,
             )
-        return False
+            return False
+        # An already matching origin is compatible, not a refusal: republish
+        # may advance its receipt. A different origin must never touch ancestry.
+        return True
     try:
         prov.write_baseline(config_dir, replace(record, identity=identity))
     except (prov.BaselineError, OSError, ValueError):
@@ -462,7 +487,8 @@ def seed_receipt_after_publish(
     The server returned the canonical document and its ETag; A is the local input
     that was published and P the accepted document. Nothing client-side is
     invented: without a revision (an older server) nothing is seeded and the link
-    stays honestly ``no-receipt``. The inbound baseline B is untouched.
+    stays honestly ``no-receipt``. An existing inbound baseline B is untouched;
+    a first publication creates B from the accepted canonical fields.
 
     The ORIGIN the acceptance proved is recorded as well -- the base and the
     scope the user chose -- so a published row is a CONFIRMED link instead of
@@ -470,8 +496,13 @@ def seed_receipt_after_publish(
     receipt: a server that answers no ETag still proved where the row went.
     """
 
-    if origin is not None and hub_id:
-        record_publish_origin(config_dir, kind, local_id, hub_id=hub_id, origin=origin)
+    if origin is not None:
+        # Compatibility is a fence for BOTH mutations. A rejected destination's
+        # accepted bytes/ETag must never become this link's outbound ancestry.
+        if not hub_id or not record_publish_origin(
+            config_dir, kind, local_id, hub_id=hub_id, origin=origin, accepted=accepted
+        ):
+            return False
     if not revision:
         return False
     from dataclasses import replace as dc_replace
@@ -664,9 +695,9 @@ def attach_served_origin(ctx: HubSyncContext, c: chk.ItemCheck, *, source: str |
     A baseline written before links carried an origin has no identity, and an
     identity-less row is a dead end: the inventory lists it as "source
     unresolved" and the desktop draws a "?" badge for a row this machine
-    pulled from a source the operator trusts. The HUB is the proof: a check
-    that FETCHED the row knows which base served it, and the client it used
-    knows under which scope.
+    pulled from a source the operator trusts. The HUB proves the serving base;
+    only an anonymous fetch of a tenant-free known-scope record proves public
+    visibility. An authenticated detail fetch does not prove org visibility.
 
     Guards -- every one of them a REFUSAL, never a relink:
 
@@ -675,9 +706,9 @@ def attach_served_origin(ctx: HubSyncContext, c: chk.ItemCheck, *, source: str |
       nothing, so a row the hub no longer serves stays unresolved);
     * only when the serving base is the CONFIGURED one (a row answered by
       some other destination says nothing about this hub);
-    * the RECORD's own scope decides the visibility -- an organization record
-      keeps its tenant, a public record names none -- never the document's
-      ``tenant_id``, which a PUBLIC row carries as its publisher's.
+    * only a tenant-free record fetched anonymously proves public scope;
+      historical tenant metadata is ambiguous (public pulls stored publisher
+      tenants) and must remain unresolved until explicitly confirmed.
     """
 
     if not source or c.verdict == "unavailable" or not c.served_by:
@@ -687,9 +718,16 @@ def attach_served_origin(ctx: HubSyncContext, c: chk.ItemCheck, *, source: str |
     record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
     if record is None or record.identity is not None:
         return False
-    if record.hub_id != c.hub_id:
+    if record.hub_id != c.hub_id or not record.scope_known:
         return False
-    origin = link_origin(source, "org" if record.tenant_id else "public", record.tenant_id)
+    # Pre-fix public pulls stored the publisher's tenant here. An optional-auth
+    # fetch cannot distinguish that from an organization row, so certifying it
+    # would bypass public consent. Preserve the immutable scope and require an
+    # explicit operator confirmation; only an anonymous read proves public scope.
+    if record.tenant_id:
+        logger.info("leaving ambiguous legacy hub scope unresolved for %s %s", c.kind, c.local_id)
+        return False
+    origin = link_origin(source, "public", None)
     identity = prov.link_identity(c.kind, c.local_id, record.hub_id, origin=origin)
     if identity is None:
         return False

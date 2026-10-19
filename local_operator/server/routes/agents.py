@@ -633,12 +633,17 @@ async def download_agent_from_radient(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+    config_manager: ConfigManager = Depends(get_config_manager),
 ):
     """
     Download (pull) an agent from the Radient agents marketplace by agent ID.
     """
     try:
-        base_url = env_config.radient_api_base_url
+        from local_operator.providers.radient_credentials import configured_radient_base_url
+
+        # Pull and subsequent checks must address the same configured origin;
+        # otherwise an immutable link cannot match source resolution or sync.
+        base_url = configured_radient_base_url(config_manager)
         # API key not required for download
         radient_client = RadientClient(api_key=None, base_url=base_url)
 
@@ -1798,29 +1803,33 @@ async def pull_team_from_radient(
         # runner and `teams sync` can three-way merge it later. Best-effort inside
         # ``record_team_pull``: the pull already succeeded and must stay successful.
         #
-        # The ORIGIN is recorded with it: the ARM that served the row decides the
-        # scope (a document naming an owning organization was served as that
-        # organization's row; a document with no owner was served by the public
-        # catalogue), and the base the client addressed is the source the link
-        # is scoped to -- the base the check reports as ``served_by`` and the one
-        # the integration and push gates compare the link's source against. The
-        # document's own ``tenant_id`` is the PUBLISHER's on a public row, so the
-        # scope is never read from it.
+        # The client base proves the serving source, not visibility: this
+        # optional-auth endpoint serves public rows even with an org bearer.
+        # The selected organization below is the caller's scope statement;
+        # document ownership alone is never sufficient provenance.
         from local_operator.hub_sync.identity import link_origin
         from local_operator.hub_sync.provenance import record_team_pull, serving_base
 
-        origin = link_origin(
-            serving_base(radient_client, config_manager.config_dir) or "",
-            "org" if owner else "public",
-            owner or None,
+        # Optional-auth detail reads serve public rows too. Only the caller's
+        # selected organization proves scope; the publisher tenant proves none.
+        declared_tenant = str(tenant_id or "").strip()
+        origin = (
+            link_origin(
+                serving_base(radient_client, config_manager.config_dir) or "",
+                "org",
+                declared_tenant,
+            )
+            if declared_tenant
+            else None
         )
         linked = await asyncio.to_thread(
             lambda: record_team_pull(
                 team_registry.config_dir,
                 team_registry.get_team(outcome.team.id),
                 document,
-                tenant_id=owner or "",
+                tenant_id=declared_tenant,
                 origin=origin,
+                scope_known=bool(declared_tenant),
             )
         )
 

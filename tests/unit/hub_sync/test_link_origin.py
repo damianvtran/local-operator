@@ -128,16 +128,16 @@ def test_a_merge_does_not_drop_the_identity(tmp_path: Path) -> None:
 
 def test_the_repair_links_a_row_that_was_pulled_before_the_fix(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
-    # A record written before links carried an origin: a hub id, a tenant, no
-    # identity. The inventory reports it as unresolved.
-    prov.record_team_pull(ctx.config_dir, _team("team-1"), {"id": "hub-1"}, tenant_id=TENANT)
+    # A tenant-free legacy row is fetched anonymously, which proves public
+    # scope; historical publisher-tenant metadata is separately refused below.
+    prov.record_team_pull(ctx.config_dir, _team("team-1"), {"id": "hub-1"}, tenant_id="")
     before = svc.links_snapshot(ctx)
     assert before["links"] == []
     assert _rows(before, "unresolved")["team-1"]["reason"] == "source-unresolved"
 
     attached = svc.attach_served_origin(
         ctx,
-        ItemCheck("team", "team-1", "crew", "hub-1", TENANT, "up-to-date", served_by=SOURCE),
+        ItemCheck("team", "team-1", "crew", "hub-1", None, "up-to-date", served_by=SOURCE),
         source=SOURCE,
     )
 
@@ -146,7 +146,7 @@ def test_the_repair_links_a_row_that_was_pulled_before_the_fix(tmp_path: Path) -
     assert after["unresolved"] == []
     row = _rows(after, "links")["team-1"]
     assert row["link_id"]
-    assert row["visibility"] == "org" and row["tenant_id"] == TENANT
+    assert row["visibility"] == "public" and row["tenant_id"] is None
 
 
 def test_the_repair_leaves_a_row_the_hub_no_longer_serves_unresolved(tmp_path: Path) -> None:

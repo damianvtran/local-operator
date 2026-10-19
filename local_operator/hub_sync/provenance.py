@@ -788,6 +788,7 @@ def record_team_pull(
     tenant_id: str,
     recorded_by: str = "pull",
     origin: LinkOrigin | None = None,
+    scope_known: bool = True,
 ) -> BaselineRecord | None:
     """Link a freshly imported team to its hub document (B1.2).
 
@@ -837,6 +838,9 @@ def record_team_pull(
             ),
             recorded_by,
         )
+        # A generic optional-auth read proves no scope without a declared
+        # target. Preserve that absence so a later check cannot certify a guess.
+        record = replace(record, scope_known=scope_known)
         identity = link_identity("team", team.id, hub_id, origin=origin)
         if identity is not None:
             record = replace(record, identity=identity)
