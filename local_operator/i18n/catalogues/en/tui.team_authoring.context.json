@@ -1,0 +1,177 @@
+{
+  "tui.team_authoring.create": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.edit": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.name": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.label": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.description": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.manager": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.members": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.aliases": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.instructions": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.project": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.members_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.aliases_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.instructions_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.overrides_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.legend": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.discard": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.invalid_name": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.required_manager": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.required_instructions": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.invalid_members": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.invalid_aliases": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.saved": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.no_change": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.revision_changed": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.missing": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.usage_edit": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.usage_new": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.registry_missing": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.footer": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.save_error": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.notice_read_only": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.new_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.edit_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.subcommand": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  },
+  "tui.team_authoring.talk_hint": {
+    "role": "team form guidance, field label or receipt",
+    "tone": "brief, calm, keyboard-first",
+    "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."
+  }
+}
