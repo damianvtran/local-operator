@@ -429,6 +429,11 @@ def cache_media(
     has none yet, so re-registering identical bytes pays no second decode.
     Peaks are NOT part of the returned block: they are a rendering
     sidecar fetched by digest, never a field every attachment row carries.
+
+    AUDIO also gets its DURATION reconciled here, from the same decode: absent
+    from BYOK vendors, cross-checked where a provider states one. It IS part
+    of the block, because the player cannot draw without it (see
+    ``audiogen.peaks.compute_duration``).
     """
     if not raw:
         return None
@@ -454,12 +459,42 @@ def cache_media(
     ref = store.put_bytes(raw, content_type)
     if ref is None:
         return None
-    if resolved == "audio" and store.get_peaks(ref.digest) is None:
-        from local_operator.audiogen.peaks import compute_peaks  # lazy: optional engine
+    if resolved == "audio":
+        from local_operator.audiogen.peaks import (  # lazy: optional engine
+            compute_duration,
+            compute_peaks,
+        )
 
-        peaks = compute_peaks(raw)
-        if peaks is not None:
-            store.put_peaks(ref.digest, peaks)
+        if store.get_peaks(ref.digest) is None:
+            peaks = compute_peaks(raw)
+            if peaks is not None:
+                store.put_peaks(ref.digest, peaks)
+        # THE DURATION IS A PROPERTY OF THE BYTES, so this is where a caller's
+        # claim and the artifact's own length are reconciled. A caller that
+        # knows the duration (Radient states one) is CROSS-CHECKED rather than
+        # trusted; a caller that does not (the BYOK legs, whose vendors state
+        # no duration) is filled from the bytes. Without this a sound record
+        # can reach a surface with no length, and the player it needs renders
+        # nothing: a generated clip the user cannot play, with no error to
+        # explain it. A disagreement is logged with the digest so it is visible
+        # to whoever reads the run, and the BYTES win - a provider's duration
+        # is a second opinion, never the source.
+        decoded_duration = compute_duration(raw)
+        if decoded_duration is not None:
+            if duration_s is not None and abs(float(duration_s) - decoded_duration) > max(
+                0.05, 0.02 * decoded_duration
+            ):
+                logger.warning(
+                    "attachments: %s states a duration of %.6fs; the bytes decode "
+                    "to %.6fs - keeping the bytes",
+                    ref.digest,
+                    float(duration_s),
+                    decoded_duration,
+                )
+            # The bytes are the source, so the block ALWAYS carries the decoded
+            # length - agreeing with a provider is not a reason to keep the
+            # provider's spelling of it.
+            duration_s = decoded_duration
     from local_operator.harness.types import AttachmentContent  # lazy: import weight
 
     return AttachmentContent(
