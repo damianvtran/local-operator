@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from local_operator.library import service
+from local_operator.library import identity, service
 from local_operator.library.metadata import MetadataStore
 
-from ._fixtures import SESSION, config_root, session, user_row, write_rows
+from ._fixtures import OTHER, SESSION, config_root, session, user_row, write_rows
 
 
 def listing(root: Path, query: service.Query) -> dict[str, Any]:
@@ -203,3 +203,78 @@ def test_user_fields_survive_agent_writes_and_locked_rows(monkeypatch) -> None:
     assert service.update_asset(root, asset_id, {"name": "Mine again"}, actor="user")["name"] == (
         "Mine again"
     )
+
+
+def test_thumbnail_reads_the_persisted_catalog_without_a_session_scan(
+    tmp_path, monkeypatch
+) -> None:
+    """Content/thumbnail/get must not pay a journal scan or an index rewrite.
+
+    A 60-card grid issues 60 thumbnail requests; each one running
+    ``build_catalog`` is what pushed a list past the desktop's 20 s deadline.
+    """
+    from local_operator.library import index as library_index
+
+    root = config_root(monkeypatch, tmp_path)
+    image = tmp_path / "photo.png"
+    image.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+        b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05"
+        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    build(root, write_rows("w1", 1, image))
+    asset_id = listing(root, service.Query())["rows"][0]["id"]
+
+    # A fresh process: no in-process aggregate, but the index file survives.
+    library_index._CACHE.clear()
+    scans: list[int] = []
+    asset_builds: list[int] = []
+    original = library_index._build_assets
+    monkeypatch.setattr(
+        library_index,
+        "_visible_sessions",
+        lambda *args, **kwargs: scans.append(1) or [],
+    )
+    monkeypatch.setattr(
+        library_index,
+        "_build_assets",
+        lambda sessions: asset_builds.append(1) or original(sessions),
+    )
+
+    first = service.thumbnail(root, asset_id, 120)
+    second = service.thumbnail(root, asset_id, 120)
+
+    assert scans == [], "a thumbnail must not enumerate sessions"
+    assert asset_builds == [1], "assets are built once per persisted index"
+    assert first.path == second.path and first.path.is_file()
+
+
+def test_a_read_miss_refreshes_once_for_a_just_indexed_asset(tmp_path, monkeypatch) -> None:
+    """A new asset is found without a rebuild, and the hit path still never scans."""
+    from local_operator.library import index as library_index
+
+    root = config_root(monkeypatch, tmp_path)
+    image = tmp_path / "photo.png"
+    image.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+        b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05"
+        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    build(root, write_rows("w1", 1, image))
+    image_id = listing(root, service.Query())["rows"][0]["id"]
+
+    # Indexed after the last write: the read path has never seen this row.
+    fresh = tmp_path / "fresh.txt"
+    fresh.write_text("x")
+    session(root, OTHER, write_rows("w9", 9, fresh))
+    fresh_id = identity.asset_id(identity.key_for(str(fresh), None))
+
+    row = service.get_asset(root, fresh_id)
+    assert row["name"] == "fresh.txt"
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a read hit must not scan sessions")
+
+    monkeypatch.setattr(library_index, "_visible_sessions", boom)
+    thumb = service.thumbnail(root, image_id, 120)
+    assert thumb.path.is_file()
