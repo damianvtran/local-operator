@@ -89,6 +89,7 @@ _ACTIONS = (
     # `--resume`) is S3's and is absent here on purpose.
     "update",
     "identity",
+    "install",
     "uninstall",
     # The credential broker's surfaces (mesh-credentials.md; build plan §2.2).
     # ``credentials`` (plural) is the READ: what this device owns and what it
@@ -945,6 +946,9 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_mark.add_argument("--json", action="store_true")
+
+    install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
+    install.add_argument("--json", action="store_true")
 
     uninstall = actions.add_parser(
         "uninstall", help="Remove the LaunchAgent (and --purge the store)"
@@ -5194,12 +5198,43 @@ def _autostart() -> str:
     return f"the relay did not start: {result.get('error')}"
 
 
+def _cmd_install(args: argparse.Namespace) -> int:
+    """Expose the explicit boot-durability repair without a new wire operation."""
+    result = _import_relay().install()
+    ok = bool(result.get("ok"))
+    payload = {
+        **result,
+        "ok": ok,
+        "steps": list(result.get("steps") or []),
+        "code": "installed" if ok else str(result.get("reason") or "install_failed"),
+        "message": (
+            "relay service installed"
+            if ok
+            else str(result.get("error") or "relay installation failed")
+        ),
+    }
+    lines = [*payload["steps"], payload["message"]]
+    if ok and result.get("persistent") is False:
+        lines.append("durability: restart-on-boot is not configured; enable linger on this device")
+    return _emit(args, payload, lines)
+
+
 def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
     def _run(args: argparse.Namespace) -> int:
         relay_mod = _import_relay()
         result = relay_mod.service_action(action)
         ok = bool(result.get("ok"))
         payload: dict[str, Any] = {"ok": ok, "action": action}
+        for field in ("linger", "persistent"):
+            if field in result:
+                payload[field] = result[field]
+        lines = [
+            f"relay {action} ok" if ok else f"relay {action} failed: {result.get('error', '')}"
+        ]
+        if ok and action in ("start", "restart") and result.get("persistent") is False:
+            lines.append(
+                "durability: restart-on-boot is not configured; enable linger on this device"
+            )
         if not ok:
             # THE FAMILY'S SHAPE, even here: `code` + `message`, because a consumer
             # that reads `code` (which GUIDE.md tells it to) saw nothing at all on
@@ -5215,7 +5250,7 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
         return _emit(
             args,
             payload,
-            [f"relay {action} ok" if ok else f"relay {action} failed: {payload.get('message')}"],
+            lines,
         )
 
     return _run
@@ -6862,6 +6897,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
         f"identity:   {'present' if payload['identity_present'] else 'missing'}",
         f"relay:      {relay_line}",
     ]
+    if payload.get("relay_running") and payload.get("relay_persistent") is False:
+        lines.append(
+            "durability: not supervised — this relay will not come back after a reboot; "
+            "run 'lop network start'"
+        )
     # THE RUNNING RELAY'S BUILD (drill 2026-10-04, F6): the row the three stale
     # relays were invisible without. Derived from the payload's ``relay_build``/
     # ``relay_generation*`` facts, so this block and ``--json`` cannot disagree;
@@ -7554,12 +7594,9 @@ def _has_terminal() -> bool:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose the mesh. Reports; never asserts reachability it has not proven.
 
-    ``ok`` ANSWERS "IS THE MESH HEALTHY", derived from the check rows rather than
-    asserted. It used to be hardcoded ``true`` while a row in the same payload
-    said ``ok: false``, so a consumer that read the summary line and not the array
-    read a failing mesh as a passing one — and ``ok`` is exactly the key an agent
-    path checks first (QA round 1). The failing rows are also named in ``code`` /
-    ``message``, so the refusal family keeps one shape.
+    ``ok`` answers link health. Credential payload repairs and supervisor
+    durability remain red, visible rows but degrade an otherwise healthy link;
+    conflating them with transport failures sends operators to the wrong repair.
 
     The relay is given the LISTING budget, not the 5 s default, because this op
     DIALS every endpoint it reports on: with the default it timed out on its own
@@ -7570,7 +7607,38 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "net_doctor", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
     )
     payload = live if live is not None else _doctor_locally(args)
-    checks = list(payload.get("checks") or [])
+    checks = [dict(check) for check in payload.get("checks") or []]
+    from local_operator.network import relay as relay_mod
+
+    supervision = relay_mod.supervision_state()
+    # A redirected or unreadable HOME cannot ask this host's manager anything.
+    # The row is OMITTED rather than reported as "not configured": a sandbox is
+    # not evidence that the real home's relay will fail to return after boot,
+    # and a degraded verdict there would send the operator to a repair that has
+    # nothing to repair.
+    if supervision["platform"] != "none" and supervision.get("addressable", False):
+        persistent = bool(supervision["persistent"])
+        checks.append(
+            {
+                "check": "supervision",
+                "class": "supervision",
+                "observed": {"addressable": supervision.get("addressable", False)},
+                "ok": persistent,
+                "detail": (
+                    "relay restart-on-boot is configured"
+                    if persistent
+                    else "relay restart-on-boot is not configured; run `lop network start` "
+                    "on this device"
+                ),
+                "remedies": ["run `lop network start` on this device"],
+            }
+        )
+    for check in checks:
+        check["class"] = (
+            "payload"
+            if check.get("check") in {"credential_repair", "credential_sync"}
+            else "supervision" if check.get("check") == "supervision" else "link"
+        )
     # THE ROW'S OWN WORDS, NOT ITS FIELD (round 24, Q-R24-2). This used to render
     # ``detail`` verbatim, which put a stage word, a Python class name AND — on the
     # state the listing's own round-10 fix exists for — the endpoint address on a
@@ -7611,16 +7679,63 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
         lines.append(readiness_mod.NO_IDENTITY_LINE)
-    failures = [
-        f"{check.get('check', '')}: {doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
-        for check in checks
-        if not check.get("ok")
+
+    def failure_words(check: Mapping[str, Any]) -> str:
+        return (
+            f"{check.get('check', '')}: "
+            f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
+        )
+
+    link_failures = [
+        failure_words(check) for check in checks if not check.get("ok") and check["class"] == "link"
     ]
-    healthy = not failures and bool(payload.get("identity_present", True))
-    answer: dict[str, Any] = {**payload, "ok": healthy}
+    payload_failures = [
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "payload"
+    ]
+    supervision_failures = [
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "supervision"
+    ]
+    degraded = bool(payload_failures or supervision_failures)
+    link_ok = not link_failures
+    healthy = link_ok and bool(payload.get("identity_present", True))
+    answer: dict[str, Any] = {
+        **payload,
+        "checks": checks,
+        "ok": healthy,
+        "link_ok": link_ok,
+        "degraded": degraded,
+        "payload_failures": payload_failures,
+        "supervision_failures": supervision_failures,
+    }
     if not healthy:
         answer["code"] = "unhealthy"
-        answer["message"] = "; ".join(failures) or "the device has no identity"
+        failures = link_failures or ["the device has no identity"]
+        answer["message"] = "; ".join(failures + payload_failures + supervision_failures)
+    elif degraded:
+        answer["code"] = "degraded"
+        message = "link healthy"
+        if payload_failures:
+            message += "; credential checks need attention: " + "; ".join(payload_failures)
+        if supervision_failures:
+            message += "; " + "; ".join(supervision_failures)
+        answer["message"] = message
+    if degraded:
+        # Only call the link healthy when the link fold proved it; a simultaneous
+        # transport failure must not be contradicted by the repair reminder.
+        if payload_failures:
+            link_words = "the link is healthy" if healthy else "the link also needs repair"
+            lines.append(
+                f"note: {len(payload_failures)} credential repair(s) open; {link_words} "
+                "— run the named login on this device"
+            )
+        elif supervision_failures:
+            lines.append(
+                "note: relay restart-on-boot needs repair — run `lop network start` on this device"
+            )
     return _emit(args, answer, lines)
 
 
@@ -9093,6 +9208,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     # The single-peer update: the asking half only (meshupdate.py).
     "update": _cmd_update,
     "identity": _guard_identity_subcommand,
+    "install": _cmd_install,
     "uninstall": _cmd_uninstall,
     # ``credential`` has a sub-verb, so it needs the same "tell me what you meant"
     # guard ``member`` and ``identity`` have: running bare `lop network credential`

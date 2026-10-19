@@ -759,6 +759,9 @@ class AsyncJob(BaseModel):
     #: validated by STRICT ``extra="forbid"`` models, so persisting a field an
     #: older owner does not know would make it drop the whole row at resume — a
     #: worse degradation than losing the cause. It costs nothing to re-derive.
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
     cut_off_cause: str = ""
     # The subagent ROLE this job runs ("task", "scout", ...) and the effort
     # TIER it was launched with ("lo"/"med"/"hi"), stamped at REGISTRATION

@@ -29248,6 +29248,24 @@ def _hub_roster_lines(rows: list[Any]) -> list[str]:
         # provider failure — the recorded cause reached no surface (design D4).
         # Rendered through the same ``render_cut_off_reason`` every other
         # surface uses, so the words cannot drift.
+        # Reduced/older row-shaped hosts predate checkpoint evidence. These
+        # additive fields must not make their otherwise valid roster unreadable.
+        last_step = getattr(row, "last_step", "")
+        wip_ref = getattr(row, "wip_ref", "")
+        death_cause = getattr(row, "death_cause", "")
+        if last_step:
+            lines.append(f"    last completed step: {last_step}")
+        if wip_ref:
+            wip_files = getattr(row, "wip_files", 0)
+            wip_at = getattr(row, "wip_at", 0.0)
+            lines.append(
+                f"    WIP: {wip_ref} ({wip_files} files, "
+                f"{subagent_ledger.format_duration(now - wip_at)})"
+            )
+        if death_cause:
+            from local_operator.incidents import render_child_death
+
+            lines.append(f"    {death_cause}: {render_child_death(death_cause)}")
         if row.cut_off_cause:
             # FUNCTION-LOCAL import: this module is a denied-module boundary and
             # must not import ``incidents`` at module scope (see the denied-module
