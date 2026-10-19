@@ -1,9 +1,9 @@
 """The ``/librarian`` bridge: the package is optional, the command is not.
 
-The module belongs to the Librarian work package and is absent on this branch.
-These tests pin the two halves the TUI owns: a missing package answers a clear
-sentence, and a present package's hooks are called through the documented
-contract. The fake modules go through ``sys.modules`` because that is what
+The module belongs to the Librarian work package and may be absent in a build
+that does not carry it. Absence is simulated at the bridge's own ``module()``
+seam — deleting ``sys.modules`` would simply re-import the package in a build
+that ships it. The fake modules go through ``sys.modules`` because that is what
 ``importlib.import_module`` reads — the same seam a real package lands on.
 """
 
@@ -38,7 +38,7 @@ async def _settle(pilot, predicate, *, turns: int = 300) -> None:
 
 
 def test_absence_is_a_state_not_an_error(monkeypatch) -> None:
-    monkeypatch.delitem(sys.modules, "local_operator.librarian", raising=False)
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
     assert librarian_control.module() is None
     result = librarian_control.call("status")
     assert result.available is False
@@ -101,22 +101,20 @@ async def test_async_hooks_are_awaited_and_blocking_hooks_leave_the_loop(
 
 @pytest.mark.asyncio
 async def test_ensure_session_names_absence_and_hands_back_an_id(monkeypatch) -> None:
-    monkeypatch.delitem(sys.modules, "local_operator.librarian", raising=False)
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
     assert await librarian_control.ensure_session() == (None, "")
 
     async def ensure_session() -> str:
         return "abc123def456"
 
-    monkeypatch.setitem(
-        sys.modules,
-        "local_operator.librarian",
-        _module(ensure_session=ensure_session),
-    )
+    fake = _module(ensure_session=ensure_session)
+    monkeypatch.setattr(librarian_control, "module", lambda: fake)
     assert await librarian_control.ensure_session() == ("abc123def456", "")
 
 
 @pytest.mark.asyncio
-async def test_the_command_degrades_without_the_package() -> None:
+async def test_the_command_degrades_without_the_package(monkeypatch) -> None:
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot, lambda: app._session is not None)
