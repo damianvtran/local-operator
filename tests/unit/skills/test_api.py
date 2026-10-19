@@ -16,6 +16,7 @@ from local_operator.skills.api import (
     _url_name,
     default_skill_roots,
     make_skill_resolver,
+    registering_skill_resolver,
 )
 from local_operator.skills.discovery import Skill
 from local_operator.skills.protocol import MAX_READ_BYTES
@@ -680,3 +681,44 @@ class TestUrlNameDecodesPercentEncoding:
         # Encoded, it looks like one plain segment; decoded, it is drive-anchored.
         assert discovery_module.is_plain_skill_name("%44%3ax") is True
         assert discovery_module.is_plain_skill_name(_url_name("skill://%44%3ax")) is False
+
+
+class TestRegisteringSkillResolver:
+    """LOH-28: every skill read declares its skill NAME as an identifier.
+
+    A long lowercase hyphenated skill name satisfies the weak-name credential
+    shape; the resolver is the one point every ``skill://`` URL passes through,
+    so the declaration happens there rather than in the shape table.
+    """
+
+    _LONG_NAME = "-".join(["project", "keys", "export", "status", "reports"])
+
+    def test_a_skill_read_registers_its_name(self, tmp_path: Path) -> None:
+        resolver = make_skill_resolver({self._LONG_NAME: _make_skill(tmp_path, self._LONG_NAME)})
+        seen: list[str] = []
+
+        def register(value: str) -> bool:
+            seen.append(value)
+            return True
+
+        wrapped = registering_skill_resolver(resolver, register)
+        content = wrapped("skill://" + self._LONG_NAME)
+        assert content is not None and self._LONG_NAME in content
+        assert seen == [self._LONG_NAME]
+
+    def test_non_skill_urls_are_not_registered(self, tmp_path: Path) -> None:
+        resolver = make_skill_resolver({"alpha": _make_skill(tmp_path, "alpha")})
+        seen: list[str] = []
+
+        def register(value: str) -> bool:
+            seen.append(value)
+            return True
+
+        wrapped = registering_skill_resolver(resolver, register)
+        assert wrapped("tool://bash") is None
+        assert wrapped("http://example.com") is None
+        assert seen == []
+
+    def test_without_a_callable_register_the_original_is_returned(self) -> None:
+        resolver = make_skill_resolver({})
+        assert registering_skill_resolver(resolver, None) is resolver

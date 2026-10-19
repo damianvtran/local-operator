@@ -16371,6 +16371,9 @@ async def _sessions_list(
             seen.add(session_id)
         deduped.append(row)
     shown = deduped[: params.limit]
+    # Identifier fields: every row's conversation title and session id are
+    # names a caller reads and quotes back; redaction must not apply to them.
+    _note_session_row_identifiers(context, shown)
     details: dict[str, Any] = {
         "op": "list",
         "count": len(shown),
@@ -16450,6 +16453,9 @@ async def _sessions_list_query(
             age = max(0.0, time.time() - float(session_row.mtime or 0.0))
             age_text = format_duration(int(age * 1000))
             lines.append(f"- [stored] {name}, session {session_row.id}, last active {age_text} ago")
+    # Identifier fields: the search rows print each session's title and id as
+    # names the caller quotes back; redaction must not apply to either.
+    _note_session_row_identifiers(context, rows)
     details: dict[str, Any] = {
         "op": "list",
         "query": params.query,
@@ -16588,6 +16594,9 @@ async def _sessions_info_mesh(
         for row in payload.get("sessions") or []
         if isinstance(row, dict) and row.get("locality") == "remote" and row.get("session_id")
     ]
+    # Identifier fields: the row's conversation title and session id are names
+    # the caller quotes back; redaction must leave both readable.
+    _note_session_row_identifiers(context, rows)
     from local_operator.resume import SessionRow
     from local_operator.session.peer_rows import select_peer_session
 
@@ -16657,6 +16666,10 @@ async def _sessions_info(
         include_stored=stored,
         stored_limit=_SESSIONS_STORED_LOOKUP_LIMIT,
     )
+    # Identifier fields: the info body prints the session's title and id as
+    # names the caller quotes back; redaction must not apply to either.
+    if row is not None:
+        _note_session_row_identifiers(context, [row])
     if row is None:
         if stored:
             # Two situations land here, and until review round 1 they shared
@@ -16672,6 +16685,9 @@ async def _sessions_info(
             extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
             if extras.get("session_dir"):
                 facts = await asyncio.to_thread(_sessions_disk_facts, target.session_id)
+                # Identifier fields: the disk-only body prints the directory's
+                # stored title and the id; both are names, not credentials.
+                note_identifiers(context, facts.name, target.session_id)
                 details = {
                     "op": "info",
                     "session_id": target.session_id,
@@ -18803,6 +18819,41 @@ def _variable_store(context: ToolContext | None) -> VariableStoreProtocol:
     from local_operator.variables import VariableStore
 
     return VariableStore(cwd=_safe_cwd(context))
+
+
+def note_identifiers(context: ToolContext | None, *values: Any) -> None:
+    """Declare display identifiers a render site is about to print.
+
+    WHY HERE, at the render site: the shape table cannot tell a project key
+    from a passphrase by spelling, but the op that renders one knows it is an
+    identifier. ``VariableStore.register_identifier`` exempts it from both
+    redaction passes for the rest of the session (LOH-28); a store without the
+    method (an older caller, a test double) simply ignores the declaration.
+
+    Falsy values are skipped: an absent name or title is not an identifier, and
+    ``register_identifier`` would refuse it anyway.
+    """
+    register = getattr(getattr(context, "variables", None), "register_identifier", None)
+    if not callable(register):
+        return
+    for value in values:
+        if value:
+            register(str(value))
+
+
+def _note_session_row_identifiers(
+    context: ToolContext | None, rows: Iterable[Mapping[str, Any]]
+) -> None:
+    """Declare each session row's title and id before any row is rendered.
+
+    One place because five session verbs render the same row shape, and the two
+    fields are exactly the identifier pair: a conversation title a human chose
+    and the id a caller must quote back. Both must survive redaction here for
+    the same reason (LOH-28) — the row is a NAME, not a secret.
+    """
+    for row in rows:
+        if isinstance(row, Mapping):
+            note_identifiers(context, row.get("conversation_name"), row.get("session_id"))
 
 
 @_guard("list_variables")

@@ -456,6 +456,38 @@ def make_skill_resolver(
     return resolver
 
 
+def registering_skill_resolver(
+    resolver: Callable[[str], str | None],
+    register: Callable[[str], bool] | None,
+) -> Callable[[str], str | None]:
+    """Wrap a resolver so every ``skill://`` read declares its skill NAME.
+
+    WHY THE READ SITE: a skill name is an identifier the model chose and must
+    keep reading — the reply shows it, and a follow-up read names it — while a
+    long lowercase hyphenated name satisfies the weak-name credential shape.
+    The resolver is the one point every ``skill://`` URL passes through, so
+    declaring there covers every reader without widening the shape table
+    (LOH-28).
+
+    ``register`` is ``VariableStore.register_identifier``; a caller without it
+    (an older store, a test double) gets the ORIGINAL resolver object back, so
+    no call through this wrapper exists when there is nothing to record.
+    Non-skill URLs are not touched: ``tool://`` and the other schemes belong to
+    their own resolvers in the chain.
+    """
+    if not callable(register):
+        return resolver
+
+    def wrapped(url: str) -> str | None:
+        if url.startswith("skill://"):
+            name = _url_name(url)
+            if name:
+                register(name)
+        return resolver(url)
+
+    return wrapped
+
+
 def _url_name(url: str) -> str:
     """The decoded NAME a ``skill://`` URL addresses, or ``""``.
 

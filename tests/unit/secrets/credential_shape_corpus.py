@@ -92,6 +92,16 @@ KEBAB_IDENTIFIER = "-".join(["this", "is", "a", "plain", "kebab", "slug"])
 KEBAB_IDENTIFIER_FOUR_SEGMENT = "-".join(["feature", "flag", "check", "enabled"])
 KEBAB_IDENTIFIER_WITH_DIGIT = "-".join(["is", "clm", "2", "enabled"])
 
+#: The LONG members of the same class (LOH-28): a project key long enough to
+#: have been refused by the retired 32-character bound. Assembled like the
+#: identifiers above, for the same transcript reason. The exact lengths are the
+#: evidence — 34 just past the old bound, 60 far past it — so a length test
+#: reappearing anywhere in the class reds on both.
+KEBAB_IDENTIFIER_LONG = "-".join(["project", "keys", "export", "status", "reports"])
+KEBAB_IDENTIFIER_VERY_LONG = "-".join(
+    ["platform", "observability", "baseline", "rollout", "status", "reports", "daily"]
+)
+
 #: An opaque value for the query rows: a UUID — its first character is a digit
 #: and its digit count is far past the class's cap, so ``?key=`` must keep
 #: masking it. Assembled like the identifiers above, for the same reason.
@@ -1279,6 +1289,52 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
         "an unbroken issuer tail keeps its mask (and the base label)",
     ),
+    # --- 2026-10-18: LOH-28 — the hyphen class is length-free by STRUCTURE ----
+    # The weak-name release now reads a lowercase hyphen phrase at any length
+    # (``_is_readable_hyphen_phrase`` dropped its 32-character bound). These
+    # rows are the keep-masking controls for that widening: each carries a LONG
+    # value that some OTHER property keeps a credential, so releasing one would
+    # mean the structural grammar stopped discriminating.
+    Case(
+        "key: " + "AmazonS3-ReadOnly-Access",
+        "a long MIXED-CASE hyphen value under a weak name: case keeps it a secret",
+    ),
+    Case(
+        "key: " + "abcdef0123456789" * 2 + "abcdefgh",
+        "a 40-char hex value under key: no word segments, so no name",
+    ),
+    Case(
+        "key: " + OPAQUE_UUID_VALUE,
+        "a UUID under key: digit-heavy, so not the word class",
+    ),
+    Case(
+        "token: " + KEBAB_IDENTIFIER_LONG,
+        "a 34-char readable slug under token: the STRONG name still masks",
+    ),
+    Case(
+        "secret: " + KEBAB_IDENTIFIER_LONG,
+        "the secret spelling of the same strong-name control",
+    ),
+    Case(
+        "password: " + KEBAB_IDENTIFIER_VERY_LONG,
+        "the password spelling at 60 chars: the strong name owns the value",
+    ),
+    Case(
+        "https://h/v1?token=" + KEBAB_IDENTIFIER_LONG,
+        "?token= keeps a long readable slug: the query name has no weak release",
+    ),
+    Case(
+        "--token " + KEBAB_IDENTIFIER_LONG,
+        "a long readable slug after --token: a flag value is a value",
+    ),
+    Case(
+        "key=glpat-" + KEBAB_IDENTIFIER_VERY_LONG,
+        "an issuer-prefixed long slug keeps the vendor mask",
+    ),
+    Case(
+        "key=sk-" + KEBAB_IDENTIFIER_VERY_LONG,
+        "the sk- spelling of the same vendor control",
+    ),
     *VENDOR_REAL_KEY_POSITIVES,
 )
 
@@ -1998,6 +2054,33 @@ NEGATIVE_CASES: tuple[Case, ...] = (
             ("SECRET_KEY", "export-prefixed"),
             ("password", "JSON field"),
         )
+    ),
+    # --- 2026-10-18: LOH-28 — long lowercase hyphen keys are NAMES ------------
+    # The 32-character bound on the weak-name hyphen release was the defect: a
+    # 34-character project key masked, was then registered session-wide, and a
+    # later title sharing a six-character window graded the hit EXPOSED. The
+    # grammar is length-free by structure, so these rows are the release's own
+    # evidence on every surface a key arrives on. The strong-name and opaque
+    # controls in the POSITIVE half bound the release.
+    Case(
+        "key: " + KEBAB_IDENTIFIER_LONG,
+        "a 34-char lowercase hyphen key: a word phrase at any length is a NAME",
+    ),
+    Case(
+        "key=" + KEBAB_IDENTIFIER_VERY_LONG,
+        "the 60-char form under '='",
+    ),
+    Case(
+        _compact(("key", KEBAB_IDENTIFIER_LONG), ("name", "Example project")),
+        "the compact JSON spelling of the same key",
+    ),
+    Case(
+        "https://h/v1/projects?key=" + KEBAB_IDENTIFIER_VERY_LONG,
+        "the query form of the 60-char slug",
+    ),
+    Case(
+        "https://h/v1/projects?api_key=" + KEBAB_IDENTIFIER_LONG,
+        "the api_key spelling of the same query",
     ),
     # --- 2026-10-09: a vendor-prefixed single-word identifier is a NAME -----------
     *VENDOR_IDENTIFIER_NEGATIVES,

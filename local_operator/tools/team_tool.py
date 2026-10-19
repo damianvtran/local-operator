@@ -32,6 +32,7 @@ from local_operator.harness.types import (
 )
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
+    Team,
     TeamEditFields,
     TeamMember,
     TeamRegistry,
@@ -46,12 +47,30 @@ from local_operator.tools.builtin import (
     _guard,
     _text,
     _validation_error,
+    note_identifiers,
     spill_truncate,
 )
 
 logger = logging.getLogger(__name__)
 
 _ROW_CAP = 160
+
+
+def _note_team_identifiers(context: ToolContext | None, team: Team) -> None:
+    """Declare a team's identifiers before any op renders it.
+
+    Identifier fields: the name, display label, aliases, manager and every
+    member role are names the caller launches, edits and quotes back (LOH-28).
+    None of them is a credential, so redaction must not apply to any.
+    """
+    note_identifiers(
+        context,
+        team.name,
+        team.label,
+        team.manager,
+        *team.aliases,
+        *(member.role for member in team.members),
+    )
 
 
 class TeamOverride(BaseModel):
@@ -320,6 +339,8 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "instance owns a product) the project brief. Read guide://teams first."
         )
         return _text(tool_call_id, "team", body)
+    for team in teams:
+        _note_team_identifiers(context, team)
     body = "registered teams:\n" + "\n".join(_row(team) for team in teams)
     body += "\n\nlaunch with /team <name> <request>, or op='show' name='<name>'."
     text, spill = spill_truncate(body, "team", context)
@@ -336,6 +357,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         return _error(tool_call_id, "team", str(exc))
     if team is None:
         return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
+    _note_team_identifiers(context, team)
     header = [
         f"{display_form(team.name, team.label)}. Led by {team.manager}",
         f"description: {team.description or '(unstated)'}",
@@ -471,6 +493,9 @@ async def _op_write(
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team", f"could not save team: {exc}")
     pinned = sum(1 for member in team.members if not member.is_default())
+    # Identifier fields: the write receipt names the team, its manager and its
+    # member slots — all names a caller manages by, not credentials.
+    _note_team_identifiers(context, team)
     note = ""
     unconfigured = _unconfigured_tiers(team.members)
     if unconfigured:
@@ -523,6 +548,8 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
         registry.delete_team(team.id)
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team_delete", f"could not delete team: {exc}")
+    # Identifier field: the delete receipt names the team the caller targeted.
+    note_identifiers(context, name)
     return _text(tool_call_id, "team_delete", f"deleted team {name!r}.")
 
 

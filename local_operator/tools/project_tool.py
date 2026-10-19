@@ -70,6 +70,7 @@ from local_operator.tools.builtin import (
     _guard,
     _text,
     _validation_error,
+    note_identifiers,
     spill_truncate,
 )
 
@@ -429,6 +430,10 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "guide://projects first."
         )
         return _text(tool_call_id, "project", body)
+    # Identifier fields: every project's key and display title are names a
+    # caller must read and quote back, so redaction must not apply to them.
+    for project in projects:
+        note_identifiers(context, project.name, project.title)
     body = "projects:\n" + "\n".join(
         _row(project, window=stale_after_s(registry.config_dir)) for project in projects
     )
@@ -454,11 +459,27 @@ async def _op_show(
         history_tail=history_tail,
         window=stale_after_s(registry.config_dir),
     )
+    # Identifier fields: the addressing key and the display title are names the
+    # caller must quote back (op='update'/'link' take the key), never secrets.
+    note_identifiers(context, project.name, project.title)
+    view: dict[str, Any] | None = None
     try:
-        lines.extend(_session_lines(build_project_view(project, config_dir=registry.config_dir)))
+        view = build_project_view(project, config_dir=registry.config_dir)
     except Exception as exc:  # noqa: BLE001 — the record is the point; the view degrades
         logger.warning("could not compose project view for %s: %s", project.name, exc)
         lines.append("linked sessions: (view unavailable this call)")
+    if view is not None:
+        # Identifier fields: every linked session's id and title are names the
+        # caller acts on; redaction must leave both readable.
+        note_identifiers(
+            context,
+            *(
+                value
+                for row in view.get("sessions") or []
+                for value in (row.get("session_id"), row.get("title"))
+            ),
+        )
+        lines.extend(_session_lines(view))
     body = "\n".join(lines)
     text, spill = spill_truncate(body, "project", context)
     return _text(tool_call_id, "project", text, details=spill or None)
@@ -506,6 +527,9 @@ async def _op_create(
         return _error(tool_call_id, "project", readable_error(exc))
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not save project: {exc}")
+    # Identifier fields: the receipt names the new project's key and title; a
+    # mask here would hide the name the caller must use for the next op.
+    note_identifiers(context, project.name, project.title)
     forced = ""
     if (
         params.force_done
@@ -593,6 +617,9 @@ async def _op_update(
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not update project: {exc}")
     updated = outcome.project
+    # Identifier fields: every update receipt names the project's key, and the
+    # refreshed branch also prints the title; neither is a credential.
+    note_identifiers(context, updated.name, updated.title)
     if not outcome.changed:
         return _text(
             tool_call_id,
