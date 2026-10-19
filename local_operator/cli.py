@@ -4776,7 +4776,8 @@ def _print_content(delegated: Any, verb: str, policy: Any | None = None) -> None
             _content_switches_off(policy) if policy is not None else "the content switch is off"
         )
         print(
-            # i18n: ignore operator output, English-only
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
             f"  scratchpad content: off ({switch}; --force runs it once)"
         )
         return
@@ -4819,7 +4820,8 @@ def _scratchpad_shape_summary(pad: Any, limit: int = 4) -> str:
         if shape.kind == "link":
             target = shape.target or "(unresolved)"
             parts.append(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 f"{name} link → {target} ({_format_bytes(shape.bytes)})"
             )
         else:
@@ -4827,7 +4829,8 @@ def _scratchpad_shape_summary(pad: Any, limit: int = 4) -> str:
     remaining = len(pad.shapes) - limit
     if remaining > 0:
         parts.append(
-            # i18n: ignore operator output, English-only
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
             f"+{remaining} more"
         )
     return "; ".join(parts)
@@ -4845,14 +4848,16 @@ def _print_scratchpads(audit: Any) -> None:
     from local_operator.session.scratchpad_audit import pointer_display
 
     print(
-        # i18n: ignore operator output, English-only
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
         "== Scratchpads =="
     )
     truncated = (
         f"; {audit.truncated} walk(s) truncated at the depth/entry cap" if audit.truncated else ""
     )
     print(
-        # i18n: ignore operator output, English-only
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
         f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
         f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
     )
@@ -4860,12 +4865,14 @@ def _print_scratchpads(audit: Any) -> None:
         tags: list[str] = []
         if pad.over_cap:
             tags.append(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 "OVER CAP"
             )
         if not pad.user_visible:
             tags.append(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 "delegated"
             )
         tag = f"  [{', '.join(tags)}]" if tags else ""
@@ -4873,7 +4880,8 @@ def _print_scratchpads(audit: Any) -> None:
         summary = _scratchpad_shape_summary(pad)
         if summary:
             print(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 f"    shapes: {summary}"
             )
         if pad.over_cap:
@@ -4884,29 +4892,34 @@ def _print_scratchpads(audit: Any) -> None:
             # would be false.
             shape_bytes = sum(shape.bytes for shape in pad.shapes)
             print(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 f"    other content: inspect {pad.path} with du; shapes account for "
                 f"{_format_bytes(shape_bytes)} of {_format_bytes(pad.bytes)}"
             )
         for marker in pad.git_markers:
             if marker.kind == "worktree":
                 print(
-                    # i18n: ignore operator output, English-only
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
                     f"    .git worktree → {pointer_display(marker)}  ({marker.path})"
                 )
             elif marker.kind == "repository":
                 print(
-                    # i18n: ignore operator output, English-only
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
                     f"    .git repository  ({marker.path})"
                 )
             else:
                 print(
-                    # i18n: ignore operator output, English-only
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
                     f"    .git link → {pointer_display(marker)}  ({marker.path})"
                 )
     if len(audit.pads) > _CLEANUP_TEXT_ROWS:
         print(
-            # i18n: ignore operator output, English-only
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
             f"  ... and {len(audit.pads) - _CLEANUP_TEXT_ROWS} more "
             "(--json lists every pad)"
         )
@@ -5106,12 +5119,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         _print_scratchpads(audit)
         print()
         print(
-            # i18n: ignore operator output, English-only
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
             "== Scratchpad content =="
         )
         _print_content(preview, "would reclaim", policy)
         print(
-            # i18n: ignore operator output, English-only
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
             f"nothing was removed (dry run); the record of real removals is {record_path}"
         )
         return 0
@@ -5136,7 +5151,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    # i18n: ignore operator output, English-only
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
                     f"refusing to reclaim scratchpad content: "
                     f"{_content_switches_off(policy)}; turn it on or pass --force to "
                     "run once",
@@ -5153,7 +5169,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             _print_scratchpads(audit)
             print()
             print(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 "== Scratchpad content =="
             )
             _print_content(preview, "would reclaim", policy)
@@ -5168,7 +5185,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    # i18n: ignore operator output, English-only
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
                     "nothing to reclaim"
                 )
             return 0
@@ -5193,7 +5211,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     )
                 else:
                     print(
-                        # i18n: ignore operator output, English-only
+                        # i18n: ignore operator CLI output, English-only; owned by the
+                        # sessions-cleanup section; remove when extracted (docs/I18N.md)
                         "refusing: not a terminal and --yes was not given, so nothing "
                         "was removed",
                         file=sys.stderr,
@@ -5236,13 +5255,15 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             )
             return 3 if result.errors else 0
         print(
-            # i18n: ignore operator output, English-only
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
             f"Reclaimed scratchpad content from {len(result.content)} session(s); "
             "no transcripts or conversation records were deleted."
         )
         if result.errors:
             print(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 f"  {result.errors} error(s); see the log",
                 file=sys.stderr,
             )
@@ -5347,7 +5368,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             # buried below them. Name the narrower command BEFORE the kept list
             # so it is discoverable from the top of the section.
             print(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 "  size by pad: lop sessions cleanup --scratchpads-only --dry-run "
                 "(Scratchpads section below)"
             )
@@ -5440,7 +5462,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
                 print(
-                    # i18n: ignore operator output, English-only
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
                     "not confirmed; nothing was removed"
                 )
             return 2
@@ -5485,14 +5508,16 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
         else:
             print(
-                # i18n: ignore operator output, English-only
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
                 f"Reclaimed scratchpad content from {len(delegated_result.content)} session(s); "
                 "no transcripts or conversation records were deleted."
             )
     if errors:
         print(f"  {errors} error(s); see the log", file=sys.stderr)
     print(
-        # i18n: ignore operator output, English-only
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
         f"record: {record_path}"
     )
     return 3 if errors else 0
