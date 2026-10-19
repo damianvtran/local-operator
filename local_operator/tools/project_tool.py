@@ -233,7 +233,8 @@ def _row(
     if project.owner:
         parts.append(f"owner: {project.owner}")
     if project.team:
-        parts.append(f"team: {project.team}")
+        # Identifier field: a team name is a rendered identifier, not prose.
+        parts.append(f"team: {identifier_text(context, project.team)}")
     if project.target_date:
         parts.append(f"→{project.target_date}")
     if project.milestones:
@@ -290,7 +291,7 @@ def _field_lines(
         [
             f"description: {project.description or '(unstated)'}",
             f"owner: {project.owner or '(unstated)'}",
-            f"team: {project.team or '(unstated)'}",
+            f"team: {identifier_text(context, project.team) if project.team else '(unstated)'}",
             f"estimate: {_estimate_text(project)}",
             f"dates: start {project.start_date or '—'} · target {project.target_date or '—'}"
             f" · completed {project.completed_at or '—'}",
@@ -302,7 +303,12 @@ def _field_lines(
     freshness = f"reported {age} ago{stale}" if age is not None else "none recorded"
     lines.append(f"progress ({freshness}): {project.progress or '—'}")
     if project.progress and project.progress_reported_by:
-        lines.append(f"progress reported by: {project.progress_reported_by}")
+        # Identifier field: the reporter is a session id, a name the caller
+        # may look up; the owner field above stays plain (a person, not in the
+        # identifier class).
+        lines.append(
+            f"progress reported by: {identifier_text(context, project.progress_reported_by)}"
+        )
     note = refreshed_note(project)
     if note is not None:
         # THE sentence, one copy (``projects.refreshed_note``): "refreshed 1h
@@ -552,17 +558,20 @@ async def _op_create(
         forced = "status 'done' forced with milestones incomplete (force_done=true). "
     if session_id and coordination:
         receipt = (
-            f"created project {project.name!r} [{project.status}]; filed by this session "
+            f"created project {identifier_text(context, repr(project.name))} "
+            f"[{project.status}]; filed by this session "
             f"(session {session_id}) — a coordination link, not a working session. "
         )
     elif session_id:
         receipt = (
-            f"created project {project.name!r} [{project.status}] and linked this session "
+            f"created project {identifier_text(context, repr(project.name))} "
+            f"[{project.status}] and linked this session "
             f"(session {session_id}). "
         )
     else:
         receipt = (
-            f"created project {project.name!r} [{project.status}] with no session link "
+            f"created project {identifier_text(context, repr(project.name))} "
+            f"[{project.status}] with no session link "
             "(this host has no session id). "
         )
     return _text(
@@ -686,7 +695,8 @@ async def _op_update(
     return _text(
         tool_call_id,
         "project",
-        f"updated project {updated.name!r} [{updated.status}] — {detail}.",
+        f"updated project {identifier_text(context, repr(updated.name))} "
+        f"[{updated.status}] — {detail}.",
     )
 
 
@@ -830,41 +840,48 @@ async def _op_link(
             return _text(
                 tool_call_id,
                 "project",
-                f"filed session {session_id} on {project.name!r} — a coordination link, "
+                f"filed session {identifier_text(context, str(session_id))} on "
+                f"{identifier_text(context, repr(project.name))} — a coordination link, "
                 "not a working session.",
             )
         return _text(
             tool_call_id,
             "project",
-            f"session {session_id} is already filed on {project.name!r} — a coordination "
+            f"session {identifier_text(context, str(session_id))} is already filed on "
+            f"{identifier_text(context, repr(project.name))} — a coordination "
             "link, not a working session.",
         )
     if linking and not changed:
         return _text(
             tool_call_id,
             "project",
-            f"session {session_id} was already linked to {project.name!r} as a working "
+            f"session {identifier_text(context, str(session_id))} was already linked to "
+            f"{identifier_text(context, repr(project.name))} as a working "
             f"session ({working}).",
         )
     if not linking and not changed:
         return _error(
             tool_call_id,
             "project",
-            f"session {session_id} is not linked to {project.name!r}; "
+            f"session {identifier_text(context, str(session_id))} is not linked to "
+            f"{identifier_text(context, repr(project.name))}; "
             "op='show' lists its sessions and filings.",
         )
     if linking and was_filed:
         return _text(
             tool_call_id,
             "project",
-            f"moved session {session_id} from filed to working links on {project.name!r} "
+            f"moved session {identifier_text(context, str(session_id))} from filed to "
+            f"working links on {identifier_text(context, repr(project.name))} "
             f"({working} now).",
         )
     return _text(
         tool_call_id,
         "project",
-        f"{'linked' if linking else 'unlinked'} session {session_id} "
-        f"{'to' if linking else 'from'} {project.name!r} ({working} now).",
+        f"{'linked' if linking else 'unlinked'} session "
+        f"{identifier_text(context, str(session_id))} "
+        f"{'to' if linking else 'from'} {identifier_text(context, repr(project.name))} "
+        f"({working} now).",
     )
 
 
@@ -905,13 +922,15 @@ async def _op_milestone(
         return _text(
             tool_call_id,
             "project",
-            f"milestone {milestone_name!r} on {project.name!r} already read that way "
+            f"milestone {identifier_text(context, repr(milestone_name))} on "
+            f"{identifier_text(context, repr(project.name))} already read that way "
             "— nothing written.",
         )
     return _text(
         tool_call_id,
         "project",
-        f"{action} milestone {milestone_name!r} on {project.name!r} "
+        f"{action} milestone {identifier_text(context, repr(milestone_name))} on "
+        f"{identifier_text(context, repr(project.name))} "
         f"({_milestone_counts(project)}).",
     )
 

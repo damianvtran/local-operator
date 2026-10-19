@@ -14815,7 +14815,8 @@ async def execute_send(
         # unchanged — no acknowledged result is NOT an undelivered message — so
         # this must never become the confident arm.
         target = (
-            f"{record.conversation_name or record.session_id} (pid {record.pid})"
+            f"{identifier_text(context, str(record.conversation_name or record.session_id))} "
+            f"(pid {record.pid})"
             if record is not None
             else f"{cold_session_id} (not running)"
         )

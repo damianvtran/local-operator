@@ -492,7 +492,7 @@ async def _op_write(
     return _text(
         tool_call_id,
         "team",
-        f"{verb} team {identifier_text(context, team.name)!r}. "
+        f"{verb} team {identifier_text(context, repr(team.name))}. "
         f"{identifier_text(context, team.manager)} leads it; "
         f"{len(team.members)} member slot(s)."
         + (f" {pinned} carries a model/effort override." if pinned else "")
@@ -532,7 +532,9 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team_delete", f"could not delete team: {exc}")
     # Identifier field: the delete receipt names the team the caller targeted.
-    return _text(tool_call_id, "team_delete", f"deleted team {identifier_text(context, name)!r}.")
+    return _text(
+        tool_call_id, "team_delete", f"deleted team {identifier_text(context, repr(name))}."
+    )
 
 
 @_guard("team")
