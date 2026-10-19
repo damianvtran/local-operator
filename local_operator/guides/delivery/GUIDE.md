@@ -61,6 +61,29 @@ probes. Use the harness
 browser, never install a second browser stack; obey the isolated HOME/config,
 CMUX stripping and exact-process-group teardown rules in `AGENTS.md`.
 
+## Never use a live peer as the revoke test
+
+A membership revocation test must run against a purpose-built disposable peer,
+never a live peer. `member rm` burns the device id, bumps the epoch, wipes
+credential copies and forces a re-key; it is not reversible by the agent, and
+re-pairing may need a person at the joining console or a head address the peer
+can actually reach. Removing a working peer can take its sessions and
+uncommitted work offline even when no file is deleted.
+
+- If the product cannot create a disposable peer, test revocation at the
+  grant/token layer (revoke a share, expire or reject a token) and leave the
+  live peer untouched.
+- Before ANY membership-changing command — `member rm`, identity rotation,
+  invite minting, epoch/re-key, security-group changes — preflight the peer:
+  list its sessions, check every worktree's HEAD and `git status`, identify
+  uncommitted or active work, and confirm a reachable head and a human/console
+  path for re-joining. Get explicit operator approval naming the peer and record
+  the preflight in the task receipt. Authorization to test is not authorization
+  to delete.
+- If the peer cannot be shown idle and committed, stop and ask; a revoke test
+  that leaves the live peer intact is a better outcome than a correct test that
+  strands a lane.
+
 ## Spend coverage once
 
 Iterate with affected tests and lints, bounded and serial for heavy work. At the
