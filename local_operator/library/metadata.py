@@ -419,7 +419,9 @@ class MetadataStore:
                 for row in connection.execute(
                     f"SELECT * FROM assets WHERE asset_id IN ({placeholders})", chunk
                 ):
-                    found[row["asset_id"]] = self._asset_row(row)
+                    value = self._asset_row(row)
+                    if value is not None:
+                        found[row["asset_id"]] = value
         return found
 
     @staticmethod

@@ -13,7 +13,7 @@ change what four surfaces consume.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -139,14 +139,14 @@ class LibraryListing(BaseModel):
     counts: dict[str, dict[str, int]] = Field(
         default_factory=lambda: {"category": {}, "origin_group": {}, "kind": {}}
     )
-    tags: list[dict] = Field(default_factory=list)
+    tags: list[dict[str, Any]] = Field(default_factory=list)
     rows: list[LibraryRow] = Field(default_factory=list)
     next_cursor: str | None = None
     cursor_reset: bool = False
     scan: LibraryScan = Field(default_factory=LibraryScan)
     #: Present once the Librarian package lands; a surface must not assume the
     #: key is there before that slice ships.
-    librarian: dict | None = None
+    librarian: dict[str, Any] | None = None
 
 
 class LibraryTag(BaseModel):

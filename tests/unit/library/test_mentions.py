@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from local_operator.session_files.scan import FileScan
 
 
-def feed(scan: FileScan, rows: list[dict]) -> None:
+def feed(scan: FileScan, rows: list[dict[str, Any]]) -> None:
     for ordinal, row in enumerate(rows):
         scan.feed(ordinal, (json.dumps(row, separators=(",", ":")) + "\n").encode())
 
