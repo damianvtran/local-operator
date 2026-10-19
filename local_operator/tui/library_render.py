@@ -73,7 +73,11 @@ class LibraryState:
     category: str = ""
     #: ``""`` is All; any other value is one of ``STATUS_FILTERS``.
     status: str = ""
+    #: The STABLE tag id sent to the service. The store compares ids, not
+    #: labels: a name here selected zero rows because the service found no
+    #: tag whose id was "q3" (QA round 1). `tag_label` is what the page paints.
     tag: str | None = None
+    tag_label: str | None = None
     sort: str = "recent"
     cursor: int = 0
 
@@ -100,14 +104,21 @@ class LibraryState:
         self.status = "" if value == self.status else value
         self.cursor = 0
 
-    def select_tag(self, name: str) -> None:
-        self.tag = None if self.tag == name else name
+    def select_tag(self, tag_id: str, name: str | None = None) -> None:
+        """Select by ID, carry the human label beside it for painting."""
+        if self.tag == tag_id:
+            self.tag = None
+            self.tag_label = None
+        else:
+            self.tag = tag_id
+            self.tag_label = name or tag_id
         self.cursor = 0
 
     def clear_filters(self) -> None:
         self.category = ""
         self.status = ""
         self.tag = None
+        self.tag_label = None
         self.cursor = 0
 
     def set_query(self, text: str) -> None:
