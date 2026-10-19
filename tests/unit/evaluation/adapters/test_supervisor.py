@@ -812,8 +812,11 @@ class FakeSupervisor:
         # deliberately unused: this fake answers a rescue/cleanup call directly,
         # so no RPC deadline exists for a per-action overhead to fund.
         execution_overhead_seconds_per_action: float = 0.0,
+        # Same parity reason: no RPC timeout sentence is built here, and this
+        # fake is never asked to score.
+        timeout_context: str | None = None,
     ) -> CleanupResult | AckResult:
-        del result_type, timeout, execution_overhead_seconds_per_action
+        del result_type, timeout, execution_overhead_seconds_per_action, timeout_context
         self.methods.append(method)
         if method in ("begin_rescue", "close"):
             return AckResult()

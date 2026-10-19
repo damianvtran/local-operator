@@ -641,3 +641,18 @@ def test_a_clear_style_redraw_collapses():
     # The reverse order (erase, then home) is what some terminals emit.
     reversed_text = "".join("\x1b[2J\x1b[H" + REDRAW_FRAME for _ in range(3))
     assert _collapse_refreshing_frames(reversed_text)[1] == 2
+
+
+def test_hub_roster_accepts_legacy_rows_without_checkpoint_evidence():
+    row = _Row("legacy-child", "failed", session_id="synthetic-session")
+    assert all(
+        not hasattr(row, name)
+        for name in ("last_step", "wip_ref", "wip_files", "wip_at", "death_cause")
+    )
+    text = "\n".join(builtin._hub_roster_lines([row]))
+    assert "label-legacy-child (legacy-child): failed" in text
+    assert "last completed step:" not in text and "WIP:" not in text
+    # Partial rows can carry a ref before metadata is available as well.
+    setattr(row, "wip_ref", "refs/lop/wip/synthetic-session/synthetic-job")
+    text = "\n".join(builtin._hub_roster_lines([row]))
+    assert "WIP: refs/lop/wip/synthetic-session/synthetic-job (0 files," in text

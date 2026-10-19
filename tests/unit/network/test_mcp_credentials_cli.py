@@ -324,7 +324,10 @@ def test_a_device_with_no_network_record_grants_nothing(
     rc, payload = _run(capsys, "--repair")
 
     assert rc == 0, payload
-    assert payload["servers"][0]["grants"] == []
+    row = payload["servers"][0]
+    assert row["grants"] == []
+    # No network is not a member question: the note must not imply a holder gap.
+    assert row["note"] == "not in a network; nothing to repair"
     assert _servers(root)["gh"]["env"] == {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}
 
 

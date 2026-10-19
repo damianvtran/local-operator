@@ -651,8 +651,85 @@ def test_a_stdio_server_with_only_literal_credentials_gets_an_adopt_row() -> Non
     assert "literal values" in row["detail"]
     assert "env.GITHUB_TOKEN" in row["detail"]
     assert "EMPTY" not in row["detail"]
-    assert row["remedies"] == ["run lop network mcp credentials --adopt on cloud-node-1"]
+    assert "run lop network mcp credentials --adopt on cloud-node-1" in row["remedies"][0]
+    assert "lop network mcp credentials --repair on cloud-node-1" in row["remedies"][0]
     assert row["observed"]["literal_keys"] == ["env.GITHUB_TOKEN"]
+
+
+def test_an_http_literal_only_server_gets_the_adopt_row_not_a_sign_in() -> None:
+    """`slack`'s static Authorization header: the operator HAS the credential.
+
+    Sending this shape to "sign in here first" is a repair dead end; the row must
+    name the literal binding, say which device holds it, and prescribe adoption
+    followed by repair so the members actually receive the copy.
+    """
+    servers = {
+        "servers": [
+            {
+                "name": "slack",
+                "url": "https://slack.test/mcp",
+                "transport": "http",
+                "auth_declared": False,
+                "has_row": False,
+                "refs": [],
+                "literal_keys": [
+                    {
+                        "server": "slack",
+                        "field": "headers",
+                        "key": "Authorization",
+                        "has_value": True,
+                    }
+                ],
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+
+    rows = readiness.mcp_credential_rows(
+        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NO_CREDENTIAL
+    assert "headers.Authorization" in row["detail"]
+    assert "cloud-node-1" in row["detail"]
+    assert "sign in here first" not in row["detail"]
+    assert "sign in here first" not in " ".join(row["remedies"])
+    assert "lop network mcp credentials --adopt on cloud-node-1" in row["remedies"][0]
+    assert "lop network mcp credentials --repair on cloud-node-1" in row["remedies"][0]
+    assert row["observed"]["literal_keys"] == ["headers.Authorization"]
+
+
+def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
+    """Literal handling must not hide a separate OAuth failure."""
+    servers = {
+        "servers": [
+            {
+                "name": "dd",
+                "url": "https://dd.test/mcp",
+                "transport": "http",
+                "auth_declared": True,
+                "has_row": False,
+                "refs": [],
+                "literal_keys": [
+                    {"server": "dd", "field": "env", "key": "CLIENT_ID", "has_value": True}
+                ],
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+
+    rows = readiness.mcp_credential_rows(
+        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+    )
+
+    assert len(rows) == 1
+    assert "sign in here first" in rows[0]["detail"]
+    assert "--adopt" not in " ".join(rows[0]["remedies"])
 
 
 def test_mcp_servers_fact_publishes_refs_and_literal_keys_for_every_transport(

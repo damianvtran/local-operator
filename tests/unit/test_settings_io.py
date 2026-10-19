@@ -26,7 +26,10 @@ from rich.cells import cell_len
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
-from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
+from local_operator.memory_capture import (
+    LOCATORS_DEFAULT_ENABLED,
+    MEMORY_DEFAULT_ENABLED,
+)
 from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -282,6 +285,7 @@ def _consumer_defaults() -> dict[str, object]:
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
+        "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,
         "network.memory.enabled": MEMORY_DEFAULT_ENABLED,
         "network.memory.scopes": list(SCOPES),
