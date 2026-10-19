@@ -1556,7 +1556,23 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # regressed adoption on #2066). The raise is stated here AND in the PR thread
 # for a reviewer to verify before it settles — it is the explicit decision this
 # guard exists to force, not an unrelated budget increase.
-BUDGET_BILLED_TOKENS = 31_000
+# RAISED 31,000 -> 31,025 for the memory move hint (#2616), stated with the
+# arithmetic because this guard exists to make that an explicit decision, not an
+# unrelated budget increase. Measured by THIS script on an isolated HOME at each
+# tree, same machine:
+#   94a27c3066  parent of #2616's merge   86,162 chars = ~30,994 billed  PASS, 6 headroom
+#   20f23b8b73  #2616 merged              86,204 chars = ~31,009 billed  FAIL by 9
+#   = +42 chars of ``tool_schemas``, and all of it is ONE clause in
+#     ``build_memory_tool``'s description: 'move with edit
+#     new_text={"move":"scope"}' (+15 billed). PR #2616's review round 1
+#     REQUIRED the description to name the move payload ("the memory tool
+#     description doesn't name the move payload"), so this is a review-mandated
+#     capability hint landing on a tree that had 6 tokens of headroom.
+# Trimming instead was measured, not assumed: dropping the clause restores
+# 30,994 and reverts that review finding; shortening it to bare 'move with edit'
+# saves only ~29 chars and still lands ~31,002, because the payload shape is the
+# whole point of the clause. The raise is therefore the honest option.
+BUDGET_BILLED_TOKENS = 31_025
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
