@@ -32,7 +32,9 @@ def config_root(monkeypatch, tmp_path: Path) -> Path:
     return root
 
 
-def session(root: Path, session_id: str = SESSION, rows: list[dict[str, Any]] | None = None) -> Path:
+def session(
+    root: Path, session_id: str = SESSION, rows: list[dict[str, Any]] | None = None
+) -> Path:
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
     if rows is not None:
@@ -65,7 +67,13 @@ def write_rows(call_id: str, ts: float, path: Path, text: str = "saved") -> list
                 "kind": "message",
                 "role": "assistant",
                 "content": [],
-                "tool_calls": [{"id": call_id, "name": "write", "arguments": {"path": str(path), "content": "x"}}],
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "name": "write",
+                        "arguments": {"path": str(path), "content": "x"},
+                    }
+                ],
             },
         },
         {
@@ -103,7 +111,9 @@ def image_rows(call_id: str, ts: float, digest: str, name: str = "cat.png") -> l
                 "kind": "message",
                 "role": "assistant",
                 "content": [],
-                "tool_calls": [{"id": call_id, "name": "generate_image", "arguments": {"prompt": "cat"}}],
+                "tool_calls": [
+                    {"id": call_id, "name": "generate_image", "arguments": {"prompt": "cat"}}
+                ],
             },
         },
         {

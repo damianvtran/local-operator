@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from local_operator.library import index
 from local_operator.session.attachments import cache_media
 
