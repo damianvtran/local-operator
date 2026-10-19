@@ -5190,11 +5190,19 @@ class ServingSessionHandle(SessionHandle):
             # model that cannot express it lands on its nearest rung instead
             # of one it rejects -- the same stale-level clamp the ``if effort``
             # arm above applies.
-            carry_level = (
+            # THE CHOICE OUTRANKS THE SPEC. The spec's level can be a CLAMP
+            # (a carry onto a narrower ladder leaves `xhigh` there while the
+            # conversation still chose `max`), and preferring it here carried
+            # the clamp onward — the reverse of the defect M1a named, and what
+            # made a round trip through a narrow route lose `max` even after
+            # the clamp stopped being RECORDED as the choice. The spec is
+            # consulted only when no choice is held (a legacy sender that set
+            # a non-seed level through `set_model` directly).
+            carry_level = getattr(self._session, "chosen_effort", None) or (
                 current.reasoning_effort
                 if current.reasoning_effort
                 and current.reasoning_effort != current.reasoning_default_effort
-                else getattr(self._session, "chosen_effort", None)
+                else None
             )
             carried = resolve_effort_in(
                 spec.reasoning_efforts,

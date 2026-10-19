@@ -2059,7 +2059,7 @@ async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
     monkeypatch.setattr(
         session,
         "set_model",
-        lambda spec, explicit=False: applied.append((spec, explicit)),
+        lambda spec, explicit=False, **kw: applied.append((spec, explicit)),
         raising=False,
     )
     monkeypatch.setattr(handle, "_refresh_state", lambda: None)
@@ -2103,7 +2103,7 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
     handle, session = make_handle()
     applied: list[Any] = []
     monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
     monkeypatch.setattr(handle, "_refresh_state", lambda: None)
 
@@ -2139,6 +2139,39 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
         applied[-1].reasoning_effort
         == build_model_spec("deepseek", "deepseek-flash").reasoning_effort
     )
+
+
+@pytest.mark.asyncio
+async def test_a_level_less_switch_carries_the_choice_not_the_clamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLAMP on the spec must not displace the choice on the way back.
+
+    `max` -> `openai/gpt-5` clamps to `xhigh` (its ladder stops there), which is
+    correctly the level IN FORCE. The reverse hop must carry `max` — the level
+    the conversation chose — not `xhigh`, the clamp the previous hop left on the
+    spec. Preferring the spec level here was the second half of review M1a: the
+    clamp was no longer RECORDED as the choice, but it was still being carried.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    session.model = build_model_spec("anthropic", "claude-opus-5").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session.chosen_effort = "max"
+
+    await handle.set_model_effort("openai", "gpt-5", None)
+    assert applied[-1].reasoning_effort == "xhigh"  # in force, clamped
+
+    await handle.set_model_effort("anthropic", "claude-opus-5", None)
+    assert applied[-1].reasoning_effort == "max", "the clamp was carried instead of the choice"
 
 
 @pytest.mark.asyncio
@@ -2220,7 +2253,7 @@ async def test_a_level_this_model_cannot_express_is_clamped_not_refused(
     handle, session = make_handle()
     applied: list[Any] = []
     monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
     monkeypatch.setattr(handle, "_refresh_state", lambda: None)
 
@@ -2951,7 +2984,7 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
     handle, session = make_handle()
     applied: list[Any] = []
     monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
     monkeypatch.setattr(handle, "_refresh_state", lambda: None)
 
@@ -3609,7 +3642,9 @@ class _AccessSession(FakeSession):
         self.model_label = label
         self.effective_model_label = label
 
-    def set_model(self, spec: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, spec: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         self.model = spec
         self.model_label = f"{spec.provider}/{spec.model_id}"
         self.effective_model_label = self.model_label
