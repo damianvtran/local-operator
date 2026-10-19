@@ -21749,7 +21749,11 @@ class Session:
         # The task returns data only. It is not a session background job and
         # cannot wake/continue a turn; stale speculative plans simply lose it.
         task = asyncio.create_task(
-            asyncio.to_thread(extract_messages, plan.llm_history[: plan.cut])
+            asyncio.to_thread(
+                extract_messages,
+                plan.llm_history[: plan.cut],
+                locators=enabled["locators"],
+            )
         )
         task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         plan.memory_capture.append(task)

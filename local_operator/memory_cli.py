@@ -950,10 +950,13 @@ def _status_text(value: dict[str, Any]) -> str:
     def onoff(flag: bool) -> str:
         return "on" if flag else "off"
 
+    capture_locators = policy_["enabled"] and policy_["capture"] and policy_["locators"]
     lines = [
         f"Agent memory: {onoff(policy_['enabled'])} (memory.enabled)"
         + ("" if policy_["enabled"] else " — agents cannot read or write it; facts are kept"),
         f"Compaction capture: {onoff(policy_['enabled'] and policy_['capture'])} (memory.capture)",
+        f"Capture locator context: {onoff(capture_locators)} "
+        "(memory.capture.locators; default off)",
         f"Recall suggestions: {onoff(policy_['enabled'] and policy_['suggest'])} (memory.suggest)",
     ]
     if sync.get("error"):

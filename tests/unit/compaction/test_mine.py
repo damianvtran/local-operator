@@ -259,7 +259,7 @@ def test_carry_rows_skips_refused_but_keeps_the_rest():
         "- Identifiers: /Users/damian/local-operator/ok.py\n"
         "- Asks: keep the manager posting updates\n"
     )
-    rows = carry_rows(carry)
+    rows = carry_rows(carry, locators=True)
     bodies = [row["body"] for row in rows]
     assert any("ok.py" in body for body in bodies)
     assert any("keep the manager posting updates" in body for body in bodies)
