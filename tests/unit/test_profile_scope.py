@@ -10,6 +10,7 @@ makes the fixtures' session rows editable.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,9 +25,39 @@ from local_operator.profile_scope import (
 from local_operator.teams import TeamEditFields, TeamRegistry, parse_members
 
 
+def _fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out.
+
+    The model validates in strict mode, so the analyzer treats the fields as
+    required even though each defaults to ``None`` at runtime. Spelling them
+    once here keeps each call site down to the fields the test cares about.
+    """
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
 def _role(registry: AgentRegistry, name: str) -> str:
     return registry.create_agent(
-        AgentEditFields(name=name, description=f"{name} for this task", tags=["role"])
+        _fields(name=name, description=f"{name} for this task", tags=["role"])
     ).id
 
 
@@ -137,7 +168,7 @@ def test_create_is_global_and_leaves_no_session_tree(
     global_agents, global_teams, session_dir = stores
     agents, teams = scope_session_registries(global_agents, global_teams, session_dir)
 
-    agents.create_agent(AgentEditFields(name="one-off", tags=["role"]))
+    agents.create_agent(_fields(name="one-off", tags=["role"]))
     teams.create_team(TeamEditFields(name="one-off-team", manager="manager", members=[]))
 
     assert global_agents.get_agent_by_name("one-off") is not None
@@ -162,7 +193,7 @@ def test_update_and_delete_route_by_ownership(scoped) -> None:
     global_id = _role(global_agents, "shared-name")
     session_id = _role(agents.session_registry, "shared-name")
 
-    agents.update_agent(session_id, AgentEditFields(description="session edited"))
+    agents.update_agent(session_id, _fields(description="session edited"))
     assert agents.get_agent(session_id).description == "session edited"
     assert agents.get_agent(global_id).description == "shared-name for this task"
 
@@ -254,10 +285,8 @@ def test_a_scoped_registry_write_never_creates_the_session_tree(
     global_agents, global_teams, session_dir = stores
     agents, teams = scope_session_registries(global_agents, global_teams, session_dir)
 
-    new_role = agents.create_agent(
-        AgentEditFields(name="through-composite", tags=["role"])
-    )
-    agents.update_agent(new_role.id, AgentEditFields(description="edited"))
+    new_role = agents.create_agent(_fields(name="through-composite", tags=["role"]))
+    agents.update_agent(new_role.id, _fields(description="edited"))
     new_team = teams.create_team(
         TeamEditFields(name="through-composite-team", manager="manager", members=[])
     )

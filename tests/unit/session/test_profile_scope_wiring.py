@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.harness.types import ToolContext
 from local_operator.profile_scope import (
     ScopedAgentRegistry,
     ScopedTeamRegistry,
@@ -16,10 +18,35 @@ from local_operator.teams import TeamRegistry
 from local_operator.tools.team_tool import _registry as team_tool_registry
 
 
+def _fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out (strict validation)."""
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
 def test_the_viewer_reads_the_session_scope(tmp_path: Path) -> None:
     session_dir = tmp_path / "sessions" / "aaaaaaaaaaaa"
     session_agents = AgentRegistry(session_dir / "roles", initialize=False, migrate=False)
-    session_agents.create_agent(AgentEditFields(name="viewer-only", tags=["role"]))
+    session_agents.create_agent(_fields(name="viewer-only", tags=["role"]))
 
     viewer = object.__new__(AttachedSession)
     viewer._config_dir = tmp_path
@@ -41,6 +68,6 @@ def test_the_team_tool_accepts_a_composite(tmp_path: Path) -> None:
     agents, teams = scope_session_registries(
         AgentRegistry(tmp_path), TeamRegistry(tmp_path), tmp_path / "sessions" / "aaaaaaaaaaaa"
     )
-    assert team_tool_registry(SimpleNamespace(team_registry=teams)) is teams
-    assert team_tool_registry(SimpleNamespace(team_registry=None)) is None
-    assert team_tool_registry(SimpleNamespace(team_registry=object())) is None
+    assert team_tool_registry(cast(ToolContext, SimpleNamespace(team_registry=teams))) is teams
+    assert team_tool_registry(cast(ToolContext, SimpleNamespace(team_registry=None))) is None
+    assert team_tool_registry(cast(ToolContext, SimpleNamespace(team_registry=object()))) is None

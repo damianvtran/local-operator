@@ -7214,25 +7214,27 @@ async def test_create_session_scopes_roles_and_teams_to_the_conversation(
     registry and absent from a plain global registry. Writes still land
     globally in S1, so this pins the read seam only.
     """
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.profile_scope import ScopedAgentRegistry, ScopedTeamRegistry
 
-    session = await create_session(
-        _args(hosting="test", model="test", yolo=True),
-        ConfigManager(tmp_config_dir),
-        AgentRegistry(tmp_config_dir),
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
     )
     try:
-        assert isinstance(session.agent_registry, ScopedAgentRegistry)
+        scoped_agents = cast(ScopedAgentRegistry, session.agent_registry)
+        assert isinstance(scoped_agents, ScopedAgentRegistry)
         assert isinstance(session.team_registry, ScopedTeamRegistry)
         roles = session._transcript.directory / "roles"
-        assert session.agent_registry.scope_dir == roles
+        assert scoped_agents.scope_dir == roles
 
-        session.agent_registry.session_registry.create_agent(
-            AgentEditFields(name="conversation-only", tags=["role"])
-        )
-        assert session.agent_registry.get_agent_by_name("conversation-only") is not None
+        scoped_agents.session_registry.create_agent(_agent_fields("conversation-only"))
+        assert scoped_agents.get_agent_by_name("conversation-only") is not None
         assert AgentRegistry(tmp_config_dir).get_agent_by_name("conversation-only") is None
     finally:
         await session.dispose()
