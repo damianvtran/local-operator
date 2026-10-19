@@ -29251,7 +29251,10 @@ def _hub_roster_lines(rows: list[Any]) -> list[str]:
         if row.last_step:
             lines.append(f"    last completed step: {row.last_step}")
         if row.wip_ref:
-            lines.append(f"    WIP: {row.wip_ref} ({row.wip_files} files, {subagent_ledger.format_duration(now - row.wip_at)})")
+            lines.append(
+                f"    WIP: {row.wip_ref} ({row.wip_files} files, "
+                f"{subagent_ledger.format_duration(now - row.wip_at)})"
+            )
         if row.death_cause:
             from local_operator.incidents import render_child_death
 

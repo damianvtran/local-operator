@@ -1108,8 +1108,11 @@ class RosterPass:
             resumable=resumable,
             age_s=age,
             detail=detail,
-            last_step=record.last_step, wip_ref=record.wip_ref, death_cause=record.death_cause,
-            wip_files=record.wip_files, wip_at=record.wip_at,
+            last_step=record.last_step,
+            wip_ref=record.wip_ref,
+            death_cause=record.death_cause,
+            wip_files=record.wip_files,
+            wip_at=record.wip_at,
             cut_off_cause=record.cut_off_cause,
             result_text=result_text,
             error_text=error_text,
@@ -2036,8 +2039,16 @@ class SubagentComms:
         record.ended_by = stamp.prior_ended_by
         record.cancel_reason = stamp.prior_cancel_reason
 
-    def note_checkpoint(self, job_id: str, *, last_step: str = "", wip_ref: str = "",
-                        death_cause: str = "", wip_files: int = 0, wip_at: float = 0.0) -> None:
+    def note_checkpoint(
+        self,
+        job_id: str,
+        *,
+        last_step: str = "",
+        wip_ref: str = "",
+        death_cause: str = "",
+        wip_files: int = 0,
+        wip_at: float = 0.0,
+    ) -> None:
         """Carry recovery evidence past the live job's retention window."""
         record = self._records.get(job_id)
         if record is not None:
@@ -2187,8 +2198,11 @@ class SubagentComms:
                     "outcome": record.outcome,
                     # Rides with the outcome: both are the same durable fact,
                     # and both must outlive the job row the manager sweeps.
-                    "last_step": record.last_step, "wip_ref": record.wip_ref,
-                    "death_cause": record.death_cause, "wip_files": record.wip_files, "wip_at": record.wip_at,
+                    "last_step": record.last_step,
+                    "wip_ref": record.wip_ref,
+                    "death_cause": record.death_cause,
+                    "wip_files": record.wip_files,
+                    "wip_at": record.wip_at,
                     "cut_off_cause": record.cut_off_cause,
                     "result_text": record.result_text,
                     "error_text": record.error_text,
@@ -2323,9 +2337,11 @@ class SubagentComms:
                 # Missing defaults to "", which is right for a sidecar written
                 # before this field existed: it reproduces today's behaviour for
                 # old rows and cannot invent a cut-off that was never recorded.
-                last_step=str(row.get("last_step") or ""), wip_ref=str(row.get("wip_ref") or ""),
+                last_step=str(row.get("last_step") or ""),
+                wip_ref=str(row.get("wip_ref") or ""),
                 death_cause=str(row.get("death_cause") or ""),
-                wip_files=int(row.get("wip_files") or 0), wip_at=float(row.get("wip_at") or 0),
+                wip_files=int(row.get("wip_files") or 0),
+                wip_at=float(row.get("wip_at") or 0),
                 cut_off_cause=str(row.get("cut_off_cause") or ""),
                 result_text=(
                     str(row["result_text"]) if row.get("result_text") is not None else None
@@ -3297,9 +3313,13 @@ class SubagentComms:
             jobs_manager=jobs,
             model_spec=model_spec,
             resume_dir=record.session_dir,
-            resume_facts={"cut_off_cause": record.cut_off_cause, "death_cause": record.death_cause,
-                          "error_text": record.error_text, "last_step": record.last_step,
-                          "wip_ref": record.wip_ref},
+            resume_facts={
+                "cut_off_cause": record.cut_off_cause,
+                "death_cause": record.death_cause,
+                "error_text": record.error_text,
+                "last_step": record.last_step,
+                "wip_ref": record.wip_ref,
+            },
             agent=agent,
             effort=effort,
             model_selector=selector,
