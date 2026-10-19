@@ -11,7 +11,9 @@ memory`` or ``/memory``) so nobody has to reconstruct flags from prose.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import shlex
 import sqlite3
 import textwrap
@@ -28,9 +30,20 @@ from local_operator.memory import (
     quota_relief,
 )
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
+from local_operator.memory_duplicates import duplicates
 from local_operator.paths import config_dir
 
-OPERATIONS = ("list", "show", "search", "move", "edit", "forget", "status", "inspect")
+OPERATIONS = (
+    "list",
+    "show",
+    "search",
+    "move",
+    "edit",
+    "forget",
+    "status",
+    "inspect",
+    "consolidate",
+)
 #: Fields a flag-based edit may change; everything else is carried over from the
 #: revision being corrected, so a one-word fix never needs the whole record retyped.
 _EDITABLE = (
@@ -50,9 +63,11 @@ _EDITABLE = (
 )
 USAGE = (
     "Commands: list · show ID · search WORDS · move ID [ID…] --to SCOPE · status · "
-    "inspect (read-only preview) · "
+    "inspect (read-only preview) · consolidate (read-only duplicate preview) · "
     "edit ID --revision REV (--title T | --body B | --tag T | --alias A | --verified) · "
-    "forget ID --revision REV --yes. ID is the SCOPE/ID printed by list."
+    "forget ID --revision REV --yes · forget --scope S [--older-than D] [--unverified] "
+    "[--tag T] [--title-matches RE] [--body-matches RE] (dry run; confirm with "
+    "--yes --expect FINGERPRINT). ID is the SCOPE/ID printed by list."
 )
 DESCRIPTION = (
     "Inspect, correct or forget the facts agents retain. Everything shown is untrusted "
@@ -67,6 +82,9 @@ EPILOG = (
     "  lop memory edit global/<id> --revision <rev> --body 'Staging host is stage-2'\n"
     "  lop memory move global/<id> --to session\n"
     "  lop memory forget global/<id> --revision <rev> --yes\n"
+    "  lop memory forget --scope global --older-than 30d --unverified\n"
+    "  lop memory forget --scope global --older-than 30d --unverified --yes --expect <fp>\n"
+    "  lop memory consolidate --scope global --limit 10\n"
     "Session-scoped facts need the session: add --session ID (inside a session the /memory "
     "command binds it automatically)."
 )
@@ -119,7 +137,11 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--title", default=None, help="edit: new title")
     parser.add_argument("--body", default=None, help="edit: new body")
     parser.add_argument(
-        "--tag", action="append", default=None, help="edit: set the tags (repeat; replaces all)"
+        "--tag",
+        action="append",
+        default=None,
+        help="edit: set the tags (repeat; replaces all) · forget filters: match any of "
+        "these tags (repeat)",
     )
     parser.add_argument(
         "--alias", action="append", default=None, help="edit: set the aliases (repeat; replaces)"
@@ -136,7 +158,48 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="edit: also supersede every conflicting sibling revision shown by show",
     )
-    parser.add_argument("--yes", action="store_true", help="forget: confirm the removal")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="forget: confirm the removal (with filters: perform the previewed set)",
+    )
+    parser.add_argument(
+        "--older-than",
+        dest="older_than",
+        default="",
+        metavar="DURATION",
+        help="forget filters: match facts created at least this long ago (90m, 12h, 7d, 2w)",
+    )
+    parser.add_argument(
+        "--unverified",
+        action="store_true",
+        help="forget filters: match facts that were never verified",
+    )
+    parser.add_argument(
+        "--title-matches",
+        dest="title_matches",
+        default="",
+        metavar="REGEX",
+        help="forget filters: match the title (case-insensitive regular expression)",
+    )
+    parser.add_argument(
+        "--body-matches",
+        dest="body_matches",
+        default="",
+        metavar="REGEX",
+        help="forget filters: match the body (case-insensitive regular expression)",
+    )
+    parser.add_argument(
+        "--expect",
+        default="",
+        metavar="FINGERPRINT",
+        help="forget filters: the fingerprint printed by the dry run being confirmed",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="forget filters: allow removing a whole scope or more than half of it",
+    )
     parser.add_argument("--related", action="store_true", help="show: also list linked facts")
     parser.add_argument(
         "--cursor", default="", help="list/inspect: continue after this ID (printed as More:)"
@@ -145,7 +208,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--limit",
         type=int,
         default=None,
-        help="inspect: entries per page (1–50, default 20)",
+        help="inspect: entries per page (1–50, default 20) · "
+        "consolidate: max groups (1–50, default 10)",
     )
     parser.add_argument(
         "--json", dest="raw", action="store_true", help="print machine-readable JSON"
@@ -240,6 +304,219 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     }
 
 
+#: Filter-based forget refuses to remove the whole scope, or more than this share of
+#: it, without --force. Half is defensible: retiring stale entries is a minority of
+#: a bank, while "this whole bank is junk" is a decision that should carry its own
+#: explicit confirmation.
+BULK_FORGET_MAX_FRACTION = 0.5
+
+#: Preview rows rendered. The JSON payload keeps every row; the human view stays
+#: readable even when a --force preview spans hundreds of facts.
+BULK_PREVIEW_ROWS = 50
+
+_DURATION = re.compile(r"^(\d+)([mhdw])$")
+_DURATION_UNITS = {"m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
+
+
+def _duration(text: str) -> float:
+    """Seconds for a compact duration. Suffix only: a bare number is ambiguous."""
+    match = _DURATION.match(text.strip().lower())
+    if not match or int(match.group(1)) == 0:
+        raise MemoryError(
+            "--older-than needs a positive duration like 90m, 12h, 7d or 2w "
+            "(minutes, hours, days, weeks)."
+        )
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+def _fingerprint(items: list[dict[str, Any]]) -> str:
+    """Short digest of the previewed (id, revision) set.
+
+    The confirmed run must carry it back: a fact edited, forgotten, added or newly
+    matched between preview and confirmation changes the digest, and the command is
+    refused before anything is removed. This is the existing revision semantics,
+    applied to a set instead of one row.
+    """
+    digest = hashlib.sha256()
+    for row in sorted(items, key=lambda item: item["id"]):
+        digest.update(f"{row['id']}:{row['version']}\n".encode())
+    return digest.hexdigest()[:12]
+
+
+def _bulk_flags(args: argparse.Namespace) -> list[str]:
+    """The filter flags, quoted, so the printed confirmation command is paste-safe."""
+    parts = ["--scope", args.scope]
+    if args.older_than:
+        parts += ["--older-than", args.older_than]
+    if args.unverified:
+        parts.append("--unverified")
+    for tag in args.tag or []:
+        parts += ["--tag", shlex.quote(tag)]
+    if args.title_matches:
+        parts += ["--title-matches", shlex.quote(args.title_matches)]
+    if args.body_matches:
+        parts += ["--body-matches", shlex.quote(args.body_matches)]
+    return parts
+
+
+def _bulk_filter_text(args: argparse.Namespace) -> str:
+    """The filter echoed back in words, for a human who did not just read the flags."""
+    parts = [f"scope {args.scope}"]
+    if args.older_than:
+        parts.append(f"older than {args.older_than.strip().lower()}")
+    if args.unverified:
+        parts.append("never verified")
+    if args.tag:
+        parts.append("tag " + " or ".join(repr(tag) for tag in args.tag))
+    if args.title_matches:
+        parts.append(f"title matches /{args.title_matches}/i")
+    if args.body_matches:
+        parts.append(f"body matches /{args.body_matches}/i")
+    return " · ".join(parts)
+
+
+def _bulk_forget(
+    args: argparse.Namespace,
+    store: MemoryStore,
+    common: dict[str, Any],
+    prefix: str,
+) -> dict[str, Any]:
+    """Dry-run-first filtered forget; the whole safety shape lives in this function."""
+    if args.revision:
+        raise MemoryError(
+            "A filter-based forget re-checks each fact's own revision; --revision applies to "
+            "one explicit ID."
+        )
+    if args.title is not None or args.body is not None or args.alias or args.verified:
+        raise MemoryError("Field-edit flags (--title/--body/--alias/--verified) apply to `edit`.")
+    if not (
+        args.older_than or args.unverified or args.tag or args.title_matches or args.body_matches
+    ):
+        raise MemoryError(
+            f"Give one memory ID, or filters to preview a bulk forget: {prefix} forget "
+            "--scope S [--older-than D] [--unverified] [--tag T] [--title-matches RE] "
+            "[--body-matches RE]."
+        )
+    if not args.scope:
+        # Deliberate asymmetry with list/search: those may span every authorised
+        # scope, but a bulk REMOVAL must name its bank. Inheriting the scope set
+        # would leave the global personal bank one omitted flag away from a
+        # cleanup aimed at session scope. Naming `global` is therefore deliberate.
+        raise MemoryError(
+            "A filter-based forget needs an explicit --scope (global, session, team or "
+            "agent); it never inherits every scope. Name `--scope global` deliberately for "
+            "the personal bank."
+        )
+    if args.expect and not args.yes:
+        raise MemoryError(
+            "--expect confirms a preview; pass it with --yes. Run the preview first "
+            f"({prefix} forget {' '.join(_bulk_flags(args))}{common['context']})."
+        )
+    seconds = _duration(args.older_than) if args.older_than else None
+    selection = store.select(
+        args.scope,
+        older_than=seconds,
+        unverified=args.unverified,
+        tags=args.tag,
+        title_matches=args.title_matches or None,
+        body_matches=args.body_matches or None,
+    )
+    items = selection["items"]
+    total = selection["total"]
+    base = {
+        **common,
+        "scope": args.scope,
+        "filter_text": _bulk_filter_text(args),
+    }
+    if not items:
+        # Also the idempotent second run of a confirmed command: report zero
+        # matches and succeed rather than failing on an already-clean store.
+        return {
+            **base,
+            "action": "bulk-forget",
+            "items": [],
+            "count": 0,
+            "total": total,
+            "tokens": 0,
+            "total_tokens": selection["total_tokens"],
+            "fingerprint": "",
+            "read_only": True,
+        }
+    fingerprint = _fingerprint(items)
+    fraction = len(items) / total if total else 1.0
+    guarded = len(items) == total or fraction > BULK_FORGET_MAX_FRACTION
+    if not args.yes:
+        command = (
+            f"{prefix} forget {' '.join(_bulk_flags(args))}{common['context']} --yes"
+            + (" --force" if guarded else "")
+            + f" --expect {fingerprint}"
+        )
+        return {
+            **base,
+            "action": "bulk-forget-preview",
+            "items": items,
+            "count": len(items),
+            "total": total,
+            "fraction": round(fraction, 3),
+            "tokens": selection["tokens"],
+            "total_tokens": selection["total_tokens"],
+            "fingerprint": fingerprint,
+            "threshold": BULK_FORGET_MAX_FRACTION,
+            "guarded": guarded,
+            "confirm": command,
+            "read_only": True,
+        }
+    if not args.expect:
+        raise MemoryError(
+            "Confirming a filter-based forget needs the fingerprint from its dry run. "
+            f"Nothing was forgotten. Run: {prefix} forget {' '.join(_bulk_flags(args))}"
+            f"{common['context']}"
+        )
+    if args.expect != fingerprint:
+        raise MemoryError(
+            "The selection changed since the preview you confirmed (fingerprint mismatch). "
+            "Nothing was forgotten. Run the preview again: "
+            f"{prefix} forget {' '.join(_bulk_flags(args))}{common['context']}"
+        )
+    if guarded and not args.force:
+        raise MemoryError(
+            f"Refused: this would forget {len(items)} of {total} fact(s) in {args.scope} "
+            f"({fraction:.0%}) — the whole scope, or more than "
+            f"{BULK_FORGET_MAX_FRACTION:.0%} of it, needs --force. Nothing was forgotten. "
+            "If that is really intended, confirm the preview with --force."
+        )
+    done = store.forget_many(args.scope, {row["id"]: row["version"] for row in items})
+    result = {
+        **base,
+        "action": "bulk-forgotten",
+        "count": len(done["forgotten"]),
+        "tokens": done["tokens"],
+        "quota": done["quota"],
+    }
+    if done.get("warning"):
+        result["warning"] = done["warning"]
+    return result
+
+
+def _consolidate(
+    args: argparse.Namespace,
+    store: MemoryStore,
+    common: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only duplicate preview. Never writes: no import_session, no DML."""
+    limit = 10 if args.limit is None else args.limit
+    if not 1 <= limit <= 50:
+        raise MemoryError("Duplicate preview limit must be 1–50.")
+    return {
+        **duplicates(store.scan(args.scope), limit=limit),
+        **common,
+        "action": "consolidate",
+        "scope": args.scope,
+        "limit": limit,
+        "read_only": True,
+    }
+
+
 def execute(
     args: argparse.Namespace,
     *,
@@ -261,9 +538,27 @@ def execute(
         raise MemoryError("--to applies to `move` only.")
     if args.operation == "status":
         return _status(root, store)
-    if args.limit is not None and args.operation != "inspect":
+    if args.limit is not None and args.operation not in ("inspect", "consolidate"):
         # A silently ignored flag reads as a filter that was applied.
-        raise MemoryError("--limit applies to `inspect` only.")
+        raise MemoryError("--limit applies to `inspect` and `consolidate` only.")
+    filter_flags = {
+        "--older-than": bool(args.older_than),
+        "--unverified": bool(args.unverified),
+        "--title-matches": bool(args.title_matches),
+        "--body-matches": bool(args.body_matches),
+        "--expect": bool(args.expect),
+        "--force": bool(args.force),
+    }
+    if args.operation != "forget":
+        stray = [name for name, used in filter_flags.items() if used]
+        if args.tag and args.operation != "edit":
+            stray.append("--tag")
+        if stray:
+            raise MemoryError(
+                f"{', '.join(stray)} "
+                + ("applies" if len(stray) == 1 else "apply")
+                + " to a filter-based `forget` only (--tag also sets tags on `edit`)."
+            )
     if args.operation == "inspect":
         # Inspect lists; it never targets a row. A silently ignored target reads
         # as a filter that was applied (same argument as the --limit refusal
@@ -292,6 +587,25 @@ def execute(
             "bound_session": current.session_id,
             "context": _context(args, store, prefix),
         }
+    if args.operation == "consolidate":
+        # Also BEFORE import_session(): that call writes a session's portable log
+        # into the index, and consolidate promises "read-only, changed nothing".
+        if args.target:
+            raise MemoryError(
+                f"`{prefix} consolidate` reviews the whole scope; it never targets a row. "
+                f"Use `{prefix} show {args.target[0]}` for that fact."
+            )
+        _bound(store, scope)
+        return _consolidate(
+            args,
+            store,
+            {
+                "agent_memory": policy(root)["enabled"],
+                "searched": _searched(store, scope),
+                "bound_session": current.session_id,
+                "context": _context(args, store, prefix),
+            },
+        )
     _bound(store, scope)
     store.import_session()
     words = list(args.target)
@@ -327,6 +641,21 @@ def execute(
                 raise MemoryError(f"{exc} List what you can see with: {prefix} list") from None
             raise
         return {**value, "context": common["context"]}
+    if args.operation == "forget":
+        if not words:
+            return _bulk_forget(args, store, common, prefix)
+        if (
+            args.older_than
+            or args.unverified
+            or args.tag
+            or args.title_matches
+            or args.body_matches
+            or args.expect
+            or args.force
+        ):
+            raise MemoryError(
+                "Give either one memory ID or filter flags to preview a bulk forget, " "not both."
+            )
     if not words:
         raise MemoryError(f"An explicit memory ID is required: {prefix} {args.operation} SCOPE/ID.")
     if len(words) > 1:
@@ -845,11 +1174,131 @@ def _quota_receipt(value: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _bulk_preview_text(value: dict[str, Any]) -> str:
+    """Render the dry run. "Nothing was deleted" is load-bearing: a filtered run
+    looks like a batch operation, and a preview must never read like a receipt."""
+    lines = [f"Filter: {value['filter_text']}"]
+    lines += _shaped(
+        f"{value['count']} match(es) of {value['total']} fact(s) in {value['scope']} "
+        f"({value['fraction']:.0%}) · {value['tokens']:,} token(s) would be freed "
+        f"(of {value['total_tokens']:,} in use)."
+    )
+    if value["guarded"]:
+        lines += _shaped(
+            f"Warning: that is the whole scope, or more than {value['threshold']:.0%} of it; "
+            "a filter-based forget refuses this without --force."
+        )
+    for row in value["items"][:BULK_PREVIEW_ROWS]:
+        # Collapse whitespace: a title is untrusted data and must stay on one line.
+        title = " ".join(row["title"].split())
+        if len(title) > 64:
+            title = title[:63] + "…"
+        lines.append(f"  {row['scope']}/{row['id'][:12]}  {title}  [{row['tokens']} tokens]")
+    hidden = len(value["items"]) - BULK_PREVIEW_ROWS
+    if hidden > 0:
+        lines.append(f"  … and {hidden} more (--json lists every row).")
+    lines.append("")
+    lines.append("Nothing was deleted.")
+    lines += _shaped(f"To forget exactly these {value['count']} fact(s), run:")
+    lines.append(f"  {value['confirm']}")
+    return "\n".join(lines)
+
+
+def _bulk_empty_text(value: dict[str, Any]) -> str:
+    """Zero matches is a success, not an error: the idempotent repeat run lands here."""
+    return (
+        f"Filter: {value['filter_text']}\n"
+        f"No facts in {value['scope']} match. Nothing was forgotten."
+    )
+
+
+def _bulk_receipt_text(value: dict[str, Any]) -> str:
+    if value["count"] == 0:
+        return _bulk_empty_text(value)
+    lines = _shaped(
+        f"Forgotten {value['count']} fact(s) in {value['scope']} · {value['tokens']:,} "
+        "token(s) freed. The bodies are removed here, and the removal propagates to trusted "
+        "synced peers when memory sync is on. It cannot be undone; store new facts instead."
+    )
+    return "\n".join(lines + _quota_receipt(value))
+
+
+def _consolidate_text(value: dict[str, Any], prefix: str) -> str:
+    """Render the duplicate preview. The word "proposes" and the closing "nothing
+    was changed" keep a review aid from reading as an applied merge."""
+    lines = ["Read-only duplicate preview — nothing is forgotten, edited or merged."]
+    if not value.get("agent_memory", True):
+        lines.append("Agent memory is OFF (memory.enabled=false): agents cannot use these.")
+    where = f"in {value['scope']}" if value.get("scope") else "across the authorized scopes"
+    lines += _shaped(
+        f"Checked {value['fact_count']} fact(s) {where} · {value['group_count']} "
+        f"duplicate group(s) found · {len(value['groups'])} shown (limit {value['limit']})."
+    )
+    if not value["groups"]:
+        lines.append("No identical or near-duplicate candidates. Nothing to consolidate.")
+        return "\n".join(lines)
+    ctx = value.get("context", "")
+    for number, group in enumerate(value["groups"], 1):
+        kind = "identical" if group["exact"] else "near-duplicate"
+        lines.append("")
+        lines += _shaped(
+            f"Group {number} — {kind} ({len(group['members'])} facts in {group['scope']}):"
+        )
+        for member in group["members"]:
+            title = " ".join(member["title"].split())
+            if len(title) > 64:
+                title = title[:63] + "…"
+            lines.append(
+                f"  {group['scope']}/{member['id'][:12]}  {title}  [{member['tokens']} tokens]"
+            )
+        for pair in group["pairs"]:
+            if pair["exact"]:
+                # The comparison normalises case/punctuation/whitespace; say so,
+                # or a reviewer may expect a byte-for-byte match.
+                evidence = "identical title and body (case/punctuation-insensitive)"
+            elif pair["title_equal"]:
+                evidence = f"identical title · combined token overlap {pair['similarity']:.0%}"
+            else:
+                evidence = f"{pair['similarity']:.0%} combined title+body token overlap"
+            if pair["a_only"] or pair["b_only"]:
+                evidence += (
+                    f" · only first: {', '.join(pair['a_only']) or '—'}"
+                    f" · only second: {', '.join(pair['b_only']) or '—'}"
+                )
+            lines += _shaped(f"  Evidence {pair['a'][:12]} vs {pair['b'][:12]}: {evidence}")
+        first, second = group["members"][0], group["members"][1]
+        lines.append(f"  Review: {prefix} show {group['scope']}/{first['id']}{ctx}")
+        lines.append(
+            f"  If the second is redundant: {prefix} forget {group['scope']}/{second['id']}"
+            f"{ctx} --revision {second['version']} --yes"
+        )
+    lines.append("")
+    lines += _shaped(
+        "Nothing was changed. Consolidate only proposes: review with show, merge with edit, "
+        "and retire the redundant fact with forget."
+    )
+    if value.get("limited"):
+        lines.append(
+            f"More groups exist ({value['group_count']} total); raise --limit to view them."
+        )
+    return "\n".join(lines)
+
+
 def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> str:
     """Readable receipt for CLI and slash command; ``--json`` keeps the raw payload."""
     if failed:
         return text
     value = json.loads(text)
+    # Action dispatch comes FIRST: a bulk preview carries ``items`` and would
+    # otherwise render as an inventory page that wrongly claims nothing matched.
+    if value.get("action") == "bulk-forget-preview":
+        return _bulk_preview_text(value)
+    if value.get("action") == "bulk-forget":
+        return _bulk_empty_text(value)
+    if value.get("action") == "bulk-forgotten":
+        return _bulk_receipt_text(value)
+    if value.get("action") == "consolidate":
+        return _consolidate_text(value, prefix)
     if "entries" in value:
         return _inspect_text(value, prefix)
     if "results" in value:
