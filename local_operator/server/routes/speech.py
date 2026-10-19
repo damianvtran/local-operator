@@ -160,6 +160,7 @@ _SPEECH_REFUSALS: Dict[int, Msg] = {
 _RUNG_VENDOR_LABELS: Dict[VoicePath, str] = {
     VoicePath.PROVIDER_TTS_ELEVENLABS: "ElevenLabs",
     VoicePath.PROVIDER_TTS_OPENAI: "OpenAI",
+    VoicePath.PROVIDER_TTS_GROQ: "Groq",
 }
 
 

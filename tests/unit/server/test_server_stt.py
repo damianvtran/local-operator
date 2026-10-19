@@ -454,6 +454,7 @@ def test_audio_path_vocabulary_is_closed() -> None:
         "provider_stt_radient",
         "provider_stt_elevenlabs",
         "provider_stt_openai",
+        "provider_stt_groq",
         "provider_stt_superwhisper",
         "model_audio_sidecar",
         "none",
@@ -623,3 +624,22 @@ async def test_a_request_cleanup_field_still_wins_over_the_setting(
     assert result["cleanup"] == "client.rules.v1"
     assert b'name="no_verbatim"' in upstream.requests[0]["body"]
     assert b"\r\n\r\nfalse\r\n" in upstream.requests[0]["body"]
+
+
+# -- Groq is opt-in: the generic paths payload is unchanged (session-voice-groq D1) --
+
+
+@pytest.mark.asyncio
+async def test_paths_never_lists_groq_even_with_a_stored_groq_key(
+    test_app_client, store_override
+) -> None:
+    store_override(FakeStore({"groq": "gsk_stored"}))
+    result = (await test_app_client.get("/v1/stt/paths")).json()["result"]
+    assert [rung["path"] for rung in result["rungs"]] == [
+        "provider_stt_radient",
+        "provider_stt_elevenlabs",
+        "provider_stt_openai",
+        "provider_stt_superwhisper",
+        "model_audio_sidecar",
+    ]
+    assert result["path"] == "none"

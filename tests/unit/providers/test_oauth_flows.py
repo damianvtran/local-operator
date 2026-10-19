@@ -1599,6 +1599,8 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # OpenAI or Anthropic key, pasted, stored under the chat provider.
         "openai-api-key",
         "anthropic-key",
+        # Groq: a pasted console key for speech only (session-voice-groq D5).
+        "groq",
         # ElevenLabs joined with the mobile voice path: same story one flag
         # over — its key is pasted from the console, and speech-only changes
         # WHERE the credential is used (speech-to-text, never chat) rather

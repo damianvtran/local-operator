@@ -1189,11 +1189,11 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     settings = {
         "retry": {
             "baseDelayMs": 1,
-            "fallbackChains": {"default": ["anthropic/claude-x", "groq/llama-x"]},
+            "fallbackChains": {"default": ["anthropic/claude-x", "unlisted/llama-x"]},
         }
     }
     state = FailoverRouteState()
-    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"], "groq": ["k3"]})
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"], "unlisted": ["k3"]})
 
     async def run() -> None:
         _ = [
@@ -1204,10 +1204,10 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
         ]
 
     await run()
-    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "groq/llama-x"]
+    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "unlisted/llama-x"]
     # The dead fallback is benched; the one that served is not.
     assert not state.target_retry_due(FallbackTarget("anthropic/claude-x"), now_ms=now_ms)
-    assert state.target_retry_due(FallbackTarget("groq/llama-x"), now_ms=now_ms)
+    assert state.target_retry_due(FallbackTarget("unlisted/llama-x"), now_ms=now_ms)
 
     # A preflight that believed the primary recovered clears the pin — which
     # must NOT clear the bench, or the next walk replays the waterfall.
@@ -1217,7 +1217,7 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     await run()
     assert specs_seen == [
         "openai/gpt-4o",
-        "groq/llama-x",
+        "unlisted/llama-x",
     ], "the benched fallback was re-walked inside its cooldown"
 
     # Past the cooldown the bench expires on its own and the target is asked
@@ -1226,7 +1226,7 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     specs_seen.clear()
     now_ms += failover_module.FALLBACK_FAILURE_COOLDOWN_MS
     await run()
-    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "groq/llama-x"]
+    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "unlisted/llama-x"]
 
 
 async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeypatch) -> None:
@@ -1255,10 +1255,10 @@ async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeyp
             return ScriptedClient(ProviderError(None, "model unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
-    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["unlisted/llama-x"]}}}
     state = FailoverRouteState()
     state.mark_target_failed(
-        FallbackTarget("groq/llama-x"),
+        FallbackTarget("unlisted/llama-x"),
         cooldown_ms=failover_module.FALLBACK_FAILURE_COOLDOWN_MS,
         now_ms=now_ms,
     )
@@ -1266,16 +1266,16 @@ async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeyp
         event
         async for event in stream_with_failover(
             _request(),
-            FakeAuth({"openai": ["k1"], "groq": ["k3"]}),
+            FakeAuth({"openai": ["k1"], "unlisted": ["k3"]}),
             settings,
             client_for,
             route_state=state,
         )
     ]
-    assert specs_seen == ["openai/gpt-4o", "groq/llama-x"]
+    assert specs_seen == ["openai/gpt-4o", "unlisted/llama-x"]
     assert any(isinstance(e, StreamEndEvent) for e in got)
     # Serving cleared the bench mark.
-    assert state.target_retry_due(FallbackTarget("groq/llama-x"), now_ms=now_ms)
+    assert state.target_retry_due(FallbackTarget("unlisted/llama-x"), now_ms=now_ms)
 
 
 async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
@@ -1298,9 +1298,9 @@ async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
         specs_seen.append(f"{spec.provider}/{spec.model_id}")
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
-    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["unlisted/llama-x"]}}}
     state = FailoverRouteState()
-    target = FallbackTarget("groq/llama-x")
+    target = FallbackTarget("unlisted/llama-x")
     await state.activate(target, "provider failure", cooldown_ms=60_000)
     state.mark_target_failed(
         target,
@@ -1311,20 +1311,20 @@ async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
         event
         async for event in stream_with_failover(
             _request(),
-            FakeAuth({"openai": ["k1"], "groq": ["k3"]}),
+            FakeAuth({"openai": ["k1"], "unlisted": ["k3"]}),
             settings,
             client_for,
             route_state=state,
         )
     ]
-    # The pin trim starts the walk at groq, and the bench must not skip it.
-    assert specs_seen == ["groq/llama-x"]
+    # The pin trim starts the walk at unlisted, and the bench must not skip it.
+    assert specs_seen == ["unlisted/llama-x"]
 
 
 async def test_bench_deadline_extends_but_never_shrinks(monkeypatch) -> None:
     """A fresh short failure cannot shorten a longer advertised reset."""
     state = FailoverRouteState()
-    target = FallbackTarget("groq/llama-x")
+    target = FallbackTarget("unlisted/llama-x")
     state.mark_target_failed(target, cooldown_ms=600_000, now_ms=1_000_000)
     state.mark_target_failed(target, cooldown_ms=60_000, now_ms=1_000_000)
     assert not state.target_retry_due(target, now_ms=1_000_000 + 599_999)
