@@ -1696,7 +1696,9 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     checkpoints = []
     for path in directory.glob("subagent-wip-*.v1.json"):
         try:
-            checkpoints.append(json.loads(path.read_text()))
+            payload = json.loads(path.read_text())
+            if isinstance(payload, dict):
+                checkpoints.append(payload)
         except (OSError, ValueError):
             continue
     wip = max(checkpoints, key=lambda r: float(r.get("at") or 0), default={})
@@ -1839,6 +1841,7 @@ def _make_runner(
                 # Offload Git without allowing a cancelled thread to race the
                 # final snapshot/clear. The lock spans worker completion.
                 async with checkpoint_lock:
+                    previous_commit = checkpoint.result.get("commit")
                     worker = asyncio.create_task(
                         asyncio.to_thread(checkpoint.snapshot, force or event_driven)
                     )
@@ -1866,6 +1869,9 @@ def _make_runner(
                         checkpoint.step,
                         checkpoint.step_at,
                         ref,
+                        force=bool(
+                            result.get("commit") and result.get("commit") != previous_commit
+                        ),
                     )
                 except Exception:
                     logger.warning("could not publish WIP checkpoint evidence", exc_info=True)
@@ -2409,11 +2415,9 @@ async def _publish_terminal_outcome(
         elif status == "cancelled":
             death_cause = "child-cancelled"
         else:
-            death_cause = (
-                "child-tool-timeout"
-                if error_text and "timeout" in error_text.lower()
-                else "child-provider-error"
-            )
+            # A provider timeout is still a provider error; guessing "tool"
+            # from prose would misattribute it. Specific loop cause wins above.
+            death_cause = "child-provider-error" if error_text else ""
     if job is not None:
         job.death_cause = death_cause
         job.last_step = last_step

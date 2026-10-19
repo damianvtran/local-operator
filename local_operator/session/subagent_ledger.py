@@ -257,7 +257,8 @@ def note_lane_step(child_dir: Path, job_id: str, step: str, at: float, wip_ref: 
         # throttle window; ordinary high-frequency tool completions may lag.
         now = time.time()
         if (
-            now - float(payload.get("step_written_at") or 0) < 5
+            not force
+            and now - float(payload.get("step_written_at") or 0) < 5
             and payload.get("wip_ref", "") == wip_ref
         ):
             return
