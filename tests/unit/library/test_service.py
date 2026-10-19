@@ -53,15 +53,12 @@ def test_filters_sort_and_session_id_list(tmp_path, monkeypatch) -> None:
     # A file both created and mentioned later is CREATED: the strongest origin wins.
     assert listing(root, service.Query(origin_groups=frozenset({"created"})))["total"] == 2
     assert (
-        service.list_assets(
-            root, service.Query(session_ids=frozenset({SESSION, "fedcba654321"}))
-        )["total"]
+        service.list_assets(root, service.Query(session_ids=frozenset({SESSION, "fedcba654321"})))[
+            "total"
+        ]
         == 2
     )
-    names = [
-        row["name"]
-        for row in listing(root, service.Query(sort="name", order="asc"))["rows"]
-    ]
+    names = [row["name"] for row in listing(root, service.Query(sort="name", order="asc"))["rows"]]
     assert names == sorted(names, key=str.lower)
     searched = listing(root, service.Query(q="a.txt"))
     assert searched["total"] == 1
@@ -77,13 +74,9 @@ def test_cursor_pages_and_resets_on_a_moved_revision(tmp_path, monkeypatch) -> N
     build(root, rows)
     first = listing(root, service.Query(limit=2))
     assert len(first["rows"]) == 2 and first["next_cursor"]
-    second = service.list_assets(
-        root, service.Query(limit=2, cursor=first["next_cursor"])
-    )
+    second = service.list_assets(root, service.Query(limit=2, cursor=first["next_cursor"]))
     assert len(second["rows"]) == 2 and second["cursor_reset"] is False
-    assert {row["id"] for row in first["rows"]}.isdisjoint(
-        {row["id"] for row in second["rows"]}
-    )
+    assert {row["id"] for row in first["rows"]}.isdisjoint({row["id"] for row in second["rows"]})
 
     extra = tmp_path / "late.txt"
     extra.write_text("late")

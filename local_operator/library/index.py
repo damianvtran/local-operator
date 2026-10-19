@@ -447,7 +447,9 @@ def _session_entry(
     proven: list[Any] = []
     if has_roster:
         try:
-            from local_operator.server.utils.desktop_sessions import contained_descendants
+            from local_operator.server.utils.desktop_sessions import (
+                contained_descendants,
+            )
 
             proven, _skipped = contained_descendants(
                 config_dir,
@@ -622,9 +624,7 @@ def build_catalog(
                     child_dir = config / "sessions" / str(child_id)
                     if _sig_matches(child.get("sig"), _signature(child_dir)):
                         continue
-                    remaining = (
-                        None if deadline is None else max(0.0, deadline - time.monotonic())
-                    )
+                    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
                     if deadline is not None and remaining <= 0:
                         building = True
                         entry_complete = False

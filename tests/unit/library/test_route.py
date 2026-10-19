@@ -124,9 +124,7 @@ async def test_metadata_tags_and_chat_round_trip(api) -> None:
 
     tags = await client.get("/v1/desktop/library/tags")
     assert any(item["name"] == "finance" and item["count"] == 1 for item in tags.json()["result"])
-    renamed = await client.patch(
-        f"/v1/desktop/library/tags/{tag_id}", json={"name": "money"}
-    )
+    renamed = await client.patch(f"/v1/desktop/library/tags/{tag_id}", json={"name": "money"})
     assert renamed.json()["result"]["name"] == "money"
 
     chat_session = session(root, "111111111111")
@@ -174,9 +172,7 @@ async def test_content_range_download_and_thumbnail(api) -> None:
     assert digest_content.status_code == 200
     assert digest_content.headers["cache-control"].startswith("private, max-age=31536000")
 
-    thumb = await client.get(
-        f"/v1/desktop/library/assets/{image_id}/thumbnail", params={"w": 120}
-    )
+    thumb = await client.get(f"/v1/desktop/library/assets/{image_id}/thumbnail", params={"w": 120})
     assert thumb.status_code == 200
     assert thumb.headers["content-type"] in ("image/webp", "image/png")
 
@@ -209,9 +205,7 @@ async def test_patch_bad_fields_are_422_not_500(api) -> None:
         {"name": ""},
         {"name": "   "},
     ):
-        response = await client.patch(
-            f"/v1/desktop/library/assets/{text_id}", json=body
-        )
+        response = await client.patch(f"/v1/desktop/library/assets/{text_id}", json=body)
         assert response.status_code == 422, (body, response.status_code, response.text)
         detail = response.json()["detail"]
         assert detail["code"] == "library_bad_filter"
@@ -223,9 +217,7 @@ async def test_patch_works_before_and_after_a_listing(api) -> None:
     text_id, _image_id, _digest = seed(root)
 
     # Never listed: the asset exists only in the derived catalog.
-    first = await client.patch(
-        f"/v1/desktop/library/assets/{text_id}", json={"name": "First edit"}
-    )
+    first = await client.patch(f"/v1/desktop/library/assets/{text_id}", json={"name": "First edit"})
     assert first.status_code == 200 and first.json()["result"]["name"] == "First edit"
     await client.get("/v1/desktop/library/assets")
     second = await client.patch(
@@ -253,9 +245,7 @@ async def test_a_metadata_edit_does_not_duplicate_or_skip_a_page(api) -> None:
     assert cursor
 
     target = page["rows"][0]["id"]
-    patched = await client.patch(
-        f"/v1/desktop/library/assets/{target}", json={"name": "zulu.txt"}
-    )
+    patched = await client.patch(f"/v1/desktop/library/assets/{target}", json={"name": "zulu.txt"})
     assert patched.status_code == 200
 
     second = await client.get(

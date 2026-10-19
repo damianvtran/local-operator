@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Annotated, Any, Iterator
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Query, Request
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Path as PathParam
+from fastapi import Query, Request
 from fastapi.responses import StreamingResponse
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -197,9 +199,7 @@ async def _query_from(
             q=q.strip(),
             categories=service.parse_csv(category, vocabulary=service.CATEGORIES),
             kinds=service.parse_csv(kind, vocabulary=service.KINDS),
-            origin_groups=service.parse_csv(
-                origin_group, vocabulary=library_index.ORIGIN_GROUPS
-            ),
+            origin_groups=service.parse_csv(origin_group, vocabulary=library_index.ORIGIN_GROUPS),
             origins=service.parse_csv(origin, vocabulary=service.ORIGINS),
             tag=tag or None,
             tag_mode=tag_mode,
@@ -320,9 +320,7 @@ async def patch_library_asset(asset_id: AssetID, body: LibraryAssetPatch, reques
     "/v1/desktop/library/assets/{asset_id}/tags",
     response_model=CRUDResponse[LibraryRow],
 )
-async def put_library_asset_tags(
-    asset_id: AssetID, body: LibraryTagsWrite, request: Request
-):
+async def put_library_asset_tags(asset_id: AssetID, body: LibraryTagsWrite, request: Request):
     try:
         row = await asyncio.to_thread(
             service.set_tags,
@@ -418,15 +416,11 @@ async def library_content(
         ) from None
     disposition = "attachment" if download else "inline"
     headers = {
-        "Content-Disposition": (
-            f"{disposition}; filename*=UTF-8''{quote(content.name, safe='')}"
-        ),
+        "Content-Disposition": (f"{disposition}; filename*=UTF-8''{quote(content.name, safe='')}"),
         "X-Content-Type-Options": "nosniff",
         "Accept-Ranges": "bytes",
         "Cache-Control": (
-            "private, max-age=31536000, immutable"
-            if content.digest
-            else "private, max-age=60"
+            "private, max-age=31536000, immutable" if content.digest else "private, max-age=60"
         ),
     }
     range_header = request.headers.get("range")
@@ -507,9 +501,7 @@ async def put_library_chat(asset_id: AssetID, body: LibraryChatWrite, request: R
     """
     config = _config_dir(request)
     session_id = body.session_id
-    if not SessionIDShape.match(session_id) or not (
-        config / "sessions" / session_id
-    ).is_dir():
+    if not SessionIDShape.match(session_id) or not (config / "sessions" / session_id).is_dir():
         raise HTTPException(
             422,
             _wd.library_chat_session_missing().envelope(code="library_chat_session_missing"),
@@ -530,9 +522,7 @@ async def put_library_chat(asset_id: AssetID, body: LibraryChatWrite, request: R
 )
 async def delete_library_chat(asset_id: AssetID, request: Request):
     try:
-        cleared = await asyncio.to_thread(
-            service.clear_chat_link, _config_dir(request), asset_id
-        )
+        cleared = await asyncio.to_thread(service.clear_chat_link, _config_dir(request), asset_id)
     except MetadataUnavailable as error:
         raise _metadata_refusal(error) from None
     return reply({"asset_id": asset_id, "chat": None, "cleared": cleared})
@@ -586,9 +576,7 @@ async def delete_library_tag(tag_id: TagID, request: Request):
     return reply({"deleted": True})
 
 
-@router.post(
-    "/v1/desktop/library/tags/{tag_id}/merge", response_model=CRUDResponse[LibraryTag]
-)
+@router.post("/v1/desktop/library/tags/{tag_id}/merge", response_model=CRUDResponse[LibraryTag])
 async def merge_library_tag(tag_id: TagID, body: LibraryTagMerge, request: Request):
     try:
         tag = await asyncio.to_thread(_store(request).merge_tags, tag_id, body.into)
