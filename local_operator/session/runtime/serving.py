@@ -5148,8 +5148,20 @@ class ServingSessionHandle(SessionHandle):
             )
         elif (
             current is not None
-            and current.reasoning_effort
-            and current.reasoning_effort != current.reasoning_default_effort
+            and (
+                (
+                    current.reasoning_effort
+                    and current.reasoning_effort != current.reasoning_default_effort
+                )
+                # OR THE CONVERSATION'S HELD CHOICE, which is the half that was
+                # missing. A trip through a route that cannot express the level
+                # leaves the SPEC at ``None``; the choice is still real (see
+                # ``Session.chosen_effort``), and a switch made from that route
+                # used to arrive here with nothing to carry and fall to the new
+                # model's seed — the observed "switch away from an aggregator and
+                # Max becomes High".
+                or getattr(self._session, "chosen_effort", None)
+            )
         ):
             # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
             #
@@ -5178,10 +5190,16 @@ class ServingSessionHandle(SessionHandle):
             # model that cannot express it lands on its nearest rung instead
             # of one it rejects -- the same stale-level clamp the ``if effort``
             # arm above applies.
+            carry_level = (
+                current.reasoning_effort
+                if current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+                else getattr(self._session, "chosen_effort", None)
+            )
             carried = resolve_effort_in(
                 spec.reasoning_efforts,
                 spec.reasoning_default_effort,
-                current.reasoning_effort,
+                carry_level,
             )
             if carried is not None:
                 spec = spec.model_copy(update={"reasoning_effort": carried})

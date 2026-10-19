@@ -43686,7 +43686,7 @@ class OperatorApp(App[None]):
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
         )
-        return f"reasoning effort: {rendered} — shift+tab cycles, this session only"
+        return f"reasoning effort: {rendered} — shift+tab cycles, this conversation"
 
     def _cmd_effort(self, arg: str, notice: NoticeFn) -> None:
         """``/effort`` — list this model's levels; ``/effort <level>`` — set one.
@@ -43700,20 +43700,23 @@ class OperatorApp(App[None]):
         in one keystroke, so the listing names that key instead of competing
         with it.
 
-        The level is SESSION-scoped: ``/effort`` has no durable form of its own,
-        which is where this parts company with ``PERSIST_HINT``. The model is a
-        standing preference — you want the same one next launch — while effort is
-        a per-task dial: raised for a hard refactor, dropped for chat. Freezing
-        one task's dial into every future session is the failure mode, so there
-        is still no ``/effort default``. What changed with the ``model_effort``
-        key is that a level CAN be made the BIRTH default for new conversations
-        — by saving the model with ``/model default`` while it is in force —
-        which is a separate, deliberate action about the DEFAULT rather than a
-        side effect of turning a dial. So the SET receipt points at that
-        command (D10). The ``/effort auto`` receipt points at ``/settings``
-        instead: auto WITHDRAWS the preference, so ``/model default`` is not the
-        route that keeps it (a stored level survives a bare ``/model default`` by
-        design, D6) — the settings row is (U2).
+        The level is CONVERSATION-scoped: ``/effort`` has no durable form of its
+        own as a machine setting, which is where this parts company with
+        ``PERSIST_HINT``. The model is a standing preference — you want the same
+        one next launch — while effort is a per-task dial: raised for a hard
+        refactor, dropped for chat. Freezing one task's dial into every future
+        session is the failure mode, so there is still no ``/effort default``.
+        The level IS written to this conversation's own journal, so a restart of
+        THIS conversation keeps it — the reported "set Max, restart, back to
+        High" defect. And what changed with the ``model_effort`` key is that a
+        level CAN be made the BIRTH default for new conversations — by saving
+        the model with ``/model default`` while it is in force — which is a
+        separate, deliberate action about the DEFAULT rather than a side effect
+        of turning a dial. So the SET receipt points at that command (D10). The
+        ``/effort auto`` receipt points at ``/settings`` instead: auto WITHDRAWS
+        the preference, so ``/model default`` is not the route that keeps it (a
+        stored level survives a bare ``/model default`` by design, D6) — the
+        settings row is (U2).
         """
         session = self._session
         spec = _model_spec(session)
@@ -43786,17 +43789,18 @@ class OperatorApp(App[None]):
             if restored == current:
                 notice(f"reasoning effort: already {destination} {scope}")
                 return
-            # U2: the withdrawal is SESSION-scoped and the user is told the one
-            # route that makes it stick, because the key they set earlier still
-            # holds the level and the next `/new` boots on it. The origin clause
-            # (`(the model's own default)` / `(nothing sent)`) gives way to it:
-            # at 80 columns a notice row holds 70 cells (design review D2) and
-            # origin + `(this session)` + the pointer do not fit together, so the
-            # actionable half stays. What it dropped is on the band and in the
-            # `/settings` expansion beside the level this row names.
+            # U2: the withdrawal is CONVERSATION-scoped and the user is told the one
+            # route that makes it stick for NEW conversations, because the key
+            # they set earlier still holds the level and the next `/new` boots
+            # on it. The origin clause (`(the model's own default)` /
+            # `(nothing sent)`) gives way to it: at 80 columns a notice row holds
+            # 70 cells (design review D2) and origin + `(saved)` + the pointer do
+            # not fit together, so the actionable half stays. What it dropped is
+            # on the band and in the `/settings` expansion beside the level this
+            # row names.
             notice(
                 f"reasoning effort: {current or 'auto'} → {destination} "
-                f"(this session) — /settings sets auto"
+                f"(saved) — /settings sets auto"
             )
             return
         if wanted not in levels:
@@ -43835,7 +43839,7 @@ class OperatorApp(App[None]):
         # receipt for an action rather than an answer about the app's settings.
         # The pointer is the one place the app tells the user a level can be made
         # the standing default (D10); it is on this receipt and not on the bare
-        # listing, whose budget is tight and whose "this session only" clause is
+        # listing, whose budget is tight and whose "this conversation" clause is
         # still exactly true of the command it describes.
         #
         # `{current or 'auto'}` is the BAND's word for "a ladder, no level set"
@@ -60095,10 +60099,14 @@ def mode_word(auto: bool) -> str:
 #: of rungs the shared vocabulary can form has to fit one 70-cell notice row at
 #: 80 columns (design review round 2, D9 / review NEW-2 / QA Q1) — and the test
 #: that proves that has to measure the SHIPPED string rather than a copy of it
-#: kept in the test file. `(session)`, one word shorter than the sibling
-#: receipts' `(this session)`, is the 5 cells that buy the invariant: 18 + 3 +
-#: rungs + 30 ≤ 70 holds for the longest two words in the vocabulary.
-EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (session); /model default keeps it"
+#: kept in the test file. `(saved)` is the 7 cells that buy the invariant (18 +
+#: 3 + rungs + 33 ≤ 70 holds for the longest two words in the vocabulary) and
+#: it is also the HONEST word now: the level is written into the conversation's
+#: own journal and survives a restart (see
+#: ``Session._journal_effort_if_selection_in_force``), while `/new` still starts
+#: on the configured default — which is exactly what `/model default = new
+#: chats` says.
+EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (saved); /model default = new chats"
 
 
 def _effort_unavailable(label: str) -> str:
