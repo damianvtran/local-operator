@@ -912,7 +912,7 @@ def test_peer_table_preserves_every_declared_endpoint_attempt(monkeypatch, tmp_p
     monkeypatch.setattr(relay.store, "list_networks", lambda root: [record])
     server = object.__new__(relay.RelayServer)
     server.root = tmp_path
-    server.settings = SimpleNamespace(handshake_timeout_s=1)
+    object.__setattr__(server, "settings", SimpleNamespace(handshake_timeout_s=1))
     link = (
         SimpleNamespace(peer_build={"version": "synthetic"}, capabilities=set()) if held else None
     )
@@ -1031,7 +1031,7 @@ def test_peer_status_attempts_are_scoped_to_each_rows_network(monkeypatch, tmp_p
     monkeypatch.setattr(relay.store, "list_networks", lambda root: records)
     server = object.__new__(relay.RelayServer)
     server.root = tmp_path
-    server.settings = SimpleNamespace(handshake_timeout_s=1)
+    object.__setattr__(server, "settings", SimpleNamespace(handshake_timeout_s=1))
     monkeypatch.setattr(server, "_link_for", lambda device: None)
 
     def probe(endpoints, **kwargs):
