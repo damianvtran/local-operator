@@ -1198,10 +1198,23 @@ export type MessageParams = {
   "wire.voice.max_spoken_chars.help": undefined;
   "wire.voice.max_spoken_chars.label": undefined;
   "wire.voice.not_enabled": undefined;
+  "wire.voice.phrase.failed": undefined;
+  "wire.voice.phrase.on_screen_first": undefined;
+  "wire.voice.phrase.still_working": undefined;
+  "wire.voice.phrase.switched": undefined;
+  "wire.voice.phrase.truncated": undefined;
+  "wire.voice.phrase.voice_off": undefined;
+  "wire.voice.rate_limited_day": undefined;
+  "wire.voice.rate_limited_minute": undefined;
   "wire.voice.store_busy": undefined;
+  "wire.voice.stt_unavailable": { "reason": string };
   "wire.voice.title": undefined;
+  "wire.voice.unavailable": { "reason": string };
+  "wire.voice.unknown_segment": undefined;
   "wire.voice.unknown_session": { "session_id": string };
   "wire.voice.unknown_source": undefined;
+  "wire.voice.unsupported_audio": undefined;
+  "wire.voice.upload_too_large": { "limit_mib": string };
 };
 export type MessageKey = keyof MessageParams;
 export type WithParams = {

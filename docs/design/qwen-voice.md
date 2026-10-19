@@ -5,6 +5,23 @@ Qwen rig is the voice, and the lop session gives the answers" (2026-10-16, EDT).
 This page is the in-repo record of its decisions and its frozen contract; the
 evidence those decisions rest on is summarised under "Evidence" below.
 
+## Superseded rows (session-voice-groq D1)
+
+`docs/design/session-voice-groq.md` replaces the local-rig topology on the
+cloud path. These rows describe machinery that no longer runs there; the rest
+of this page stands.
+
+| Row | Status | Replaced by |
+|---|---|---|
+| Q10 "No lop speech code" | **Superseded.** The voice routes call `transcribe_audio` and `synthesize_speech` again, both with `include_groq=True`. | D1 |
+| Q1 topology, Q2 relay LLM, Q3 `⟦lop-say⟧` token, Q4 Gateway task scope, Q12 rig directory | **Retired** on the cloud path. | D1, D2 |
+| "Frozen contract" `/voice/text` `{text, spoken_chars, truncated}` | **Extended**: adds `segments`. | D3 |
+| "Frozen contract" routes (three) | **Extended**: adds `POST /voice/speech` and a file door on `/voice/utterance`; `features.voice` is 2. | D3, D7 B2 |
+| Q7 closed phrase set | **Kept**, served by `/voice/speech` `{kind: "phrase", key}` from a phrase cache. Keys: `on_screen_first`, `voice_off`, `switched`, `failed`, `still_working`, plus `truncated`. | D3 |
+
+Still in force: Q5-Q8, V3, V5, V7 (voice never approves), V8, V13 (voice
+refuses while a card is pending), V14 and V15.
+
 ## Evidence
 
 Read from qwen-audio-agent 2.0.1 and speech_to_speech 1.0.0, the versions the

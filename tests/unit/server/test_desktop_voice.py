@@ -17,9 +17,9 @@ V7 is pinned twice, deliberately of two kinds:
   answers. The runtime half, against a real ``bash`` card, is
   ``tests/unit/voice/test_utterance_during_approval.py``.
 
-Q10 is pinned statically too: the route module imports nothing from
-``local_operator.stt`` or ``local_operator.tts``, and the removed routes and
-fields are refused.
+Speech goes through the harness cascades (session-voice-groq D1, which replaced
+Q10): the route module owns no rung or client, and every cascade call passes
+``include_groq=True``. The cascades are stubbed here; no key and no network.
 """
 
 from __future__ import annotations
@@ -166,11 +166,19 @@ async def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         (tmp_path / "sessions" / sid).mkdir(parents=True)
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
+    app.state.env_config = SimpleNamespace(radient_api_base_url="http://radient.invalid")
     app.state.instance_id = "inst-test"
     pool = FakePool(tmp_path)
     app.state.desktop_sessions = pool
     app.include_router(desktop_voice.router)
     app.include_router(desktop_sessions.router)
+
+    async def no_store():
+        return SimpleNamespace(close=lambda: None)
+
+    from local_operator.server.dependencies import get_provider_auth_store
+
+    app.dependency_overrides[get_provider_auth_store] = no_store
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
@@ -342,20 +350,17 @@ async def test_malformed_utterances_are_refused_before_anything_runs(rig: Any) -
 
 
 @pytest.mark.asyncio
-async def test_the_utterance_has_no_recording_door(rig: Any) -> None:
-    """Q10: a ``file`` part is not read, transcribed or admitted; the text is."""
+async def test_a_recording_and_text_together_are_refused(rig: Any) -> None:
+    """Exactly one door per request: both is as invalid as neither."""
     await _enable(rig, SESSION_A)
     response = await rig.client.post(
         "/v1/desktop/voice/utterance",
         data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), "text": "list files"},
         files={"file": ("a.wav", b"RIFF\x24\x00\x00\x00WAVEfmt ", "audio/wav")},
     )
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
-    assert set(result) == {"text", "path", "admission"}
-    assert result["text"] == "list files" and result["path"] is None
-    (admitted,) = rig.pool.remote.admissions
-    assert admitted["text"] == "list files"
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_voice_request"
+    assert rig.pool.remote.admissions == []
 
 
 @pytest.mark.asyncio
@@ -401,7 +406,8 @@ async def test_text_reads_the_agents_message_through_speakable(rig: Any) -> None
     response = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    assert set(result) == {"text", "spoken_chars", "truncated"}
+    assert set(result) == {"text", "spoken_chars", "truncated", "segments"}
+    assert "".join(result["segments"]) == result["text"]
     expected = speakable.speakable("Here are the files. ```\nls\n``` Done.").text
     assert result["text"] == expected
     assert "ls" not in result["text"].split() and "```" not in result["text"]
@@ -510,36 +516,33 @@ async def test_text_announces_a_pending_approval_from_its_card_and_answers_nothi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/v1/desktop/voice/speech", "/v1/desktop/voice/live-token"])
-async def test_the_removed_routes_are_gone(rig: Any, path: str) -> None:
+async def test_the_live_token_route_is_gone_and_the_router_is_the_four_routes(rig: Any) -> None:
     await _enable(rig, SESSION_A)
-    response = await rig.client.post(
-        path,
-        json={"session_id": SESSION_A, "source": {"kind": "message", "message_id": ASSISTANT_ID}},
-    )
+    response = await rig.client.post("/v1/desktop/voice/live-token", json={})
     assert response.status_code in (404, 405), response.text
     assert {getattr(route, "path", "") for route in desktop_voice.router.routes} == {
         "/v1/desktop/voice",
         "/v1/desktop/voice/utterance",
         "/v1/desktop/voice/text",
+        "/v1/desktop/voice/speech",
     }
 
 
-def test_desktop_voice_imports_no_speech_code() -> None:
-    """Q10, statically: the route module reaches neither cascade."""
+def test_desktop_voice_adds_no_speech_client_of_its_own() -> None:
+    """D1, statically: the module reaches the cascades, not a rung or a client."""
     tree = ast.parse(Path(desktop_voice.__file__).read_text(encoding="utf-8"))
     offenders: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             parts = node.module.split(".")
-            if "stt" in parts or "tts" in parts:
+            if ("stt" in parts or "tts" in parts) and "clients" in parts:
                 offenders.append(node.module)
-        elif isinstance(node, ast.Import):
-            offenders += [a.name for a in node.names if {"stt", "tts"} & set(a.name.split("."))]
+            offenders += [
+                f"{node.module}.{alias.name}"
+                for alias in node.names
+                if ("stt" in parts or "tts" in parts) and alias.name.startswith("_run_")
+            ]
     assert offenders == [], offenders
-
-
-# -- V7 --------------------------------------------------------------------------
 
 
 def test_desktop_voice_has_no_import_or_call_path_to_answer_gate() -> None:
@@ -716,3 +719,482 @@ def test_the_feed_publishes_the_slot_as_a_voice_frame(tmp_path: Path) -> None:
     tick()
     assert [f["payload"] for f in frames()] == [{"active": None}]
     asyncio.run(feed.close())
+
+
+# -- B2: the speech cascades behind the voice routes (session-voice-groq D1/D3/D4) --
+
+
+def _wav_bytes() -> bytes:
+    import io
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16000)
+        writer.writeframes(b"\x00\x00" * 1600)
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def cascades(rig: Any, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Both cascades stubbed at the module the route imports them from."""
+    from local_operator.stt import AudioPath, SttOutcome
+    from local_operator.tts import (
+        RungAvailability,
+        TtsOutcome,
+        VoicePath,
+        VoicePathResolution,
+    )
+
+    calls = SimpleNamespace(
+        tts=[], stt=[], resolve=[], spend=[], tts_error=None, stt_error=None, text="list files"
+    )
+
+    async def synthesize(text: str, **kwargs: Any) -> TtsOutcome:
+        calls.tts.append((text, kwargs))
+        if calls.tts_error is not None:
+            raise calls.tts_error
+        return TtsOutcome(
+            audio=_wav_bytes(), path=VoicePath.PROVIDER_TTS_GROQ, attempts=(), provider="groq"
+        )
+
+    async def resolve(**kwargs: Any) -> VoicePathResolution:
+        calls.resolve.append(kwargs)
+        rung = RungAvailability(VoicePath.PROVIDER_TTS_GROQ, True, "A Groq API key is stored.")
+        return VoicePathResolution(
+            path=VoicePath.PROVIDER_TTS_GROQ, reason="ok", rungs=(rung,), servable=True
+        )
+
+    async def transcribe(path: Path, **kwargs: Any) -> SttOutcome:
+        calls.stt.append((path.read_bytes()[:4], kwargs))
+        if calls.stt_error is not None:
+            raise calls.stt_error
+        return SttOutcome(text=calls.text, path=AudioPath.PROVIDER_STT_GROQ, attempts=())
+
+    monkeypatch.setattr("local_operator.tts.cascade.synthesize_speech", synthesize)
+    monkeypatch.setattr("local_operator.tts.cascade.resolve_voice_path", resolve)
+    monkeypatch.setattr("local_operator.stt.cascade.transcribe_audio", transcribe)
+    monkeypatch.setattr(desktop_voice, "emit_voice_spend", lambda **kw: calls.spend.append(kw))
+    return calls
+
+
+async def _speech(rig: Any, source: dict[str, Any], segment: int = 0) -> Any:
+    return await rig.client.post(
+        "/v1/desktop/voice/speech",
+        json={"session_id": SESSION_A, "source": source, "segment": segment},
+    )
+
+
+async def _recording(rig: Any, data: bytes | None = None) -> Any:
+    return await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4())},
+        # The declared type lies; the container is sniffed from the bytes.
+        files={"file": ("a.mp3", data or _wav_bytes(), "audio/mpeg")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_recording_is_transcribed_through_the_cascade_and_admitted(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    response = await _recording(rig)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "list files" and result["path"] == "provider_stt_groq"
+    # The rung token is the message's input_path; the words steer as dictation.
+    assert rig.pool.remote.admissions[-1]["input_path"] == "provider_stt_groq"
+    ((head, kwargs),) = cascades.stt
+    assert head == b"RIFF" and kwargs["include_groq"] is True
+    assert kwargs["correlation_session_id"] == SESSION_A
+    (record,) = cascades.spend
+    assert record["channel"] == "stt" and record["provider"] == "groq"
+    assert record["session_id"] == SESSION_A
+
+
+@pytest.mark.asyncio
+async def test_unsupported_and_oversized_recordings_cost_nothing(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _enable(rig, SESSION_A)
+    bad = await _recording(rig, b"definitely not audio")
+    assert bad.status_code == 422 and bad.json()["detail"]["code"] == "invalid_voice_request"
+    monkeypatch.setattr(desktop_voice, "MAX_UPLOAD_BYTES", 64)
+    big = await _recording(rig, _wav_bytes())
+    assert big.status_code == 413
+    assert big.json()["detail"]["code"] == "voice_upload_too_large"
+    assert cascades.stt == [] and cascades.spend == []
+    assert rig.pool.remote.admissions == []
+    assert desktop_voice.MAX_UPLOAD_BYTES == 64  # the patched ceiling, restored on teardown
+
+
+def test_the_upload_ceiling_is_16_mib() -> None:
+    import importlib
+
+    assert importlib.reload(desktop_voice).MAX_UPLOAD_BYTES == 16 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_recording_is_refused_while_a_card_is_pending_before_stt(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    """V7 + V13 on the file door: the refusal comes before any STT spend."""
+    await _enable(rig, SESSION_A)
+    remote = rig.pool.remote
+    remote.pending_gate = SimpleNamespace(
+        request_id="gate-1", kind="approval", title="bash", detail="rm -rf build/"
+    )
+    response = await _recording(rig)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "approval_pending"
+    assert cascades.stt == [] and cascades.spend == []
+    assert remote.admissions == [] and remote.gate_answers == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_parks_during_stt_still_refuses(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _enable(rig, SESSION_A)
+    remote = rig.pool.remote
+    real = cascades.stt
+
+    async def transcribe(path: Path, **kwargs: Any):
+        from local_operator.stt import AudioPath, SttOutcome
+
+        real.append((b"", kwargs))
+        remote.pending_gate = SimpleNamespace(
+            request_id="g", kind="approval", title="bash", detail="x"
+        )
+        return SttOutcome(text="yes", path=AudioPath.PROVIDER_STT_GROQ, attempts=())
+
+    monkeypatch.setattr("local_operator.stt.cascade.transcribe_audio", transcribe)
+    response = await _recording(rig)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "approval_pending"
+    assert remote.admissions == [] and remote.gate_answers == []
+
+
+@pytest.mark.asyncio
+async def test_no_stt_rung_is_stt_unavailable(rig: Any, cascades: SimpleNamespace) -> None:
+    from local_operator.stt import AudioPath, AudioPathResolution
+    from local_operator.stt.cascade import SttUnavailable
+
+    cascades.stt_error = SttUnavailable(
+        "none",
+        resolution=AudioPathResolution(
+            path=AudioPath.NONE, reason="No provider.", rungs=(), model_audio_capable=False
+        ),
+    )
+    await _enable(rig, SESSION_A)
+    response = await _recording(rig)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "stt_unavailable"
+    assert rig.pool.remote.admissions == []
+
+
+def _limited(status: int = 429, **details: Any) -> Any:
+    from local_operator.clients._http import APIError
+
+    return APIError("Too many requests.", status_code=status, details=details)
+
+
+@pytest.mark.parametrize(
+    ("details", "scope", "retry", "remaining"),
+    [
+        ({"retry_after_s": 7.0, "remaining_requests": 12}, "minute", 7.0, 12),
+        ({"retry_after_s": 41000.0, "remaining_requests": 0}, "day", 41000.0, 0),
+        # No remaining count: the size of retry-after decides (D4's fallback).
+        ({"retry_after_s": 8.0}, "minute", 8.0, None),
+        ({"retry_after_s": 3600.0}, "day", 3600.0, None),
+        ({}, "minute", None, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_tts_429_maps_to_voice_rate_limited_with_retry_after(
+    rig: Any,
+    cascades: SimpleNamespace,
+    details: dict[str, Any],
+    scope: str,
+    retry: float | None,
+    remaining: int | None,
+) -> None:
+    from local_operator.tts import VoicePath
+    from local_operator.tts.cascade import TtsUnavailable as Unavailable
+
+    cascades.tts_error = Unavailable(
+        "x",
+        resolution=None,  # type: ignore[arg-type]
+        error=_limited(**details),
+        failed_path=VoicePath.PROVIDER_TTS_GROQ,
+    )
+    await _enable(rig, SESSION_A)
+    response = await _speech(rig, {"kind": "message", "message_id": ASSISTANT_ID})
+    assert response.status_code == 429, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "voice_rate_limited"
+    assert detail["scope"] == scope
+    assert detail["retry_after_s"] == retry
+    assert detail["remaining_requests"] == remaining
+    assert detail["rung"] == "provider_tts_groq"
+    assert detail["text"]
+    if retry is not None:
+        assert response.headers["retry-after"] == str(int(-(-retry // 1)))
+
+
+@pytest.mark.asyncio
+async def test_an_stt_429_is_voice_rate_limited_and_admits_nothing(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    from local_operator.stt import AudioPath, AudioPathResolution, SttAttempt
+    from local_operator.stt.cascade import SttUnavailable
+
+    cascades.stt_error = SttUnavailable(
+        "x",
+        resolution=AudioPathResolution(
+            path=AudioPath.NONE, reason="r", rungs=(), model_audio_capable=False
+        ),
+        attempts=(SttAttempt(path=AudioPath.PROVIDER_STT_GROQ, outcome="failed"),),
+        error=_limited(retry_after_s=5.0, remaining_requests=0),
+        status_code=429,
+        detail="rate limited",
+    )
+    await _enable(rig, SESSION_A)
+    response = await _recording(rig)
+    assert response.status_code == 429, response.text
+    detail = response.json()["detail"]
+    assert (detail["code"], detail["scope"], detail["retry_after_s"]) == (
+        "voice_rate_limited",
+        "day",
+        5.0,
+    )
+    assert detail["rung"] == "provider_stt_groq"
+    assert rig.pool.remote.admissions == [] and cascades.spend == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_429_failure_keeps_the_speech_refusal_path(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    from local_operator.tts import VoicePath
+    from local_operator.tts.cascade import TtsUnavailable
+
+    cascades.tts_error = TtsUnavailable(
+        "x",
+        resolution=None,  # type: ignore[arg-type]
+        error=_limited(status=402),
+        failed_path=VoicePath.PROVIDER_TTS_GROQ,
+    )
+    await _enable(rig, SESSION_A)
+    response = await _speech(rig, {"kind": "message", "message_id": ASSISTANT_ID})
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"].get("code") != "voice_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_speech_returns_one_segment_as_wav_with_the_cascade_flags(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    text = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
+    segments = text.json()["result"]["segments"]
+    response = await _speech(rig, {"kind": "message", "message_id": ASSISTANT_ID}, 0)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.content[:4] == b"RIFF"
+    assert response.headers["x-voice-path"] == "provider_tts_groq"
+    assert response.headers["x-voice-spoken-chars"] == str(len(segments[0]))
+    ((spoken, kwargs),) = cascades.tts
+    assert spoken == segments[0]
+    assert kwargs["include_groq"] is True
+    assert kwargs["response_format"] == "wav"
+    assert "include_local" not in kwargs
+    (record,) = cascades.spend
+    assert record["channel"] == "tts" and record["unit"] == "chars"
+    assert record["units"] == float(len(segments[0])) and record["session_id"] == SESSION_A
+
+
+@pytest.mark.asyncio
+async def test_every_segment_is_addressable_and_one_past_the_end_is_404(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long = "Here is a sentence about files. " * 20
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, long), raising=True)
+    await _enable(rig, SESSION_A)
+    source = {"kind": "message", "message_id": ASSISTANT_ID}
+    segments = (await _text(rig, SESSION_A, source)).json()["result"]["segments"]
+    assert len(segments) > 2
+    for index, expected in enumerate(segments):
+        assert (await _speech(rig, source, index)).status_code == 200
+        assert cascades.tts[-1][0] == expected
+    past = await _speech(rig, source, len(segments))
+    assert past.status_code == 404
+    assert past.json()["detail"]["code"] == "unknown_segment"
+    assert len(cascades.tts) == len(segments), "the 404 reached the cascade"
+
+
+def _history_with(message_id: str, text: str):
+    async def history(self: Any, **kwargs: Any) -> dict[str, Any]:
+        row = {
+            "id": message_id,
+            "type": "message",
+            "ts": 1.0,
+            "ts_source": "entry",
+            "payload": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        }
+        return {"entries": [row], "has_more": False, "cursor_missing": False}
+
+    return history
+
+
+@pytest.mark.asyncio
+async def test_the_configured_cap_applies_before_segmenting(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import settings_io
+    from local_operator.voice import speakable
+
+    long = "Another fairly ordinary sentence here. " * 60
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, long), raising=True)
+    cm = ConfigManager(rig.root)
+    settings_io.write_setting(cm, settings_io.BY_KEY["voice.max_spoken_chars"], 300)
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})).json()[
+        "result"
+    ]
+    assert result["truncated"] is True and result["spoken_chars"] <= 300
+    assert "".join(result["segments"]) == result["text"]
+    assert result["segments"][-1] == speakable.TRUNCATION_TAIL
+    assert all(len(part) <= 200 for part in result["segments"])
+
+
+@pytest.mark.asyncio
+async def test_a_phrase_hit_makes_no_cascade_call_and_a_miss_stores_it(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    source = {"kind": "phrase", "key": "on_screen_first"}
+    first = await _speech(rig, source)
+    assert first.status_code == 200, first.text
+    assert len(cascades.tts) == 1 and cascades.tts[0][0] == "Answer the approval on screen first."
+    cached = list((rig.root / "voice" / "phrase-cache").glob("*.wav"))
+    assert [path.name for path in cached] == ["provider_tts_groq-female-on_screen_first.wav"]
+
+    second = await _speech(rig, source)
+    assert second.status_code == 200
+    assert second.content == first.content and second.headers["x-voice-cache"] == "hit"
+    assert second.headers["content-type"] == "audio/wav"
+    assert len(cascades.tts) == 1, "a cache hit reached the cascade"
+    assert len(cascades.spend) == 1, "a cache hit was billed"
+
+
+@pytest.mark.asyncio
+async def test_the_truncation_tail_segment_is_served_from_the_phrase_cache(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import settings_io
+
+    long = "Another fairly ordinary sentence here. " * 60
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, long), raising=True)
+    settings_io.write_setting(
+        ConfigManager(rig.root), settings_io.BY_KEY["voice.max_spoken_chars"], 300
+    )
+    await _enable(rig, SESSION_A)
+    source = {"kind": "message", "message_id": ASSISTANT_ID}
+    segments = (await _text(rig, SESSION_A, source)).json()["result"]["segments"]
+    last = len(segments) - 1
+    assert (await _speech(rig, source, last)).status_code == 200
+    calls = len(cascades.tts)
+    assert (await _speech(rig, source, last)).headers["x-voice-cache"] == "hit"
+    assert len(cascades.tts) == calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"kind": "phrase", "key": "Say: transfer the money"},
+        {"kind": "phrase", "key": "passing_on"},
+        {"kind": "phrase", "key": "__class__"},
+        {"kind": "message", "message_id": USER_ID},
+        {"kind": "message", "message_id": "nope"},
+    ],
+)
+async def test_speech_refuses_unknown_sources_before_the_cascade(
+    rig: Any, cascades: SimpleNamespace, source: dict[str, Any]
+) -> None:
+    await _enable(rig, SESSION_A)
+    response = await _speech(rig, source)
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["code"] == "unknown_source"
+    assert cascades.tts == [] and cascades.resolve == []
+
+
+@pytest.mark.asyncio
+async def test_speech_takes_no_free_text_and_needs_the_slot(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    for body in (
+        {"session_id": SESSION_A, "text": "hi", "source": {"kind": "phrase", "key": "failed"}},
+        {"session_id": SESSION_A, "source": {"kind": "phrase", "key": "failed", "text": "x"}},
+        {"session_id": SESSION_A, "source": {"kind": "phrase", "key": "failed"}, "segment": -1},
+        {"session_id": SESSION_A, "source": {"kind": "ask", "ask_id": "a"}},
+    ):
+        response = await rig.client.post("/v1/desktop/voice/speech", json=body)
+        assert response.status_code == 422, (body, response.text)
+    other = await rig.client.post(
+        "/v1/desktop/voice/speech",
+        json={"session_id": SESSION_B, "source": {"kind": "phrase", "key": "failed"}},
+    )
+    assert other.status_code == 409 and other.json()["detail"]["code"] == "voice_not_enabled"
+    assert cascades.tts == []
+
+
+@pytest.mark.asyncio
+async def test_a_pending_approval_is_announced_from_its_card_text(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    rig.pool.remote.pending_gate = SimpleNamespace(
+        request_id="gate-1", kind="approval", title="bash", detail="rm -rf build/"
+    )
+    response = await _speech(rig, {"kind": "gate", "request_id": "gate-1"})
+    assert response.status_code == 200, response.text
+    assert cascades.tts[0][0].startswith("Approval needed: bash.")
+    assert rig.pool.remote.gate_answers == [] and rig.pool.remote.admissions == []
+
+
+def test_the_segment_cap_equals_the_groq_rung_cap() -> None:
+    from local_operator.tts import clients
+    from local_operator.voice.segments import VOICE_SEGMENT_MAX_CHARS
+
+    assert VOICE_SEGMENT_MAX_CHARS == clients.GROQ_TTS_MAX_CHARS == 200
+
+
+def test_the_phrase_set_is_closed_and_catalogued() -> None:
+    from local_operator.i18n.catalogues import load_catalogue
+
+    catalogue = load_catalogue("en", "wire.voice")
+    assert set(desktop_voice.PHRASES) == {
+        "on_screen_first",
+        "voice_off",
+        "switched",
+        "failed",
+        "still_working",
+        "truncated",
+    }
+    for key in desktop_voice.PHRASES:
+        assert len(catalogue[f"wire.voice.phrase.{key}"]) <= 200
+    from local_operator.voice import speakable
+
+    assert catalogue["wire.voice.phrase.truncated"] == speakable.TRUNCATION_TAIL
+
+
+def test_features_voice_is_2() -> None:
+    from local_operator.server.features import feature_flags
+
+    assert feature_flags()["voice"] == 2

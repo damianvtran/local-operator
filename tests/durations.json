@@ -1047,6 +1047,7 @@
   "tests/unit/ui_browser/test_state.py": 1.0,
   "tests/unit/ui_console/test_backend.py": 2.037,
   "tests/unit/ui_console/test_state.py": 1.0,
+  "tests/unit/voice/test_segments.py": 1.0,
   "tests/unit/voice/test_slot.py": 1.0,
   "tests/unit/voice/test_speakable.py": 1.0,
   "tests/unit/voice/test_steer_during_approval.py": 1.0,
