@@ -8466,3 +8466,105 @@ async def test_no_growth_forms_are_allowed_on_a_pad_under_cap(tmp_path) -> None:
     renamed = await run("bash-pad-rename", f'mv "{pad}/notes.md" "{pad}/notes2.md"')
     assert renamed.is_error is False, renamed.text
     assert (pad / "notes2.md").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "needle"),
+    [
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv a.dat b.tar.gz',
+            "'.tar.gz' is a compiled, archived or model artefact",
+        ),
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv notes.md build/notes.md',
+            "'build' is a build or dependency directory",
+        ),
+    ],
+)
+async def test_an_in_pad_rename_still_reports_the_refused_shape_post_hoc(
+    tmp_path, command, needle
+) -> None:
+    """R3-1: the rename exemption belongs to the PRECHECK only. The post-hoc
+    audit must still see where an in-pad rename PUT the name, or a rename is a
+    free way to leave a build tree/archive in the pad with no line."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a.dat").write_bytes(b"x")
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-rename-shape", {"command": command}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert "[scratch]" in result.text and needle in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "needle", "created"),
+    [
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv a.dat b.tar.gz',
+            "'.tar.gz' is a compiled, archived or model artefact",
+            "b.tar.gz",
+        ),
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv notes.md build/notes.md',
+            "'build' is a build or dependency directory",
+            "build/notes.md",
+        ),
+    ],
+)
+async def test_an_in_pad_rename_on_an_over_cap_pad_runs_and_still_reports(
+    tmp_path, monkeypatch, command, needle, created
+) -> None:
+    """The precheck exempts the rename (it adds no bytes); the command therefore
+    runs, and the post-hoc line must still name the refused shape it left."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a.dat").write_bytes(b"x" * 4096)
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+    held = sum(
+        entry.lstat().st_blocks * 512
+        for entry in pad.rglob("*")
+        if not entry.is_dir() and not entry.is_symlink()
+    )
+    _pad_cap_config(tmp_path, monkeypatch, max(1024, held - 1))
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-rename-over-cap", {"command": command}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert needle in result.text
+    assert (pad / created).exists(), "the rename itself is a no-growth command"
+
+
+@pytest.mark.asyncio
+async def test_touch_through_an_in_pad_symlink_is_refused(tmp_path, monkeypatch) -> None:
+    """R3-2: the symlink guard must run BEFORE ``_pad_target`` resolves the
+    link, or it is dead and ``touch`` through it is exempted as a no-op."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "real.md").write_bytes(b"x" * 4096)
+    (pad / "link.md").symlink_to("real.md")
+    held = (pad / "real.md").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, max(1024, held - 1))
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-touch-link",
+        {"command": 'touch "$LOCAL_OPERATOR_SCRATCHPAD/link.md"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True, result.text
+    assert "Scratchpad over cap" in result.text

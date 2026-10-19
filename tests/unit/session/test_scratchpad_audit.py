@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any, cast
 
 from local_operator.session import scratchpad_audit as audit_module
 from local_operator.session.scratchpad_audit import audit_scratchpads
@@ -196,7 +197,7 @@ def test_the_json_shape_carries_every_row_and_the_cap(tmp_path: Path) -> None:
 
     assert payload["count"] == 1
     assert payload["over_cap"] == 0
-    [row] = payload["pads"]
+    [row] = cast(list[dict[str, Any]], payload["pads"])
     assert row["session"] == "json-row"
     assert row["origin"] == "subagent"
     assert row["shapes"][0]["path"] == "build"
@@ -222,7 +223,8 @@ def test_a_non_pointer_git_file_is_labelled_and_never_printed_raw(
     assert marker.target == "not a pointer\nline two"
     assert pointer_display(marker) == "(not a gitdir pointer)"
     assert "\n" not in pointer_display(marker)
-    assert row.as_dict()["git_markers"][0]["target"] == "not a pointer\nline two"
+    markers = cast(list[dict[str, Any]], row.as_dict()["git_markers"])
+    assert markers[0]["target"] == "not a pointer\nline two"
 
 
 def test_an_unreadable_git_file_says_so_instead_of_printing_an_empty_arrow(
