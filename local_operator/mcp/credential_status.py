@@ -136,7 +136,7 @@ def server_states(
         if not name or name in rows:
             continue
         try:
-            rows[name] = _fact_row(entry, mesh=mesh)
+            rows[name] = _fact_row(entry, mesh=mesh, grants=grants)
         except Exception:  # noqa: BLE001 — one row must not fail the document
             rows[name] = _row("unknown", "the credential state could not be read")
     return rows
@@ -280,14 +280,18 @@ def _server_row(
     )
 
 
-def _fact_row(entry: Mapping[str, Any], *, mesh: dict[str, Any]) -> dict[str, Any]:
+def _fact_row(
+    entry: Mapping[str, Any], *, mesh: dict[str, Any], grants: "_GrantIndex"
+) -> dict[str, Any]:
     """A status row for a configured server the discovery loader did not return.
 
     Everything is taken from the readiness fact (names and booleans only): the
-    refs and their ``set`` states, whether a local grant row exists, whether a
-    placement entry was ever pulled. NO network, no dial — the same contract as
-    every other row here. The state vocabulary is identical, so a caller cannot
-    tell which source produced a row (which is the point).
+    refs and their ``set`` states, whether a placement entry was ever pulled.
+    The GRANT half comes from the shared ``_GrantIndex``, not the fact's
+    ``has_row``: that boolean is ANY auth row, so a registration-only
+    (``client_info``) row would render ``synced`` while the same URL answers
+    ``server_has_stored_grant`` False (review round 3, M3). NO network, no dial
+    — the same contract as every other row here.
     """
     refs = [
         {"id": str(ref.get("id") or ""), "set": ref.get("set") is True}
@@ -301,7 +305,25 @@ def _fact_row(entry: Mapping[str, Any], *, mesh: dict[str, Any]) -> dict[str, An
         for binding in ref.get("bindings") or []
         if isinstance(binding, Mapping)
     }
-    shape = "header-ref" if "headers" in bindings else ("env-ref" if "env" in bindings else "oauth")
+    url = str(entry.get("url") or "")
+    grant_state = grants.state(url) if url else "absent"
+    live_grant = grant_state == "present" and not grants.dead(url)
+    # The fact's auth hint is a boolean ``auth_*`` field; another key in the same
+    # family carries a diagnostics dict, so the check is by TYPE as well as name.
+    auth_declared = any(
+        str(field).startswith("auth_") and isinstance(value, bool) and value
+        for field, value in entry.items()
+    )
+    has_refs = bool(refs or bindings)
+    oauth_shape = bool(url) and (auth_declared or (live_grant and not has_refs))
+    if oauth_shape:
+        shape = "oauth"
+    elif "headers" in bindings:
+        shape = "header-ref"
+    elif "env" in bindings:
+        shape = "env-ref"
+    else:
+        shape = "none"
     if entry.get("literal_keys"):
         return _row(
             "missing_source",
@@ -326,16 +348,31 @@ def _fact_row(entry: Mapping[str, Any], *, mesh: dict[str, Any]) -> dict[str, An
             shape=shape,
             refs=refs,
         )
-    if entry.get("has_row"):
+    if shape == "none":
+        # Nothing to authenticate: the vacuous ``synced`` rule, not a login.
         return _row("synced", "", shape=shape, refs=refs)
-    url = str(entry.get("url") or "")
+    if grant_state == "unknown":
+        return _row("unknown", "the OAuth grant store could not be read", shape=shape, refs=refs)
+    if live_grant:
+        return _row("synced", "", shape=shape, refs=refs)
+    if grant_state == "present":
+        return _row(
+            "expired",
+            "sign-in expired here; sign in again on this device",
+            shape=shape,
+            refs=refs,
+        )
     key = f"mcp:{url}" if url else ""
     placed = mesh["entries"].get(key) if key else None
     if placed and placed.get("holder"):
         owner_name = str(getattr(placed.get("entry"), "owner_device_name", "") or "")
         return _row(
             "synced",
-            _bounded(f"borrows from {owner_name}" if owner_name else "borrows from a shared device"),
+            _bounded(
+                f"borrows from {owner_name}"
+                if owner_name
+                else "borrows from a shared device"
+            ),
             owner=str(getattr(placed.get("entry"), "owner_device", "") or ""),
             shape=shape,
             refs=refs,
@@ -405,7 +442,11 @@ def _oauth_row(
         else:
             detail = ""
         if detail:
-            sentence = f"{owner_name}: sign in again — {detail}" if owner_name else f"sign in again — {detail}"
+            sentence = (
+                f"{owner_name}: sign in again — {detail}"
+                if owner_name
+                else f"sign in again — {detail}"
+            )
         else:
             sentence = f"{owner_name}: sign in again" if owner_name else "sign in again"
         return _row(
@@ -434,7 +475,11 @@ def _oauth_row(
         # gitlab contradiction measured on cloud-node-1.
         return _row(
             "synced",
-            _bounded(f"borrows from {owner_name}" if owner_name else "borrows from a shared device"),
+            _bounded(
+                f"borrows from {owner_name}"
+                if owner_name
+                else "borrows from a shared device"
+            ),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
