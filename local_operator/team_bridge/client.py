@@ -1571,24 +1571,6 @@ class TeamBridgeClient:
             access=access,
         )
 
-    async def conversation_join(
-        self, conversation_id: str, *, access: OAuthAccess | None = None
-    ) -> dict[str, Any]:
-        """Accept a human invitation, or self-join a tenant-visible channel."""
-
-        return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/join", access=access
-        )
-
-    async def conversation_leave(
-        self, conversation_id: str, *, access: OAuthAccess | None = None
-    ) -> dict[str, Any]:
-        """Leave. Reads stay allowed under a kill; leaving is not a flow expansion."""
-
-        return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/leave", access=access
-        )
-
     async def conversation_messages(
         self,
         conversation_id: str,

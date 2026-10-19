@@ -2264,7 +2264,7 @@ async def test_conversation_create_refuses_an_unknown_field(api):
 async def test_conversation_send_requires_a_client_ref(api):
     client, _root, _d = api
     response = await client.post(
-        "/v1/desktop/team-bridge/conversations/bcv_1/messages",
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
         json={"body": "hello"},
     )
     assert response.status_code == 422
@@ -2274,12 +2274,12 @@ async def test_conversation_send_forwards_the_text_and_key(api):
     client, _root, _d = api
     FakeClient.behavior["conversation_send"] = {"id": "bcmsg_1", "seq": 1}
     response = await client.post(
-        "/v1/desktop/team-bridge/conversations/bcv_1/messages",
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
         json={"tenant_id": "tnt_1", "client_ref": "ref-1", "body": "hello"},
     )
     assert response.status_code == 200, response.text
     assert FakeClient.behavior["last_send"] == {
-        "conversation_id": "bcv_1",
+        "conversation_id": "bcv_abc12345",
         "client_ref": "ref-1",
         "text": "hello",
         "tenant_id": "tnt_1",
@@ -2290,7 +2290,7 @@ async def test_conversation_send_forwards_the_text_and_key(api):
 async def test_conversation_read_requires_something_to_do(api):
     client, _root, _d = api
     response = await client.post(
-        "/v1/desktop/team-bridge/conversations/bcv_1/read", json={}
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/read", json={}
     )
     assert response.status_code == 422
 
@@ -2305,3 +2305,49 @@ async def test_unread_is_one_badge_read(api):
     assert response.status_code == 200
     assert response.json()["result"]["total"] == 3
     assert FakeClient.behavior["last_unread_kwargs"] == {"tenant_id": "tnt_1"}
+
+
+async def test_conversation_history_forwards_parsed_cursors(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages"
+        "?tenant_id=tnt_1&limit=20&before_seq=41"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_history_kwargs"] == {
+        "conversation_id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "before_seq": 41,
+        "after_seq": None,
+        "endpoint_id": None,
+    }
+
+
+async def test_conversation_history_refuses_a_non_numeric_cursor(api):
+    client, _root, _d = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?before_seq=nope"
+    )
+    # A caller-controlled cursor is the family's invalid_request (422), never a
+    # 500 from int().
+    assert response.status_code == 422
+
+
+async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
+    client, _root, _d = api
+    for method, path, payload in (
+        ("get", "/v1/desktop/team-bridge/conversations/nope", None),
+        ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/read", {"seq": 1}),
+    ):
+        response = (
+            await client.get(path)
+            if method == "get"
+            else await client.post(path, json=payload)
+        )
+        assert response.status_code == 422, (path, response.text)
