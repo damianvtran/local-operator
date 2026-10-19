@@ -382,3 +382,127 @@ async def test_invalid_exact_selectors_do_not_register_jobs(tmp_path, monkeypatc
         assert not session.subagent_comms.snapshot()
     finally:
         await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# the inherit sentinel against an explicit per-run model pick
+# ---------------------------------------------------------------------------
+
+
+def setup_inherit_pinned(tmp_path, monkeypatch, *, choice="model"):
+    """A session whose ``coder`` role is the PACKAGED seed, pin and all.
+
+    The seed is the published definition of the role, so the pin under test is
+    the one a teammate who pulls the role actually gets — not a row written by
+    hand for the occasion.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.agent_profiles import install_seed
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(tmp_path / "config", {"hi": "deepseek/deepseek-chat"}, choice=choice)
+    registry = AgentRegistry(tmp_path / "agents")
+    assert install_seed("coder", registry=registry) is not None
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+    return session
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_model_pick_cannot_move_a_role_that_pins_the_session_model(
+    tmp_path, monkeypatch
+):
+    """The other model-reachable layer: the per-run ``model=`` pick.
+
+    A role that declares "always run on the launching session's model" is not
+    moved by a delegating model naming a different model either — the same
+    reason the launch tier does not move it. The receipt names the role as the
+    decider, so the pick is visible as unused rather than silently dropped.
+    """
+    session = setup_inherit_pinned(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "local_operator.mobile.peer_model.validate_peer_selection", lambda p, m: PIN
+    )
+    try:
+        spec, source = session._resolve_subagent_selection(
+            "coder", None, strict=True, model="deepseek/deepseek-chat"
+        )
+        assert spec is not None
+        assert (spec.provider, spec.model_id) == (MODEL.provider, MODEL.model_id)
+        assert source == "role_inherit"
+
+        # And the launch says so on the receipt the delegating model reads.
+        job_id, result = await launch(session, agent="coder", model="deepseek/deepseek-chat")
+        assert row(session, job_id).model_label == f"{MODEL.provider}/{MODEL.model_id}"
+        assert "selection: role_inherit" in text(result)
+        assert "NOT applied" in text(result)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_role_with_no_pin_still_takes_an_explicit_model_pick(tmp_path, monkeypatch):
+    """The negative half: the rule is narrow, and an ordinary role is untouched.
+
+    A role with no pin is the delegating model's to place, exactly as before.
+    """
+    session = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "local_operator.mobile.peer_model.validate_peer_selection", lambda p, m: PIN
+    )
+    try:
+        spec, source = session._resolve_subagent_selection(
+            "scout", None, strict=True, model="deepseek/deepseek-chat"
+        )
+        assert spec is not None
+        assert (spec.provider, spec.model_id) == (PIN.provider, PIN.model_id)
+        assert source == "explicit_model"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_pick_is_refused_even_for_a_role_that_pins_the_session_model(
+    tmp_path, monkeypatch
+):
+    """A malformed selector is malformed whether or not the role would use it.
+
+    The SHAPE check stays in front of the role's pin (it is the same check the
+    ``task`` tool's own argument validation makes), so a role that pins the
+    session's model does not become a way to launch on a typo.
+    """
+    session = setup_inherit_pinned(tmp_path, monkeypatch)
+    try:
+        result = await execute_task(
+            "bad",
+            {"label": "bad", "prompt": "go", "agent": "coder", "model": "deepseek/"},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+        assert result.is_error
+        assert not session.jobs.list()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pick_this_machine_cannot_use_is_not_applied_rather_than_refused(
+    tmp_path, monkeypatch
+):
+    """A pick that is well-formed but unusable here is NOT applied — and is not
+    the reason the launch fails.
+
+    The role's pin means the pick will not run, so requiring it to be usable
+    on this machine would fail launches over a credential nothing was going to
+    use. The pick is reported as not applied on the receipt, which is the
+    honest account of what happened; what it must never be is silently
+    honoured.
+    """
+    session = setup_inherit_pinned(tmp_path, monkeypatch)
+    try:
+        job_id, result = await launch(session, agent="coder", model="nosuchprovider/x")
+        assert row(session, job_id).model_label == f"{MODEL.provider}/{MODEL.model_id}"
+        assert "NOT applied" in text(result)
+    finally:
+        await session.dispose()

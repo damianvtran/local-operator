@@ -27823,6 +27823,35 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
+def _not_applied_note(entry: Mapping[str, Any]) -> str:
+    """Say so when a tier or model this call passed was NOT applied.
+
+    A role whose own pin is the inherit sentinel states an ABSOLUTE decision
+    ("always run on the launching session's model"), and it outranks anything
+    the delegating model passed. The launch still names the model the child will
+    run on, but a caller whose ``effort=`` or ``model=`` was dropped has to be
+    told: a silent substitution is the very thing this rule exists to prevent,
+    and a receipt that reads as though the pick took effect IS the substitution
+    by another name. The note is therefore appended to the launch line rather
+    than left in the model's head, and it names the value that was passed so
+    the reader can see which one was ignored.
+    """
+    if entry.get("model_selection_source") != "role_inherit":
+        return ""
+    passed: list[str] = []
+    if entry.get("effort"):
+        passed.append(f"effort={entry['effort']!r}")
+    if entry.get("model_pick"):
+        passed.append(f"model={entry['model_pick']!r}")
+    if not passed:
+        return ""
+    verb = "was" if len(passed) == 1 else "were"
+    return (
+        f" [the {' and '.join(passed)} you passed {verb} NOT applied: this role "
+        "pins the launching session's model]"
+    )
+
+
 def _model_clause(model: str, owns: bool | None, session_model: str) -> str:
     """``on <model>`` or ``on this session's model (<model>)``.
 
@@ -28012,6 +28041,12 @@ async def execute_task(
                     if context and context.jobs
                     else ""
                 ),
+                # WHAT THIS CALL ASKED FOR, kept beside what the launch
+                # decided: the two can differ now, and only the pair says
+                # whether the caller's pick was applied (see
+                # ``_not_applied_note``).
+                "effort": item.effort,
+                "model_pick": item.model,
             }
         )
     if not launched:
@@ -28024,6 +28059,7 @@ async def execute_task(
             if entry.get("model_selection_source")
             else ""
         )
+        + _not_applied_note(entry)
         for entry in launched
     ]
     body = (

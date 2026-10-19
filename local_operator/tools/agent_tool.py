@@ -89,6 +89,7 @@ from local_operator.agent_profiles import (
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
+    is_inherit_tier_sentinel,
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
@@ -210,9 +211,28 @@ class AgentParams(BaseModel):
         says "no pin", and it is ACCEPTED in both modes — the operator owning
         the tier choice means the operator owns the value too, and a pin-clearing
         call must not become impossible to make.
+
+        **The INHERIT SENTINEL is refused here, and it is refused by name.**
+        ``default`` is the harness's marker for "the launching session's
+        model"; a role that pins it always runs on the session's model, and
+        that pin is absolute. A model able to set it could pin a REVIEWER to
+        the parent's own model and call the result an independent review, so
+        the state is reachable only from a packaged seed (or the operator's own
+        registry edit) and never from this tool. The generic tier refusal
+        would have covered it too, but it says "not a configured tier", which
+        reads as a misconfiguration to fix — and the fix here is "do not set
+        it", not "configure a tier called default".
         """
         if value == INHERIT_EFFORT:
             return value
+        if is_inherit_tier_sentinel(value):
+            raise ValueError(
+                "'default' is not a tier you can pin: it is the harness's inherit "
+                "marker, and a role that pins it always runs on the launching "
+                "session's model. A pin that collapses an independent review "
+                "into a self-review is not a pin this tool may write. Use "
+                "'inherit' to clear a pin."
+            )
         return _validate_effort_tier(value, info, pin=True)
 
     delegate: bool | None = Field(

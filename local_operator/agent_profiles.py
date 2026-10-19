@@ -183,9 +183,27 @@ class AgentProfile:
     default model tier for the role and is always overridable per launch,
     because the right model for a role depends on the operator's provider mix
     rather than on anything this file can know. The packaged seeds pin NO
-    tier: a child inherits the session's model unless the operator (or the
+    TIER: a child inherits the session's model unless the operator (or the
     launch) picks one, so a review round never silently lands on a weaker
     model than the session it is checking.
+
+    **The one exception is the INHERIT SENTINEL, and it is not a tier.**
+    ``effort`` may carry ``default`` (:data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL`),
+    which says "always run on the LAUNCHING SESSION's model" rather than naming
+    a tier. It is absolute: a delegating model's tier argument, its explicit
+    model pick, and a roster slot's tier all lose to it, because every one of
+    those is reachable by a delegating model and a pin they could move would
+    not be a pin. The ``coder`` seed carries it, and it carries it for the
+    incident it names: a delegating model passing ``effort="hi"`` moved 143
+    coder launches off the session's model onto that tier's, so a child could
+    be working on a different model from the session that launched it. A
+    reviewer's independence is protected a different way — by a role that
+    pins a TIER, which stays the role's DEFAULT and stays overridable — so the
+    sentinel is stated where the child's MODEL must match its parent's, and
+    nowhere else. It cannot be authored through the ``agent`` tool: the
+    sentinel is reachable only from a packaged seed or the operator's own
+    registry row, because a model able to write it could pin a reviewer to
+    the parent's own model.
     """
 
     name: str
