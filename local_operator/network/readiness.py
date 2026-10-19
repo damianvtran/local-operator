@@ -498,14 +498,65 @@ def mcp_login_remedy(url: str) -> str:
     return "sign in here first"
 
 
+def _server_refs(
+    root: Path,
+    raw: Mapping[str, Any],
+    presence: dict[str, bool | None] | None = None,
+) -> list[dict[str, Any]]:
+    """Every ``${NAME}`` reference a user-scope server declares, with its state.
+
+    All transports: a stdio server's spawn environment is exactly as much a
+    credential question as an HTTP header, and the readiness row now answers it
+    instead of skipping the row. The parser is ``mcp.secret_refs``' one parser;
+    presence comes from ``mcpdefs.reference_present``, the same read the state
+    verb publishes. Values never appear — only names, bindings and a boolean.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.mcp.secret_refs import public_secret_refs
+    from local_operator.network.mcpdefs import reference_present
+
+    def _text_map(value: Any) -> dict[str, str]:
+        return (
+            {str(key): str(item) for key, item in value.items()}
+            if isinstance(value, Mapping)
+            else {}
+        )
+
+    parsed = public_secret_refs(
+        SimpleNamespace(env=_text_map(raw.get("env")), headers=_text_map(raw.get("headers")))
+    )
+    cache = presence if presence is not None else {}
+    rows: list[dict[str, Any]] = []
+    for ref in parsed:
+        ref_id = str(ref.get("id") or "")
+        if not ref_id:
+            continue
+        if ref_id not in cache:
+            cache[ref_id] = reference_present(root, ref_id)
+        rows.append(
+            {
+                "id": ref_id,
+                "bindings": [dict(binding) for binding in ref.get("bindings") or []],
+                "set": cache[ref_id],
+            }
+        )
+    return rows
+
+
 def mcp_servers_fact(root: Path) -> dict[str, Any]:
-    """The USER-SCOPE MCP servers, and per HTTP/SSE server whether a login row exists.
+    """The USER-SCOPE MCP servers, their login rows and their credential shapes.
 
     Reads the file the WRITERS target (``<root>/mcp.json``), not the merged
     discovery list: a project-scope server is cwd-dependent and says nothing
     about what an offload — whose cwd the sender picks — will see (design §8.6).
     A missing or unreadable file reads as "no servers"; the sentence for that
     state already says "missing or empty".
+
+    Each row carries the references it declares (``refs``: id, bindings and
+    whether THIS root's store resolves it — all transports, because a stdio
+    spawn environment is a credential question too) and the literal bindings
+    still waiting for adoption (``literal_keys``). Names only; no value is read.
     """
     path = root / "mcp.json"
     withheld: list[str] = []
@@ -520,6 +571,14 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
     entries = document.get("mcpServers") if isinstance(document, dict) else None
     if not isinstance(entries, Mapping):
         entries = {}
+    literal_keys: list[dict[str, Any]] = []
+    try:
+        from local_operator.mcp.credential_sources import literal_credential_keys
+
+        literal_keys = literal_credential_keys(root)
+    except Exception:  # noqa: BLE001 — an unreadable file already reads as no servers
+        literal_keys = []
+    presence: dict[str, bool | None] = {}
     store = None
     store_unreadable = False
     try:
@@ -576,6 +635,10 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                     "auth_declared": bool(raw.get("oauth") or raw.get("auth")),
                     "has_row": has_row,
                     "has_placement": has_placement,
+                    "refs": _server_refs(root, raw, presence),
+                    "literal_keys": [
+                        dict(row) for row in literal_keys if str(row.get("server")) == str(name)
+                    ],
                     **({"auth_diagnostics": diagnostics} if diagnostics is not None else {}),
                 }
             )
@@ -725,19 +788,24 @@ def has_local_provider_credential(root: Path, provider: str) -> bool | None:
             pass
 
 
-def placement_fact(*, provider: str = "", mcp_url: str = "", root: Path) -> dict[str, Any]:
+def placement_fact(
+    *, provider: str = "", mcp_url: str = "", secret: str = "", root: Path
+) -> dict[str, Any]:
     """The placement entry for a key (owner + holders) and this device's observation.
 
     ``{}`` when there is no entry — absence is a refusal (nobody may borrow)
     and the viewer reads it as such, never as "unknown". The observation rides
     the same lookup: it is the borrower-side memory of the last borrow attempt,
     which is what lets the verdict say ``owner_offline`` with a last-seen stamp
-    instead of guessing from reachability.
+    instead of guessing from reachability. ``secret`` is the class-2 key
+    (``secret:<NAME>``) the stdio readiness row consults.
     """
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.state import PlacementState
 
-    found = placement_mod.placement_entries_for(provider=provider, mcp_url=mcp_url, root=root)
+    found = placement_mod.placement_entries_for(
+        provider=provider, mcp_url=mcp_url, secret=secret, root=root
+    )
     if found is None:
         return {}
     network_id, entry = found
@@ -1007,6 +1075,16 @@ class ViewerFacts:
 
     def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
         return placement_fact(provider=provider, mcp_url=mcp_url, root=self.root)
+
+    def secret_placement(self, name: str) -> dict[str, Any]:
+        """The class-2 placement entry for one store secret, if the network has one.
+
+        Separate from the MCP URL lookup because the two are distinct key
+        namespaces; absence means no device has declared a share of this name,
+        which is what separates the stdio row's copy remedy from its source
+        remedy.
+        """
+        return placement_fact(secret=name, root=self.root)
 
     def close(self) -> None:
         if self._store is not None:
@@ -1927,7 +2005,14 @@ def mcp_credential_rows(
     viewer: Viewer,
     peer_label: str,
 ) -> list[dict[str, Any]]:
-    """(f) Per user-scope HTTP/SSE server: does a login path exist for the peer?"""
+    """(f) Per user-scope server: does the peer hold what it needs to run it?
+
+    HTTP/SSE keeps its existing login/placement verdict (byte-identical rows).
+    A stdio server used to be skipped; its credential question is the references
+    in its spawn environment, so it now gets a row driven by the peer's own ref
+    states: all set is a pass; a missing name that has a placement entry is a
+    copy that has not arrived; a missing name with no entry has no source here.
+    """
     fact = facts.get("mcp")
     if not isinstance(fact, Mapping):
         return []
@@ -1935,9 +2020,20 @@ def mcp_credential_rows(
     for server in fact.get("servers") or []:
         if not isinstance(server, Mapping):
             continue
-        if str(server.get("transport") or "") not in ("http", "sse"):
-            # Stdio servers are listed, not credential-checked (deferral §7):
-            # their secrets live in the spawn environment, a different question.
+        transport = str(server.get("transport") or "")
+        if transport not in ("http", "sse"):
+            name = _bounded(server.get("name") or "", 120)
+            if not name:
+                continue
+            row = _mcp_ref_row(
+                member,
+                name=name,
+                server=server,
+                viewer=viewer,
+                peer_label=peer_label,
+            )
+            if row is not None:
+                rows.append(row)
             continue
         url = _bounded(server.get("url") or "", 300)
         name = _bounded(server.get("name") or "", 120) or url
@@ -1958,6 +2054,91 @@ def mcp_credential_rows(
             }
         rows.append(row)
     return rows
+
+
+def _mcp_ref_row(
+    member: Any,
+    *,
+    name: str,
+    server: Mapping[str, Any],
+    viewer: Viewer,
+    peer_label: str,
+) -> dict[str, Any] | None:
+    """A stdio server's row: can the PEER resolve the names its config declares?
+
+    ``None`` when the server declares no references — there is no credential
+    question to answer, and a vacuous ``ok`` row would read as verification of
+    something nobody asked. ``set`` is three-valued (``None`` = the peer's store
+    could not be read); anything that is not a definite ``True`` is reported as
+    not resolved rather than as a pass, the same closed direction the rest of
+    this module takes.
+    """
+    refs = [
+        ref
+        for ref in server.get("refs") or []
+        if isinstance(ref, Mapping) and str(ref.get("id") or "")
+    ]
+    if not refs:
+        return None
+    names = [str(ref.get("id")) for ref in refs]
+    missing = [str(ref.get("id")) for ref in refs if ref.get("set") is not True]
+    observed = {"server": name, "refs": names}
+    if not missing:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=True,
+            detail=f"{peer_label} resolves every referenced credential for {name}",
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    shown = ", ".join(_bounded(item, 120) for item in missing)
+    lookup = getattr(viewer, "secret_placement", None)
+    shared = False
+    if callable(lookup):
+        for ref_name in missing:
+            entry: Any = lookup(ref_name) or {}
+            holders = {
+                str(holder.get("device") or "")
+                for holder in entry.get("holders") or []
+                if isinstance(holder, Mapping)
+            }
+            # A share that does not LIST the peer will never reach it: reporting
+            # "not synced yet" there would send the operator to wait for a copy
+            # nobody granted. Only a real holder row takes the copy branch.
+            if member.device_id in holders:
+                shared = True
+                break
+    if shared:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_SHARED,
+            detail=(
+                f"the referenced credentials for {name} ({shown}) are shared in this "
+                f"network but have not reached {peer_label}"
+            ),
+            remedies=[
+                "run lop network mcp credentials --repair on the owner, then wait for "
+                "the next sync"
+            ],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_MCP_CREDENTIAL,
+        ok=False,
+        code=CODE_NO_CREDENTIAL,
+        detail=f"{peer_label} has no credential for {shown} referenced by {name}",
+        remedies=[f"set {shown} on {peer_label}, or share it from the owner"],
+        source=SOURCE_PEER,
+        observed=observed,
+    )
 
 
 def _mcp_credential_row(

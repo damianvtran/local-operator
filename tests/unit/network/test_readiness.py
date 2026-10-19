@@ -571,6 +571,88 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
 
 
+def test_stdio_reference_rows_answer_from_the_peers_ref_states() -> None:
+    """A stdio server is no longer skipped: its spawn environment is checked.
+
+    Three answers, the design's three states: every ref resolves; a missing ref
+    that has a placement entry somewhere (a share that has not arrived — copy
+    remedy); and a missing ref with no placement at all (no source — set it or
+    share it from the owner). A server with no refs produces no row: a vacuous
+    pass would verify nothing.
+    """
+    servers = {
+        "servers": [
+            {"name": "gh", "transport": "stdio", "refs": [{"id": "GITHUB_TOKEN", "set": True}]},
+            {"name": "stale", "transport": "stdio", "refs": [{"id": "SHARED_TOKEN", "set": False}]},
+            {
+                "name": "absent",
+                "transport": "stdio",
+                "refs": [{"id": "MISSING_TOKEN", "set": None}],
+            },
+            {"name": "plain", "transport": "stdio", "refs": []},
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+
+    class _SecretViewer(_FakeViewer):
+        def secret_placement(self, name: str) -> dict[str, Any]:
+            if name == "SHARED_TOKEN":
+                return {"owner_device": VIEWER, "holders": [{"device": PEER}]}
+            return {}
+
+    rows = readiness.mcp_credential_rows(
+        _member(), _facts(mcp=servers), viewer=_SecretViewer(), peer_label="cloud-node-1"
+    )
+    by_server = {(row.get("observed") or {}).get("server", ""): row for row in rows}
+
+    assert set(by_server) == {"gh", "stale", "absent"}
+    assert by_server["gh"]["ok"] is True
+    assert by_server["stale"]["ok"] is False
+    assert by_server["stale"]["code"] == readiness.CODE_NOT_SHARED
+    assert "have not reached cloud-node-1" in by_server["stale"]["detail"]
+    assert "mcp credentials --repair" in by_server["stale"]["remedies"][0]
+    assert by_server["absent"]["ok"] is False
+    assert by_server["absent"]["code"] == readiness.CODE_NO_CREDENTIAL
+    assert "MISSING_TOKEN" in by_server["absent"]["detail"]
+    assert "set MISSING_TOKEN on cloud-node-1" in by_server["absent"]["remedies"][0]
+
+
+def test_mcp_servers_fact_publishes_refs_and_literal_keys_for_every_transport(
+    root: Path,
+) -> None:
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "gh": {
+                        "type": "stdio",
+                        "command": "x",
+                        "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}", "PLAIN": "literal-value"},
+                    },
+                    "slack": {
+                        "type": "http",
+                        "url": "https://slack.test/mcp",
+                        "headers": {"Authorization": "${Authorization}"},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fact = readiness.mcp_servers_fact(root)
+    rows = {row["name"]: row for row in fact["servers"]}
+
+    assert {ref["id"]: ref["set"] for ref in rows["gh"]["refs"]} == {"GITHUB_TOKEN": False}
+    assert rows["gh"]["literal_keys"] == [
+        {"server": "gh", "field": "env", "key": "PLAIN", "has_value": True}
+    ]
+    assert {ref["id"] for ref in rows["slack"]["refs"]} == {"Authorization"}
+    # The literal's VALUE never appears in the fact payload.
+    assert "literal-value" not in json.dumps(fact)
+
+
 def test_shareable_lines_render_every_login_state_once() -> None:
     """One renderer for the CLI and the agent digest (design §2), so the two cannot
     drift the way the readiness rows once did.

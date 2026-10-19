@@ -183,6 +183,54 @@ def test_push_lands_rows_on_the_peer_and_is_idempotent(
     server_b.stop()
 
 
+def test_an_adopted_literal_lands_on_the_peer_as_a_reference(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The 0.82.3 failure, end to end on two real relays.
+
+    A literal ``Authorization: Bearer …`` on the head must become an exact
+    ``${MCP_SLACK_AUTHORIZATION}`` reference through the SHIPPED adoption verb,
+    travel as ``ref:MCP_SLACK_AUTHORIZATION`` and land on the peer as that same
+    reference. Before adoption this row travelled as ``literal-held``, the mirror
+    held ``${Authorization}`` with no store anywhere holding that name, and the
+    server could not connect — the measured defect.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    live = _bind_and_start(server_b, record)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    _write_servers(
+        server_a.root,
+        {
+            "slack": {
+                "type": "http",
+                "url": "https://slack.test/mcp",
+                "headers": {"Authorization": "Bearer bearer-literal-sentinel"},
+            }
+        },
+    )
+
+    rc, adopted = _run_json(capsys, "credentials", "--adopt")
+    assert rc == 0, adopted
+    assert [row["secret"] for row in adopted["adopted"]] == ["MCP_SLACK_AUTHORIZATION"]
+    assert (server_a.root / "mcp.json").read_text(encoding="utf-8").count(
+        "${MCP_SLACK_AUTHORIZATION}"
+    ) == 1
+
+    rc, payload = _run_json(capsys, "push", "--peer", server_b.identity.name)
+    assert rc == 0, payload
+    assert payload["peers"][0]["installed"][0]["name"] == "slack"
+    landed = _peer_servers(server_b)
+    assert landed["slack"]["headers"] == {"Authorization": "${MCP_SLACK_AUTHORIZATION}"}
+    assert "bearer-literal-sentinel" not in (server_b.root / "mcp.json").read_text(encoding="utf-8")
+    server_b.stop()
+
+
 def test_state_lists_the_servers_and_the_keys_a_mirror_needs(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,

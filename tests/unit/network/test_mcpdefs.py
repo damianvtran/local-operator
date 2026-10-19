@@ -90,6 +90,50 @@ def test_a_whole_value_reference_travels_as_its_name(root: Path) -> None:
     assert row["raw"]["env"] == {"K": "ref:NAME"}
 
 
+def test_adopted_literals_become_references_the_bundle_and_needs_list_carry(
+    root: Path,
+) -> None:
+    """The closed loop: a literal becomes a store row + exact reference, so the
+    definitions row carries ``ref:<NAME>`` and the needs-list finally names it.
+
+    This is the measured defect's regression cell: before adoption the same
+    config produced ``literal-held`` (never a value on the wire, but no name for
+    the placement/copy half either), so the peer's mirror asked for a key nobody
+    had granted.
+    """
+    from local_operator.mcp.credential_sources import adopt_literal_credentials
+    from local_operator.network.credentials import sync
+
+    _write_servers(
+        root,
+        {
+            "gh": {
+                "type": "stdio",
+                "command": "npx",
+                "env": {"GITHUB_TOKEN": "ghp-literal-sentinel"},
+            },
+            "slack": {
+                "type": "http",
+                "url": "https://slack.test/mcp",
+                "headers": {"Authorization": "Bearer literal-sentinel"},
+            },
+        },
+    )
+
+    receipt = adopt_literal_credentials(root)
+
+    assert len(receipt["adopted"]) == 2
+    bundle = mcpdefs.local_bundle(root)
+    flat = json.dumps(bundle, sort_keys=True)
+    assert "literal-sentinel" not in flat
+    rows = {row["name"]: row for row in bundle["servers"]}
+    assert rows["gh"]["raw"]["env"] == {"GITHUB_TOKEN": "ref:GITHUB_TOKEN"}
+    assert rows["slack"]["raw"]["headers"] == {"Authorization": "ref:MCP_SLACK_AUTHORIZATION"}
+    assert sync.needs_names(root) == frozenset({"GITHUB_TOKEN", "MCP_SLACK_AUTHORIZATION"})
+    state = {row["name"]: row for row in mcpdefs.state_rows(root)}
+    assert {ref["id"]: ref["set"] for ref in state["gh"]["refs"]} == {"GITHUB_TOKEN": True}
+
+
 def test_the_escape_stays_a_held_value_never_a_reference(root: Path) -> None:
     """``$${X}`` is the literal text ``${X}`` and must not become ``ref:X``."""
     _write_servers(root, {"gl": {"type": "stdio", "command": "x", "env": {"K": "$${X}"}}})
