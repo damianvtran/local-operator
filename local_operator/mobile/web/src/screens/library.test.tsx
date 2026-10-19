@@ -115,8 +115,40 @@ describe("library list", () => {
 		expect(screen.getByLabelText("loading assets")).toBeTruthy();
 		expect(await screen.findByText("launch notes")).toBeTruthy();
 		expect(screen.getByText("launch planning")).toBeTruthy();
-		expect(screen.getByText("1 assets")).toBeTruthy();
+		expect(screen.getByText("1 asset")).toBeTruthy();
 		expect(getLibrary).toHaveBeenCalledTimes(1);
+	});
+
+	it("pluralizes the result count with the shared i18n message", async () => {
+		getLibrary.mockResolvedValue(listing({ total: 3 }));
+		render(<LibraryScreen />);
+		expect(await screen.findByText("3 assets")).toBeTruthy();
+	});
+
+	it("keeps the chosen sort when filters are cleared", async () => {
+		render(<LibraryScreen />);
+		await screen.findByText("launch notes");
+
+		fireEvent.click(screen.getByRole("button", { name: "sort" }));
+		fireEvent.click(await screen.findByRole("button", { name: /^name/ }));
+		await waitFor(() => expect(getLibrary).toHaveBeenCalledTimes(2));
+		expect((getLibrary.mock.calls[1][0] as LibraryQuery).sort).toBe("name");
+
+		fireEvent.click(screen.getByRole("button", { name: /filter/ }));
+		fireEvent.click(await screen.findByRole("button", { name: "favorites" }));
+		await waitFor(() => expect(getLibrary).toHaveBeenCalledTimes(3));
+		const filtered = getLibrary.mock.calls[2][0] as LibraryQuery;
+		expect(filtered.sort).toBe("name");
+		expect(filtered.favorite).toBe(true);
+
+		fireEvent.click(screen.getByRole("button", { name: "clear filters" }));
+		await waitFor(() => expect(getLibrary).toHaveBeenCalledTimes(4));
+		const cleared = getLibrary.mock.calls[3][0] as LibraryQuery;
+		expect(cleared.sort).toBe("name");
+		expect(cleared.favorite).toBeUndefined();
+		expect(cleared.categories).toBeUndefined();
+		expect(cleared.origin_groups).toBeUndefined();
+		expect(cleared.tag).toBeUndefined();
 	});
 
 	it("shows the empty state and the building banner", async () => {

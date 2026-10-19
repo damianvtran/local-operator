@@ -22,6 +22,7 @@ import { Chip } from "../components/ui/chip";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/cn";
 import { navigate } from "../router";
+import { messageRuntime } from "../store";
 import type { LibraryAsset, LibraryListing } from "../types";
 
 type SortId = "recent" | "name" | "kind" | "size" | "created" | "modified";
@@ -331,7 +332,9 @@ export function LibraryScreen() {
 				) : null}
 				{!loading && rows.length > 0 ? (
 					<p className="pt-2 text-center text-meta text-ink-dim">
-						{listing?.total ?? rows.length} assets
+						{messageRuntime.t("relay.library.count", {
+							count: listing?.total ?? rows.length,
+						})}
 					</p>
 				) : null}
 			</main>
@@ -440,7 +443,13 @@ export function LibraryScreen() {
 
 					<button
 						type="button"
-						onClick={() => setFilters(EMPTY_FILTERS)}
+						onClick={() =>
+							/* Clearing narrows the CATALOG, not the reader's chosen view.
+							   Sort is a display preference and survives; resetting it to the
+							   default made a filter action silently reorder the grid
+							   (UX round 1, U2). */
+							setFilters((current) => ({ ...EMPTY_FILTERS, sort: current.sort }))
+						}
 						className="min-h-11 rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted active:bg-elevated"
 					>
 						clear filters
