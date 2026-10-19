@@ -20,7 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
-from local_operator.memory import SCOPES, MemoryError, MemoryIdentity, MemoryStore
+from local_operator.memory import (
+    SCOPES,
+    MemoryError,
+    MemoryIdentity,
+    MemoryStore,
+    quota_relief,
+)
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
 from local_operator.paths import config_dir
 
@@ -171,6 +177,26 @@ def _context(args: argparse.Namespace, store: MemoryStore, prefix: str) -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
+def _device_name(device: str, root: Path) -> str:
+    """The mesh's display name for ``device``, or ``""`` when this device has none.
+
+    Best effort by contract: a name is cosmetic, never authority, and an
+    unresolved peer still prints its id. Read-only across the network records so
+    a receipt for a peer in any paired network can be labelled, not only the
+    network the receipt happened to be written under.
+    """
+    try:
+        from local_operator.network import store as network_store
+
+        for record in network_store.list_networks(root):
+            member = record.member(device)
+            if member is not None and member.name:
+                return str(member.name)
+    except Exception:  # noqa: BLE001 — a label must never fail a status read
+        return ""
+    return ""
+
+
 def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     from local_operator.network.memory import peer_status, settings
 
@@ -180,6 +206,12 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     except MemoryError as exc:
         sync_on, sync_scopes, excluded, sync_error = False, [], [], str(exc)
     values = policy(root)
+    # A receipt stores the stable device id; the name is resolved here, at the one
+    # place both the human renderer and `--json` read, so a failing peer is a
+    # machine an operator can recognise rather than an opaque 32-hex token.
+    peers = peer_status(root)
+    for peer in peers:
+        peer["name"] = _device_name(str(peer.get("device") or ""), root)
     return {
         "policy": values,
         "sync": {
@@ -192,7 +224,7 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
             "trust": (
                 "Existing paired receiver-admin peers with memory-sync-v1 only; no new grants."
             ),
-            "peers": peer_status(root),
+            "peers": peers,
             "retention": (
                 "Tombstones/conflicts are retained; bounded saturation refuses new writes, "
                 "never silently evicts facts."
@@ -558,10 +590,22 @@ def _status_text(value: dict[str, Any]) -> str:
         from local_operator.ansi import strip_control_sequences
 
         message = " ".join(strip_control_sequences(str(receipt.get("message") or "")).split())
-        remedy = message or _PEER_REMEDY.get(
-            code, "Run `lop memory status --json` for this peer's receipt."
-        )
-        lines += _shaped(f"Not syncing with {device}: {code}. {remedy}")
+        fallback = _PEER_REMEDY.get(code, "Run `lop memory status --json` for this peer's receipt.")
+        # Peer verbosity must not own this page's hierarchy: an unbounded sentence
+        # pushed `1 failing` out of a 40-row viewport. The excerpt is bounded, and
+        # the code-keyed remedy is printed separately when the sentence was cut
+        # before it could carry one; the full text stays in `--json`.
+        truncated = len(message) > PEER_EXCERPT_CHARS
+        if truncated:
+            message = message[:PEER_EXCERPT_CHARS].rsplit(" ", 1)[0].rstrip() + " …"
+        label = str(receipt.get("name") or "") or device
+        if label != device:
+            label = f"{label} ({device})"
+        lines += _shaped(f"Not syncing with {label}: {code}. {message or fallback}")
+        if truncated:
+            if code in _PEER_REMEDY and _PEER_REMEDY[code] not in message:
+                lines += _shaped(f"Remedy: {fallback}")
+            lines += _shaped("Full peer text: `lop memory status --json`.")
     usage = value["usage"]
     lines.append(
         f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
@@ -581,20 +625,20 @@ def _status_text(value: dict[str, Any]) -> str:
             )
         )
         near = [row for row in quotas if row["percent"] >= 80]
-        if near:
-            # The actionable half: the defect was a cap that stayed silent until
-            # it refused writes, so the warning must name both ways to relieve it.
+        # ONE LINE PER SCOPE, each with its own relief. A combined sentence used to
+        # tell a session at 96% to move facts "to session scope" — a session->session
+        # move the CLI refuses. The advice is `quota_relief`, the same source the
+        # per-write warning reads, so the two surfaces cannot contradict each other.
+        for row in near:
+            advice, hint = quota_relief(str(row["scope"]))
             lines += _shaped(
-                "Near cap: "
-                + ", ".join(f"{row['scope']} {row['percent']}%" for row in near)
-                + ". Consolidate stale facts (forget) or move work-state facts to "
-                "session scope."
+                f"Near cap: {row['scope']} {row['percent']}% "
+                f"({row['used_tokens']}/{row['cap_tokens']}, {row['headroom_tokens']} left). "
+                + advice
             )
-            # The command sits on its own line so wrapping never splits it.
-            lines += _shaped(
-                "Free space: `lop memory move ID --to session` "
-                "(TUI: `/memory move ID --to session`)."
-            )
+            if hint:
+                # The command sits on its own line so wrapping never splits it.
+                lines += _shaped(f"Free space: {hint}.")
     lines.append(value["limits"])
     return "\n".join(lines)
 
@@ -605,6 +649,12 @@ _PROPOSALS = {
     "team": "move to a team",
     "review-work-scope": "review as work scope",
 }
+
+#: How much of a peer's refusal sentence the status page shows. A peer controls
+#: its own sentence length; without a bound a 2,448-character diagnostic pushed
+#: the `1 failing` header out of a 40-row viewport. The full text stays in
+#: `lop memory status --json`, and the code-keyed remedy is printed beside it.
+PEER_EXCERPT_CHARS = 240
 
 #: The repo's own list-row bar (see ``_row``: "an 80-column terminal never
 #: clips the ID or splits a status"). Every line of this page is shaped to it.

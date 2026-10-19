@@ -179,8 +179,10 @@ def test_inventory_reports_a_quota_row_per_authorized_scope(store):
 
 
 def test_status_output_shows_headroom_percent_and_the_move_hint(store, monkeypatch):
-    monkeypatch.setattr(memory, "OWNER_TOKENS", 400)
-    _fill(store, "session", 400, 80)
+    # Global is the scope where moving to session IS the available relief; the
+    # session case (whose move is refused) is pinned separately below.
+    monkeypatch.setattr(memory, "GLOBAL_TOKENS", 400)
+    _fill(store, "global", 400, 80)
     text, failed = run(
         "status",
         config=store.root.parent,
@@ -190,7 +192,7 @@ def test_status_output_shows_headroom_percent_and_the_move_hint(store, monkeypat
     assert not failed
     human = render_human(text, failed)
     assert "Quota:" in human and "left" in human and "%" in human
-    assert "session" in human and "lop memory move" in human
+    assert "global" in human and "lop memory move" in human
 
 
 def test_the_memory_tool_result_carries_quota_and_the_crossing_warning(tmp_path, monkeypatch):
@@ -222,3 +224,48 @@ def test_the_memory_tool_result_carries_quota_and_the_crossing_warning(tmp_path,
     assert all("quota" in value for value in values)
     assert all("headroom_tokens" in value["quota"] for value in values)
     assert values[-1]["quota"]["percent"] > 0
+
+
+def test_status_session_near_cap_never_prescribes_a_session_move(store, monkeypatch):
+    """D1: at session scope the status page must not offer a refused move.
+
+    The per-write warning has been scope-aware since round 1; `status` kept
+    printing "move work-state facts to session scope" and a `--to session`
+    command even when session was the full scope, which the CLI then refuses.
+    """
+    monkeypatch.setattr(memory, "OWNER_TOKENS", 400)
+    _fill(store, "session", 400, 86)
+    text, failed = run(
+        "status",
+        config=store.root.parent,
+        identity=MemoryIdentity("session-a", "team-a", "agent-a"),
+        session_dir=store.session_dir,
+    )
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "Near cap: session" in human
+    assert "--to session" not in human
+    assert "forget" in human
+
+
+def test_status_mixed_near_caps_advise_each_scope_separately(store, monkeypatch):
+    monkeypatch.setattr(memory, "GLOBAL_TOKENS", 400)
+    monkeypatch.setattr(memory, "OWNER_TOKENS", 400)
+    _fill(store, "global", 400, 86)
+    _fill(store, "session", 400, 86)
+    text, failed = run(
+        "status",
+        config=store.root.parent,
+        identity=MemoryIdentity("session-a", "team-a", "agent-a"),
+        session_dir=store.session_dir,
+    )
+    assert not failed, text
+    lines = render_human(text, failed).splitlines()
+    global_at = next(i for i, line in enumerate(lines) if "Near cap: global" in line)
+    session_at = next(i for i, line in enumerate(lines) if "Near cap: session" in line)
+    # Each scope gets its own advice, and only the global block offers the move;
+    # the session block's command is the forget ticket.
+    global_block, session_block = lines[global_at:session_at], lines[session_at:]
+    assert any("--to session" in line for line in global_block)
+    assert not any("--to session" in line for line in session_block)
+    assert any("forget" in line for line in session_block)

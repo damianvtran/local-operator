@@ -798,6 +798,35 @@ CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n I
 """
 
 
+#: The relief sentence and its command hint for a near-cap scope, shared by the
+#: write warning and `lop memory status`. ONE function because the two surfaces
+#: drifted: the write warning learned that a session->session move is refused,
+#: while status kept prescribing `--to session` at session scope — an impossible
+#: instruction at the exact moment the operator is out of space.
+def quota_relief(scope: str) -> tuple[str, str]:
+    """``(advice, command hint)`` for relieving ``scope`` at 80% or more.
+
+    The hint is empty for a scope whose only honest advice is consolidation, and
+    every hint names a move target that is NOT the scope itself.
+    """
+    if scope == "global":
+        return (
+            "Consolidate stale facts with forget, or move work-state facts to session " "scope.",
+            "`lop memory move ID --to session`",
+        )
+    if scope == "session":
+        return (
+            "Consolidate this session's stale facts with forget — completed steps, "
+            "superseded values and next-step notes from earlier turns are the stale ones; "
+            "move only facts that belong in another scope.",
+            "`lop memory forget SCOPE/ID --revision REV --yes`",
+        )
+    return (
+        "Consolidate stale facts with forget; move only facts that belong in another " "scope.",
+        "`lop memory move ID --to SCOPE`",
+    )
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -986,22 +1015,10 @@ class MemoryStore:
         db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(reached)))
         # The relief must be actionable WHERE it is offered: a session->session move
         # is refused, so telling a session owner to "move to session" is noise; for
-        # team/agent only a fact that belongs elsewhere can move.
-        if scope == "global":
-            relief = (
-                "Consolidate stale facts with forget, or move work-state facts to session "
-                "scope (`lop memory move ID --to session`)."
-            )
-        elif scope == "session":
-            relief = (
-                "Consolidate this session's stale facts with forget; facts that belong in "
-                "another scope can be moved there (`lop memory move ID --to SCOPE`)."
-            )
-        else:
-            relief = (
-                "Consolidate stale facts with forget; move only facts that belong in "
-                "another scope (`lop memory move ID --to SCOPE`)."
-            )
+        # team/agent only a fact that belongs elsewhere can move. The sentences live
+        # in `quota_relief` so the status page cannot drift from this warning.
+        advice, hint = quota_relief(scope)
+        relief = advice + (f" ({hint})" if hint else "")
         if reached >= 90:
             guidance = "Consolidate now: writes are refused once the cap is reached. " + relief
         else:
