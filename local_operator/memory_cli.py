@@ -103,7 +103,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--scope",
         choices=SCOPES,
         default=None,
-        help="restrict list/search to one scope (default: every scope you are authorized for)",
+        help="restrict list/search/consolidate to one scope (default: every scope you are "
+        "authorized for) · required by a filter-based forget, which never inherits scopes",
     )
     parser.add_argument("--session", default="", help="session ID, to include its memories")
     parser.add_argument("--team", default="", help="team registry ID, to include its memories")
