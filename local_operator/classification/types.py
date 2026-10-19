@@ -212,6 +212,14 @@ class DecisionResponse:
     #: carries no basis field on the wire; the channel ledger then applies its own
     #: documented default. ADDITIVE: existing constructors keep working unchanged.
     cost_basis: str | None = None
+    #: The id the vendor says the amount was PRICED FROM — the top-level
+    #: ``cost.model`` object's ``model`` field. It is deliberately separate
+    #: from :attr:`model`, which is the vendor's echo of the requested id
+    #: (``jev-1.13.0`` for a ``jev-1.13`` request): the echo is wire evidence,
+    #: while this is the billing identity a ledger row must carry. ``None``
+    #: when the response stated no cost object. ADDITIVE: existing
+    #: constructors keep working unchanged.
+    cost_model: str | None = None
     latency_s: float = 0.0
 
 
