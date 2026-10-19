@@ -856,7 +856,10 @@ jobs:
     # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
     # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
     # unchanged; this is scheduling headroom, not a test-failure waiver.
-    timeout-minutes: 31
+    # Current heaviest shard: 7208s / 4 workers = 1802s + 60s overhead =
+    # 1862s, two seconds beyond 31 minutes (1860s). The guard also fails on
+    # origin/main 66da1d80ac; 32 minutes fits it without changing partitioning.
+    timeout-minutes: 32
     strategy:
       fail-fast: false
       matrix:
