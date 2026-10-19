@@ -171,6 +171,33 @@ def _text(static) -> str:
     return content.plain
 
 
+def _install_metadata_fakes(monkeypatch) -> dict[str, Any]:
+    """Record the service's write target and fields; never touch SQLite."""
+    written: dict[str, Any] = {"targets": []}
+
+    class FakeStore:
+        def __init__(self, config_dir) -> None:
+            pass
+
+        def create_tag(self, name: str) -> dict[str, str]:
+            return {"id": f"id-{name}"}
+
+    def fake_set_tags(config_dir, asset_id, tag_ids, **kwargs):
+        written["targets"].append(("tags", asset_id))
+        written["tags"] = list(tag_ids)
+        return {}
+
+    def fake_update(config_dir, asset_id, fields, **kwargs):
+        written["targets"].append(("update", asset_id))
+        written["fields"] = dict(fields)
+        return {}
+
+    monkeypatch.setattr(library_view_mod.library_metadata, "MetadataStore", FakeStore)
+    monkeypatch.setattr(library_service, "set_tags", fake_set_tags)
+    monkeypatch.setattr(library_service, "update_asset", fake_update)
+    return written
+
+
 @pytest.fixture
 def calls(monkeypatch):
     """Record every service Query instead of scanning a real config root."""
@@ -293,26 +320,7 @@ async def test_the_rail_filters_by_category_and_hides_below_ninety(calls) -> Non
 async def test_edit_metadata_collects_the_form_and_writes_through_the_service(
     calls, monkeypatch
 ) -> None:
-    written: dict[str, Any] = {}
-
-    class FakeStore:
-        def __init__(self, config_dir) -> None:
-            pass
-
-        def create_tag(self, name: str) -> dict[str, str]:
-            return {"id": f"id-{name}"}
-
-    def fake_set_tags(config_dir, asset_id, tag_ids, **kwargs):
-        written["tags"] = list(tag_ids)
-        return {}
-
-    def fake_update(config_dir, asset_id, fields, **kwargs):
-        written["fields"] = dict(fields)
-        return {}
-
-    monkeypatch.setattr(library_view_mod.library_metadata, "MetadataStore", FakeStore)
-    monkeypatch.setattr(library_service, "set_tags", fake_set_tags)
-    monkeypatch.setattr(library_service, "update_asset", fake_update)
+    written = _install_metadata_fakes(monkeypatch)
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 34)) as pilot:
@@ -336,6 +344,185 @@ async def test_edit_metadata_collects_the_form_and_writes_through_the_service(
 
 
 @pytest.mark.asyncio
+async def test_the_form_saves_the_asset_it_opened_for_across_a_reload(calls, monkeypatch) -> None:
+    """B1: the cursor is a viewport position; the form's identity is an id."""
+    written = _install_metadata_fakes(monkeypatch)
+    first = _row(0, "asset-A.txt", "text")
+    second = _row(1, "asset-B.txt", "text")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.load(_payload([first, second]))
+        await pilot.pause()
+
+        await pilot.press("e")
+        await pilot.pause()
+        assert view._form.asset_id == first["id"]
+
+        # The in-flight answer a refresh/building retry can deliver: B is now
+        # row 0, so the live cursor names a different asset than the form.
+        view.load(_payload([second, first]))
+        await pilot.pause()
+        assert view.selected() is not None and view.selected()["id"] == second["id"]
+
+        view._name_input.value = "A renamed"
+        view._tags_input.focus()
+        await pilot.press("enter")
+        await _settle(pilot, lambda: "fields" in written and not view._form_open)
+
+        assert written["targets"] == [("tags", first["id"]), ("update", first["id"])]
+        assert written["fields"]["name"] == "A renamed"
+
+
+@pytest.mark.asyncio
+async def test_an_in_flight_reload_cannot_retarget_the_form(monkeypatch) -> None:
+    """The reviewer's reproduction, with the answer held in its worker thread."""
+    import threading
+
+    written = _install_metadata_fakes(monkeypatch)
+    first = _row(0, "asset-A.txt", "text")
+    second = _row(1, "asset-B.txt", "text")
+    answers = [_payload([first, second]), _payload([second, first])]
+    gate = threading.Event()
+    held = threading.Event()
+    queries: list[Any] = []
+
+    def held_list_assets(config_dir, query, **kwargs):
+        index = len(queries)
+        queries.append(query)
+        if index == 1:
+            held.set()
+            gate.wait(5)
+        return answers[min(index, 1)]
+
+    monkeypatch.setattr(library_service, "list_assets", held_list_assets)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+
+        # Start the reload FIRST and hold its answer: this is the in-flight
+        # shape (a refresh or building retry) that the cursor-based save
+        # mis-targeted. The form opens against the still-current A payload.
+        view._reload()
+        await _settle(pilot, lambda: held.is_set())
+        await pilot.press("e")
+        await pilot.pause()
+        assert view._form.asset_id == first["id"]
+
+        gate.set()
+        await _settle(
+            pilot, lambda: view.selected() is not None and view.selected()["id"] == second["id"]
+        )
+
+        view._name_input.value = "A renamed"
+        view._tags_input.focus()
+        await pilot.press("enter")
+        await _settle(pilot, lambda: "fields" in written and not view._form_open)
+
+        assert written["targets"] == [("tags", first["id"]), ("update", first["id"])]
+        assert written["fields"]["name"] == "A renamed"
+
+
+@pytest.mark.asyncio
+async def test_the_form_refuses_when_its_asset_vanishes(calls, monkeypatch) -> None:
+    """The other half of B1: a missing id is a refusal, never a retarget."""
+    written = _install_metadata_fakes(monkeypatch)
+    first = _row(0, "asset-A.txt", "text")
+    second = _row(1, "asset-B.txt", "text")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.load(_payload([first, second]))
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+
+        view.load(_payload([second]))
+        await pilot.pause()
+        view._tags_input.focus()
+        await pilot.press("enter")
+        await _settle(pilot, lambda: "no longer in the list" in view._form.error)
+
+        assert written["targets"] == []
+        assert view._form_open is True
+        assert view._form.asset_id == first["id"]
+
+
+@pytest.mark.parametrize("settled", [True, False])
+@pytest.mark.asyncio
+async def test_a_preview_cannot_outlive_its_asset(calls, monkeypatch, settled) -> None:
+    """M1: both the settled frame and a late in-flight result are cleared."""
+    import threading
+
+    payload = _payload()
+    payload["rows"][0]["kind"] = "text"
+    payload["rows"][0]["name"] = "asset-A.txt"
+    payload["rows"][1]["kind"] = "text"
+    payload["rows"][1]["name"] = "asset-B.txt"
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def read_preview(row):
+        if not settled:
+            started.set()
+            release.wait(5)
+        return {"kind": "text", "text": "CONTENT BELONGING TO ASSET A"}
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.load(payload)
+        await pilot.pause()
+        monkeypatch.setattr(view, "_read_preview", read_preview)
+
+        await pilot.press("space")
+        if settled:
+            await _settle(pilot, lambda: view._preview_widget is not None)
+            assert "CONTENT BELONGING TO ASSET A" in _text(view._preview_widget)
+        else:
+            await _settle(pilot, lambda: started.is_set())
+
+        await pilot.press("down")
+        await pilot.pause()
+        if not settled:
+            release.set()
+            for _ in range(80):
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+        assert view.selected() is not None
+        assert view._preview_for is None
+        assert view._preview_widget is None
+        assert "CONTENT BELONGING TO ASSET A" not in _text(view._detail_canvas)
+
+
+@pytest.mark.asyncio
+async def test_the_form_does_not_select_the_whole_name_on_open(calls) -> None:
+    """Design round 1: no pale-on-pale-blue selection flood on focus."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+        await pilot.press("e")
+        await pilot.pause()
+        assert view._name_input.select_on_focus is False
+        assert view._name_input.selection.start == view._name_input.selection.end
+        assert view._tags_input.select_on_focus is False
+        # A standard page keeps its title: the short-page chrome trade only
+        # applies below 22 page rows (regression from the U2 fix).
+        assert view._title_row.display is True
+
+
+@pytest.mark.asyncio
 async def test_ask_leaves_the_mode_and_seeds_the_composer(calls) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 34)) as pilot:
@@ -350,6 +537,134 @@ async def test_ask_leaves_the_mode_and_seeds_the_composer(calls) -> None:
         assert "/tmp/library-test/chart.png" in editor.text
         assert app._transcript_view().display is True
         assert editor.read_only is False
+
+
+@pytest.mark.asyncio
+async def test_the_form_scrolls_at_sixty_by_twenty(calls) -> None:
+    """UX round 1: the tags field must be reachable, not clipped away."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+        await pilot.press("e")
+        await pilot.pause()
+        assert view._form_block.display is True
+        assert view._form_block.max_scroll_y > 0
+        view._tags_input.focus()
+        await pilot.pause()
+        assert view._tags_input.has_focus
+        # Focus FOLLOWS into view: the scroll container moves to the field
+        # rather than leaving the caret on an off-screen row.
+        assert view._form_block.scroll_offset.y > 0
+
+        # The form's refusal copy lives at the bottom of the same scroll
+        # region, so it is reachable too; save/cancel stay on the page footer.
+        view._tags_input.value = ", ".join(f"t{i}" for i in range(13))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "At most 12 tags" in str(view._form_error.content)
+        view._form_block.scroll_to(y=view._form_block.max_scroll_y, animate=False)
+        await pilot.pause()
+        assert view._form_error.region.y < view._form_block.region.bottom
+        assert view._hint_save.display is True
+        assert view._hint_cancel.display is True
+
+
+@pytest.mark.parametrize("size", [(60, 20), (80, 24)])
+@pytest.mark.asyncio
+async def test_the_form_reveals_every_field_on_a_short_page_with_a_draft(calls, size) -> None:
+    """UX round 1 U2: a seeded multi-line draft must not trap focus off-screen."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        app._editor().load_text(
+            "My unfinished question about the deck.\n\n"
+            "Tell me about this asset: chart.png — image, from board prep."
+        )
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+        await pilot.press("e")
+        await pilot.pause()
+
+        assert view._title_row.display is False
+        assert view._rule.display is False
+        assert view._status.display is False
+        assert view._hint_save.display is True
+        assert view._hint_cancel.display is True
+
+        for field in (view._name_input, view._description, view._tags_input):
+            field.focus()
+            await pilot.pause()
+            await pilot.pause()
+            form = view._form_block.region
+            region = field.region
+            assert form.y <= region.y and region.bottom <= form.bottom
+
+
+@pytest.mark.asyncio
+async def test_enter_in_the_name_field_saves(calls, monkeypatch) -> None:
+    """UX round 1 U3: the footer's `enter save` works from the first field."""
+    written = _install_metadata_fakes(monkeypatch)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+        await pilot.press("e")
+        await pilot.pause()
+        assert app.focused is view._name_input
+        view._name_input.value = "renamed from name"
+        await pilot.press("enter")
+        await _settle(pilot, lambda: "fields" in written and not view._form_open)
+        assert written["fields"]["name"] == "renamed from name"
+
+
+@pytest.mark.asyncio
+async def test_the_error_state_exposes_a_working_retry(calls) -> None:
+    """UX round 1 U4: the error screen names the recovery and `r` performs it."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.load(
+            {
+                **(_payload()),
+                "state": "error",
+                "error": "permission denied",
+                "rows": [],
+                "total": 0,
+                "counts": {"category": {}, "origin_group": {}, "tags": []},
+            }
+        )
+        await pilot.pause()
+        assert view._hint_reload.display is True
+        list_text = _text(view._list_canvas)
+        assert "permission denied" in list_text
+        assert "Press r to retry" in list_text
+
+        await pilot.press("r")
+        await _settle(pilot, lambda: bool(view.rows()))
+
+
+@pytest.mark.asyncio
+async def test_ask_appends_to_a_draft_instead_of_replacing_it(calls) -> None:
+    """UX round 1: `a` is an insertion, not a new conversation."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        app._editor().load_text("half-typed prompt")
+        await pilot.pause()
+
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+        await pilot.press("a")
+        await _settle(pilot, lambda: not app.query(LibraryView))
+
+        text = app._editor().text
+        assert text.startswith("half-typed prompt")
+        assert "chart.png" in text
+        assert "Tell me about" in text
 
 
 @pytest.mark.asyncio

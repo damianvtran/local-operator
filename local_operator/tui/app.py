@@ -36771,7 +36771,15 @@ class OperatorApp(App[None]):
         self._close_library_view()
         try:
             editor = self._editor()
-            editor.load_text(prompt)
+            # NEVER replace a draft the user already wrote. `a` is an
+            # insertion gesture on a shared composer, not a new conversation:
+            # the reference joins the existing words as a second paragraph,
+            # and the caret lands after it ready to send. Round 1 UX finding:
+            # `load_text` silently discarded a half-typed prompt.
+            existing = editor.text
+            editor.load_text(
+                f"{existing.rstrip()}\n\n{prompt}" if existing.strip() else prompt
+            )
             editor.focus()
         except Exception:  # noqa: BLE001 — the page already left; never strand it
             logger.debug("library: seeding the composer failed", exc_info=True)
