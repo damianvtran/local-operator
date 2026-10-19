@@ -375,6 +375,9 @@ def test_an_unchanged_store_costs_no_scan_and_no_repaint() -> None:
     session_tags.set_entity_tags(config_dir(), "session", SESSION_A, [review["id"]], review["id"])
     daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
     snapshot = daemon.table.tags_snapshot()
+    # Seed the daemon's published marker the way its first scan tick would,
+    # before a client is watching; the repaint under test is the SECOND pass.
+    asyncio.run(daemon.refresh_tags_if_changed())
 
     queue: asyncio.Queue[None] = asyncio.Queue()
     daemon.table.list_subscribers.add(queue)
@@ -562,7 +565,7 @@ def test_the_scan_tick_wakes_the_stream(monkeypatch) -> None:
     monkeypatch.setattr(attention.AttentionStore, "revision", lambda self: "stable")
     daemon._attention_revision = "stable"
 
-    # The first tick adopts the current store state without a repaint.
+    # The first tick seeds the published marker; no subscriber exists yet.
     asyncio.run(daemon._scan_once())
 
     queue: asyncio.Queue[None] = asyncio.Queue()

@@ -4020,12 +4020,6 @@ class MobileDaemon:
 
         table = self.table
         marker = await asyncio.to_thread(_tags_marker, config_dir())
-        if self._tags_notified is None:
-            # The daemon's first pass ADOPTS the current store state: the warm
-            # read already served it, so a first-tick repaint would be a frame
-            # no client asked for (NIT-2).
-            self._tags_notified = marker
-            return
         if marker == self._tags_notified:
             return
         await asyncio.to_thread(table.tags_snapshot, marker)
