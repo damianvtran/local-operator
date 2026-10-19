@@ -384,6 +384,14 @@ class VariableStore:
         # scrubbing must never make it readable or injectable, which is why
         # this is a separate set rather than another entry in `_credentials`.
         self._redactions: set[str] = set()
+        # PER-SESSION span authority (LOH-28). A static OPEN/CLOSE pair is
+        # forgeable: a tool result or a prompt could print the bare markers
+        # around a credential and suppress its mask. The render prefix carries
+        # this token, so only spans this store minted are exempt; anything else
+        # is neutralized and redacts normally. Random per store, never derived
+        # from input, and stripped before a spill file or model result is
+        # written (see strip_identifier_spans).
+        self._span_token = secrets.token_hex(16)
 
     # -- sources -----------------------------------------------------------
     def _project_file(self) -> dict[str, str]:
@@ -537,11 +545,44 @@ class VariableStore:
 
         A marker or placeholder character INSIDE ``value`` is user-controlled
         and is neutralized to U+FFFD here, so an identifier can never smuggle a
-        live placeholder or an early close into the span protocol.
+        live placeholder or an early close into the span protocol. The
+        per-session TOKEN after OPEN is what makes the prefix unforgeable: a
+        bare ``OPEN ... CLOSE`` pair in any other text is not a span and its
+        content redacts normally. The token is minted from ``secrets`` per
+        store and the placeholder start per render; neither is derived from
+        input. Restoration removes the token from every result, and
+        :meth:`strip_identifier_spans` removes it from a spill, so it never
+        reaches a model-visible result or a spill file.
         """
         if not value:
             return value
-        return IDENTIFIER_SPAN_OPEN + _neutralize_identifier_chars(value) + IDENTIFIER_SPAN_CLOSE
+        return (
+            IDENTIFIER_SPAN_OPEN
+            + self._span_token
+            + ":"
+            + _neutralize_identifier_chars(value)
+            + IDENTIFIER_SPAN_CLOSE
+        )
+
+    def _truncated_prefix_bytes(self, text: str, index: int) -> int:
+        """Bytes after an OPEN that belong to this store's (truncated) prefix.
+
+        A row truncator can cut inside the per-session token, leaving
+        ``OPEN + token[:n]`` with no colon or close. Those bytes are a
+        fragment of the span protocol, not content: neutralizing only the
+        OPEN would print part of the session token into a model-visible
+        result. Forged OPENs with an unrelated tail match nothing here.
+        """
+        rest = text[index + 1 :]
+        matched = 0
+        for length in range(1, len(self._span_token) + 1):
+            if rest.startswith(self._span_token[:length]):
+                matched = length
+            else:
+                break
+        if matched and rest[matched : matched + 1] == ":":
+            matched += 1
+        return matched
 
     def _extract_identifier_spans(self, text: str) -> tuple[str, dict[str, str]]:
         """Replace marked identifier spans with per-call random placeholders.
@@ -557,40 +598,111 @@ class VariableStore:
         therefore cannot collide with — or be restored as — an identifier this
         pass did not create. A placeholder that a mask swallows is not restored.
 
-        An OPEN with no following CLOSE is a malformed marker: it is dropped and
-        its content stays ordinary text, so it redacts normally rather than
-        being exempted by a stray byte.
+        FORGERY: an OPEN is a span only when the text at that offset carries
+        THIS store's ``OPEN + token + ":"`` prefix. A static or wrong-token
+        pair is not a span: the OPEN is neutralized, the content stays ordinary
+        text, and any credential inside it masks normally. An own-token prefix
+        with no following CLOSE is likewise neutralized whole rather than
+        treated as an exemption.
 
-        CONTAINMENT INVARIANT (review R1-3 / QA Q1-3): a span whose content has
-        a containment relation with a KNOWN secret in either direction is NOT
-        extracted. Extracting it would split the secret's bytes so the
-        exact-value pass could no longer match the whole value; leaving it in
-        the text lets the secret mask whole, which is the all-or-none rule.
+        BOUNDARY OVERLAP (review R2-1 / QA Q2-2): spans are NOT extracted when
+        their ``[content_start, close)`` interval overlaps ANY occurrence of a
+        KNOWN secret in the LOGICAL text (span contents inlined). Measuring the
+        raw text misses a secret split by the marker prefix — ``vorn-`` before
+        the OPEN and ``kell-tarn`` inside the span is one printed value. The
+        interval check catches exact, prefix, suffix and partial boundary
+        overlaps, so the exact-value pass can still mask the secret whole.
         """
         if IDENTIFIER_SPAN_OPEN not in text:
             return text, {}
         known_secrets = self.redaction_values()
-        spans: dict[str, str] = {}
-        parts: list[str] = []
-        taken: set[str] = set(text)
-        cursor = _IDENTIFIER_PLACEHOLDER_FIRST + secrets.randbelow(_IDENTIFIER_PLACEHOLDER_SPAN)
+        secret_intervals: list[tuple[int, int]] = []
+        for secret in known_secrets:
+            if not secret:
+                continue
+            found = text.find(secret)
+            while found != -1:
+                secret_intervals.append((found, found + len(secret)))
+                found = text.find(secret, found + 1)
+        prefix = IDENTIFIER_SPAN_OPEN + self._span_token + ":"
+        # PASS 1: find own spans and build the LOGICAL text (span contents
+        # inlined). Secret overlap must be measured here, not on the raw text:
+        # a marker prefix between ``vorn-`` and ``kell-tarn`` hides the secret
+        # from ``str.find`` even though the renderer printed it as one value.
+        pieces: list[tuple[str, str, int]] = []
+        unmarked_parts: list[str] = []
+        regions: list[tuple[int, int]] = []
+        logical_len = 0
         index = 0
         length = len(text)
         while index < length:
             char = text[index]
             if char != IDENTIFIER_SPAN_OPEN:
-                parts.append(_IDENTIFIER_NEUTRAL if _is_identifier_control(char) else char)
+                pieces.append(("raw", char, -1))
+                unmarked_parts.append(char)
+                logical_len += 1
                 index += 1
                 continue
-            close = text.find(IDENTIFIER_SPAN_CLOSE, index + 1)
+            if not text.startswith(prefix, index):
+                consumed = 1 + self._truncated_prefix_bytes(text, index)
+                neutral = _IDENTIFIER_NEUTRAL * consumed
+                pieces.append(("raw", neutral, -1))
+                unmarked_parts.append(neutral)
+                logical_len += consumed
+                index += consumed
+                continue
+            content_start = index + len(prefix)
+            close = text.find(IDENTIFIER_SPAN_CLOSE, content_start)
             if close < 0:
-                index += 1
+                neutral = _IDENTIFIER_NEUTRAL * len(prefix)
+                pieces.append(("raw", neutral, -1))
+                unmarked_parts.append(neutral)
+                logical_len += len(neutral)
+                index = content_start
                 continue
-            content = _neutralize_identifier_chars(text[index + 1 : close])
-            if any(content in secret or secret in content for secret in known_secrets):
-                # Known-secret overlap: never split the secret's bytes.
+            content = text[content_start:close]
+            regions.append((logical_len, logical_len + len(content)))
+            pieces.append(("span", content, len(regions) - 1))
+            unmarked_parts.append(content)
+            logical_len += len(content)
+            index = close + 1
+
+        unmarked = "".join(unmarked_parts)
+        secret_intervals: list[tuple[int, int]] = []
+        for secret in known_secrets:
+            if not secret:
+                continue
+            found = unmarked.find(secret)
+            while found != -1:
+                secret_intervals.append((found, found + len(secret)))
+                found = unmarked.find(secret, found + 1)
+        overlapping = [
+            any(
+                region_start < interval_end and interval_start < region_end
+                for interval_start, interval_end in secret_intervals
+            )
+            for region_start, region_end in regions
+        ]
+
+        # PASS 2: placeholders for spans clear of every known secret; content
+        # alone for a span whose logical interval overlaps one (the exact-value
+        # pass then masks the secret whole).
+        spans: dict[str, str] = {}
+        parts: list[str] = []
+        taken: set[str] = set(text)
+        cursor = _IDENTIFIER_PLACEHOLDER_FIRST + secrets.randbelow(_IDENTIFIER_PLACEHOLDER_SPAN)
+        for kind, value, span_index in pieces:
+            if kind == "raw":
+                parts.append(
+                    "".join(
+                        _IDENTIFIER_NEUTRAL if _is_identifier_control(char) else char
+                        for char in value
+                    )
+                )
+                continue
+            content = _neutralize_identifier_chars(value)
+            if overlapping[span_index]:
                 parts.append(content)
-                index = close + 1
                 continue
             placeholder = _next_identifier_placeholder(taken, cursor)
             if placeholder is None:
@@ -600,7 +712,6 @@ class VariableStore:
                 spans[placeholder] = content
                 parts.append(placeholder)
                 cursor = ord(placeholder) + 1
-            index = close + 1
         return "".join(parts), spans
 
     def _restore_identifier_spans(self, text: str, spans: Mapping[str, str]) -> str:
@@ -618,6 +729,46 @@ class VariableStore:
             if placeholder in text:
                 text = text.replace(placeholder, identifier)
         return _neutralize_identifier_chars(text)
+
+    def strip_identifier_spans(self, text: str) -> str:
+        """Remove this session's span markers from a persisted/streamed copy.
+
+        THE TOKEN NEVER OUTLIVES THE RESULT IT PROTECTED. A marked value exists
+        only between the render site and the redaction pass; a spill file keeps
+        the full output, so it must not keep a token that could be lifted and
+        replayed (even though a token from another result cannot authenticate a
+        span in this one, there is no reason to store it). Own spans are
+        replaced by their content; any marker or placeholder byte left over is
+        neutralized. A span minted by ANOTHER store is not ours: its markers are
+        neutralized and its token is treated as ordinary text, never as an
+        authority.
+        """
+        if not text:
+            return text
+        prefix = IDENTIFIER_SPAN_OPEN + self._span_token + ":"
+        parts: list[str] = []
+        index = 0
+        length = len(text)
+        while index < length:
+            char = text[index]
+            if char != IDENTIFIER_SPAN_OPEN:
+                parts.append(_IDENTIFIER_NEUTRAL if _is_identifier_control(char) else char)
+                index += 1
+                continue
+            if not text.startswith(prefix, index):
+                consumed = 1 + self._truncated_prefix_bytes(text, index)
+                parts.append(_IDENTIFIER_NEUTRAL * consumed)
+                index += consumed
+                continue
+            content_start = index + len(prefix)
+            close = text.find(IDENTIFIER_SPAN_CLOSE, content_start)
+            if close < 0:
+                parts.append(_IDENTIFIER_NEUTRAL * len(prefix))
+                index = content_start
+                continue
+            parts.append(text[content_start:close])
+            index = close + 1
+        return "".join(parts)
 
     def unregister_redaction(self, value: str) -> bool:
         """Stop scrubbing a §6 registration; returns whether anything was dropped.

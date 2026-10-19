@@ -170,15 +170,19 @@ def _slot_token(member: TeamMember) -> str:
     return f"team:{member.role}" if member.kind == "team" else str(member.role)
 
 
-def _override_lines(team: Any) -> list[str]:
+def _override_lines(team: Any, mark: Callable[[str], str] | None = None) -> list[str]:
     """The lines ``show`` adds for a roster carrying member overrides.
 
     Deliberately NOT in ``roster_lines()``: that feeds the manager's and every
     member's prompt, and a prompt change is a prompt-cache cost for no behaviour
     gain. ``show`` is the surface a model reads when it needs to know, and the
     desktop editor is the surface that writes them.
+
+    ``mark`` wraps the slot name for the redaction pass, like
+    ``Team.roster_lines``; a slot name is a rendered identifier.
     """
 
+    label = mark or (lambda value: value)
     rows: list[str] = []
     for member in team.members:
         if member.is_default():
@@ -188,7 +192,7 @@ def _override_lines(team: Any) -> list[str]:
             parts.append(f"tier {member.tier}")  # i18n: ignore model-facing tool output
         if member.effort:
             parts.append(f"effort {member.effort}")  # i18n: ignore model-facing tool output
-        rows.append(f"- {_slot_token(member)}: {', '.join(parts)}")
+        rows.append(f"- {label(_slot_token(member))}: {', '.join(parts)}")
     if not rows:
         return []
     return ["member overrides (model tier / reasoning effort):", *rows]
@@ -339,7 +343,11 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
     if team is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "team",
+            f"no team named {identifier_text(context, repr(name))} (try op='list')",
+        )
     header = [
         f"{identifier_text(context, display_form(team.name, team.label))}. "
         f"Led by {identifier_text(context, team.manager)}",
@@ -347,13 +355,13 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     ]
     if team.aliases:
         # D5: an alias resolves to this team, and the model has no other way
-        # to learn one exists.
+        # to learn one exists. Identifier fields: every alias is a name.
         header.append(
-            f"aliases: {', '.join(team.aliases)}"
+            f"aliases: {', '.join(identifier_text(context, alias) for alias in team.aliases)}"
         )  # i18n: ignore model-facing tool output
     header.append("roster:")  # i18n: ignore model-facing tool output
     header.extend(team.roster_lines(lambda value: identifier_text(context, value)))
-    header.extend(_override_lines(team))
+    header.extend(_override_lines(team, lambda value: identifier_text(context, value)))
     body = "\n".join(header)
     if team.instructions.strip():
         body += "\n\ncollaboration:\n" + team.instructions.strip()
@@ -363,7 +371,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         body += "\n\nproject:\n" + team.project.strip()
     else:
         body += "\n\nproject: (none)"
-    body += f"\n\nlaunch with /team {team.name} <request>."
+    body += f"\n\nlaunch with /team {identifier_text(context, team.name)} <request>."
     text, spill = spill_truncate(body, "team", context)
     return _text(tool_call_id, "team", text, details=spill or None)
 
@@ -406,15 +414,21 @@ async def _op_write(
             return _error(
                 tool_call_id,
                 "team",
-                f"Team name {name!r} is already an alias of team {existing.name!r}",
+                f"Team name {identifier_text(context, repr(name))} is already an alias "
+                f"of team {identifier_text(context, repr(existing.name))}",
             )
         return _error(
             tool_call_id,
             "team",
-            f"team {name!r} already exists; use op='update' to change it.",
+            f"team {identifier_text(context, repr(name))} already exists; "
+            "use op='update' to change it.",
         )
     if not creating and existing is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} to update.")
+        return _error(
+            tool_call_id,
+            "team",
+            f"no team named {identifier_text(context, repr(name))} to update.",
+        )
     if params.overrides:
         # The operator gate (design §6): a roster-level pin is the operator's
         # choice unless they have delegated model choice, exactly like a role's
@@ -497,7 +511,7 @@ async def _op_write(
         f"{len(team.members)} member slot(s)."
         + (f" {pinned} carries a model/effort override." if pinned else "")
         + note
-        + f" Launch with /team {team.name} <request>.",
+        + f" Launch with /team {identifier_text(context, team.name)} <request>.",
     )
 
 
@@ -526,7 +540,11 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team_delete", str(exc))
     if team is None:
-        return _error(tool_call_id, "team_delete", f"no team named {name!r} to delete.")
+        return _error(
+            tool_call_id,
+            "team_delete",
+            f"no team named {identifier_text(context, repr(name))} to delete.",
+        )
     try:
         registry.delete_team(team.id)
     except Exception as exc:  # noqa: BLE001

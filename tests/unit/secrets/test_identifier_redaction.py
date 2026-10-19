@@ -24,6 +24,7 @@ from local_operator.projects import ProjectEdit, ProjectRegistry
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.builtin import (
+    _redact_tool_text,
     _session_row_brief,
     _sessions_info_body,
     identifier_text,
@@ -63,9 +64,13 @@ def store() -> VariableStore:
     return VariableStore(cwd=".")
 
 
-def _plain(text: str) -> str:
-    """The rendered text with span markers removed — what restoration must yield."""
-    return text.replace(IDENTIFIER_SPAN_OPEN, "").replace(IDENTIFIER_SPAN_CLOSE, "")
+def _plain(store: VariableStore, text: str) -> str:
+    """The rendered text with span markers removed — what restoration must yield.
+
+    Deferred to the store's own stripper so the expectation and the spill
+    path cannot drift (the token is store-scoped, not a fixed shape).
+    """
+    return store.strip_identifier_spans(text)
 
 
 def _has_private_use(text: str) -> bool:
@@ -214,7 +219,9 @@ def test_identifier_span_strips_marker_and_placeholder_chars(store: VariableStor
     wrapped = store.identifier_span(
         "a" + IDENTIFIER_SPAN_OPEN + "b" + IDENTIFIER_SPAN_CLOSE + PLACEHOLDER_CHAR + "c"
     )
-    assert wrapped == IDENTIFIER_SPAN_OPEN + "a\ufffdb\ufffd\ufffdc" + IDENTIFIER_SPAN_CLOSE
+    assert wrapped == (
+        IDENTIFIER_SPAN_OPEN + store._span_token + ":a\ufffdb\ufffd\ufffdc" + IDENTIFIER_SPAN_CLOSE
+    )
     out, _ = store.redact_with_report("key: " + wrapped)
     assert out == "key: a\ufffdb\ufffd\ufffdc"
 
@@ -262,7 +269,7 @@ async def test_project_show_and_list_mark_the_key_and_title(tmp_path) -> None:
     assert "key: " + store.identifier_span(SLUG) in shown.text
     for result in (shown, listed):
         scrubbed, report = store.redact_with_report(result.text)
-        assert scrubbed == _plain(result.text)
+        assert scrubbed == _plain(store, result.text)
         assert SLUG in scrubbed
         assert report.labels == ()
         assert report.reached_model is False
@@ -282,7 +289,7 @@ def test_session_rows_mark_the_title_and_id(store: VariableStore) -> None:
     assert IDENTIFIER_SPAN_OPEN in info
     for text in (brief, info):
         scrubbed, report = store.redact_with_report(text)
-        assert scrubbed == _plain(text)
+        assert scrubbed == _plain(store, text)
         assert SLUG in scrubbed and row["session_id"] in scrubbed
         assert report.labels == ()
 
@@ -302,12 +309,12 @@ async def test_team_show_and_list_mark_names_and_roster(tmp_path) -> None:
     context = ToolContext(cwd=".", team_registry=registry, variables=store)
     shown = await execute_team("tc", {"op": "show", "name": SLUG}, None, None, context)
     listed = await execute_team("tc", {"op": "list"}, None, None, context)
-    assert IDENTIFIER_SPAN_OPEN in shown.text and "manager: token" in _plain(shown.text)
-    assert "- password" in _plain(shown.text)
+    assert IDENTIFIER_SPAN_OPEN in shown.text and "manager: token" in _plain(store, shown.text)
+    assert "- password" in _plain(store, shown.text)
     assert IDENTIFIER_SPAN_OPEN in listed.text
     for result in (shown, listed):
         scrubbed, report = store.redact_with_report(result.text)
-        assert scrubbed == _plain(result.text)
+        assert scrubbed == _plain(store, result.text)
         assert SLUG in scrubbed and "token" in scrubbed
         assert report.labels == ()
         assert report.reached_model is False
@@ -329,7 +336,7 @@ async def test_agent_show_and_list_mark_the_role_name(tmp_path) -> None:
         result = await execute_agent("tc", args, None, None, context)
         assert IDENTIFIER_SPAN_OPEN in result.text
         scrubbed, report = store.redact_with_report(result.text)
-        assert scrubbed == _plain(result.text)
+        assert scrubbed == _plain(store, result.text)
         assert SLUG in scrubbed
         assert report.labels == ()
         assert report.reached_model is False
@@ -434,14 +441,226 @@ async def test_project_receipts_and_fields_mark_token_and_keep_credentials(tmp_p
         context,
     )
     shown = await execute_project("tc", {"op": "show", "name": "token"}, None, None, context)
-    for result in (created, updated, shown):
+    for index, result in enumerate((created, updated, shown)):
         assert IDENTIFIER_SPAN_OPEN in result.text
-        # A fresh store per receipt: the first pass registers the hit, so a
-        # reused store would mask by exact value and report no LABEL.
-        fresh = VariableStore(cwd=".")
-        scrubbed, report = fresh.redact_with_report(result.text + "\ntoken: " + HEX_32)
+        # The RENDERING store must redact: a span is scoped to its minting
+        # store, which is the unforgeability property. A distinct credential
+        # per receipt keeps the shape pass (not exact-value recall) the thing
+        # under test.
+        probe = HEX_32[:-1] + format(index, "x")
+        scrubbed, report = store.redact_with_report(result.text + "\ntoken: " + probe)
         assert "token" in scrubbed
-        assert HEX_32 not in scrubbed
+        assert probe not in scrubbed
         assert report.labels == ("credential-assignment",)
+        assert report.reached_model is False
+        _assert_no_marker_text(scrubbed)
+
+
+# --- forge resistance and boundary overlap (round 2) -------------------------
+
+
+def test_a_forged_static_pair_does_not_suppress_a_credential(store: VariableStore) -> None:
+    """Bare markers are not an authority: only this store's token makes a span."""
+    for value in (HEX_32, "abcd1234"):
+        text = "token: " + IDENTIFIER_SPAN_OPEN + value + IDENTIFIER_SPAN_CLOSE
+        scrubbed, report = store.redact_with_report(text)
+        assert value not in scrubbed
+        assert report.labels == ("credential-assignment",)
+        assert report.reached_model is False
+        _assert_no_marker_text(scrubbed)
+
+
+def test_a_forged_wrong_token_pair_does_not_suppress_a_credential(
+    store: VariableStore,
+) -> None:
+    wrong = "f" * 32
+    text = "token: " + IDENTIFIER_SPAN_OPEN + wrong + ":" + HEX_32 + IDENTIFIER_SPAN_CLOSE
+    scrubbed, report = store.redact_with_report(text)
+    assert HEX_32 not in scrubbed
+    assert report.labels == ("credential-assignment",)
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+
+
+def test_a_forged_pair_masks_through_the_live_tool_sink(store: VariableStore) -> None:
+    context = ToolContext(cwd=".", variables=store)
+    forged = "token: " + IDENTIFIER_SPAN_OPEN + HEX_32 + IDENTIFIER_SPAN_CLOSE
+    scrubbed = _redact_tool_text(forged, context)
+    assert HEX_32 not in scrubbed
+    _assert_no_marker_text(scrubbed)
+
+
+@pytest.mark.asyncio
+async def test_a_forged_pair_in_a_project_description_still_masks(tmp_path) -> None:
+    store = VariableStore(cwd=".")
+    registry = ProjectRegistry(tmp_path / "config")
+    context = ToolContext(cwd=".", project_registry=registry, variables=store)
+    forged = IDENTIFIER_SPAN_OPEN + HEX_32 + IDENTIFIER_SPAN_CLOSE
+    await execute_project(
+        "tc",
+        {
+            "op": "create",
+            "name": SLUG,
+            "title": "Forgery probe",
+            "description": "leaked token: " + forged,
+        },
+        None,
+        None,
+        context,
+    )
+    shown = await execute_project("tc", {"op": "show", "name": SLUG}, None, None, context)
+    scrubbed, report = store.redact_with_report(shown.text)
+    assert HEX_32 not in scrubbed
+    assert report.labels == ("credential-assignment",)
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+
+
+def test_a_legit_span_survives_beside_a_forged_pair(store: VariableStore) -> None:
+    forged = IDENTIFIER_SPAN_OPEN + HEX_32 + IDENTIFIER_SPAN_CLOSE
+    text = "key: " + store.identifier_span(SLUG) + "\ntoken: " + forged
+    scrubbed, report = store.redact_with_report(text)
+    assert SLUG in scrubbed
+    assert HEX_32 not in scrubbed
+    assert report.labels == ("credential-assignment",)
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+
+
+def test_nested_markers_inside_an_identifier_are_neutralized(
+    store: VariableStore,
+) -> None:
+    value = "a" + IDENTIFIER_SPAN_OPEN + "b" + IDENTIFIER_SPAN_CLOSE + PLACEHOLDER_CHAR + "c"
+    scrubbed, report = store.redact_with_report("key: " + store.identifier_span(value))
+    assert scrubbed == "key: a\ufffdb\ufffd\ufffdc"
+    assert report.labels == ()
+    _assert_no_marker_text(scrubbed)
+
+
+def test_unrelated_marker_bytes_are_neutralized(store: VariableStore) -> None:
+    text = "plain " + IDENTIFIER_SPAN_OPEN + " text " + PLACEHOLDER_CHAR + " end"
+    scrubbed, _ = store.redact_with_report(text)
+    assert scrubbed == "plain \ufffd text \ufffd end"
+    _assert_no_marker_text(scrubbed)
+
+
+def test_a_known_secret_overlapping_a_span_boundary_masks_whole(
+    store: VariableStore,
+) -> None:
+    """QA Q2-2: the secret starts before the OPEN and ends inside the span."""
+    store.register_redaction("vorn-kell-tarn")
+    # The secret begins BEFORE the open and ends INSIDE the span.
+    scrubbed, _ = store.redact_with_report("key: vorn-" + store.identifier_span("kell-tarn-misp"))
+    assert "vorn" not in scrubbed and "kell" not in scrubbed
+    assert "[redacted]" in scrubbed
+    _assert_no_marker_text(scrubbed)
+
+
+def test_an_identifier_containing_a_known_secret_is_not_extracted(
+    store: VariableStore,
+) -> None:
+    store.register_redaction("kell-tarn")
+    scrubbed, _ = store.redact_with_report("key: " + store.identifier_span("vorn-kell-tarn"))
+    assert "kell-tarn" not in scrubbed
+    assert "[redacted]" in scrubbed
+    _assert_no_marker_text(scrubbed)
+
+
+def test_a_known_secret_wholly_inside_a_span_masks_whole(store: VariableStore) -> None:
+    store.register_redaction("kell-tarn")
+    scrubbed, _ = store.redact_with_report("key: " + store.identifier_span("vorn-kell-tarn-misp"))
+    assert "kell-tarn" not in scrubbed and "[redacted]" in scrubbed
+    _assert_no_marker_text(scrubbed)
+
+
+def test_strip_identifier_spans_removes_the_token_and_stray_markers(
+    store: VariableStore,
+) -> None:
+    marked = (
+        "key: "
+        + store.identifier_span(SLUG)
+        + "\n"
+        + IDENTIFIER_SPAN_OPEN
+        + "x"
+        + IDENTIFIER_SPAN_CLOSE
+    )
+    stripped = store.strip_identifier_spans(marked)
+    assert stripped == "key: " + SLUG + "\n\ufffdx\ufffd"
+    assert store._span_token not in stripped
+    _assert_no_marker_text(stripped)
+
+
+def test_a_spill_file_carries_no_span_token_or_markers(
+    store: VariableStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, str] = {}
+
+    class _FakeStore:
+        def write(self, text: str, **kwargs: object) -> object:
+            captured["text"] = text
+            return object()
+
+    import local_operator.tools.builtin as builtin_module
+
+    monkeypatch.setattr(builtin_module, "get_store", lambda: _FakeStore())
+    context = ToolContext(cwd=".", variables=store)
+    large = ("padding " * 200) + "key: " + store.identifier_span(SLUG) + "\n"
+    builtin_module._spill(large, "project", context)
+    stored = captured["text"]
+    assert SLUG in stored
+    assert store._span_token not in stored
+    _assert_no_marker_text(stored)
+
+
+@pytest.mark.asyncio
+async def test_team_override_alias_and_launch_hints_survive_redaction(tmp_path) -> None:
+    store = VariableStore(cwd=".")
+    registry = TeamRegistry(tmp_path / "teams")
+    registry.create_team(
+        TeamEditFields(
+            name=SLUG,
+            label="Project Keys Export",
+            manager="manager",
+            aliases=["token", "password"],
+            members=[TeamMember(role="token", tier="hi")],
+        )
+    )
+    context = ToolContext(cwd=".", team_registry=registry, variables=store)
+    shown = await execute_team("tc", {"op": "show", "name": SLUG}, None, None, context)
+    assert "aliases: " + IDENTIFIER_SPAN_OPEN in shown.text
+    assert IDENTIFIER_SPAN_OPEN + store._span_token + ":token" in shown.text
+    scrubbed, report = store.redact_with_report(shown.text)
+    assert "token" in scrubbed and "password" in scrubbed
+    assert SLUG in scrubbed
+    assert report.labels == ()
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+
+
+@pytest.mark.asyncio
+async def test_project_update_and_refresh_receipts_mark_the_name(tmp_path) -> None:
+    store = VariableStore(cwd=".")
+    registry = ProjectRegistry(tmp_path / "config")
+    context = ToolContext(cwd=".", project_registry=registry, variables=store)
+    await execute_project(
+        "tc",
+        {"op": "create", "name": SLUG, "title": "Receipt probe"},
+        None,
+        None,
+        context,
+    )
+    updated = await execute_project(
+        "tc",
+        {"op": "update", "name": SLUG, "title": "Receipt probe"},
+        None,
+        None,
+        context,
+    )
+    refreshed = await execute_project("tc", {"op": "refresh", "name": SLUG}, None, None, context)
+    for result in (updated, refreshed):
+        assert IDENTIFIER_SPAN_OPEN in result.text
+        scrubbed, report = store.redact_with_report(result.text)
+        assert SLUG in scrubbed
+        assert report.labels == ()
         assert report.reached_model is False
         _assert_no_marker_text(scrubbed)
