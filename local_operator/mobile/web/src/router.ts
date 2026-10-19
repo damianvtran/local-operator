@@ -17,6 +17,8 @@ export type Route =
 	| { name: "past" }
 	| { name: "account-routing" }
 	| { name: "pair" }
+	| { name: "library" }
+	| { name: "library-asset"; assetId: string }
 	| { name: "session"; sessionId: string; jobId?: string };
 
 export function parseHash(hash: string): Route {
@@ -27,6 +29,14 @@ export function parseHash(hash: string): Route {
 	   flow generates a key, claims a code and then waits for a human on ANOTHER
 	   device — a state that has to survive whatever the reader does in the meantime. */
 	if (path === "/pair") return { name: "pair" };
+	/* The Library (design §6.3): a list and a deep-linkable asset. The asset
+	   route is matched first for the same reason the subagent route is: the
+	   list's own pattern would otherwise swallow its prefix. */
+	if (path === "/library") return { name: "library" };
+	const libraryAsset = path.match(/^\/library\/a\/([^/]+)$/);
+	if (libraryAsset) {
+		return { name: "library-asset", assetId: decodeURIComponent(libraryAsset[1]) };
+	}
 	const agent = path.match(/^\/s\/([^/]+)\/a\/([^/]+)$/);
 	if (agent) {
 		return {
