@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # Serialize child decoders across stores; cache failed attempts as well as success.
 # Failures may retry after eviction/restart, allowing a repaired installation to
 # recover without writing permanent negative metadata alongside user artifacts.
+# Successes are memoised too: manual deletion of a repaired sidecar needs cache
+# eviction/restart before another repair; normal reads never remove sidecars.
 _RECOVERY_LOCK = threading.Lock()
 MAX_RECOVERY_BYTES = 8 * 1024 * 1024
 RECOVERY_TIMEOUT_SECONDS = 10
@@ -36,7 +38,7 @@ def _recover(root: str, digest: str) -> None:
     # Check size before get_bytes(): reading a legacy movie just to refuse
     # its MIME type would bypass the recovery input bound.
     try:
-        if store._content_path(digest).stat().st_size > MAX_RECOVERY_BYTES:
+        if store.path_for(digest).stat().st_size > MAX_RECOVERY_BYTES:
             return
         entry = store.get_bytes(digest)
         if entry is None or not entry[1].startswith("audio/"):
