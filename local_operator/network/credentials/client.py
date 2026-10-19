@@ -932,8 +932,26 @@ class MeshCredentialClient:
         members = self._other_active_members()
         if only_device:
             members = [device for device in members if device == only_device]
+        from local_operator.network import wire
+
         for device in members:
             asked += 1
+            # A PEER THAT DOES NOT ADVERTISE THE PUSH CAPABILITY MUST NOT BE SENT
+            # A PLACEMENT REQUEST EITHER (lifecycle-only peer test): the handshake
+            # already says it cannot handle one, so asking would put a frame on
+            # the wire that a previous-release peer has no handler for. The link
+            # is established first only to READ its capabilities; a failed dial
+            # falls through to ``_ask_owner_directly``'s own offline handling.
+            ensure = getattr(self._relay, "_ensure_link_with_reason", None)
+            if ensure is not None:
+                try:
+                    link, _why = ensure(device)
+                except Exception:  # noqa: BLE001 — an unreachable peer is reported below
+                    link = None
+                caps = tuple(getattr(link, "capabilities", ()) or ()) if link is not None else ()
+                if link is not None and wire.CREDENTIAL_PLACEMENT_PUSH_V1 not in caps:
+                    skipped.append({"device": device, "reason": "peer_lacks_placement_push"})
+                    continue
             reply = self._ask_owner_directly(
                 device,
                 {

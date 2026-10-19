@@ -856,7 +856,14 @@ jobs:
     # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
     # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
     # unchanged; this is scheduling headroom, not a test-failure waiver.
-    timeout-minutes: 31
+    #
+    # 31 -> 32 on 2026-10-19: the credential-repair slices' new test files run
+    # at the manifest's 30.786s fallback and push the heaviest shard to
+    # 7202.00s of serial weight (1800.39s on 4 workers), 0.39s past the 1800s
+    # budget at 31. 32 is again the guard's minimum: ceil((1800.39 + 60)/60).
+    # That shard's last measured pytest wall was well under 20 minutes; this is
+    # the partition's accounting catching up with a grown suite, not a waiver.
+    timeout-minutes: 32
     strategy:
       fail-fast: false
       matrix:
