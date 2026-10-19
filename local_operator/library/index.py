@@ -32,10 +32,17 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
+
+try:  # POSIX advisory locking; Windows has no fcntl and writes stay serialised per process.
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None  # type: ignore[assignment]
 
 from local_operator import resume
 from local_operator.library import classify, identity
@@ -48,6 +55,34 @@ INDEX_DIRNAME: Final = "library"
 INDEX_FILENAME: Final = "index.json"
 INDEX_SCHEMA: Final = 3
 DEFAULT_BUDGET_S: Final = service.DEFAULT_BUDGET_S
+
+#: How long a request-path caller may reuse the in-process aggregate without a
+#: session sweep. The desktop grid polls every ~2 s; without this window an
+#: actively-written journal changed its signature on every poll and dragged the
+#: whole index rebuild onto the request path. ``budget_s=None`` (background
+#: finisher, CLI, tests) always scans: it exists to make progress, not to poll.
+FRESH_WINDOW_S: Final = 2.0
+
+#: Non-structural churn (a revision bump inside an existing entry) rewrites the
+#: 11 MB index at most this often. A session id that appears for the first time
+#: or an entry that first becomes complete bypasses the limit: those are the
+#: events a reader must not miss, and they happen once per conversation.
+WRITE_INTERVAL_S: Final = 10.0
+
+#: ``(index file identity, monotonic build time, aggregate)`` per resolved index
+#: path. The identity is what makes returning the cached aggregate sound: an
+#: unchanged file plus the signature sweep below proves the session map the
+#: aggregate was built from is still the one on disk.
+_CACHE: dict[str, tuple[tuple[int, int, int] | None, float, "Catalog"]] = {}
+#: One ``threading.Lock`` per index path: one build (or sweep) at a time.
+_LOCKS: dict[str, threading.Lock] = {}
+#: One lock per index path for the persisted-index asset build in
+#: :func:`catalog_for_read`; separate from the scan lock so a thumbnail never
+#: queues behind a background full build.
+_ASSET_LOCKS: dict[str, threading.Lock] = {}
+#: Paths with a full build in flight, so concurrent callers can report building.
+_BUILDING: set[str] = set()
+_CACHE_LOCK = threading.Lock()
 
 #: The three groups the Library shows. Raw origins stay on each occurrence.
 ORIGIN_GROUPS: Final = ("generated", "created", "mentioned")
@@ -224,6 +259,56 @@ def _record_dict(record: FileRecord) -> dict[str, Any]:
     }
 
 
+def _cache_key(config: Path) -> str:
+    """Resolved index path: two spellings of one config share one aggregate."""
+    return os.path.realpath(str(index_path(config)))
+
+
+def _index_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (int(info.st_mtime_ns), int(info.st_size), int(getattr(info, "st_ino", 0) or 0))
+
+
+def _cached(key: str) -> tuple[tuple[int, int, int] | None, float, "Catalog"] | None:
+    with _CACHE_LOCK:
+        return _CACHE.get(key)
+
+
+def _remember(key: str, stat: tuple[int, int, int] | None, catalog: "Catalog") -> None:
+    with _CACHE_LOCK:
+        _CACHE[key] = (stat, time.monotonic(), catalog)
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _CACHE_LOCK:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[key] = lock
+        return lock
+
+
+def _asset_lock_for(key: str) -> threading.Lock:
+    with _CACHE_LOCK:
+        lock = _ASSET_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _ASSET_LOCKS[key] = lock
+        return lock
+
+
+def _serve(key: str, catalog: "Catalog") -> "Catalog":
+    """The cached aggregate, marked building while another caller's build runs."""
+    with _CACHE_LOCK:
+        busy = key in _BUILDING
+    if busy and catalog.state != "building":
+        return dataclasses.replace(catalog, state="building")
+    return catalog
+
+
 def _load(path: Path) -> dict[str, Any]:
     """Read the derived index. Any failure is an empty catalog, never an error."""
     try:
@@ -235,6 +320,145 @@ def _load(path: Path) -> dict[str, Any]:
         return {}
     sessions = payload.get("sessions")
     return payload if isinstance(sessions, dict) else {}
+
+
+@contextmanager
+def _index_lock(path: Path):
+    """Advisory cross-process lock; yields ``False`` when another process holds it."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+")
+    except OSError:
+        yield False
+        return
+    try:
+        locked = True
+        if _fcntl is not None:
+            try:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            except OSError:
+                locked = False
+        try:
+            yield locked
+        finally:
+            if locked and _fcntl is not None:
+                try:
+                    _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    finally:
+        handle.close()
+
+
+def _entry_revision_value(entry: Any) -> float:
+    try:
+        return float(entry.get("revision") or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def _merge_sessions(
+    disk: dict[str, Any], incoming: dict[str, Any], *, keep: set[str]
+) -> dict[str, Any]:
+    """Merge a build into what another process may have persisted meanwhile.
+
+    A COMPLETE incoming entry is authoritative for the key it covers: this
+    build either refreshed it from the journal or verified its signature, and a
+    revision comparison cannot decide freshness — retracting a child lowers the
+    parent's revision below the stale disk entry's. An INCOMPLETE incoming entry
+    must not replace a complete disk entry (a budget-limited scan that started
+    and ran out); disk keeps the complete rows. ``keep`` names the sessions
+    still visible to this build, so a complete disk entry for a session this
+    build did not reach also survives.
+    """
+    merged: dict[str, Any] = {
+        session_id: entry for session_id, entry in incoming.items() if isinstance(entry, dict)
+    }
+    for session_id, entry in disk.items():
+        if not isinstance(entry, dict):
+            continue
+        held = merged.get(session_id)
+        if isinstance(held, dict):
+            if not held.get("complete") and entry.get("complete"):
+                merged[session_id] = entry
+            continue
+        if session_id in keep and entry.get("complete"):
+            merged[session_id] = entry
+    return merged
+
+
+def _structural_change(disk: dict[str, Any], merged: dict[str, Any]) -> bool:
+    """A new session or a first completion: the events a poll must not miss."""
+    for session_id, entry in merged.items():
+        held = disk.get(session_id)
+        if not isinstance(held, dict):
+            return True
+        if entry.get("complete") and not held.get("complete"):
+            return True
+    return any(session_id not in merged for session_id in disk)
+
+
+def _written_recently(path: Path) -> bool:
+    try:
+        return time.time() - path.stat().st_mtime < WRITE_INTERVAL_S
+    except OSError:
+        return False
+
+
+def _persist(
+    path: Path,
+    sessions: dict[str, Any],
+    *,
+    visible: set[str],
+    force: bool = False,
+    partial: bool = False,
+) -> tuple[dict[str, Any], float, bool, tuple[int, int, int] | None] | None:
+    """Read-merge-write under the cross-process lock.
+
+    Returns ``(merged sessions, built_at, wrote, stat)``, or ``None`` when
+    another process holds the lock — the caller then serves its last aggregate
+    rather than waiting. ``stat`` is the index identity observed UNDER the lock
+    (after any write), which is the identity of the payload ``merged`` came
+    from. The rate limit applies only to non-structural churn: a new session or
+    a first completion always lands. The top-level ``complete`` flag lets a
+    reader tell a finished index from a budget-limited one that has only
+    complete rows so far.
+    """
+    with _index_lock(path.with_name("index.lock")) as locked:
+        if not locked:
+            return None
+        stat = _index_stat(path)
+        disk = _load(path)
+        raw = disk.get("sessions")
+        disk_sessions: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        # ``sessions`` is authoritative for what it contains; ``visible`` lets a
+        # complete disk entry survive for a session this build did not reach.
+        merged = _merge_sessions(disk_sessions, sessions, keep=visible)
+        built_at = float(disk.get("built_at") or 0.0)
+        complete = not partial
+        flag_changed = disk.get("complete") is not complete
+        if merged == disk_sessions and not flag_changed:
+            return merged, built_at, False, stat
+        if (
+            not force
+            and not flag_changed
+            and not _structural_change(disk_sessions, merged)
+            and _written_recently(path)
+        ):
+            return merged, built_at, False, stat
+        stamp = time.time()
+        revision = int(sum(_entry_revision_value(entry) for entry in merged.values()))
+        _write(
+            path,
+            {
+                "version": INDEX_SCHEMA,
+                "built_at": stamp,
+                "revision": revision,
+                "complete": complete,
+                "sessions": merged,
+            },
+        )
+        return merged, stamp, True, _index_stat(path)
 
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
@@ -581,16 +805,148 @@ def build_catalog(
     *,
     budget_s: float | None = DEFAULT_BUDGET_S,
     home: str | None = None,
+    refresh: bool = False,
 ) -> Catalog:
     """Build or refresh the catalog. Blocking: call from a worker thread.
 
     ``budget_s=None`` scans every uncovered session to completion (the
     background finisher and CLI callers). A positive budget publishes what it
     reached and answers ``building``.
+
+    A warm aggregate is served from memory: within :data:`FRESH_WINDOW_S` for a
+    request-path poll, and after a full signature sweep when the on-disk index
+    and every visible journal are unchanged. The 11 MB write happens only when
+    the session map moved, and non-structural churn is rate-limited so an
+    actively-written journal cannot rewrite the index on every poll.
+
+    ``refresh=True`` skips the freshness window (still bounded by ``budget_s``):
+    a read that missed an asset uses it to look for an index entry created since
+    the last write.
     """
     config = Path(config_dir)
     home = home or str(Path.home())
     path = index_path(config)
+    key = _cache_key(config)
+    cached = _cached(key)
+    if (
+        cached is not None
+        and not refresh
+        and budget_s is not None
+        and cached[2].state == "ready"
+        and cached[0] == _index_stat(path)
+        and time.monotonic() - cached[1] < FRESH_WINDOW_S
+    ):
+        return _serve(key, cached[2])
+
+    lock = _lock_for(key)
+    if not lock.acquire(blocking=budget_s is None):
+        # Single-flight: another caller is already scanning. Its last aggregate
+        # is servable now; report building so the caller polls again. An
+        # unbounded caller (background finisher, CLI) waits instead: it exists
+        # to finish the build, not to serve a stale answer.
+        if cached is not None:
+            return _serve(key, cached[2])
+        return catalog_for_read(config)
+    with _CACHE_LOCK:
+        _BUILDING.add(key)
+    try:
+        # Another thread may have finished while this one was waiting.
+        cached = _cached(key)
+        stat = _index_stat(path)
+        if (
+            cached is not None
+            and not refresh
+            and budget_s is not None
+            and cached[2].state == "ready"
+            and cached[0] == stat
+            and time.monotonic() - cached[1] < FRESH_WINDOW_S
+        ):
+            return _serve(key, cached[2])
+        return _build_locked(config, path, key, budget_s=budget_s, home=home)
+    finally:
+        with _CACHE_LOCK:
+            _BUILDING.discard(key)
+        lock.release()
+
+
+def catalog_for_read(config_dir: str | Path) -> Catalog:
+    """The aggregate for content/thumbnail/get reads.
+
+    Never enumerates sessions and never writes. A warm Catalog is returned only
+    when the index file is still the one it was built from; otherwise the
+    persisted index is loaded and its assets built once. A thumbnail therefore
+    cannot trigger a journal scan or an 11 MB rewrite on the request path.
+
+    The stat is captured BEFORE the read and compared after the asset build.
+    A writer that lands in between replaces the file atomically; caching the
+    old payload under the new stat would make the fast path serve a catalog
+    that predates that write (and made ``refresh=True`` skip the new session).
+    One retry handles the race; a second move leaves the catalog uncached.
+    """
+    config = Path(config_dir)
+    path = index_path(config)
+    key = _cache_key(config)
+    cached = _cached(key)
+    if cached is not None and cached[0] == _index_stat(path):
+        return _serve(key, cached[2])
+    with _asset_lock_for(key):
+        cached = _cached(key)
+        stat = _index_stat(path)
+        if cached is not None and cached[0] == stat:
+            return _serve(key, cached[2])
+        catalog = Catalog(
+            assets=[],
+            revision=0,
+            state="building",
+            sessions_total=0,
+            sessions_scanned=0,
+            built_at=0.0,
+        )
+        for _attempt in range(2):
+            payload = _load(path)
+            raw = payload.get("sessions")
+            sessions: dict[str, Any] = raw if isinstance(raw, dict) else {}
+            complete = sum(
+                1
+                for entry in sessions.values()
+                if isinstance(entry, dict) and entry.get("complete")
+            )
+            # A partial index is how a cold/incremental build looks on disk;
+            # a reader must not call it ready just because it has rows. An index
+            # written before the flag existed, or by a build that stopped early,
+            # may have only complete rows and still be missing sessions.
+            incomplete = any(
+                isinstance(entry, dict) and not entry.get("complete") for entry in sessions.values()
+            )
+            indexed_all = payload.get("complete") is True
+            catalog = Catalog(
+                assets=_build_assets(sessions),
+                revision=int(payload.get("revision") or 0)
+                or int(sum(_entry_revision_value(entry) for entry in sessions.values())),
+                state="ready" if sessions and indexed_all and not incomplete else "building",
+                sessions_total=len(sessions),
+                sessions_scanned=complete,
+                built_at=float(payload.get("built_at") or 0.0),
+            )
+            stat_after = _index_stat(path)
+            if stat_after == stat:
+                _remember(key, stat_after, catalog)
+                return _serve(key, catalog)
+            stat = stat_after
+        # The file moved twice while we read it: answer from what we have, but
+        # do not record an identity that would make the next read trust it.
+        return _serve(key, catalog)
+
+
+def _build_locked(
+    config: Path,
+    path: Path,
+    key: str,
+    *,
+    budget_s: float | None,
+    home: str,
+) -> Catalog:
+    stat_before = _index_stat(path)
     payload = _load(path)
     raw_sessions = payload.get("sessions")
     cached_sessions: dict[str, Any] = raw_sessions if isinstance(raw_sessions, dict) else {}
@@ -688,30 +1044,71 @@ def build_catalog(
         else:
             building = True
 
-    if building:
-        state = "building"
-    else:
-        state = "ready"
+    state = "building" if building else "ready"
+    complete = not building
+    changed = sessions != cached_sessions
+    flag_written = payload.get("complete") is complete
+    cached = _cached(key)
+    if not changed and flag_written and cached is not None and cached[0] == stat_before:
+        # Every persisted entry already matched its journal, and the cached
+        # aggregate was built from this exact file: no rebuild, no write. Return
+        # it directly — this build is finished, so its own in-flight marker must
+        # not relabel a ready aggregate as building.
+        return cached[2]
 
-    revision = int(sum(float(entry.get("revision") or 0.0) for entry in sessions.values()))
-    if sessions != cached_sessions or state == "ready":
-        _write(
+    merged = sessions
+    built_at = float(payload.get("built_at") or 0.0)
+    wrote = False
+    disk_stat = stat_before
+    if changed or not flag_written:
+        persisted = _persist(
             path,
-            {
-                "version": INDEX_SCHEMA,
-                "built_at": time.time(),
-                "revision": revision,
-                "sessions": sessions,
-            },
+            sessions,
+            visible={session_id for session_id, *_ in visible},
+            # An unbounded build (background finisher, CLI, tests) must land its
+            # result; only the poll path trades persistence for latency.
+            force=budget_s is None,
+            partial=building,
         )
-    return Catalog(
-        assets=_build_assets(sessions),
+        if persisted is None:
+            # Another process holds the write lock; never wait on the request
+            # path. Its write will be picked up by the next stat check.
+            if cached is not None:
+                return _serve(key, cached[2])
+        else:
+            merged, disk_built_at, wrote, disk_stat = persisted
+            built_at = disk_built_at
+            if not wrote and changed and cached is not None:
+                # Rate-limited non-structural churn: keep the last aggregate and
+                # let a later poll persist; refresh its freshness window so the
+                # next poll does not repeat the scan for the same churn — but
+                # only if the file it came from is still the one on disk.
+                if disk_stat == stat_before:
+                    _remember(key, disk_stat, cached[2])
+                return _serve(key, cached[2])
+
+    if changed:
+        revision = int(sum(_entry_revision_value(entry) for entry in merged.values()))
+    else:
+        revision = int(payload.get("revision") or 0) or int(
+            sum(_entry_revision_value(entry) for entry in sessions.values())
+        )
+    catalog = Catalog(
+        assets=_build_assets(merged),
         revision=revision,
         state=state,
         sessions_total=total,
         sessions_scanned=scanned,
-        built_at=time.time(),
+        built_at=built_at or time.time(),
     )
+    stat_after = _index_stat(path)
+    if stat_after == disk_stat:
+        # Only an identity that matches the payload these assets came from may
+        # be cached. ``disk_stat`` was captured under the write lock; a writer
+        # that landed while ``_build_assets`` ran (outside that lock) leaves the
+        # aggregate uncached and the next read reloads.
+        _remember(key, stat_after, catalog)
+    return catalog
 
 
 def complete_in_background(config_dir: str | Path) -> Catalog:
@@ -727,6 +1124,7 @@ __all__ = [
     "Occurrence",
     "ORIGIN_GROUPS",
     "build_catalog",
+    "catalog_for_read",
     "complete_in_background",
     "index_path",
     "origin_group",

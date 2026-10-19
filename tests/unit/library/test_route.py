@@ -268,3 +268,22 @@ async def test_a_metadata_edit_does_not_duplicate_or_skip_a_page(api) -> None:
         seen = [row["id"] for row in result["rows"]]
         assert len(seen) == len(set(seen))
         assert target not in seen, "the moved row must not be repeated"
+
+
+async def test_scope_final_narrows_the_route_listing(api) -> None:
+    """The UI's default view: generated artifacts only, API default stays all."""
+    client, root = api
+    seed(root)
+
+    everything = await client.get("/v1/desktop/library/assets")
+    final = await client.get("/v1/desktop/library/assets", params={"scope": "final"})
+    assert everything.status_code == 200 and final.status_code == 200
+    all_data, final_data = everything.json()["result"], final.json()["result"]
+    assert all_data["total"] == 2
+    assert final_data["total"] == 1
+    assert [row["name"] for row in final_data["rows"]] == ["cat.png"]
+    assert final_data["counts"]["origin_group"] == {"generated": 1}
+
+    refused = await client.get("/v1/desktop/library/assets", params={"scope": "nope"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "library_bad_filter"

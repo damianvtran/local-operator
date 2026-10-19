@@ -72,10 +72,21 @@ _SCAN_GRACE = 0.5
 #: pass that captured less than everything is attributable later. Literal members only:
 #: this record exists so a failed pass is attributable at all, so it must never carry
 #: free text (a body, a locator or an exception message) out of the store.
-#: ``refused-row`` = a candidate the admission or write guard would not admit;
+#: Each literal names the GUARD that dropped candidates, never a verdict about them:
+#: ``admission-skip`` = ``extract``'s admission guard skipped a candidate, which never
+#: reached ``persist``; ``write-refused`` = ``persist``'s write belt refused a row;
 #: ``timeout`` = the scan budget ran out; ``quota`` = the store refused growth;
-#: ``store-error`` = anything else.
-CAPTURE_REASONS = ("timeout", "refused-row", "quota", "store-error")
+#: ``store-error`` = anything else. The old ``refused-row`` was a VERDICT that named
+#: neither guard, so a record reading ``refused=0, skipped=18`` was misread as an
+#: over-refusing write guard when it was an admission skip; it is deliberately not
+#: accepted any more. Records written before :data:`ATTRIBUTION_STARTED_KEY` stay
+#: unclassifiable rather than being assigned a cause they never recorded.
+CAPTURE_REASONS = ("admission-skip", "write-refused", "timeout", "quota", "store-error")
+#: ``meta`` key stamping the first capture written by a build that records guard-named
+#: reasons and the ``declined`` status. Reporting must cohort on it (rows older than the
+#: stamp predate the split and cannot be reclassified honestly), and it is never
+#: backfilled onto a store whose rows were written before the split.
+ATTRIBUTION_STARTED_KEY = "attribution_started_at"
 _HEADINGS = re.compile(r"^#{1,4}\s*(?:Goal|Key Decisions|Progress|Critical Context)\b", re.I)
 
 
@@ -416,6 +427,29 @@ def _count(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+def _meta_fields(value: Any) -> tuple[str | None, int, int]:
+    """``(reason, refused, skipped)`` from one stored attribution value.
+
+    One parser for every reader, so ``capture_detail`` and ``persist``'s duplicate
+    path cannot disagree about what a record says. A reason outside
+    :data:`CAPTURE_REASONS` — ``refused-row`` from a pre-split build — is reported as
+    ``None`` because it named no guard, and a malformed value degrades to no
+    attribution rather than breaking the hint: the row itself is the truth.
+    """
+    try:
+        parsed = json.loads(value) if value is not None else None
+    except (TypeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        return None, 0, 0
+    reason = parsed.get("reason")
+    return (
+        reason if reason in CAPTURE_REASONS else None,
+        _count(parsed.get("refused")),
+        _count(parsed.get("skipped")),
+    )
+
+
 def capture_detail(store: MemoryStore, marker_id: str) -> CaptureDetail | None:
     """The terminal row plus ``reason``/``refused``/``skipped`` from ``meta``.
 
@@ -440,15 +474,7 @@ def capture_detail(store: MemoryStore, marker_id: str) -> CaptureDetail | None:
     refused = 0
     skipped = 0
     if record is not None:
-        try:
-            parsed = json.loads(record[0])
-        except (TypeError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict):
-            if parsed.get("reason") in CAPTURE_REASONS:
-                reason = parsed["reason"]
-            refused = _count(parsed.get("refused"))
-            skipped = _count(parsed.get("skipped"))
+        reason, refused, skipped = _meta_fields(record[0])
     return CaptureDetail(str(row[0]), int(row[1]), reason, refused, skipped)
 
 
@@ -476,9 +502,12 @@ def persist(
     :func:`_capture_key` — ``captures`` keeps its 4-column shape for mixed-version
     rollout.
 
-    A pass that captured nothing is a FAILURE, whatever ended it: a budget stop with no
-    rows, or a pass whose every candidate was refused, is recorded ``failed`` rather
-    than an ``ok``/0 that would hide the loss (review round 1, MAJOR).
+    A pass that captured nothing is recorded explicitly rather than as an ``ok``/0 that
+    would hide the outcome (review round 1, MAJOR): ``failed`` when a fault or the write
+    belt ended it (a budget stop with no rows, a store that refused every write), and
+    ``declined`` when the admission guard skipped everything the scan found. An admission
+    skip is a benign decline — nothing the store should have taken was lost — and must
+    not be counted as a stage fault beside timeouts and store errors.
 
     Returns the terminal ``(status, reason)`` actually recorded, so ``finish`` reports
     the same outcome the store holds.
@@ -486,7 +515,7 @@ def persist(
     guard(marker_id)
     if skipped is None:
         skipped = getattr(rows, "skipped", 0)
-    if status not in ("ok", "failed") or len(rows) > 52:
+    if status not in ("ok", "failed", "declined") or len(rows) > 52:
         raise MemoryError("Invalid capture result.")
     if reason is not None and reason not in CAPTURE_REASONS:
         raise MemoryError("Invalid capture reason.")
@@ -531,18 +560,33 @@ def persist(
     if reason is None and (refused or skipped):
         # Either guard losing a candidate makes the pass partial. ``skipped`` arrived
         # from admission, where the row never reached this function; counting only the
-        # write belt is how a stricter ``extract`` rule became invisible.
-        reason = "refused-row"
+        # write belt is how a stricter ``extract`` rule became invisible. The literal
+        # names the guard that fired: sharing one verdict-shaped literal between the two
+        # is how 41 admission skips read as write refusals (``refused`` summed to zero
+        # across every record). When BOTH fired the write belt is named — it is the
+        # later, stricter guard — while ``refused``/``skipped`` in ``meta`` keep both
+        # counts.
+        reason = "write-refused" if refused else "admission-skip"
     # A moved session's full portable truth must be indexed before a capture
     # exports anything, otherwise the new candidates would replace its old facts.
     store.import_session()
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        if db.execute(
-            "SELECT 1 FROM captures WHERE session=? AND compaction=?",
+        existing = db.execute(
+            "SELECT status FROM captures WHERE session=? AND compaction=?",
             (store.identity.session_id, marker_id),
-        ).fetchone():
-            return status, reason
+        ).fetchone()
+        if existing is not None:
+            # A duplicate pass must report the terminal pair the store ALREADY holds:
+            # ``declined``/``failed`` are derived below from what the pass wrote, so
+            # echoing the caller's requested status here would contradict both the
+            # row a resumed caller reads next and this function's returned contract.
+            # The reason is read back for the same reason.
+            record = db.execute(
+                "SELECT value FROM meta WHERE key=?", (_capture_key(store, marker_id),)
+            ).fetchone()
+            stored_reason, _, _ = _meta_fields(record[0] if record is not None else None)
+            return str(existing[0]), stored_reason
         origin = store._origin(db)
         seq = db.execute(
             "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
@@ -608,12 +652,19 @@ def persist(
             )
             store._reindex(db, entity)
             captured += 1
-        # A pass that captured nothing is a FAILURE, whatever ended it. A budget stop
-        # with no rows, or a pass whose every candidate was refused, must not present as
-        # a completed capture: the hint would claim success and the failed-rate metric
-        # would count it as a good pass.
-        if status == "ok" and not captured and reason in ("timeout", "refused-row"):
-            status = "failed"
+        # Guard losses and stage faults must not present as a completed capture: the
+        # hint would claim success and a health metric would count them as good passes.
+        # An admission-only skip is DECLINED (benign: the guard rejected everything the
+        # scan found), while a fault or a write-belt total loss stays FAILED. `quota`
+        # and `store-error` normally arrive through ``_record_failure`` with status
+        # already `failed`; they are listed here so no guarded/faulted path lands
+        # `ok`/0. A pass whose facts were all dropped by a tombstone or supersede
+        # ``continue`` is NOT a loss — a forget/edit was respected — and stays `ok`/0.
+        if status == "ok" and not captured:
+            if reason == "admission-skip":
+                status = "declined"
+            elif reason in ("timeout", "write-refused", "quota", "store-error"):
+                status = "failed"
         if facts:
             try:
                 store._quota(db, "session", store.identity.session_id)
@@ -622,10 +673,18 @@ def persist(
                 # a generic ``store-error``. The message is the store's own (content-free).
                 raise _QuotaExceeded(str(exc)) from None
         db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+        # Cohort marker for the guard-named split: written once by the first capture
+        # this build persists, and never backfilled onto rows written before it. Old
+        # rows carry the verdict-shaped literal (or none), so reporting ages them
+        # against this stamp instead of inventing a cause for them.
+        db.execute(
+            "INSERT OR IGNORE INTO meta VALUES (?,?)",
+            (ATTRIBUTION_STARTED_KEY, _dump({"at": timestamp})),
+        )
         # Attribution lives in ``meta``, not in ``captures``: the 4-column table keeps
         # the previous release's positional INSERT working for sessions still running
-        # old code during rollout. Written only when there is something to attribute,
-        # so a clean pass adds no meta row.
+        # old code during rollout. This attribution row is written only when there is
+        # something to attribute; the cohort stamp above is not per-pass attribution.
         if reason is not None or refused or skipped:
             db.execute(
                 "INSERT OR REPLACE INTO meta VALUES (?,?)",
@@ -892,7 +951,8 @@ def hint(store: MemoryStore, marker_id: str) -> str:
     ``reason`` used to be written and read by nobody, which is how 221 failed passes
     became unattributable. This is the operator surface that carries it: the hint is
     rendered into the next turn, so a partial capture says so and a total loss says
-    which coarse cause ended it. Reasons are literals, never content.
+    which coarse cause ended it. Reasons are literals, never content. A ``declined``
+    pass is reported as a benign decline (nothing worth keeping), not as a failure.
     """
     state = capture_detail(store, marker_id)
     if state is None:
@@ -905,24 +965,50 @@ def hint(store: MemoryStore, marker_id: str) -> str:
                 "Search/read memory:// for paths and links, retained asks and decisions. "
                 "Store goals and decisions explicitly."
             )
-        elif state.reason == "refused-row":
+        elif state.reason == "write-refused":
             text = (
                 f"Context compacted; {state.n} candidates captured to session memory; "
-                "some candidates were withheld by the memory guard. "
+                "some candidates were withheld by the memory guard at the write. "
+                "Search/read memory:// for paths and links, retained asks and decisions. "
+                "Store goals and decisions explicitly."
+            )
+        elif state.reason == "admission-skip":
+            text = (
+                f"Context compacted; {state.n} candidates captured to session memory; "
+                "some candidates were declined by the admission guard. "
                 "Search/read memory:// for paths and links, retained asks and decisions. "
                 "Store goals and decisions explicitly."
             )
         else:
+            # A pre-split record's reason reads None because ``refused-row`` named no
+            # guard; its stored counts still prove the pass was partial. Report that
+            # evidence without naming a guard: an unqualified success here would hide
+            # the withheld candidates on exactly the records that can never be
+            # reclassified (review round 1, MINOR 1).
+            withheld = state.refused + state.skipped
+            caveat = (
+                f"; {withheld} candidates were withheld (cause not recorded)" if withheld else ""
+            )
             text = (
-                f"Context compacted; {state.n} candidates captured to session memory. "
+                f"Context compacted; {state.n} candidates captured to session memory"
+                f"{caveat}. "
                 "Search/read memory:// for paths and links, retained asks and decisions. "
                 "Store goals and decisions explicitly."
             )
+    elif state.status == "declined":
+        # A benign decline, deliberately NOT worded as a failure: admission refused
+        # everything the scan found, and nothing the store should have taken was lost.
+        text = (
+            "Context compacted; automatic memory capture declined every candidate "
+            "(nothing in the compacted summary was worth keeping as memory). "
+            "Store goals and decisions explicitly."
+        )
     else:
         cause = {
             "timeout": "the capture scan timed out",
-            "refused-row": "every candidate was refused by the memory store",
+            "write-refused": "every candidate was refused by the memory store",
             "quota": "the memory store is at its quota",
+            "store-error": "the memory store raised an error",
         }.get(state.reason or "")
         detail = f" ({cause})" if cause else ""
         text = (
