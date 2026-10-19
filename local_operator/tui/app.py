@@ -131,6 +131,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.text import tr
@@ -429,6 +430,12 @@ from local_operator.tui.widgets.harness_import_view import (
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
+from local_operator.tui.widgets.library_view import (
+    LibraryView,
+    LibraryViewAskRequested,
+    LibraryViewDismissed,
+    LibraryViewLibrarianRequested,
+)
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
@@ -6180,6 +6187,13 @@ class OperatorApp(App[None]):
         # it exactly like its siblings.
         self._schedule_view: Any | None = None
         self._schedule_focus_restore: Any | None = None
+        # The library mode (``/library``): the same full-page MODE contract,
+        # fed by THIS machine's global asset catalog through a worker. Held
+        # here so teardown and the Esc chain close it exactly like its
+        # siblings — a catalog read left mounted behind a session swap would
+        # keep its worker pointed at the previous config root.
+        self._library_view: Any | None = None
+        self._library_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
@@ -30168,6 +30182,7 @@ class OperatorApp(App[None]):
             and self._import_view is None
             and self._review_view is None
             and self._schedule_view is None
+            and self._library_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -36712,6 +36727,220 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_schedule_view()
 
+    # -- the library page (``/library``) -----------------------------------
+
+    def _cmd_library(self, notice: NoticeFn) -> None:
+        """``/library`` — open THIS machine's global asset catalog.
+
+        Frontend-LOCAL (see ``_FRONTEND_LOCAL_SLASHES``): the rows come from
+        this machine's session journals and metadata database, and the page's
+        writes (name, description, tags) land in that database. Routed to a
+        runtime it would paint a catalog belonging to the host the runtime
+        lives on while the user reads it here — the wrong-machine answer
+        ``/settings`` and ``/import`` refuse.
+
+        The PAGE is the receipt (the ``/settings`` rule): it replaces the
+        transcript region, so a notice printed behind it would only be read
+        after leaving.
+        """
+        self._open_library_view()
+
+    def _open_library_view(self) -> None:
+        """Enter the full-page library mode (idempotent while it is up).
+
+        The MODE contract is :meth:`_open_settings_view`'s, one sibling later:
+        capture focus, hide the transcript, mount before ``#input-dock``, add
+        the shared layout class, make the composer inert, then seed the page
+        BEFORE its deferred mount handler repaints. The page's own
+        :meth:`LibraryView.start` begins the worker here rather than in
+        ``on_mount`` so the first painted frame already says "reading the
+        library" instead of flashing an empty list for one tick.
+        """
+        if self._library_view is not None:
+            return
+        from local_operator.paths import config_dir
+
+        # One mode at a time: the settings page's close is the single teardown
+        # seam its siblings share, and it now closes this page too.
+        self._close_settings_view()
+        self._library_focus_restore = self.focused
+        view = LibraryView(config_dir())
+        self._library_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+        view.start()
+
+    def _close_library_view(self) -> bool:
+        """Leave the library mode and put the conversation back. True if open.
+
+        Mirror of :meth:`_close_schedule_view`: everything the mode changed is
+        restored here and nowhere else. The transcript was only hidden, so its
+        blocks, scroll position and any half-typed prompt come back exactly as
+        they were left.
+        """
+        view = self._library_view
+        if view is None:
+            return False
+        self._library_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._library_focus_restore
+        self._library_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_library_view_dismissed(self, message: LibraryViewDismissed) -> None:
+        """The page's ``esc`` hint was clicked — same exit as the key itself."""
+        message.stop()
+        self._close_library_view()
+
+    def on_library_view_ask_requested(self, message: LibraryViewAskRequested) -> None:
+        """``a`` — leave the page and seed the ONE composer with the asset.
+
+        The prompt names the asset by path where the index has one, because a
+        path is what the agent's own tools can read; a digest-only asset is
+        named by its opaque id instead of inventing a path it does not have
+        (``library_render.asset_prompt``). The draft is SEEDED, never sent:
+        the user still owns the question, and the ordinary composer decides
+        which conversation it starts or resumes.
+        """
+        message.stop()
+        if self._library_view is None:
+            return
+        from local_operator.i18n.keys import tui_library
+        from local_operator.tui import library_render
+
+        shape, values = library_render.ask_reference(message.row)
+        message_obj = (
+            tui_library.ask_prompt(**values)
+            if shape == "path"
+            else tui_library.ask_prompt_digest(**values)
+        )
+        prompt = tr("tui.library")(message_obj)
+        self._close_library_view()
+        try:
+            editor = self._editor()
+            # NEVER replace a draft the user already wrote. `a` is an
+            # insertion gesture on a shared composer, not a new conversation:
+            # the reference joins the existing words as a second paragraph,
+            # and the caret lands after it ready to send. Round 1 UX finding:
+            # `load_text` silently discarded a half-typed prompt.
+            existing = editor.text
+            editor.load_text(f"{existing.rstrip()}\n\n{prompt}" if existing.strip() else prompt)
+            editor.focus()
+        except Exception:  # noqa: BLE001 — the page already left; never strand it
+            logger.debug("library: seeding the composer failed", exc_info=True)
+
+    def on_library_view_librarian_requested(self, message: LibraryViewLibrarianRequested) -> None:
+        """``L`` — leave the page and open the Librarian's pinned conversation."""
+        message.stop()
+        if self._library_view is None:
+            return
+        self._close_library_view()
+        self._cmd_librarian("open", self._system_notice)
+
+    # -- the Librarian (``/librarian``) ------------------------------------
+
+    def _cmd_librarian(self, arg: str, notice: NoticeFn) -> None:
+        """``/librarian [status|pause|resume|run|open]`` — the Librarian's door.
+
+        The module itself belongs to the Librarian work package and is absent
+        on this branch, so the command is a thin, lazy bridge
+        (:mod:`local_operator.tui.librarian_control`): absent is a clear
+        sentence, a present package's own hooks do the work, and nothing here
+        implements organizing, a cadence or a taxonomy.
+
+        Frontend-LOCAL: ``pause``/``resume``/``run`` read and write THIS
+        machine's Librarian state, and ``open`` is a session transition like
+        ``/resume``. Routed to a remote runtime they would pause or organize
+        the wrong machine's library and then try to attach a conversation
+        nobody is sitting at.
+        """
+        from local_operator.tui import librarian_control
+
+        verb = arg.strip().casefold() or "status"
+        if verb not in librarian_control.VERBS:
+            notice(tr("tui.library")(tui_library.librarian_usage()), "warning")
+            return
+        if verb == "open":
+            self.run_worker(self._librarian_open(notice), group="librarian", exclusive=True)
+            return
+        self.run_worker(self._librarian_control(verb, notice), group="librarian", exclusive=True)
+
+    async def _librarian_control(self, verb: str, notice: NoticeFn) -> None:
+        from local_operator.tui import librarian_control
+
+        result = await librarian_control.call_async(verb)
+        if not result.available:
+            notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
+            return
+        if result.missing_hook:
+            notice(
+                tr("tui.library")(tui_library.librarian_hook_missing(hook=result.missing_hook)),
+                "warning",
+            )
+            return
+        if result.error:
+            notice(
+                tr("tui.library")(tui_library.librarian_error(error=result.error)),
+                "warning",
+            )
+            return
+        notice(tr("tui.library")(tui_library.librarian_status(state=result.state)))
+
+    async def _librarian_open(self, notice: NoticeFn) -> None:
+        """Open (creating on first use) the Librarian's pinned conversation.
+
+        ``/aida``'s shape one noun over: the module's ``ensure_session`` is the
+        ONE creator, and the app only switches to the id it returns through the
+        ordinary resume path. A package without the hook, or a refusal, is
+        answered with the module's own sentence — never a silent no-op.
+        """
+        from local_operator.tui import librarian_control
+
+        # Availability BEFORE the launcher check: a build without the package
+        # cannot open her whatever the launcher offers, and "needs a
+        # session-capable launcher" would send the reader to the CLI for a
+        # command that still would not exist there.
+        if librarian_control.module() is None:
+            notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
+            return
+        if self._resume_factory is None:
+            notice(tr("tui.library")(tui_library.librarian_no_launcher()), "warning")
+            return
+        session_id, reason = await librarian_control.ensure_session()
+        if session_id is None:
+            if not reason:
+                notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
+            elif reason == "ensure_session":
+                notice(
+                    tr("tui.library")(tui_library.librarian_hook_missing(hook="ensure_session")),
+                    "warning",
+                )
+            else:
+                notice(
+                    tr("tui.library")(tui_library.librarian_open_failed(error=reason)),
+                    "warning",
+                )
+            return
+        self._resume_session(session_id, notice)
+
     def _cmd_settings(self, notice: NoticeFn) -> None:
         """``/settings`` — open the full-page settings surface.
 
@@ -36936,6 +37165,7 @@ class OperatorApp(App[None]):
         self._close_schedule_view()
         self._close_review_view()
         self._close_import_view()
+        self._close_library_view()
         view = self._settings_view
         if view is None:
             return False
@@ -40715,6 +40945,10 @@ class OperatorApp(App[None]):
             self._cmd_review(notice)
         elif command == "/schedule":
             self._cmd_schedule(notice)
+        elif command == "/library":
+            self._cmd_library(notice)
+        elif command == "/librarian":
+            self._cmd_librarian(arg, notice)
         elif command == "/hub":
             # The Hub links surface. The action is SYNC and owns its own worker,
             # the fleet-door and usage-panel pattern: calling it directly keeps
