@@ -24,17 +24,19 @@ def test_the_system_prompt_has_a_library_section() -> None:
 
     text = " ".join(render_template("system.md", {}).split())
     assert "## Library" in text
-    assert "global, long-term catalog" in text
-    assert "Canvas Files panel is session-local" in text
-    assert "Produced and highlighted files enter the Library" in text
-    assert "Use the `library` tool for durable names, descriptions and tags" in text
-    assert "the Librarian agent maintains the taxonomy" in text
+    # The budget gate (31,000 billed tokens) forced this paragraph shorter;
+    # these assert the FACTS, not a sentence the budget will keep re-cutting.
+    assert "global, long-term file catalog" in text
+    assert "Canvas Files is session-local" in text
+    assert "Produced and highlighted files enter it" in text
+    assert "prefer durable deliverables over scratch" in text
+    assert "Use `library` for names, descriptions and tags" in text
+    assert "the Librarian keeps the taxonomy" in text
 
 
 def test_the_files_decision_prompt_names_the_library() -> None:
     flat = " ".join(FILES_INSTRUCTIONS.split())
     assert "enter the user's long-term Library" in flat
-    assert "prefer durable deliverables over incidental scratch" in flat
 
 
 def test_the_seed_is_the_documented_policy() -> None:

@@ -11,11 +11,13 @@ with the run's delivery facts set exactly as the wake pump sets them.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from local_operator.harness.types import (
     AgentEndEvent,
+    AgentMessage,
     Message,
     ModelSpec,
     StreamEndEvent,
@@ -36,7 +38,11 @@ def _reply(text: str) -> ScriptedStream:
 
 
 def _event(text: str | None) -> AgentEndEvent:
-    messages = [Message(role="assistant", content=[TextContent(text=text)])] if text else []
+    messages = (
+        cast("list[AgentMessage]", [Message(role="assistant", content=[TextContent(text=text)])])
+        if text
+        else []
+    )
     return AgentEndEvent(messages=messages)
 
 
