@@ -2859,7 +2859,9 @@ def test_doctor_supervision_warning_is_local_and_not_a_link_failure(monkeypatch,
         net_cli, "_relay_call", lambda *a, **k: {"identity_present": True, "checks": []}
     )
     monkeypatch.setattr(
-        relay, "supervision_state", lambda: {"platform": "systemd", "persistent": False}
+        relay,
+        "supervision_state",
+        lambda: {"platform": "systemd", "addressable": True, "persistent": False},
     )
     assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0
     result = json.loads(capsys.readouterr().out)
