@@ -740,6 +740,12 @@ export interface Capabilities {
 	    relay app serves catalogues. Consumers must require both bits. */
 	i18n?: { catalogues: number };
 	stt?: SttCapability;
+	/** The relay serves `/api/library*` and the asset catalog. `1` when present;
+	    absent on an older relay, which must hide the destination rather than
+	    render a screen whose requests would 404. */
+	library?: number;
+	/** The organizing agent exists on this build. Additive to `library`. */
+	librarian?: number;
 }
 
 export type CommandOp =
@@ -924,4 +930,112 @@ export interface ProjectLinkedSession {
 	subagents: { running: number; settled: number; names: string[] } | null;
 	/** ``null`` means UNKNOWN (no persisted snapshot), never zero. */
 	todos: { open: number; total: number } | null;
+}
+
+/* ---------------------------------------------------------------------------
+ * Library (design §6.3, frozen backend contract at 98d7d3471d)
+ *
+ * The wire row is the shared service's projection with `display=True`: `ref.path`
+ * is always null on this plane and `display_path` is the only spelling the phone
+ * ever sees. Types mirror the row exactly — the screen derives nothing the
+ * service did not decide (ordering, origin group, effective name).
+ * ------------------------------------------------------------------------- */
+
+export type LibraryTag = {
+	id: string;
+	name: string;
+	category: string;
+	/** Assigned-asset count, present on the tag list but not on a row's tags. */
+	count?: number;
+};
+
+export type LibraryOccurrence = {
+	session_id: string;
+	session_title: string;
+	origin: string;
+	tool: string;
+	at: number;
+	intent: string | null;
+	first_seq: number;
+	last_seq: number;
+	child_id: string | null;
+	label: string | null;
+};
+
+export type LibraryChatLink = {
+	session_id: string;
+	title: string;
+	updated_at: number;
+};
+
+export type LibraryPreview = {
+	state: "ready" | "unsupported";
+	mime_type: string;
+	pages: number | null;
+};
+
+export interface LibraryAsset {
+	id: string;
+	ref: {
+		type: "path" | "artifact";
+		/** Always null on the phone projection. Kept in the type so a bug that
+		    starts serving it is visible rather than silently accepted. */
+		path: string | null;
+		display_path: string;
+		digest: string | null;
+		content_type: string;
+	};
+	name: string;
+	derived_name: string;
+	description: string;
+	kind: string;
+	category: string;
+	origin: string;
+	origin_group: "generated" | "created" | "mentioned";
+	origins: string[];
+	tags: LibraryTag[];
+	primary_tag: string | null;
+	size_bytes: number | null;
+	width: number | null;
+	height: number | null;
+	duration_s: number | null;
+	created_at: number;
+	modified_at: number;
+	last_seen_at: number;
+	exists: boolean;
+	highlighted: boolean;
+	highlight_why: string | null;
+	occurrences: LibraryOccurrence[];
+	session_count: number;
+	chat: LibraryChatLink | null;
+	preview: LibraryPreview;
+	organized: { at: number; by: string | null; confidence: number | null } | null;
+	locked: boolean;
+	favorite: boolean;
+	archived: boolean;
+}
+
+export interface LibraryListing {
+	state: "ready" | "building";
+	revision: number;
+	total: number;
+	counts: {
+		category: Record<string, number>;
+		origin_group: Record<string, number>;
+		kind: Record<string, number>;
+	};
+	tags: LibraryTag[];
+	rows: LibraryAsset[];
+	next_cursor: string | null;
+	cursor_reset: boolean;
+	scan: { sessions_total: number; sessions_scanned: number };
+}
+
+export interface LibraryFacets {
+	state: "ready" | "building";
+	revision: number;
+	total: number;
+	counts: LibraryListing["counts"];
+	tags: LibraryTag[];
+	scan: LibraryListing["scan"];
 }
