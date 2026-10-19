@@ -372,3 +372,41 @@ def test_the_cli_prefers_the_relay_when_it_answers(
 
     assert "fallback" not in receipt["slack"]
     assert calls == ["credential_placement", "credential_sync_pull"]
+
+
+def test_a_successful_member_validation_records_synced_with_the_owner(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive is recorded, not merely "not refused".
+
+    The status row then says "synced — borrows from macbook" instead of falling
+    back to a bare placement answer, and a later owner-side expiry overwrites it.
+    """
+    from local_operator.network import cli as net_cli
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    from types import SimpleNamespace
+
+    url = "https://linear.test/mcp"
+    key = credential_key_for_mcp(url)
+    store.save(_record(), root)
+    monkeypatch.setattr(
+        "local_operator.network.identity.load",
+        lambda *a, **k: SimpleNamespace(device_id=SELF, name="laptop"),
+    )
+    _place(root, key, kind="mcp-rotating")
+
+    def relay_answer(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any]:
+        if op == "credential_grant":
+            return {"kind": "grant"}
+        return {"ok": True, "state": "synced", "code": ""}
+
+    monkeypatch.setattr(net_cli, "_relay_answer", relay_answer)
+    servers = [{"name": "linear", "url": url, "refs": [], "shape": "oauth"}]
+    receipt = net_cli._member_repair_receipt(root, servers)
+    assert receipt["linear"]["grant"] == {"ok": True, "code": ""}
+
+    entry = mcp_state.load(NETWORK, root)[key]
+    assert entry["state"] == "synced"
+    assert entry["owner_name"] == "macbook"

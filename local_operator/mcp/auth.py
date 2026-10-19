@@ -1995,7 +1995,25 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     except Exception:  # noqa: BLE001 — the store is best-effort here
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
-    return payload_carries_grant(payload)
+    if not payload_carries_grant(payload):
+        return False
+    # A ROW IS NOT A USABLE CREDENTIAL (real-node QA). A registration-only row,
+    # an emptied row left by a failed write, or a row whose refresh token the
+    # provider already rejected all HAVE a row and none of them can serve a
+    # bearer. Counting them as a local grant made the local path win over the
+    # broker and produced a bare 401 with no borrow attempted — the server a peer
+    # could have served stayed dead. A dead marker is the row's own tombstone and
+    # outranks the token fields: it is only cleared by a NEW interactive grant.
+    dead = payload.get(GRANT_DEAD_AT_KEY)
+    if isinstance(dead, (int, float)) and not isinstance(dead, bool) and dead > 0:
+        return False
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return False
+    return any(
+        isinstance(tokens.get(field), str) and tokens.get(field).strip()
+        for field in ("access_token", "refresh_token")
+    )
 
 
 def _live_unconfirmed_send(marker: Any, target: Any) -> bool:

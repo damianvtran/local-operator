@@ -15,6 +15,7 @@ sentinels; every output assertion also checks they never appear.
 from __future__ import annotations
 
 import argparse
+from argparse import Namespace
 import json
 from pathlib import Path
 from typing import Any
@@ -549,3 +550,190 @@ def test_an_http_server_without_a_brokered_key_grants_to_the_provisioning_popula
         SELF,
         DRIVE,
     }
+
+
+def _seed_oauth_grant(root: Path, *, dead: bool = False) -> None:
+    """Give THIS device a usable (or tombstoned) grant for ``URL``."""
+    import asyncio
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    storage = McpTokenStorage(URL)
+    tokens = OAuthToken(
+        **{
+            "access_token": "oauth-access",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "oauth-refresh",
+        }
+    )
+    asyncio.run(storage.set_tokens(tokens))
+    if dead:
+        storage.mark_grant_dead(rejected_refresh_token="oauth-refresh")
+
+
+def _mcp_grants(payload: dict[str, Any]) -> dict[str, set[str]]:
+    return {
+        str(item.get("key")): set(item.get("devices") or [])
+        for row in payload["servers"]
+        for item in row.get("grants") or []
+        if str(item.get("key") or "").startswith("mcp:")
+    }
+
+
+def test_repair_grants_the_brokered_key_to_eligible_members(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A device approved before the login holds no ``mcp:<url>`` row.
+
+    ``--repair`` grants the brokered key beside the references, to the SAME
+    population: active device members with drive/admin. A read holder may borrow
+    but is not copied to; a pool member declares no credentials.
+    """
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    _write_config(
+        root,
+        {
+            "linear": {
+                "type": "http",
+                "url": URL,
+                "auth": {"type": "oauth"},
+            }
+        },
+    )
+    network_store.save(_record(), root)
+    _seed_oauth_grant(root)
+
+    assert net_cli._cmd_mcp_credentials(  # noqa: SLF001
+        Namespace(json=True, adopt=False, repair=True), root
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    grants = _mcp_grants(payload)
+    assert set(grants) == {credential_key_for_mcp(URL)}
+    assert grants[credential_key_for_mcp(URL)] == {SELF, DRIVE}
+    assert READER not in grants[credential_key_for_mcp(URL)]
+    assert POOL not in grants[credential_key_for_mcp(URL)]
+
+
+def test_repair_grants_a_dead_owner_grant_on_purpose(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """cloudflare/minerva-qa: the owner's grant needs a re-login, not silence.
+
+    Withholding the share would leave the holder with no diagnosis at all; with
+    it, the borrow answers ``interactive_required`` and the status says "sign in
+    again on <owner>" — the one remedy that can work.
+    """
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    _write_config(
+        root,
+        {"cloudflare": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
+    )
+    network_store.save(_record(), root)
+    _seed_oauth_grant(root, dead=True)
+
+    assert net_cli._cmd_mcp_credentials(  # noqa: SLF001
+        Namespace(json=True, adopt=False, repair=True), root
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert _mcp_grants(payload)[credential_key_for_mcp(URL)] == {SELF, DRIVE}
+
+
+def _seed_peer_shares(root: Path, keys: list[str], *, owner_name: str = "macbook") -> None:
+    """The peer OWNS these keys and this device holds a share of each."""
+    with placement_mod.mutate(NETWORK, root=root, self_device=DRIVE) as document:
+        for key in keys:
+            document.declare(
+                key,
+                owner_device=DRIVE,
+                owner_device_name=owner_name,
+                provider="mcp-oauth",
+                kind="store-secret",
+                by=DRIVE,
+            )
+            document.grant(key, SELF, by=DRIVE)
+
+
+def test_a_member_row_renders_the_status_refs_not_an_empty_list(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Real-node QA: a member with two refs set showed ``refs=[]``.
+
+    The row must render the STATUS pass's reference list (which reads the same
+    user-scope config), carry the per-ref ``set`` flags, and never emit the
+    owner-side "no eligible member holds this server yet" note — this device is
+    holding a share, not looking for someone to grant one to.
+    """
+    _write_config(
+        root,
+        {
+            "notes": {
+                "type": "stdio",
+                "command": "/bin/echo",
+                "env": {
+                    "NOTES_TOKEN": "${NOTES_TOKEN}",
+                    "NOTES_PROJECT": "${NOTES_PROJECT}",
+                },
+            }
+        },
+    )
+    from local_operator.secrets import access
+
+    store = access.open_store(root, create=True)
+    store.set("NOTES_TOKEN", b"token-value")
+    store.set("NOTES_PROJECT", b"project-value")
+    network_store.save(_record(), root)
+    _seed_peer_shares(
+        root,
+        ["secret:NOTES_TOKEN", "secret:NOTES_PROJECT"],
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0
+    row = payload["servers"][0]
+    assert sorted(row["refs"]) == ["NOTES_PROJECT", "NOTES_TOKEN"]
+    assert sorted(row["ref_states"], key=lambda item: item["id"]) == [
+        {"id": "NOTES_PROJECT", "set": True},
+        {"id": "NOTES_TOKEN", "set": True},
+    ]
+    assert row["state"] == "synced", row
+    assert row["note"] == ""
+    assert row.get("member") is not None
+
+
+def test_a_member_row_names_the_owner_when_the_borrow_is_expired(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """cloudflare/minerva-qa: "sign in again on <owner>", not "synced"."""
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    _write_config(
+        root,
+        {"cloudflare": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
+    )
+    network_store.save(_record(), root)
+    mcp_state.record(
+        NETWORK,
+        credential_key_for_mcp(URL),
+        state="expired",
+        code="interactive_required",
+        owner_device=DRIVE,
+        owner_name="macbook",
+        root=root,
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["state"] == "expired", row
+    assert "macbook" in row["reason"], row["reason"]
+    assert row["note"] == ""

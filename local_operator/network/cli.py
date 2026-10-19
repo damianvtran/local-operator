@@ -9257,7 +9257,56 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
         names_by_server[name] = [
             str(ref.get("id")) for ref in server.get("refs") or [] if isinstance(ref, Mapping)
         ]
+    # THE OAUTH KEYS (real-node QA): a device approved before a login has no
+    # ``mcp:<url>`` row, so it cannot borrow even though the owner's grant is
+    # healthy. ``--repair`` grants the brokered key alongside the references, to
+    # the same eligible population. A DEAD owner grant is still granted on
+    # purpose: the holder's borrow returns ``interactive_required`` and the
+    # status renders "sign in again on <owner>", which is the honest remedy —
+    # refusing to share would leave the holder with no diagnosis at all.
+    oauth_keys: dict[str, str] = {}
+    try:
+        from local_operator.mcp.auth import McpTokenStorage, server_has_stored_grant
+        from local_operator.network.credentials.types import credential_key_for_mcp
+        from local_operator.providers.auth_store import AuthStore
 
+        database = root / "auth.db"
+        auth_store = AuthStore(db_path=database, config_dir=root) if database.exists() else None
+        for server in servers:
+            name = str(server.get("name") or "")
+            url = str(server.get("url") or "")
+            if not name or not url or shapes.get(name) != "oauth":
+                continue
+            if auth_store is None:
+                continue
+            # HEALTHY OR DEAD, NOT "USABLE". A tombstoned grant is still a grant
+            # this owner holds and can be asked to re-login for: the holder's
+            # borrow then answers ``interactive_required`` and the status says
+            # "sign in again on <owner>", which is the remedy. The usable test
+            # (``server_has_stored_grant``) would silently withhold the share and
+            # leave the holder with no diagnosis. A registration-only or emptied
+            # row is neither, so it still produces no share.
+            if server_has_stored_grant(url, auth_store) or McpTokenStorage(
+                url, auth_store
+            ).grant_is_dead():
+                oauth_keys[name] = credential_key_for_mcp(url)
+    except Exception:  # noqa: BLE001 — no grant check means no oauth keys this run
+        oauth_keys = {}
+
+    all_keys_by_server: dict[str, list[str]] = {
+        name: [credential_key_for_secret(ref) for ref in ref_names]
+        + ([oauth_keys[name]] if name in oauth_keys else [])
+        for name, ref_names in names_by_server.items()
+    }
+    # WHICH SERVERS THIS DEVICE OWNS AT LEAST ONE KEY OF. That — not "has a local
+    # copy" — is what separates an owner row from a member row: a member holds
+    # copies of a peer's keys and must still be described by the status pass.
+    owned_here: set[str] = set()
+    # Keys whose placement row names a PEER as owner: the presence of at least
+    # one of these is what makes the row a MEMBER row. Without it, "owns nothing"
+    # is also true of an owner that has not signed in yet, and that row must keep
+    # the owner-side note.
+    peer_shared_here: set[str] = set()
     for record in sorted(records, key=lambda item: item.network_id):
         self_device = str(getattr(identity, "device_id", "") or record.self_device_id or "")
         if not self_device:
@@ -9267,12 +9316,24 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
         with placement_mod.mutate(
             record.network_id, root=root, self_device=self_device
         ) as document:
+            for name, keys_here in all_keys_by_server.items():
+                for key in keys_here:
+                    entry_here = document.entry(key)
+                    if entry_here is None:
+                        continue
+                    if str(entry_here.owner_device) == self_device:
+                        owned_here.add(name)
+                    else:
+                        peer_shared_here.add(name)
             for server in servers:
                 name = str(server.get("name") or "")
                 ref_names = names_by_server.get(name) or []
-                if not name or not ref_names:
+                oauth_key = oauth_keys.get(name, "")
+                if not name or not (ref_names or oauth_key):
                     continue
                 keys = [credential_key_for_secret(ref_name) for ref_name in ref_names]
+                if oauth_key:
+                    keys.append(oauth_key)
                 allowed: list[str] = []
                 for key in keys:
                     if state.mark_for(key) == sync_mod.MARK_LOCAL_ONLY:
@@ -9322,11 +9383,33 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             if server_name == name
         ]
         status = states.get(name) or {}
+        # A MEMBER ROW IS ONE THIS DEVICE OWNS NOTHING OF. Its answer comes from
+        # the credential-status pass (which refs resolve, whose sign-in it
+        # borrows, why it is down); the owner-side notes below describe SHARES
+        # and would say "no eligible member holds this server yet" about a server
+        # this device in fact holds a share of.
+        ref_names = names_by_server.get(name) or []
+        # Not owned here is necessary but not sufficient: an OWNER row for a
+        # server it has no grant for yet reads ``needs_operator_login``, and
+        # turning that into a member row would suppress the owner-side note that
+        # explains it. A member row is one the status attributes to a PEER.
+        member_row = name not in owned_here and (
+            name in peer_shared_here or bool(str(status.get("owner") or ""))
+        )
+        status_refs = [item for item in status.get("refs") or [] if isinstance(item, Mapping)]
         row: dict[str, Any] = {
             "server": name,
             "transport": str(server.get("transport") or ""),
             "shape": shape,
-            "refs": names_by_server.get(name) or [],
+            # On a member, the STATUS read is the authority for which references
+            # the server declares (it reads the same user-scope config); the
+            # readiness fact can legitimately be empty for a server that arrived
+            # through the definitions mirror mid-run.
+            "refs": (
+                [str(item.get("id") or "") for item in status_refs]
+                if member_row and status_refs
+                else ref_names
+            ),
             "grants": key_rows,
             "skipped": _dedupe_skip_rows(
                 [row for row in skipped_rows if row.get("server") == name]
@@ -9335,9 +9418,15 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             "state": str(status.get("state") or "unknown"),
             "reason": str(status.get("reason") or ""),
         }
+        if member_row:
+            # The machine surface gets the presence flags too: "set" is the fact
+            # the operator needs and the names alone cannot carry it.
+            row["ref_states"] = [dict(item) for item in status_refs]
         if name in member:
             row["member"] = member[name]
-        if shape == "oauth" and not key_rows and not row["skipped"]:
+        if member_row:
+            row["note"] = ""
+        elif shape == "oauth" and not key_rows and not row["skipped"]:
             # The note describes the mcp:<url> path only. An OAuth-shaped server
             # that ALSO declares env/header refs received real copies — or had
             # them refused — and saying "no copy" over a granted/skipped row would
@@ -9567,7 +9656,14 @@ def _member_repair_receipt(
                         "code": "" if ok else str(detail.get("code") or "refused"),
                     }
                     if ok:
-                        mcp_state.clear(network_id, oauth_key, root=root)
+                        mcp_state.record(
+                            network_id,
+                            oauth_key,
+                            state="synced",
+                            owner_device=str(getattr(_entry, "owner_device", "") or ""),
+                            owner_name=str(getattr(_entry, "owner_device_name", "") or ""),
+                            root=root,
+                        )
         out[name] = receipt
     return out
 
