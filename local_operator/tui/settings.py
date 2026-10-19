@@ -224,6 +224,9 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # app's settings read/write path all know the key. Default OFF because the
     # operator found the rail heavy; it ships opt-in.
     "display.turn_answer_rail": False,
+    # Desktop-only transcript timestamps (opt-in); the TUI reads neither key.
+    "display.message_timestamps": False,
+    "display.message_timestamp_style": "absolute",
     # --- the composer widget-visibility family (operator request, 2026-09-27) ---
     #
     # One BOOL per composable piece of the composer, all default True because

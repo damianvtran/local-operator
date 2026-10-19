@@ -2688,6 +2688,44 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.display_turn_answer_rail_choice_false_description()),
         ),
     ),
+    # Opt-in desktop transcript timestamps. Default OFF so "unset" is the
+    # transcript as it renders today; the TUI has no per-message timestamp.
+    Setting(
+        key="display.message_timestamps",
+        path=("display.message_timestamps",),
+        section="appearance",
+        label=_t(_ws.display_message_timestamps_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_ws.display_message_timestamps_help()),
+        choices=_bool_choices(
+            _t(_ws.display_message_timestamps_choice_true_description()),
+            _t(_ws.display_message_timestamps_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="display.message_timestamp_style",
+        path=("display.message_timestamp_style",),
+        section="appearance",
+        label=_t(_ws.display_message_timestamp_style_label()),
+        kind=Kind.ENUM,
+        default="absolute",
+        help=_t(_ws.display_message_timestamp_style_help()),
+        choices=(
+            Choice(
+                "absolute",
+                _t(_ws.display_message_timestamp_style_choice_absolute_label()),
+                _t(_ws.display_message_timestamp_style_choice_absolute_description()),
+            ),
+            Choice(
+                "relative",
+                _t(_ws.display_message_timestamp_style_choice_relative_label()),
+                _t(_ws.display_message_timestamp_style_choice_relative_description()),
+            ),
+        ),
+        # Inert while timestamps are off, same mechanism as the notification rows.
+        gated_by="display.message_timestamps",
+    ),
     # -- the composer widget-visibility family (operator request, 2026-09-27) --
     #
     # One BOOL per composable piece of the composer: the status band and the

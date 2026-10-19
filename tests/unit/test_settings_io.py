@@ -641,6 +641,12 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.turn_answer_rail": (
         "read only by the desktop app; the TUI has no answer mark, so no code here consumes it"
     ),
+    "display.message_timestamps": (
+        "read only by the desktop app; the TUI has no per-message timestamp"
+    ),
+    "display.message_timestamp_style": (
+        "read only by the desktop app; the TUI has no per-message timestamp"
+    ),
     "display.composer.band": "tui/settings.py derives its defaults from this registry",
     "display.composer.chevron": "tui/settings.py derives its defaults from this registry",
     "display.composer.model": "tui/settings.py derives its defaults from this registry",
@@ -808,6 +814,8 @@ def test_display_keys_are_flat_dotted() -> None:
         "display.dock",
         "display.hide_cross_session",
         "display.turn_answer_rail",
+        "display.message_timestamps",
+        "display.message_timestamp_style",
     }
 
 
@@ -3223,3 +3231,42 @@ def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
         settings_io.write_setting(manager, setting, "bogus")
     # The rejected write did not land.
     assert settings_io.read_setting(manager, setting) == "off"
+
+
+def test_the_message_timestamp_flags_default_and_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt-in desktop timestamps: OFF + absolute by default, written flat, read back."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_get, settings_reload
+
+    settings_reload()
+    manager = ConfigManager(tmp_path)
+    flag = settings_io.BY_KEY["display.message_timestamps"]
+    style = settings_io.BY_KEY["display.message_timestamp_style"]
+    assert flag.default is False and flag.kind is Kind.BOOL
+    assert style.default == "absolute" and style.kind is Kind.ENUM
+    assert [c.value for c in style.choices] == ["absolute", "relative"]
+    assert settings_get("display.message_timestamps") is False
+    assert settings_get("display.message_timestamp_style") == "absolute"
+
+    settings_io.write_setting(manager, flag, True)
+    settings_io.write_setting(manager, style, "relative")
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["display.message_timestamps"] is True
+    assert stored["display.message_timestamp_style"] == "relative"
+    assert "display" not in stored, "wrote a nested mapping nothing reads"
+    assert settings_get("display.message_timestamps") is True
+    assert settings_get("display.message_timestamp_style") == "relative"
+
+    settings_io.write_setting(manager, flag, False)
+    settings_io.write_setting(manager, style, "absolute")
+    assert settings_get("display.message_timestamps") is False
+    assert settings_get("display.message_timestamp_style") == "absolute"
+
+
+def test_the_timestamp_style_is_gated_by_the_timestamps_flag() -> None:
+    assert settings_io.BY_KEY["display.message_timestamp_style"].gated_by == (
+        "display.message_timestamps"
+    )
+    assert settings_io.BY_KEY["display.message_timestamps"].gated_by is None

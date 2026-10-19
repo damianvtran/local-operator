@@ -540,6 +540,16 @@ export type MessageParams = {
   "wire.settings.display_images.choice.true.description": undefined;
   "wire.settings.display_images.help": undefined;
   "wire.settings.display_images.label": undefined;
+  "wire.settings.display_message_timestamp_style.choice.absolute.description": undefined;
+  "wire.settings.display_message_timestamp_style.choice.absolute.label": undefined;
+  "wire.settings.display_message_timestamp_style.choice.relative.description": undefined;
+  "wire.settings.display_message_timestamp_style.choice.relative.label": undefined;
+  "wire.settings.display_message_timestamp_style.help": undefined;
+  "wire.settings.display_message_timestamp_style.label": undefined;
+  "wire.settings.display_message_timestamps.choice.false.description": undefined;
+  "wire.settings.display_message_timestamps.choice.true.description": undefined;
+  "wire.settings.display_message_timestamps.help": undefined;
+  "wire.settings.display_message_timestamps.label": undefined;
   "wire.settings.display_narration.choice.false.description": undefined;
   "wire.settings.display_narration.choice.true.description": undefined;
   "wire.settings.display_narration.help": undefined;

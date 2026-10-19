@@ -834,6 +834,46 @@ def display_images_label() -> Msg:
     return Msg("wire.settings.display_images.label", {})
 
 
+def display_message_timestamp_style_choice_absolute_description() -> Msg:
+    return Msg("wire.settings.display_message_timestamp_style.choice.absolute.description", {})
+
+
+def display_message_timestamp_style_choice_absolute_label() -> Msg:
+    return Msg("wire.settings.display_message_timestamp_style.choice.absolute.label", {})
+
+
+def display_message_timestamp_style_choice_relative_description() -> Msg:
+    return Msg("wire.settings.display_message_timestamp_style.choice.relative.description", {})
+
+
+def display_message_timestamp_style_choice_relative_label() -> Msg:
+    return Msg("wire.settings.display_message_timestamp_style.choice.relative.label", {})
+
+
+def display_message_timestamp_style_help() -> Msg:
+    return Msg("wire.settings.display_message_timestamp_style.help", {})
+
+
+def display_message_timestamp_style_label() -> Msg:
+    return Msg("wire.settings.display_message_timestamp_style.label", {})
+
+
+def display_message_timestamps_choice_false_description() -> Msg:
+    return Msg("wire.settings.display_message_timestamps.choice.false.description", {})
+
+
+def display_message_timestamps_choice_true_description() -> Msg:
+    return Msg("wire.settings.display_message_timestamps.choice.true.description", {})
+
+
+def display_message_timestamps_help() -> Msg:
+    return Msg("wire.settings.display_message_timestamps.help", {})
+
+
+def display_message_timestamps_label() -> Msg:
+    return Msg("wire.settings.display_message_timestamps.label", {})
+
+
 def display_narration_choice_false_description() -> Msg:
     return Msg("wire.settings.display_narration.choice.false.description", {})
 
