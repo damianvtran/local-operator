@@ -127,8 +127,10 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # `wire.slash`: their copy lives in English-only namespaces so the audited
     # wire.slash hash stays valid, and a missing or extra command raises a
     # KeyError here either way rather than passing silently.
-    # 52 pre-slice rows + the four TUI-owned pages (memory/import/review/
-    # schedule) + the two child-namespace commands (library/librarian).
+    # 52 `PREVIOUS_ENGLISH` rows (the pre-slice set plus the later rows folded
+    # in as they registered: language, highlights, hub) + the four TUI-owned
+    # pages (memory/import/review/schedule) + the two child-namespace commands
+    # (library/librarian).
     assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 4 + 2 == 58
     for command in SLASH_COMMANDS:
         if command.name in (
