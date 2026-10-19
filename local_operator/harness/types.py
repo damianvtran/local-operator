@@ -2720,6 +2720,9 @@ class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
     #: field here needs no ``PROTOCOL_VERSION`` bump.
     cut_off: str = ""
     cut_off_cause: str = ""
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):

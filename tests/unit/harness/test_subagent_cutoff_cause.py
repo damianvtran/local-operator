@@ -340,6 +340,11 @@ async def test_a_child_cut_off_by_its_own_loop_settles_named_and_resumable(
         tools=[],
         transcript=transcript,
         system_blocks_provider=lambda: ["stable"],
+        # Isolate the child's working directory: the new WIP checkpointer commits
+        # whatever dirty tree the child inherits, so a cwd left at the developer's
+        # checkout would snapshot (and, on a failed child, retain a ref for)
+        # unrelated work in the operator's repository.
+        cwd=str(tmp_path),
     )
 
     polls = {"n": 0}
@@ -407,6 +412,9 @@ async def test_a_cleanly_finishing_child_carries_no_cause_end_to_end(tmp_path, m
         tools=[],
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
+        # Same isolation as the cut-off case above: never run a child in the
+        # developer's checkout (see the WIP checkpointer's inheritance rule).
+        cwd=str(tmp_path),
     )
     events: list[AgentEvent] = []
     parent.subscribe(events.append)

@@ -641,7 +641,18 @@ def build_config(
         prepare_timeout=120.0,
         reset_timeout=900.0,
         step_timeout=180.0,
-        score_timeout=300.0,
+        # Scoring is the ONE call whose work scales with the episode: it grades
+        # everything the run did. A measured 453-step OSWorld episode spent its
+        # whole 300 s score budget (the fatal named request 478, which is the
+        # parent-wire RPC id, NOT a judge-request count -- the adapter scores
+        # in its own process), so the old 300 s value cut a COMPLETED 2.4 h
+        # episode off at scoring and discarded it (task_005, 2026-10-19,
+        # ``steps: 0``). A 500-step episode is 1.10x that work; 1800 s is ~5.4x
+        # the projected 330 s. The only other time bound, ``--max-wall-s``
+        # (default 18000 s), is a guest-side budget resource and owner lease,
+        # not a deadline on this call. Do not lower this without re-measuring
+        # a long episode's score duration.
+        score_timeout=1800.0,
         cleanup_timeout=120.0,
         handshake_timeout=60.0,
         max_cycle_cost_micros=max_cycle_usd_micros,

@@ -571,18 +571,20 @@ class AdapterSupervisor:
         *,
         timeout: float,
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> AdapterResult:
         if self.rpc is None:
             raise SupervisionError("adapter RPC is unavailable")
+        # Absent values are DROPPED rather than sent as zero/None: the overhead
+        # rate's zero default has to leave an ordinary call byte-identical, and
+        # a caller that has no context for the timeout sentence should not put
+        # a keyword on the wire for it either.
+        extras: dict[str, Any] = {}
         if execution_overhead_seconds_per_action:
-            payload = await self.rpc.call(
-                method,
-                params,
-                timeout=timeout,
-                execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
-            )
-        else:
-            payload = await self.rpc.call(method, params, timeout=timeout)
+            extras["execution_overhead_seconds_per_action"] = execution_overhead_seconds_per_action
+        if timeout_context is not None:
+            extras["timeout_context"] = timeout_context
+        payload = await self.rpc.call(method, params, timeout=timeout, **extras)
         return result_type.model_validate(payload, strict=True)
 
     async def handshake(self, *, timeout: float = 10.0) -> Handshake:
@@ -925,21 +927,24 @@ class VerifiedAdapterSession:
         timeout: float,
         validate: Callable[[AdapterResult], None],
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> AdapterResult:
         self._ensure_usable()
+        # Built exactly as ``AdapterSupervisor._call_raw`` builds its own kwargs:
+        # a None context is DROPPED, not sent. The in-process doubles that
+        # replace the supervisor mirror that method's signature, and an
+        # unconditional keyword turned every ``execute``/``observe`` into a
+        # TypeError in them (the whole adapters/osworld suite went red when
+        # the score context was introduced).
+        extras: dict[str, Any] = {}
+        if execution_overhead_seconds_per_action:
+            extras["execution_overhead_seconds_per_action"] = execution_overhead_seconds_per_action
+        if timeout_context is not None:
+            extras["timeout_context"] = timeout_context
         try:
-            if execution_overhead_seconds_per_action:
-                result = await self._supervisor._call_raw(
-                    method,
-                    params,
-                    result_type,
-                    timeout=timeout,
-                    execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
-                )
-            else:
-                result = await self._supervisor._call_raw(
-                    method, params, result_type, timeout=timeout
-                )
+            result = await self._supervisor._call_raw(
+                method, params, result_type, timeout=timeout, **extras
+            )
             validate(result)
             return result
         except BaseException as error:
@@ -1218,7 +1223,15 @@ class VerifiedAdapterSession:
         self.verifier.finish_ask(params, result, answer_owner=self._answer_owner)
         return result
 
-    async def score(self, params: ScoreParams, *, timeout: float) -> ScoreResult:
+    async def score(
+        self, params: ScoreParams, *, timeout: float, timeout_context: str | None = None
+    ) -> ScoreResult:
+        """Score the state reached, under ``timeout``.
+
+        ``timeout_context`` reaches only the timeout sentence; the runner
+        passes the episode's step count so a reader of the fatal can tell a
+        long legitimate episode from a wedged scorer without the run root.
+        """
         if params.episode_id != self.verifier.episode_id:
             raise SupervisionError("score belongs to another episode")
         self._ensure_usable()
@@ -1227,6 +1240,7 @@ class VerifiedAdapterSession:
             params,
             ScoreResult,
             timeout=timeout,
+            timeout_context=timeout_context,
             validate=lambda value: (
                 self.verifier.accept_score(params, value)
                 if isinstance(value, ScoreResult)

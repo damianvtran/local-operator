@@ -137,6 +137,15 @@ class Recommendation:
     resources: tuple[Candidate, ...] = ()
     block: str = ""
     vendor: str | None = None
+    #: The preferred leg this decision FALLED BACK FROM, and why. Empty on a
+    #: first-leg decision and on every skipped run — a skipped Recommendation
+    #: carries no routing claim at all, so ``recommend.py``'s degradation stays
+    #: byte-identical. Populated from
+    #: :class:`~local_operator.classification.cascade.VendorResolution` so a
+    #: downstream cost line can say "openrouter answered because radient was not
+    #: synced here" instead of presenting the fallback as the choice.
+    fallback_from: str = ""
+    fallback_reason: str = ""
     cost_usd: float | None = None
     #: What the vendor reported for this call, in its own units. Carried on the
     #: outcome rather than kept inside the vendor layer because the harness's cost

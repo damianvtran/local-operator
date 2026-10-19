@@ -2199,6 +2199,28 @@ class OnboardRun:
             "network": network_name,
         }
 
+        # -- adopt literal credentials BEFORE the pushes and the offer ---------
+        # A literal env/header value is invisible to ``public_secret_refs``, so the
+        # needs-list never declares it and no placement grant/copy follows. Turn
+        # each into a store row plus an exact ``${NAME}`` reference first; then the
+        # ordinary MCP push and ``build_items`` see the names. NEVER fatal — the
+        # admit-then-grant rule this step already states: the failure is recorded
+        # (class name only, never a value) and the transaction proceeds.
+        mcp_credentials: dict[str, Any] = {}
+        try:
+            from local_operator.mcp.credential_sources import adopt_literal_credentials
+
+            mcp_credentials = adopt_literal_credentials(config_dir())
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal
+            mcp_credentials = {
+                "adopted": [],
+                "reused": [],
+                "conflicts": [],
+                "skipped": [],
+                "error": exc.__class__.__name__,
+            }
+        data["mcp_credentials"] = mcp_credentials
+
         # -- one forced push each: definitions, then MCP server rows -----------
         def _push(*tail: str) -> dict[str, Any]:
             """One push through this device's own CLI; recorded, never fatal."""

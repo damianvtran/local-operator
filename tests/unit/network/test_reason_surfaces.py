@@ -130,6 +130,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),
+    # ``lop network install`` carries the same shape: the install receipt's machine
+    # reason is the payload's ``code``, never a rendered line; ``message`` is the
+    # human half.
+    ("local_operator/network/cli.py", "_cmd_install", "reason"): (1, "a payload key, not a line"),
     # ``lop network start`` on Linux when a missing unit had to be installed first:
     # the value read is the INSTALL receipt's own machine reason (``no_supervisor``
     # / ``isolated_home`` / ``enable_failed`` / ``not_serving``) and it rides the
@@ -247,6 +251,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/cli.py", "_cmd_mcp", "reason"): (
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
+    ),
+    # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
+    # from ``placement.grant_key_set`` and this handler's ``local-only`` check in
+    # process (``no_local_credential``, ``local_only``, ...); ``--json`` carries
+    # them as machine tokens and the human line only counts them. No peer prose
+    # can reach this read.
+    ("local_operator/network/cli.py", "_cmd_mcp_credentials", "reason"): (
+        1,
+        "this device's own grant-skip code, carried in --json as a machine token",
+    ),
+    # ``_dedupe_skip_rows`` reads the same local code only to form the dedupe
+    # identity: compared, never rendered.
+    ("local_operator/network/cli.py", "_dedupe_skip_rows", "reason"): (
+        1,
+        "the same local skip code, compared for deduplication — never rendered",
     ),
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
         1,

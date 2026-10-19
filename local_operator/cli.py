@@ -10787,7 +10787,13 @@ def teams_link_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     # every sync is the two-way conservative merge (A2.3) and needs the caller's
     # acknowledgement. Recording B := L instead would read a later hub DELETION as a
     # plain remote removal and delete text the user wrote.
-    prov.write_baseline(
+    #
+    # ``lop teams link`` is the operator naming the origin THEMSELVES: the row is
+    # linked into an organization, so the link carries that organization's scope
+    # and the CONFIGURED base -- the same identity the resolve dialog would mint
+    # for the same row (no client is involved here, so the configuration names
+    # the destination).
+    prov.attach_origin(
         team_registry.config_dir,
         prov.make_record(
             "team",
@@ -10796,6 +10802,11 @@ def teams_link_command(args: argparse.Namespace, team_registry: Any, base_dir: P
             tenant,
             local,
             "adopt" if identical else prov.UNKNOWN_BASELINE,
+        ),
+        _link_origin(
+            prov.canonical_hub_source(ConfigManager(base_dir)) or "",
+            "org",
+            tenant,
         ),
     )
     print(f"\n\033[1;32mLinked team '{team.name}' to hub team {args.hub_team_id}.\033[0m")
@@ -12087,7 +12098,10 @@ def _confirm_plan(
 
 
 def _seed_after_publish(
-    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None", result: Any
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None",
+    result: Any,
+    target: "_PublishTarget | None" = None,
+    client: Any = None,
 ) -> None:
     """Seed the outbound receipt after an ACCEPTED CLI publish (parent ruling (A)b).
 
@@ -12095,13 +12109,21 @@ def _seed_after_publish(
     ETag; A is the local input that was published. BEST-EFFORT AND SILENT on
     failure: the publication itself succeeded, and the link honestly stays
     ``no-receipt`` (the inventory says so) until the next seed point.
+
+    The ORIGIN the acceptance proved is seeded with it: the base and the scope
+    the user CHOSE (never the accepted document's ``tenant_id``, which a
+    publicly published row carries as its publisher's). A published row is then
+    a confirmed link rather than one the inventory reports as unresolved.
     """
 
     if not seed or not isinstance(result, Mapping):
         return
     config_dir, kind, local_id, local_fields = seed
     try:
-        from local_operator.hub_sync.service import seed_receipt_after_publish
+        from local_operator.hub_sync.service import (
+            published_hub_id,
+            seed_receipt_after_publish,
+        )
 
         seed_receipt_after_publish(
             config_dir,
@@ -12110,6 +12132,16 @@ def _seed_after_publish(
             accepted=result.get("accepted_document") or {},
             local_fields=dict(local_fields),
             revision=str(result.get("revision") or "") or None,
+            origin=(
+                _link_origin(
+                    _serving_base(client, config_dir),
+                    target.visibility,
+                    target.tenant_id if target.visibility == "org" else None,
+                )
+                if target is not None
+                else None
+            ),
+            hub_id=published_hub_id(kind, result),
         )
     except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
         return
@@ -12207,7 +12239,7 @@ def _publish_against_old_server(
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
         return 1, None
-    _seed_after_publish(seed, result)
+    _seed_after_publish(seed, result, target, client)
     return 0, result
 
 
@@ -12293,7 +12325,7 @@ def _publish_with_preview(
     while True:
         try:
             result = _commit_publication(client, kind, target, plan)
-            _seed_after_publish(seed, result)
+            _seed_after_publish(seed, result, target, client)
             return 0, result
         except KeyboardInterrupt:
             # The commit was in flight, so unlike the preview the hub may still
@@ -12938,8 +12970,34 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         outcome,
         document,
         source=f"from organization '{tenant}'",
-        tenant_id=owner or tenant,
+        # The ORGANIZATION arm: the row was served as the signed-in member of
+        # this organization, so the link names that organization.
+        origin=_link_origin(_serving_base(client, base_dir), "org", owner or tenant),
     )
+
+
+def _serving_base(client: Any, base_dir: Path) -> str:
+    """The base a hub client addressed, or the CONFIGURED one when it does not say."""
+
+    from local_operator.hub_sync import provenance as prov
+
+    return prov.serving_base(client, base_dir) or ""
+
+
+def _link_origin(base: str, visibility: str, tenant_id: str | None = None) -> "Any":
+    """The origin a hub operation was served under, or None when it cannot be stated.
+
+    The base is the one the client ADDRESSED. In the canonical case that is the
+    CONFIGURED hub base -- every client here is built from it -- so a link
+    minted by a pull gets the same ``link_id`` the source-resolution dialog
+    would mint for the same row. A non-canonical base names the hub that really
+    answered, which is the base the check reports and the integration and push
+    gates compare the link's source against.
+    """
+
+    from local_operator.hub_sync.identity import link_origin
+
+    return link_origin(base, visibility, tenant_id)
 
 
 def _teams_pull_public(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
@@ -12985,7 +13043,12 @@ def _teams_pull_public(args: argparse.Namespace, team_registry: Any, base_dir: P
         outcome,
         document,
         source="from the public hub",
-        tenant_id=str(document.get("tenant_id") or ""),
+        # The PUBLIC arm: the row was served anonymously by the public
+        # catalogue, so its scope is public and it names NO organization. The
+        # document's own ``tenant_id`` is the PUBLISHER's (a public row carries
+        # it, measured on the live hub), and recording it is what used to put a
+        # public row behind an organization identity.
+        origin=_link_origin(_serving_base(client, base_dir), "public"),
     )
 
 
@@ -12995,14 +13058,15 @@ def _finish_team_pull(
     document: Mapping[str, Any],
     *,
     source: str,
-    tenant_id: str,
+    origin: "Any",
 ) -> int:
     """The shared tail of both pull arms: link, report, name what was stored.
 
     Extracted so the two arms cannot drift on the post-import contract: the
     success sentence, the link warning, the rename notes and the model
     suggestion notice are one implementation; the arms differ only in
-    ``source`` ("from organization 'x'" | "from the public hub").
+    ``source`` ("from organization 'x'" | "from the public hub") and in the
+    ``origin`` each arm was served under.
     """
     team = outcome.team
     # Link the row to its hub document and record what was pulled, so `teams sync`
@@ -13014,7 +13078,8 @@ def _finish_team_pull(
         team_registry.config_dir,
         team_registry.get_team(team.id),
         document,
-        tenant_id=tenant_id,
+        tenant_id=(origin.tenant_id if origin is not None else "") or "",
+        origin=origin,
     )
     print(f"\n\033[1;32mSuccessfully pulled team '{team.name}' (ID: {team.id}) {source}\033[0m")
     if linked is None:

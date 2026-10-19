@@ -2512,6 +2512,7 @@ async def test_real_aws_answer_never_publishes_coerced_values(
                 *,
                 timeout: float,
                 execution_overhead_seconds_per_action: float = 0.0,
+                timeout_context: str | None = None,
             ) -> Any:
                 if method == "ask_user_exchange":
                     self.calls.append(method)
@@ -2522,6 +2523,7 @@ async def test_real_aws_answer_never_publishes_coerced_values(
                     result_type,
                     timeout=timeout,
                     execution_overhead_seconds_per_action=(execution_overhead_seconds_per_action),
+                    timeout_context=timeout_context,
                 )
 
         async def rescue(descriptor: Any, **kwargs: Any) -> Any:

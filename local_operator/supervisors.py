@@ -472,6 +472,37 @@ def is_bus_failure(text: str) -> bool:
     return any(marker in (text or "") for marker in _NO_BUS_MARKERS)
 
 
+def linger_enabled() -> bool:
+    """Read durability independently of whether a user service answers now.
+
+    An enabled unit without linger only follows the login session; a successful
+    start is not evidence it will survive logout or return after reboot.
+    """
+    binary = shutil.which("loginctl")
+    if binary is None:
+        return False
+    user = os.environ.get("USER")
+    if not user:
+        # `getuid` is POSIX-only. This function is reached from the Linux arm,
+        # but the cross-platform probe reads every module on Windows and a bare
+        # attribute access here is a real import-time hazard if a future caller
+        # widens the path. An absent uid is "cannot ask", not a crash.
+        getuid = getattr(os, "getuid", None)
+        user = str(getuid()) if getuid is not None else ""
+    if not user:
+        return False
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [binary, "show-user", user, "-p", "Linger"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "Linger=yes" in result.stdout.splitlines()
+
+
 def enable_linger() -> bool:
     """Best-effort ``loginctl enable-linger``; never fatal to an install.
 
