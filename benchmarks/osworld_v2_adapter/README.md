@@ -21,6 +21,68 @@ plus `local_operator.computer_input` and `local_operator.helpers` — by design:
 session construction belongs to the driver process, never to the isolated
 adapter worker.
 
+## Guest-local action-server supervision
+
+During allocation, after disk preparation and **before task setup**, the adapter
+uses the existing `/execute` endpoint to configure the action server's existing
+private systemd service. Installation does not restart or signal a healthy
+server. Discovery follows only the command's `/proc` ancestry and cgroup;
+MainPID must be the server itself, stderr must already go to the journal, and
+services with desktop-affecting start/stop hooks are refused. The effective
+systemd configuration is verified after reload and on idempotent re-entry:
+oneshot/unloaded units, an overridden restart policy or capture hook, nonempty
+`RestartPreventExitStatus` exclusions, `ExitType=cgroup`, and service sandboxes
+that could prevent diagnostic writes are refused. Existing exit-status exclusions
+are not erased: their intent is unknown. Successful installation requires the
+effective `RestartPreventExitStatus` to be empty and `ExitType` to be `main`. Shell/session-scope
+launches and unsupported guests remain unchanged. No SSH, SSM or new credentials
+are used; privilege escalation is the existing guest-preparation ladder.
+
+`guest-supervisor-setup.json` records either `status: supervised` and the unit,
+or **`status: supervision unavailable` with a reason**, once per provider. This
+is an optional capability, never an allocation gate. The real benchmark AMI's
+service layout is an **unverified deployment prerequisite** until that setup
+record is inspected on a live run; cloud-free tests do not establish AMI coverage.
+
+The systemd drop-in sets `Restart=always`, a one-second backoff and a three-start
+per-hour limit (including starts already counted by systemd). Once the limit is
+hit the unit stays failed; the adapter never resets it. `KillMode=process`
+prevents service restarts from killing desktop applications descended from old
+server requests. A fixed root-owned `ExecStopPost` helper retains the previous
+process's `EXIT_CODE`, `EXIT_STATUS` (including signal names), `SERVICE_RESULT`
+and a bounded journal tail in `/var/lib/lop-action-supervisor/<unit>.json`.
+The exit fields are written before querying the journal; a journal failure retains
+them and marks `journal_tail_status: unavailable`. The file is an initialized
+`schema_version: 1` envelope containing `records`, the installation's
+`baseline_nrestarts` / `baseline_active_enter`, and a total `captured_exits` count.
+Reports independently query systemd's `NRestarts` and
+`ActiveEnterTimestampMonotonic` and include them as `systemd_nrestarts` /
+`systemd_active_enter`. A valid empty history proves no restart only when the
+manager's generation still matches that baseline. A counter/history mismatch or
+an activation change without a capture forces a fresh binding and records
+`receipt_unavailable` with `receipt_failure: systemd_generation_disagreement`.
+Thus ENOSPC/EROFS before the helper's first write cannot silently authorize input
+against the old screen. Manual restarts/counter resets that cannot be correlated
+also fail closed; this mechanism never resets systemd's counters. Only four records and 4096 tail characters per record are retained. This helper
+writes harness diagnostics only; it does not touch desktop or task paths.
+
+Before each action and observation the adapter checks for a new restart receipt.
+A failed receipt read is retried once; if still unavailable, remaining input is
+skipped and a fresh observation is required, just as for a restart. Evidence
+marks `receipt_unavailable` and `read_failed`; failed reads never authorize input
+on the old binding. Secret-withheld record payloads are marked `records_withheld`,
+not silently represented as clean empty histories. A recovered action batch is **not replayed**: its remaining input is skipped and
+the adapter returns a newly read observation, establishing a fresh binding before
+more input can be accepted. Ambiguous failed input stays explicitly ambiguous in
+`guest-supervisor-recovery.json`; recovery does not claim it was unapplied.
+Recovery evidence includes the restart ID, exit status and secret-scrubbed stderr
+tail. A bounded recovery wait ends a still-unreachable episode through the usual
+guest-down diagnostics. The last retrieved records are retained; the final
+crash-loop record may exist only on the guest when the sole HTTP transport stays
+down, and the evidence explicitly marks it **not retrieved**, not as a known
+exit cause. A genuinely stopped EC2 instance is still reported as such by the
+existing health probe.
+
 ## Guest-down health evidence
 
 After an execute connection failure whose readiness check also fails, the AWS
