@@ -76,6 +76,21 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
 
 router = APIRouter(tags=["Desktop agent messages"], dependencies=[Depends(require_desktop)])
 
+#: The server mints conversation ids as ``bcv_`` + hex; validating the grammar
+#: BEFORE interpolating an id into an upstream path is the pair lane's rule
+#: (review S-RSA-5) and applies unchanged here.
+_CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
+#: The conversation domain's other two interpolated path/query values. Both are
+#: opaque server-minted strings; this route family only has to prove they
+#: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
+#: rule is a conservative charset rather than a re-implementation of the
+#: server's mint.
+_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
+#: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
+#: because that module rides the httpx boot path this file must not pull at
+#: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
+_ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+
 
 class _Strict(BaseModel):
     """Input bodies are strict: an unknown field is a client bug, not a no-op.
@@ -894,3 +909,486 @@ async def get_message(
     except ReadRefused as exc:
         _raise_read(exc.code)
     return reply(detail_view(detail))
+
+
+# ---------------------------------------------------------------------------
+# Conversations (docs/TEAM-BRIDGE-CONVERSATIONS.md)
+# ---------------------------------------------------------------------------
+#
+# These routes are PASS-THROUGH by design. Membership, the human-only rule,
+# agent consent/joined_seq, the screening fetch/admit split, unread counters and
+# every authorization decision live on the server; duplicating any of them here
+# would create a second, subtly different policy and a second place to get
+# tenant scoping wrong. What this plane adds is the desktop contract: strict
+# bodies, the shared refusal mapping, and the same no-store/no-body-cache rules
+# as the pair lane — an answer is returned to the renderer and never persisted.
+#
+# A body cached here would break team_bridge/store.py's §13.9 rule, so there is
+# deliberately no store call in this section: conversations are read live.
+
+
+class ConversationMemberIn(_Strict):
+    account_id: str = Field(min_length=1, max_length=128)
+    kind: Literal["human", "agent"] = "human"
+    endpoint_id: str | None = Field(default=None, max_length=128)
+    display_label: str = Field(min_length=1, max_length=64)
+
+
+class ConversationCreateIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+    kind: Literal["dm", "group", "channel"]
+    name: str | None = Field(default=None, max_length=128)
+    topic: str | None = Field(default=None, max_length=512)
+    visibility: Literal["private", "tenant"] | None = None
+    agent_capable: bool = False
+    members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
+
+
+class ConversationSendIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+    client_ref: str = Field(min_length=1, max_length=128)
+    body: str = Field(min_length=1)
+    agent_label: str | None = Field(default=None, max_length=64)
+
+
+class ConversationReadIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+    seq: int | None = Field(default=None, ge=0)
+    muted: bool | None = None
+
+    @model_validator(mode="after")
+    def _something_to_do(self) -> "ConversationReadIn":
+        if self.seq is None and self.muted is None:
+            raise ValueError("a read write needs seq, muted, or both")
+        return self
+
+
+class ConversationConsentIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+    decision: Literal["accept", "decline"]
+    consent_version: str = Field(min_length=1, max_length=128)
+
+
+class ConversationAdmitIn(_Strict):
+    tenant_id: str | None = Field(default=None, max_length=128)
+    verdict: Literal["allow", "reject"]
+    body_hash: str = Field(min_length=1, max_length=128)
+
+
+def _conversation_client(config_manager: ConfigManager):
+    """The transport, imported INSIDE the handler (the httpx boot rule)."""
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+
+    return TeamBridgeClient(config_manager.config_dir)
+
+
+def _require_conversation_id(conversation_id: str) -> None:
+    """Refuse a malformed conversation id BEFORE it is interpolated upstream.
+
+    The id comes from the path and the client builds the upstream path from it,
+    so this is the pair lane's review S-RSA-5 rule applied to the new family: a
+    value outside the minted grammar is this route family's 404/400, never a
+    path of the caller's choosing. One helper, so a new route cannot forget it.
+    """
+
+    if _CONVERSATION_ID.fullmatch(conversation_id) is None:
+        _raise_read("invalid_request")
+
+
+def _require_message_id(message_id: str) -> None:
+    """Refuse a message id that could reshape the upstream path. See above."""
+
+    if _MESSAGE_ID.fullmatch(message_id) is None:
+        _raise_read("invalid_request")
+
+
+def _require_account_id(account_id: str) -> None:
+    """Refuse an account id carrying URL syntax. See above."""
+
+    if _ACCOUNT_ID.fullmatch(account_id) is None:
+        _raise_read("invalid_request")
+
+
+async def _conversation_reply(awaitable: Any) -> Any:
+    """Map the transport's two refusal families, exactly like the pair routes."""
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+
+    try:
+        return await awaitable
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+
+
+@router.get("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
+async def list_conversations(
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    before: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the signed-in account's conversations, newest activity first."""
+
+    if set(request.query_params) - {"tenant_id", "limit", "before"}:
+        _raise_read("invalid_request")
+    parsed_limit: int | None = None
+    if limit is not None:
+        try:
+            parsed_limit = int(limit)
+        except ValueError:
+            _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    payload = await _conversation_reply(
+        client.conversations(tenant_id=tenant_id, limit=parsed_limit, before=before)
+    )
+    return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
+async def create_conversation(
+    body: ConversationCreateIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Create (or find, for a dm) a conversation. The payload is the wire shape."""
+
+    client = _conversation_client(config_manager)
+    payload = {
+        key: value
+        for key, value in body.model_dump().items()
+        if value is not None and not (key == "members" and not value)
+    }
+    payload["members"] = [member.model_dump(exclude_none=True) for member in body.members]
+    result = await _conversation_reply(client.create_conversation(payload))
+    return reply(result)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def get_conversation(
+    conversation_id: str,
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One conversation: members, read state and latest seq. No body, ever."""
+    _require_conversation_id(conversation_id)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(client.conversation(conversation_id, tenant_id=tenant_id))
+    )
+
+
+# Archive and unarchive are TWO static paths, deliberately not one
+# ``{action}`` route: a dynamic segment there matched ``/messages`` and made
+# every send a 422 (found by the route test). A closed path is also the guard
+# the pair-lane reader relies on — the id grammar is checked before any I/O.
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/archive",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_archive(
+    conversation_id: str,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Archive (read-only for every member)."""
+    _require_conversation_id(conversation_id)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(client.conversation_lifecycle(conversation_id, "archive"))
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/unarchive",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_unarchive(
+    conversation_id: str,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Unarchive (owner only, server-enforced)."""
+    _require_conversation_id(conversation_id)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(client.conversation_lifecycle(conversation_id, "unarchive"))
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/members",
+    response_model=CRUDResponse[Any],
+)
+async def add_conversation_members(
+    conversation_id: str,
+    members: list[ConversationMemberIn],
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Invite members. Humans are invited; agents stay invited until their owner consents."""
+    _require_conversation_id(conversation_id)
+
+    client = _conversation_client(config_manager)
+    payload = [member.model_dump(exclude_none=True) for member in members]
+    return reply(
+        await _conversation_reply(
+            client.conversation_members(conversation_id, payload, tenant_id=tenant_id)
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/members/{account_id}",
+    response_model=CRUDResponse[Any],
+)
+async def remove_conversation_member(
+    conversation_id: str,
+    account_id: str,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove a human member (owner only; the server owns succession)."""
+    _require_conversation_id(conversation_id)
+    _require_account_id(account_id)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(client.conversation_remove_member(conversation_id, account_id))
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/members/{account_id}/consent",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_consent(
+    conversation_id: str,
+    account_id: str,
+    body: ConversationConsentIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Record an agent owner's participation decision (the agent only then becomes active)."""
+    _require_conversation_id(conversation_id)
+    _require_account_id(account_id)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_consent(
+                conversation_id,
+                account_id,
+                decision=body.decision,
+                consent_version=body.consent_version,
+                tenant_id=body.tenant_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/join",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_join(
+    conversation_id: str,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Accept an invitation, or self-join a tenant-visible channel."""
+    _require_conversation_id(conversation_id)
+
+    client = _conversation_client(config_manager)
+    return reply(await _conversation_reply(client.conversation_join(conversation_id)))
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/leave",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_leave(
+    conversation_id: str,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Leave. Leaving is the leave/re-add boundary: re-entry needs a fresh invite."""
+    _require_conversation_id(conversation_id)
+
+    client = _conversation_client(config_manager)
+    return reply(await _conversation_reply(client.conversation_leave(conversation_id)))
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_history(
+    conversation_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    before_seq: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One history page. Bodies are present only where the server's rule allows them."""
+
+    _require_conversation_id(conversation_id)
+    if set(request.query_params) - {
+        "tenant_id",
+        "limit",
+        "before_seq",
+        "after_seq",
+        "endpoint_id",
+    }:
+        _raise_read("invalid_request")
+    if before_seq and after_seq:
+        _raise_read("invalid_request")
+    parsed_limit: int | None = None
+    if limit is not None:
+        try:
+            parsed_limit = int(limit)
+        except ValueError:
+            _raise_read("invalid_request")
+    # The two cursors are parsed, not interpolated: `int("x")` raises and an
+    # unwrapped raise is a 500 on a caller-controlled value. The server answers
+    # invalid_request for the same shape, so both ends agree on the refusal.
+    parsed_before: int | None = None
+    parsed_after: int | None = None
+    try:
+        parsed_before = int(before_seq) if before_seq else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if (parsed_before is not None and parsed_before < 0) or (
+        parsed_after is not None and parsed_after < 0
+    ):
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_messages(
+                conversation_id,
+                tenant_id=tenant_id,
+                limit=parsed_limit,
+                before_seq=parsed_before,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[Any],
+)
+async def send_conversation_message(
+    conversation_id: str,
+    body: ConversationSendIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Append one message. The body is returned to the renderer and never stored here."""
+    _require_conversation_id(conversation_id)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_send(
+                conversation_id,
+                client_ref=body.client_ref,
+                text=body.body,
+                tenant_id=body.tenant_id,
+                agent_label=body.agent_label,
+            )
+        )
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_message_body(
+    conversation_id: str,
+    message_id: str,
+    tenant_id: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """The agent classification fetch: body + binding hash. Not a context path."""
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_body(
+                conversation_id, message_id, tenant_id=tenant_id, endpoint_id=endpoint_id
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/admit",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_admit(
+    conversation_id: str,
+    message_id: str,
+    body: ConversationAdmitIn,
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Record the harness's screening verdict. A reject is terminal on the server."""
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_admit(
+                conversation_id,
+                message_id,
+                verdict=body.verdict,
+                body_hash=body.body_hash,
+                tenant_id=body.tenant_id,
+                endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_read(
+    conversation_id: str,
+    body: ConversationReadIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Advance the read cursor and/or mute; the answer is the post-state."""
+    _require_conversation_id(conversation_id)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_read(
+                conversation_id, seq=body.seq, muted=body.muted, tenant_id=body.tenant_id
+            )
+        )
+    )
+
+
+@router.get("/v1/desktop/team-bridge/unread", response_model=CRUDResponse[Any])
+async def conversation_unread(
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """The ONE badge read: per-conversation counts plus the unmuted total."""
+
+    client = _conversation_client(config_manager)
+    return reply(await _conversation_reply(client.unread(tenant_id=tenant_id)))
