@@ -377,7 +377,25 @@ class RecordSink:
             )
         try:
             self._frames.fallbacks.clear()
-            document = self._frames.project({"kind": kind, **payload})
+            original = {"kind": kind, **payload}
+            try:
+                document = self._frames.project(original)
+            except (
+                Exception
+            ) as error:  # noqa: BLE001 - projection is never a recording prerequisite
+                # A future projector bug must not recreate whole-line loss.
+                # The encoder, not this optional optimization, decides whether
+                # the original event is serializable.
+                document = original
+                self._frames.fallbacks.append(
+                    {
+                        "path": "$",
+                        "reason": (
+                            "projection failed; original event kept inline: "
+                            f"{type(error).__name__}"
+                        ),
+                    }
+                )
             if self._frames.fallbacks:
                 document["record_image_fallbacks"] = list(self._frames.fallbacks)
             line = json.dumps(document, ensure_ascii=False, default=str).encode("utf-8") + b"\n"

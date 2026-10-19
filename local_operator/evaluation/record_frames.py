@@ -21,6 +21,11 @@ from local_operator.evaluation.evidence.media import validate_media
 from local_operator.evaluation.protocol import ArtifactRef
 from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
 
+# Projection must stay comfortably below the JSON encoder's own recursion
+# ceiling. At this depth we preserve the original subtree rather than risk
+# losing a serializable event just to optimize its image storage.
+MAX_FRAME_PROJECTION_DEPTH = 64
+
 
 class RecordFrames:
     """Reuse published adapter bytes, or publish previously inline bytes once.
@@ -36,11 +41,25 @@ class RecordFrames:
         self.fallback = self.root / "frames"
         self.fallbacks: list[dict[str, str]] = []
 
-    def project(self, value: Any, *, path: str = "$") -> Any:
-        if isinstance(value, list):
-            return [self.project(item, path=f"{path}[{index}]") for index, item in enumerate(value)]
-        if not isinstance(value, dict):
+    def project(self, value: Any, *, path: str = "$", _depth: int = 0) -> Any:
+        if not isinstance(value, (dict, list)):
             return value
+        if _depth >= MAX_FRAME_PROJECTION_DEPTH:
+            self.fallbacks.append(
+                {
+                    "path": path,
+                    "reason": (
+                        f"projection depth {_depth} reached limit {MAX_FRAME_PROJECTION_DEPTH}; "
+                        "subtree kept inline"
+                    ),
+                }
+            )
+            return value
+        if isinstance(value, list):
+            return [
+                self.project(item, path=f"{path}[{index}]", _depth=_depth + 1)
+                for index, item in enumerate(value)
+            ]
         if value.get("type") == "image":
             try:
                 return self._project_image(value)
@@ -53,7 +72,11 @@ class RecordFrames:
         # Both spellings are tool arguments, not content blocks. Their values
         # can legitimately describe images without being captured frames.
         return {
-            key: item if key in {"arguments", "args"} else self.project(item, path=f"{path}.{key}")
+            key: (
+                item
+                if key in {"arguments", "args"}
+                else self.project(item, path=f"{path}.{key}", _depth=_depth + 1)
+            )
             for key, item in value.items()
         }
 
@@ -62,7 +85,7 @@ class RecordFrames:
         if not isinstance(mime_type, str) or not isinstance(value.get("data"), str):
             raise ValueError("image projection requires string mime_type and base64 data")
         if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
-            raise ValueError(f"image projection does not support mime_type {mime_type!r}")
+            raise ValueError(f"image projection does not support mime_type {mime_type[:127]!r}")
         data = base64.b64decode(value["data"], validate=True)
         # Use the same strict media contract as reference resolution, but
         # before publication so invalid frames do not create useless copies.

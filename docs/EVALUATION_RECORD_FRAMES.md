@@ -56,7 +56,19 @@ SVG, BMP, aliases such as `image/jpg`, case variants such as `image/PNG`, empty
 images, malformed base64, URL-shaped `data`, missing/non-string MIME values,
 and otherwise unpublishable images remain inline with fallback notes. No MIME
 normalization or transcoding changes the original evidence. Even a supported
-MIME can fall back if its bytes or its storage cannot be verified.
+MIME can fall back if its bytes or its storage cannot be verified. Unsupported
+MIME diagnostic echoes use at most the first 127 characters; the original MIME
+string remains intact in the inline block.
+
+Container depth is counted from zero at the record mapping. At depth **64**,
+projection stops and retains that entire subtree unchanged, with a fallback note
+naming the depth and path. Images at depth 63 can still be projected; images at
+64 or deeper remain inline. This bounds the optimizer's recursion without
+raising Python's recursion limit or changing what JSON itself can encode.
+If any unexpected exception escapes projection, the sink writes the original
+event intact with a root-level fallback note instead of discarding the line.
+JSON encoding and actual journal-storage failures still use the ordinary sink
+diagnostic; this optimization cannot make otherwise unencodable data encodable.
 
 ## Reading old and new records
 
@@ -129,3 +141,24 @@ A frame-heavy regression test exercises the real writer with twelve supported
 1280×720 images and asserts a small unflagged line, one artifact and byte-equal
 resolution. Separate tests require the annotation on oversized text and inline
 fallbacks; they do not assert that all possible event lines are bounded.
+
+## Branch review notes for the PR thread
+
+- **Q-1 — fixed:** depth-64 subtree fallback plus a sink-level fallback for any
+  unexpected projector exception preserve serializable events and their text.
+  Boundary tests cover depths 63, 64 and 65. Same-interpreter controls reproduce
+  baseline 1 line / previous head 0 lines / fixed 1 line at depth 997 under
+  CPython 3.12.13 with the default recursion limit 1000. QA's depth-995 cutoff
+  depends on its caller stack; the fixed writer also writes that depth intact.
+- **R2-1 — fixed:** unsupported-MIME reason echoes previously repeated arbitrary
+  caller input (the reviewer measured a 1,000,058-byte reason for a million-char
+  MIME). The echo now uses only the first 127 characters; a million-character
+  regression test checks the original evidence remains intact and the reason
+  stays below 256 characters for that fixture.
+- **R2-2 — deferred, non-gating:** a failed new fallback-CAS publication can
+  leave a zero-byte or partial `frames/<sha256>` file, causing later events to
+  stay inline with diagnostic notes. Cleanup needs explicit ownership tracking
+  so only a file created by the failed publication is removed, never a
+  pre-existing digest entry or another publisher's file. That recovery work is
+  outside the depth-loss remediation; no issue was created. Evidence continues
+  to be written inline rather than lost.

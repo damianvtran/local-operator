@@ -9,6 +9,8 @@ import hashlib
 import io
 import json
 import struct
+import subprocess
+import sys
 import zlib
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,10 @@ from PIL import Image
 from pydantic import ValidationError
 
 from local_operator.evaluation.adapters.supervisor import SupervisionError
-from local_operator.evaluation.record_frames import resolve_record_images
+from local_operator.evaluation.record_frames import (
+    MAX_FRAME_PROJECTION_DEPTH,
+    resolve_record_images,
+)
 from local_operator.evaluation.record_sink import MAX_RECORD_LINE_BYTES, RecordSink
 from local_operator.harness.types import (
     ImageContent,
@@ -238,6 +243,100 @@ def test_artifact_io_failure_is_inline_fallback_not_record_failure(
     assert row["content"] == payload["content"]
     assert row["text"] == payload["text"]
     assert "synthetic artifact store is full" in row["record_image_fallbacks"][0]["reason"]
+
+
+@pytest.mark.parametrize(
+    "depth",
+    [MAX_FRAME_PROJECTION_DEPTH - 1, MAX_FRAME_PROJECTION_DEPTH, MAX_FRAME_PROJECTION_DEPTH + 1],
+)
+def test_projection_depth_boundary_preserves_the_original_subtree(
+    tmp_path: Path, frame: bytes, depth: int
+) -> None:
+    nested: dict[str, Any] = image(frame)
+    for _ in range(depth - 1):
+        nested = {"child": nested}
+    payload = {"text": "deep trajectory survives", "tree": nested}
+    path = tmp_path / "events.jsonl"
+    row = write_event(path, payload)
+    assert row["text"] == payload["text"]
+    leaf = row["tree"]
+    for _ in range(depth - 1):
+        leaf = leaf["child"]
+    if depth < MAX_FRAME_PROJECTION_DEPTH:
+        assert leaf["type"] == "image_reference"
+        assert "record_image_fallbacks" not in row
+    else:
+        assert leaf == image(frame)
+        assert (
+            f"depth {MAX_FRAME_PROJECTION_DEPTH} reached limit"
+            in row["record_image_fallbacks"][0]["reason"]
+        )
+    assert resolve_record_images(row, path)["tree"] == nested
+
+
+def test_depth_995_event_is_written_with_original_text(tmp_path: Path) -> None:
+    # pytest's own caller stack consumes recursion headroom. Exercise the real
+    # writer in a fresh interpreter, without changing its recursion limit, so
+    # this checks projection rather than the test runner's JSON ceiling.
+    script = """
+import json
+from pathlib import Path
+import sys
+from local_operator.evaluation.record_sink import RecordSink
+value = "leaf"
+for _ in range(995):
+    value = {"child": value}
+sink = RecordSink(Path(sys.argv[1]), expected_bytes=0, reserve_bytes=0)
+sink.write("agent_event", {"text": "deep trajectory survives", "tree": value})
+assert sink.failure is None, str(sink.failure)
+assert sink.lines_written == 1
+sink.close()
+row = json.loads(Path(sys.argv[1]).read_text())
+assert row["text"] == "deep trajectory survives"
+assert "projection depth 64 reached limit 64" in row["record_image_fallbacks"][0]["reason"]
+for _ in range(995):
+    row["tree"] = row["tree"]["child"]
+assert row["tree"] == "leaf"
+print("depth995: line=1 text=preserved subtree=preserved recursion_limit="
+      + str(sys.getrecursionlimit()))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "events.jsonl")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "depth995: line=1 text=preserved subtree=preserved" in result.stdout
+
+
+@pytest.mark.parametrize("error_type", [RecursionError, RuntimeError])
+def test_unexpected_projector_exception_never_discards_serializable_event(
+    tmp_path: Path, frame: bytes, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    def fail_projection(*args: Any, **kwargs: Any) -> Any:
+        raise error_type("synthetic projector failure")
+
+    monkeypatch.setattr(
+        "local_operator.evaluation.record_frames.RecordFrames.project", fail_projection
+    )
+    payload = {"text": "whole original event survives", "content": [image(frame)]}
+    row = write_event(tmp_path / "events.jsonl", payload)
+    assert row["text"] == payload["text"]
+    assert row["content"] == payload["content"]
+    assert row["record_image_fallbacks"] == [
+        {
+            "path": "$",
+            "reason": f"projection failed; original event kept inline: {error_type.__name__}",
+        }
+    ]
+
+
+def test_unsupported_mime_reason_does_not_repeat_unbounded_input(tmp_path: Path) -> None:
+    block = {"type": "image", "data": "AA==", "mime_type": "x" * 1_000_000}
+    row = write_event(tmp_path / "events.jsonl", {"content": [block]})
+    assert row["content"] == [block]
+    assert len(row["record_image_fallbacks"][0]["reason"]) < 256
+    assert "x" * 128 not in row["record_image_fallbacks"][0]["reason"]
 
 
 def test_large_image_url_is_annotated_without_claiming_a_size_cap(tmp_path: Path) -> None:
