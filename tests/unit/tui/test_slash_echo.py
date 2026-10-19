@@ -118,6 +118,14 @@ ECHO_POLICY = {
     # The PAGE is the receipt; its preview/import controls do the writing, and
     # nothing typed after `/import` reaches the model.
     "import": False,
+    # The PAGE is the receipt and it takes no argument: the ledger it paints is
+    # the answer, and a row behind it would only be readable after leaving
+    # (`/settings`' rule).
+    "review": False,
+    # The PAGE is the receipt (same rule as `/settings` and `/review`): it
+    # replaces the transcript region and takes no argument, so a user row
+    # printed behind it would only be readable after leaving.
+    "schedule": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -238,6 +246,12 @@ PROMPT_POLICY = {
     "settings": False,
     # The argument is a subcommand/source/id selection, never a prompt.
     "import": False,
+    # Takes no argument at all, so an inline engage has nothing to consume.
+    "review": False,
+    # The PAGE is the receipt (same rule as `/settings` and `/review`): it
+    # replaces the transcript region and takes no argument, so a user row
+    # printed behind it would only be readable after leaving.
+    "schedule": False,
     "sidebar": False,
     "search": False,
     "accounts": False,

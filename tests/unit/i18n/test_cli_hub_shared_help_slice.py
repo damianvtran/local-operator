@@ -194,7 +194,10 @@ def test_helpers_resolve_locale_each_call_and_direct_parsers_preserve_protocol(m
         assert {value for _, value in seen} == {locale}
         assert len(seen) == 24
         assert resolutions == [locale, locale]
-    assert not (REPO / "local_operator/i18n/catalogues/fr/cli.hub_shared_help.json").exists()
+    assert (REPO / "local_operator/i18n/catalogues/fr/cli.hub_shared_help.json").is_file()
+    assert set(catalogues.load_catalogue("fr", "cli.hub_shared_help")) == set(
+        catalogues.load_catalogue("en", "cli.hub_shared_help")
+    )
     monkeypatch.setenv("LOP_LANG", "fr")
     seen.clear()
     resolutions.clear()

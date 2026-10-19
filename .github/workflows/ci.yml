@@ -420,6 +420,133 @@ jobs:
       - name: Ratchet and catalogue parity
         run: python scripts/i18n/check.py
 
+  # ---------------------------------------------------------------------------
+  # Packaging smoke: install the BUILT wheel and start it.
+  #
+  # WHY THIS EXISTS. v0.77.0 reached PyPI unstartable on Python 3.14:
+  # `import local_operator.server.app` raised `TypeError: 'function' object is
+  # not subscriptable` because PEP 649 deferred an annotation that named `dict`
+  # inside a class body which also defined `def dict(...)`. The source tree was
+  # green: `server-sanity` below does `pip install -e`, on 3.12 only, and the
+  # publish workflow built and uploaded the wheel without ever installing it.
+  # `lop --version` also passed on the broken artifact, because it reads
+  # installed metadata without importing the server stack. So the first honest
+  # run of the artifact was a user's install. This job builds the wheel once
+  # and runs `scripts/smoke_wheel.py` against it: a throwaway venv, an import
+  # from the installed location, and a real `lop serve` + `/health` check that
+  # reports `install_kind == "pip"`.
+  #
+  # THE BUILD IS DELIBERATELY ONCE. The wheel is `py3-none-any`, so every
+  # interpreter installs byte-identical code; rebuilding per version would test
+  # the builder three times and the artifact zero extra times. PR builds omit
+  # the pnpm mobile bundle (cheap, and the bundle is not what this regression
+  # class is about); the publish gate in publish.yml installs the exact release
+  # artifact, which does include it.
+  #
+  # Gate: the existing `unit` flag — packaging is code, not docs. Do not invent
+  # a flag; `scripts/ci_scope.py` registers both jobs under `unit`.
+  packaging-smoke-build:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.unit != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build --wheel --outdir dist/packaging-smoke
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packaging-smoke-wheel
+          path: dist/packaging-smoke/*.whl
+
+  packaging-smoke:
+    needs: [changes, packaging-smoke-build]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.unit != 'false' &&
+      needs.packaging-smoke-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each entry is a DIFFERENT failure class, not a hunch:
+        #   3.12 - the `requires-python` floor and today's only PR-CI
+        #          interpreter (see the `test` matrix above); it is also the
+        #          version the source-tree sanity jobs run on.
+        #   3.13 - a declared classifier and an existing push-to-main leg, so
+        #          the artifact is checked where the package says it works.
+        #   3.14 - the deferred-annotation (PEP 649) interpreter class that
+        #          shipped v0.77.0 broken while every 3.12/3.13 run was green.
+        # One server start per version; no full test suite per version, and no
+        # rebuild per version (the wheel is py3-none-any).
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: packaging-smoke-wheel
+          path: dist/packaging-smoke
+
+      - name: Install and start the built wheel
+        run: python scripts/smoke_wheel.py --wheel dist/packaging-smoke/local_operator-*.whl
+
+  # The source-tree half of the same interpreter class. `packaging-smoke` above
+  # proves the BUILT artifact starts on 3.14; this job proves the tree the next
+  # tag is cut from can be installed and imported on 3.14 first. That is a
+  # different check: an editable install resolves the checkout, so it catches a
+  # PEP 649 spelling error at pull-request time without waiting for a build.
+  #
+  # `lop serve --help` is the second assertion: on v0.77.0 the console script
+  # itself worked (it reads metadata without importing the server stack) while
+  # `import local_operator.server.app` did not, so importing alone is the
+  # signal that matters and --help only guards the entry point stays wired.
+  source-import-314:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.unit != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the server extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[server]"
+
+      - name: Import the server app on 3.14
+        run: python -c "import local_operator.server.app"
+
+      - name: The console script still resolves serve
+        run: lop serve --help
+
   type-check:
     needs: [changes]
     if: >-

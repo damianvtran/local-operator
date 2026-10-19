@@ -390,6 +390,9 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "tui-e2e": ("tui",),
     "cli-sanity": ("cli",),
     "server-sanity": ("server",),
+    "packaging-smoke-build": ("unit",),
+    "packaging-smoke": ("unit",),
+    "source-import-314": ("unit",),
     "i18n": ("i18n",),
 }
 
@@ -543,6 +546,26 @@ LOCAL_EXCLUSIONS: dict[str, str] = {
         "the job may well pass. Excluded rather than left as a gate that cries "
         "wolf; the audit stays a required CI check and this classifier cannot "
         "skip it on any dependency-touching diff."
+    ),
+    "packaging-smoke-build": (
+        "the CI step is `python -m build --wheel`; the shared .venv does not "
+        "carry the `build` package and installing it there is a dependency "
+        "cost paid by every worktree. `uv build --wheel` is the local "
+        "spelling when needed, and scripts/smoke_wheel.py is runnable by hand "
+        "against its output; the gate itself is cheap in CI."
+    ),
+    "packaging-smoke": (
+        "consumes the artifact built by packaging-smoke-build and starts one "
+        "server per interpreter in a throwaway venv; reproducing it locally "
+        "means a wheel build plus up to three installs (~17 MB each) on a "
+        "shared disk. Run scripts/smoke_wheel.py --wheel <wheel> by hand when "
+        "changing the packaging or the server start path."
+    ),
+    "source-import-314": (
+        "the 3.14 interpreter is not guaranteed on every development host; the "
+        "same import is exercised against the built artifact by "
+        'packaging-smoke on 3.14 in CI. Run `python -c "import '
+        'local_operator.server.app"` under 3.14 locally when it is available.'
     ),
 }
 

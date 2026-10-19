@@ -1016,6 +1016,19 @@ _FRONTEND_LOCAL_SLASHES = {
     # config/session root; a follower routed here would inspect and import on
     # the owner's host instead. Same rule `/settings` states for config.yml.
     "import",
+    # Reads THIS machine's derived code-request index and fetch cache, which
+    # live under the config root the PAGE reads. Routed to the runtime it would
+    # list the runtime host's PR ledger while the user is looking at this
+    # screen — `/import`'s wrong-machine answer, with nothing written.
+    "review",
+    # Reads and WRITES THIS process's live wake scheduler: the rows are the
+    # ones this terminal's runtime armed, and `set_wake_schedules` re-arms them
+    # here. Routed to a follower's runtime it would list and rewrite wakes on
+    # the host the runtime lives on while the user watches this screen — the
+    # wrong-machine answer `/settings` and `/import` refuse, with a mutation
+    # attached. The machine-wide wake index (the desktop's schedules page) is a
+    # different subject and is deliberately not what this page reads.
+    "schedule",
     "provider",
     "search",
     "accounts",

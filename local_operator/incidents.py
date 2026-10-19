@@ -1224,8 +1224,11 @@ class Incident:
         head = f"[session incident{source}] {self.category}:"
         lines = [f"{head} {self.raw.strip()[:500]}"]
         if self.hint:
-            lines.append(f"suggested action: {self.hint}")
+            lines.append(
+                f"suggested action: {self.hint}"
+            )  # i18n: ignore model-facing incident block
         lines.append(
+            # i18n: ignore model-facing incident block
             "This is why the previous turn ended. Take it into account before "
             "repeating the same request."
         )
@@ -1489,8 +1492,9 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     """
     lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
     if reason.strip():
-        lines.append(f"Reason: {reason.strip()[:200]}")
+        lines.append(f"Reason: {reason.strip()[:200]}")  # i18n: ignore model-facing incident block
     lines.append(
+        # i18n: ignore model-facing incident block
         "Its tools are not callable until the user restores it, and the agent "
         "should not retry them in a loop."
     )
@@ -1574,8 +1578,9 @@ def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str
     # for five of nine — the incident's own shape. The list is reference material
     # on its own line, not part of the sentence a reader skims.
     if named:
-        lines.append(f"Jobs: {', '.join(named)}")
+        lines.append(f"Jobs: {', '.join(named)}")  # i18n: ignore model-facing incident block
     lines.append(
+        # i18n: ignore model-facing incident block
         # No present-tense claim about who has read these (review round 3,
         # MINOR-3): the row is durable and re-rendered forever, so "nothing has
         # read it" would become false the moment a later turn did read it — the
@@ -1609,9 +1614,13 @@ def format_unlanded_records_message(adoption_ids: Sequence[str], receipt_ids: Se
     """
     parts: list[str] = []
     if adoption_ids:
-        parts.append(f"{len(adoption_ids)} aside exchange(s) the user added")
+        parts.append(
+            f"{len(adoption_ids)} aside exchange(s) the user added"
+        )  # i18n: ignore model-facing incident block
     if receipt_ids:
-        parts.append(f"{len(receipt_ids)} shell command receipt(s)")
+        parts.append(
+            f"{len(receipt_ids)} shell command receipt(s)"
+        )  # i18n: ignore model-facing incident block
     lines = [
         "[session incident] unsaved records: "
         + " and ".join(parts or ["queued records"])
@@ -1619,10 +1628,15 @@ def format_unlanded_records_message(adoption_ids: Sequence[str], receipt_ids: Se
         "into this conversation."
     ]
     if adoption_ids:
-        lines.append(f"Asides (last message id): {', '.join(adoption_ids)}")
+        lines.append(
+            f"Asides (last message id): {', '.join(adoption_ids)}"
+        )  # i18n: ignore model-facing incident block
     if receipt_ids:
-        lines.append(f"Shell receipts (call id): {', '.join(receipt_ids)}")
+        lines.append(
+            f"Shell receipts (call id): {', '.join(receipt_ids)}"
+        )  # i18n: ignore model-facing incident block
     lines.append(
+        # i18n: ignore model-facing incident block
         "suggested action: an aside is still in its panel while the desktop keeps it "
         "(about an hour) and can be added again; a shell command can be run again."
     )
@@ -1716,15 +1730,17 @@ def format_model_switch_message(
         head = f"[model switch] You are now running as {new_label}."
     lines = [head]
     if reason.strip():
-        lines.append(f"Reason: {reason.strip()[:200]}")
+        lines.append(f"Reason: {reason.strip()[:200]}")  # i18n: ignore model-facing incident block
     if transient:
         lines.append(
+            # i18n: ignore model-facing incident block
             "This is a temporary fallback for the current request; the session "
             "may return to its primary model at a later turn. Capabilities and "
             "context window may differ from the primary."
         )
     else:
         lines.append(
+            # i18n: ignore model-facing incident block
             "This applies from now on. Capabilities, context window, and tone "
             "may differ from the previous model; act as the model you now are."
         )

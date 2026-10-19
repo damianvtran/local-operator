@@ -31,7 +31,7 @@ import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -107,6 +107,8 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+from local_operator.i18n.keys import tui_notices as _nt
+from local_operator.i18n.messages import Msg
 from local_operator.incidents import (
     CONTINUATION_LIMIT_CAUSE,
     OUTPUT_LIMIT_CAUSE,
@@ -121,6 +123,29 @@ from local_operator.model.effort import real_rungs
 COMPOSE_NOTICE_INTERVAL_S = 0.2
 
 logger = logging.getLogger(__name__)
+
+
+def _notice(
+    message: Msg,
+    *,
+    kind: Literal["info", "warning", "error"] = "warning",
+    headline: str = "",
+) -> NoticeEvent:
+    """One typed notice: catalogue text plus its additive ``code``/``params``.
+
+    ``text`` stays present and English-first (RFC §2.6) so every existing
+    client keeps rendering what it rendered before; the id and parameters let
+    a locale-aware viewer re-render without parsing the sentence. Callers keep
+    passing ``kind``/``headline`` exactly as they did on the raw constructor.
+    """
+    body = message.envelope()
+    return NoticeEvent(
+        text=body["text"],
+        code=body["code"],
+        params=body["params"],
+        kind=kind,
+        headline=headline,
+    )
 
 
 class _ToolDone:
@@ -2736,14 +2761,7 @@ class AgentLoop:
                                 update={"requires_reasoning_echo": True}
                             )
                             echo_fill_route = (turn_model.provider, turn_model.model_id)
-                            yield NoticeEvent(
-                                text=(
-                                    "the provider refused this request for a "
-                                    "missing reasoning echo — retrying with the "
-                                    "echo filled in at the same effort"
-                                ),
-                                kind="warning",
-                            )
+                            yield _notice(_nt.reasoning_echo_filled(), kind="warning")
                             has_more_tool_calls = True
                             continue
                         # SECOND recovery, and the one that needs a gate: a
@@ -2818,14 +2836,7 @@ class AgentLoop:
                                 # just refused (the empty-truncation retreat sets
                                 # one for the same reason).
                                 effort_ceiling = thinking_off
-                                yield NoticeEvent(
-                                    text=(
-                                        "the provider refused this request for a "
-                                        "missing reasoning echo — retrying with "
-                                        "thinking disabled"
-                                    ),
-                                    kind="warning",
-                                )
+                                yield _notice(_nt.reasoning_echo_thinking_off(), kind="warning")
                                 has_more_tool_calls = True
                                 continue
                         # Pair every dangling tool call so the wire stays legal.
@@ -3035,14 +3046,8 @@ class AgentLoop:
                                 # cleared immediately after that call returns
                                 # (see the note under ``assistant is None``).
                                 effort_ceiling = lower
-                                yield NoticeEvent(
-                                    text=(
-                                        f"model spent its whole output budget "
-                                        f"thinking and produced nothing — "
-                                        f"retrying once at effort {lower} "
-                                        f"(your reasoning effort is unchanged)"
-                                    ),
-                                    kind="warning",
+                                yield _notice(
+                                    _nt.budget_exhausted_retry(effort=lower), kind="warning"
                                 )
                                 has_more_tool_calls = True
                                 continue
@@ -3102,14 +3107,7 @@ class AgentLoop:
                                 recovery = Message.user(LENGTH_STOP_RECOVERY_PROMPT)
                                 context.messages.append(recovery)
                                 new_messages.append(recovery)
-                                yield NoticeEvent(
-                                    text=(
-                                        "the model spent its whole output budget "
-                                        "thinking and produced nothing — "
-                                        "re-asking it to continue the work"
-                                    ),
-                                    kind="warning",
-                                )
+                                yield _notice(_nt.budget_exhausted_continue(), kind="warning")
                                 # No TurnEndEvent, for the wordless recovery's
                                 # reason: nothing was announced or shown for this
                                 # turn, so there is no live row to settle.
@@ -3162,14 +3160,8 @@ class AgentLoop:
                                 # the only cause left to name -- a ladder claim
                                 # here would be false.
                                 cause = "a stop was requested"
-                            yield NoticeEvent(
-                                text=(
-                                    "the model spent its whole output budget "
-                                    f"thinking and produced no visible output "
-                                    f"({cause}) — retry, or switch to a model "
-                                    "with a larger output budget"
-                                ),
-                                kind="warning",
+                            yield _notice(
+                                _nt.budget_exhausted_no_output(cause=cause), kind="warning"
                             )
                         elif has_text:
                             # A partial ANSWER, which is the case the missing
@@ -3213,13 +3205,7 @@ class AgentLoop:
                                 recovery = Message.user(CONTINUE_TRUNCATED_ANSWER_PROMPT)
                                 context.messages.append(recovery)
                                 new_messages.append(recovery)
-                                yield NoticeEvent(
-                                    text=(
-                                        "the model hit the output limit — continuing "
-                                        "the answer where it stopped"
-                                    ),
-                                    kind="warning",
-                                )
+                                yield _notice(_nt.output_limit_continuing(), kind="warning")
                                 # No TurnEndEvent: the turn is still live, and the
                                 # row settles when the continued answer arrives.
                                 has_more_tool_calls = True
@@ -3236,14 +3222,7 @@ class AgentLoop:
                                 # removes. A text+call turn is left alone here:
                                 # the call arm owns its re-ask.
                                 length_answer_cut_off = True
-                            yield NoticeEvent(
-                                text=(
-                                    "the model hit the output limit — this answer "
-                                    "is cut off, and the rest was never sent — "
-                                    "ask again to continue, or narrow the request"
-                                ),
-                                kind="warning",
-                            )
+                            yield _notice(_nt.output_limit_cut_off(), kind="warning")
                         elif assistant.tool_calls:
                             # Visible truncation with a call in flight and no prose
                             # to pronounce it: the call was NOT executed (the
@@ -3279,18 +3258,12 @@ class AgentLoop:
                             # call's own row, from the arm marker that result
                             # carries (not from this model-facing text, which a
                             # row must not paint: review F2).
-                            yield NoticeEvent(
-                                text=(
-                                    "the model hit the output limit mid tool call "
-                                    "— nothing was executed; re-asking it to "
-                                    "re-emit the call in smaller pieces"
-                                    if any(cut_calls)
-                                    else "the model hit the output limit before the "
-                                    "call ran — nothing was executed; re-asking it "
-                                    "to re-issue the call as it is"
-                                ),
-                                kind="warning",
+                            notice_message = (
+                                _nt.output_limit_tool_call()
+                                if any(cut_calls)
+                                else _nt.output_limit_before_call()
                             )
+                            yield _notice(notice_message, kind="warning")
                         # Truncated: pair placeholders, do NOT execute.
                         #
                         # A synthetic result rather than the bare
@@ -3398,14 +3371,7 @@ class AgentLoop:
                             recovery = Message.user(WORDLESS_STOP_RECOVERY_PROMPT)
                             context.messages.append(recovery)
                             new_messages.append(recovery)
-                            yield NoticeEvent(
-                                text=(
-                                    "the model's reply arrived empty (no text, no "
-                                    "tool calls) — re-asking it for its next "
-                                    "action or finish"
-                                ),
-                                kind="warning",
-                            )
+                            yield _notice(_nt.empty_reply(), kind="warning")
                             # No TurnEndEvent, for the nameless recovery's
                             # reason: nothing was announced or shown for this
                             # turn, so there is no live row to settle.
@@ -3473,10 +3439,7 @@ class AgentLoop:
                         )
                         context.messages.append(recovery)
                         new_messages.append(recovery)
-                        yield NoticeEvent(
-                            text="Repeated tool errors — requesting a different approach.",
-                            kind="warning",
-                        )
+                        yield _notice(_nt.repeated_tool_errors(), kind="warning")
                     # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
                     # ``no_reply`` call is an affirmative way to end the turn,
                     # so a batch whose LAST result carries the quiet marker ends
@@ -3586,14 +3549,7 @@ class AgentLoop:
                         # an aside's question with "withdrawn unasked"). Say what
                         # happened and what it means, in words that do not
                         # depend on knowing the loop's vocabulary.
-                        yield NoticeEvent(
-                            text=(
-                                "This turn was stopped because it kept being asked to "
-                                "keep going; the pending message was dropped. Reply with "
-                                "what to do next."
-                            ),
-                            kind="warning",
-                        )
+                        yield _notice(_nt.kept_going_stopped(), kind="warning")
                         # The pending batch is dropped (as today), and the end
                         # NAMES the cause: ``aborted=True`` is what the taxonomy
                         # reads as involuntary, and ``cut_off_cause`` is the token
@@ -6509,7 +6465,9 @@ def validate_tool_arguments(
     required = schema.get("required", []) or []
     for name in required:
         if name not in arguments:
-            errors.append(f"missing required argument '{name}'")
+            errors.append(
+                f"missing required argument '{name}'"
+            )  # i18n: ignore model-facing tool argument error
     for name, value in arguments.items():
         prop_schema = properties.get(name)
         if not isinstance(prop_schema, dict):
@@ -6546,7 +6504,9 @@ def validate_tool_arguments(
             except ValidationError:
                 continue
         else:
-            errors.append(f"argument '{name}' does not match type {' | '.join(types)}")
+            errors.append(
+                f"argument '{name}' does not match type {' | '.join(types)}"
+            )  # i18n: ignore model-facing tool argument error
     return errors
 
 

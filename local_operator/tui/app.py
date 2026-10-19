@@ -131,6 +131,8 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_projects as _pc
+from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
 
@@ -450,14 +452,19 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsViewAttachmentPreviewRequested,
     ProjectsViewComposeChanged,
     ProjectsViewDismissed,
+    ProjectsViewEditSubmitted,
     ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
+    ProjectsViewMilestoneAddedRequested,
+    ProjectsViewMilestoneRemoved,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
     ProjectsViewSendRequested,
     ProjectsViewStartRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
+from local_operator.tui.widgets.review_view import ReviewView, ReviewViewDismissed
+from local_operator.tui.widgets.schedule_view import ScheduleView, ScheduleViewDismissed
 from local_operator.tui.widgets.session_picker import (
     AIDA_MARKER,
     PICKER_FLEET_ASKS,
@@ -557,6 +564,14 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The projects edit slice's copy (LOH-19 P2). The app composes exactly two of
+#: its sentences — the "project vanished mid-write" refusals that only the
+#: write's own KeyError can produce; every other sentence belongs to the page.
+_te_projects_edit = tr("tui.projects_edit")
+#: The projects page's shared vocabulary. The app composes exactly one of its
+#: sentences — the EDIT form's done-gate refusal — because the store's own
+#: exception is raised HERE, in the write handler (UX round 1, U4).
+_te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
@@ -6154,6 +6169,17 @@ class OperatorApp(App[None]):
         # holds the widget so teardown and the Esc chain can close it.
         self._import_view: Any | None = None
         self._import_focus_restore: Any | None = None
+        # The review mode (``/review``): the same full-page MODE contract, read-
+        # only and fed by the derived code-request index. Held here so teardown
+        # and the Esc chain close it exactly like its siblings.
+        self._review_view: Any | None = None
+        self._review_focus_restore: Any | None = None
+        # The schedule mode (``/schedule``): the same full-page MODE contract,
+        # fed by THIS session's live scheduler and writing through
+        # ``set_wake_schedules``. Held here so teardown and the Esc chain close
+        # it exactly like its siblings.
+        self._schedule_view: Any | None = None
+        self._schedule_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
@@ -20512,6 +20538,18 @@ class OperatorApp(App[None]):
             logger.debug("projects: associated set failed", exc_info=True)
             return frozenset()
 
+    def _projects_read_only(self) -> bool:
+        """Whether this session may WRITE projects (QA round 1, Q1).
+
+        A follower's runtime lives on another device: the projects this page
+        lists come from the OWNER's machine, and a write from here would land
+        in a store that does not own the project (measured: a follower edit,
+        add and remove all persisted). ``_is_viewer`` is the same predicate the
+        rest of the app uses for a non-owning session, and a bare terminal
+        with no session is False — locally writable, as it always was.
+        """
+        return _is_viewer(self._session)
+
     def _projects_payload(self) -> list[Any]:
         """Compose every project's view ONCE — the page's whole data input.
 
@@ -25964,6 +26002,10 @@ class OperatorApp(App[None]):
         # owns itself: its OWN Esc handler runs the ladder first (editor, then
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
+        if self._close_review_view():
+            return
+        if self._close_schedule_view():
+            return
         if self._close_import_view():
             return
         if self._close_settings_view():
@@ -30064,6 +30106,8 @@ class OperatorApp(App[None]):
             and self._org_chart_view is None
             and self._projects_view is None
             and self._import_view is None
+            and self._review_view is None
+            and self._schedule_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -36435,6 +36479,174 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_import_view()
 
+    def _cmd_review(self, notice: NoticeFn) -> None:
+        """``/review`` — open the full-page code-request ledger.
+
+        Frontend-LOCAL (see ``_FRONTEND_LOCAL_SLASHES``): the rows come from
+        THIS machine's derived index and fetch cache. The page is the receipt,
+        so nothing is printed behind it; the only refusal is a session that has
+        not booted yet, whose message has to be real copy rather than a crash
+        on ``None.session_id``.
+        """
+        from local_operator.i18n.keys import tui_review
+        from local_operator.i18n.text import tr
+
+        session = self._session
+        if session is None:
+            notice(tr("tui.review")(tui_review.session_unavailable()), "warning")
+            return
+        self._open_review_view(session_id=session.session_id, cwd=getattr(session, "cwd", ""))
+
+    def _open_review_view(self, session_id: str, *, cwd: str = "") -> None:
+        """Enter the full-page review mode.
+
+        Same MODE contract as :meth:`_open_import_view`: the transcript is
+        hidden, the dock stays in place and inert, and the page owns focus. Its
+        loading is async in the widget's own worker, so the first frame is the
+        loading state rather than a blocked app.
+        """
+        if self._review_view is not None:
+            return
+        if self._settings_view is not None:
+            self._close_settings_view()
+        if self._import_view is not None:
+            self._close_import_view()
+        if self._schedule_view is not None:
+            self._close_schedule_view()
+        self._review_focus_restore = self.focused
+        view = ReviewView(session_id, cwd=cwd)
+        self._review_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        # The review page shares the settings page's region contract, so it
+        # reuses that layout class (the same greyed dock, the same transcript
+        # slot) rather than introducing a second full-page skeleton.
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_review_view(self) -> bool:
+        """Leave the review mode and restore the conversation. True if open."""
+        view = self._review_view
+        if view is None:
+            return False
+        self._review_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._review_focus_restore
+        self._review_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_review_view_dismissed(self, message: ReviewViewDismissed) -> None:
+        """The page's esc hint/key — same exit as the mode's own Esc chain."""
+        message.stop()
+        self._close_review_view()
+
+    def _cmd_schedule(self, notice: NoticeFn) -> None:
+        """``/schedule`` — open this conversation's wake ledger.
+
+        Frontend-LOCAL (see ``_FRONTEND_LOCAL_SLASHES``): the rows come from
+        THIS process's scheduler and the write re-arms it here. Routed to the
+        runtime it would list and rewrite the runtime host's wakes while the
+        terminal sits somewhere else. The only refusal is a session that has
+        not booted yet, which needs real copy rather than a crash on ``None``.
+        """
+        from local_operator.i18n.keys import tui_schedule
+        from local_operator.i18n.text import tr
+
+        session = self._session
+        if session is None:
+            notice(tr("tui.schedule")(tui_schedule.session_unavailable()), "warning")
+            return
+        self._open_schedule_view(session)
+
+    def _open_schedule_view(self, session: Any) -> None:
+        """Enter the full-page schedule mode.
+
+        Same MODE contract as :meth:`_open_review_view`: the transcript is
+        hidden, the dock stays in place and inert, and the page owns focus. The
+        page reads the live scheduler synchronously, so its first frame is the
+        populated (or empty) list rather than a loading state.
+        """
+        if self._schedule_view is not None:
+            return
+        if self._settings_view is not None:
+            self._close_settings_view()
+        if self._import_view is not None:
+            self._close_import_view()
+        if self._review_view is not None:
+            self._close_review_view()
+        self._schedule_focus_restore = self.focused
+        view = ScheduleView(session, session_id=getattr(session, "session_id", ""))
+        self._schedule_view = view
+        self._transcript_view().display = False
+        # The dock's wake band lists the SAME rows this page manages; at 60x24
+        # it left the list a one-row viewport and its late (1 Hz) arrival shrank
+        # an already-readable page (round-1 design D1 / UX U2). Suppressed for
+        # the page's lifetime, then re-settled so the reclaimed rows go to the
+        # page and the band comes back on exit.
+        if self._wake_panel is not None:
+            self._wake_panel.set_suppressed(True)
+        self._refresh_band()
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        # The schedule page shares the settings page's region contract, so it
+        # reuses that layout class (the same greyed dock, the same transcript
+        # slot) rather than introducing a second full-page skeleton.
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_schedule_view(self) -> bool:
+        """Leave the schedule mode and restore the conversation. True if open."""
+        view = self._schedule_view
+        if view is None:
+            return False
+        self._schedule_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        # Restore the band BEFORE the composer comes back: `_refresh_band` is
+        # what re-decides `#band.has-slot` and the todo budget, so waiting for
+        # the next 1 Hz poll would leave the dock visibly short for a beat.
+        if self._wake_panel is not None:
+            self._wake_panel.set_suppressed(False)
+        self._refresh_band()
+        self._set_composer_read_only(False)
+        restore = self._schedule_focus_restore
+        self._schedule_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_schedule_view_dismissed(self, message: ScheduleViewDismissed) -> None:
+        """The page's esc hint/key — same exit as the mode's own Esc chain."""
+        message.stop()
+        self._close_schedule_view()
+
     def _cmd_settings(self, notice: NoticeFn) -> None:
         """``/settings`` — open the full-page settings surface.
 
@@ -36650,10 +36862,13 @@ class OperatorApp(App[None]):
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
 
-        The import page shares this region, so it is torn down here too: every
-        session-swap, /clear, approval and ctrl+C path already calls this
-        method, and a second copy of those nine call sites would drift.
+        The import, review and schedule pages share this region, so they are
+        torn down here too: every session-swap, /clear, approval and ctrl+C path
+        already calls this method, and a second copy of those nine call sites
+        would drift.
         """
+        self._close_schedule_view()
+        self._close_review_view()
         self._close_import_view()
         view = self._settings_view
         if view is None:
@@ -36749,6 +36964,7 @@ class OperatorApp(App[None]):
                     associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
                     own_session=self._own_session_id(),
+                    read_only=self._projects_read_only(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
@@ -36784,6 +37000,7 @@ class OperatorApp(App[None]):
             associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         # The start picker's rows ride the same seed (P5b): the page never reads
         # a registry, so the host hands them over while it is still building the
@@ -36885,6 +37102,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.set_start_rows(self._start_picker_rows())
 
@@ -37105,6 +37323,11 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        # The page already refuses the key; this is the boundary check that
+        # holds for a message already in flight (QA round 1, Q1) — a follower
+        # must not reach the store through ANY of this page's write paths.
+        if view.refuse_read_only():
+            return
         from local_operator.projects import MilestoneEdit, store_error_text
 
         try:
@@ -37130,6 +37353,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
 
     def _projects_manager_target(self) -> SendTarget | None:
@@ -37702,6 +37926,8 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        if view.refuse_read_only():
+            return
         import time as _time
 
         from local_operator.projects import store_error_text
@@ -37725,8 +37951,148 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.form_created(project.id, project.title or project.name)
+
+    def on_projects_view_edit_submitted(self, message: ProjectsViewEditSubmitted) -> None:
+        """`ctrl+s` on the EDIT form: write ONLY the changed fields, then re-show.
+
+        The form's builder already diffed the values against the state it
+        opened on, and the store applies ``model_fields_set`` per field — so a
+        concurrent session's change to an untouched field survives this write
+        (the per-field last-writer-wins contract). A refusal stays IN the form,
+        under the field the store's exception names, with the draft intact.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        if view.refuse_read_only():
+            return
+        import time as _time
+
+        from local_operator.projects import ProjectDoneGateError, store_error_text
+        from local_operator.tui.projects_edit import refusal_field
+
+        try:
+            result = registry.update_project(message.project_id, message.edit)
+        except KeyError:
+            name = message.project_name or "that project"
+            view.show_form_refusal(
+                _te_projects_edit(_pe.refusal_project_gone_edit(name=name)), field="key"
+            )
+            return
+        except ProjectDoneGateError as exc:
+            # The store's own sentence ends with `pass force_done=true`, a
+            # parameter this form has no field for: a reader sent there has no
+            # route on this surface (UX round 1, U4). The form's copy names
+            # the milestones and stops at the actionable rule.
+            view.show_form_refusal(
+                _te_projects(_pc.refusal_done_gate(names=", ".join(exc.incomplete))),
+                field="status",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_form_refusal(store_error_text(exc), field=refusal_field(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+        )
+        view.form_edited(changed=result.changed)
+
+    def on_projects_view_milestone_added_requested(
+        self, message: ProjectsViewMilestoneAddedRequested
+    ) -> None:
+        """`a` submitted: add-or-update the milestone through the store core.
+
+        The store's ``set_milestone`` is the SAME core the tool and the routes
+        use, and it is add-or-update BY NAME: the returned action is the
+        receipt (added/updated/unchanged), never an assumption. A refusal lands
+        on the page's notice line with the prompt still up, so the reader can
+        correct the name and press enter again.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        if view.refuse_read_only():
+            return
+        import time as _time
+
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        # The same tri-state rule as the prompt's: a blank optional date is
+        # ABSENT, not a clear. ``target_date=None`` in model_fields_set would
+        # erase an existing milestone's stored date when the reader only echoed
+        # its name.
+        fields: dict[str, Any] = {"name": message.name}
+        if message.target_date:
+            fields["target_date"] = message.target_date
+        try:
+            _project, action = registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(**fields),
+            )
+        except KeyError:
+            # The store's add path raises KeyError only for a vanished project;
+            # the message names the PROJECT, not the raw uuid.
+            name = message.project_name or "that project"
+            view.show_notice(_te_projects_edit(_pe.refusal_project_gone_milestone(name=name)))
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_notice(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+        )
+        view.milestone_added(message.name, action)
+
+    def on_projects_view_milestone_removed(self, message: ProjectsViewMilestoneRemoved) -> None:
+        """The y/n confirm answered yes: remove through the store, then re-show.
+
+        The confirm is gone by the time this runs (the page disarmed it on the
+        answer), so a refusal has only the page's notice line to land on —
+        which is where the reader is looking.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        if view.refuse_read_only():
+            return
+        import time as _time
+
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, remove=True),
+            )
+        except KeyError:
+            name = message.project_name or "that project"
+            view.show_notice(_te_projects_edit(_pe.refusal_project_gone_milestone(name=name)))
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_notice(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+        )
+        view.milestone_removed(message.name)
 
     def _own_session_id(self) -> str | None:
         """THIS process's session id, or ``None`` — the detail page's anchor.
@@ -40146,6 +40512,10 @@ class OperatorApp(App[None]):
             self._cmd_settings(notice)
         elif command == "/import":
             self._cmd_import(arg, notice)
+        elif command == "/review":
+            self._cmd_review(notice)
+        elif command == "/schedule":
+            self._cmd_schedule(notice)
         elif command == "/hub":
             # The Hub links surface. The action is SYNC and owns its own worker,
             # the fleet-door and usage-panel pattern: calling it directly keeps
@@ -43578,6 +43948,14 @@ class OperatorApp(App[None]):
         page = self._projects_view
         if page is not None and getattr(page, "wants_field_tab", False):
             page.form_focus_previous()
+            return
+        # The schedule form is the second page that owns a shift+tab meaning.
+        # Without this delegation the app-wide priority handler ran BEFORE the
+        # focused field and changed the conversation's reasoning effort (and its
+        # billable setting) while navigating the form (round-1 UX U1).
+        schedule = self._schedule_view
+        if schedule is not None and getattr(schedule, "wants_field_tab", False):
+            schedule.form_focus_previous()
             return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming

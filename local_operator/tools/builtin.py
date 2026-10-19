@@ -15078,6 +15078,9 @@ class SessionsParams(BaseModel):
         description="spawn/resume: message to run (required).",
     )
     name: str | None = Field(default=None, description="spawn: title.")
+    tags: list[str] | None = Field(
+        default=None, description="spawn: existing category names (local sessions only)."
+    )
     team: str | None = Field(default=None, description="spawn: team.")
     profile: str | None = Field(default=None, description="spawn: role.")
     model: str | None = Field(default=None, description="spawn: <provider>/<model-id>.")
@@ -15148,6 +15151,7 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
             "op",
             "prompt",
             "name",
+            "tags",
             "team",
             "profile",
             "model",
@@ -15333,7 +15337,8 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     "spawn": _SessionsOpDoc(
         summary="open a NEW parallel session for work the USER asked to run"
         " separately; listed as a workstream by default. With `peer` it is minted ON"
-        " that device.",
+        " that device. Tags group related parallel sessions; use existing categories —"
+        " a misspelling is refused.",
         example="sessions(op='spawn', prompt='audit the release', name='release audit')",
         refusals=(
             "needs `prompt`; `background=false` is unsupported (v1 always detaches);"
@@ -16193,6 +16198,18 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     except OSError:
         return extras
     extras["session_dir"] = str(directory)
+    from local_operator.session.session_tags import read_categories, read_entity_tags
+
+    categories = read_categories(config_dir())
+    try:
+        assignment = read_entity_tags(config_dir(), "session", session_id, categories=categories)
+    except ValueError:
+        # Older imported directories need not have generated session-id shape.
+        assignment = {"tags": [], "primary": None}
+    lookup = {tag["id"]: tag["name"] for tag in categories}
+    extras["tags"] = [lookup[key] for key in assignment["tags"] if key in lookup]
+    extras["primary"] = assignment["primary"]
+
     try:
         transcript = directory / TRANSCRIPT_NAME
         if transcript.is_file():
@@ -16472,6 +16489,8 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
         if opener.get("session"):
             bits.append(f"session {opener['session']}")
         second.append("opened by " + ", ".join(bits))
+    if extras.get("tags"):
+        second.append("tags: " + ", ".join(extras["tags"]))
     if extras.get("session_dir"):
         second.append(f"dir: {extras['session_dir']}")
     if extras.get("transcript_path"):
@@ -18013,6 +18032,8 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
         bits.append(f"job {details['job_id']}")
     if details.get("pid"):
         bits.append(f"pid {details['pid']}")
+    if details.get("tags_applied"):
+        bits.append("tags: " + ", ".join(details["tags"]))
     where = f" ({', '.join(bits)})" if bits else ""
     opener = details.get("opener") or {}
     opened_by = ""
@@ -18268,6 +18289,28 @@ async def _sessions_open(
     parse — and everything structured comes from the durable ledger the
     launcher wrote.
     """
+    tag_ids: list[str] | None = None
+    tag_names: dict[str, str] = {}
+    if params.tags is not None:
+        if str(params.peer or "").strip():
+            return _error(
+                tool_call_id,
+                "sessions",
+                "Tags are for local sessions only; mesh tag forwarding is not "
+                "supported in this slice.",
+            )
+        from local_operator.session.session_tags import (
+            read_categories,
+            resolve_category_names,
+        )
+
+        # Refuse before the launcher can mint a directory or admit work.
+        try:
+            categories = await asyncio.to_thread(read_categories, config_dir())
+            tag_ids = resolve_category_names(config_dir(), params.tags, categories=categories)
+            tag_names = {tag["id"]: tag["name"] for tag in categories}
+        except ValueError as exc:
+            return _error(tool_call_id, "sessions", str(exc))
     if str(params.peer or "").strip():
         # THE MESH PATH (design §3C): a remote spawn/resume is an act on the
         # owner's device — the local `lop exec` launcher is not involved, and
@@ -18395,6 +18438,43 @@ async def _sessions_open(
         "pid": pid,
         "log_path": str(state.get("log") or "") or None,
     }
+    if tag_ids is not None:
+        from local_operator.session.session_tags import set_entity_tags
+
+        if not session_id:
+            # The bounded publication grace already expired, but the launcher
+            # admitted a job. Report that partial success, not a spawn failure
+            # that invites a second session; there is no background tag retry.
+            reason = "Session id is not published yet; tags were not written"
+            details.update(tags_applied=False, tags_error=reason)
+            return _text(
+                tool_call_id,
+                "sessions",
+                f"Spawn requested (job {job_id}). {reason}. "
+                f"Follow `lop exec --status {job_id}`. Once listed, the operator can "
+                "re-tag it from the sidebar Tags… picker; do not repeat the spawn to retry tags.",
+                details=details,
+            )
+        try:
+            # The ledger, not argv, establishes identity. A failed durable write
+            # must not turn an admitted session into a false tag-success receipt.
+            await asyncio.to_thread(
+                set_entity_tags, config_dir(), "session", session_id, tag_ids, tag_ids[0]
+            )
+            # This receipt describes the successful write, not a later registry
+            # edit. Reuse the exact vocabulary snapshot validated before launch.
+            details["tags"] = [tag_names[key] for key in tag_ids]
+            details["tags_applied"] = True
+        except (OSError, ValueError, KeyError) as exc:
+            details.update(tags_applied=False, tags_error=str(exc))
+            return _text(
+                tool_call_id,
+                "sessions",
+                _sessions_open_body(params, details) + f" Tags not applied: {exc}. "
+                "Once listed, the operator can re-tag it from the sidebar Tags… picker; "
+                "do not repeat the spawn to retry tags.",
+                details=details,
+            )
     if params.op == "resume":
         details["visibility_changed"] = False
     return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)

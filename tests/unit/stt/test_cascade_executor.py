@@ -73,7 +73,16 @@ class FakeWireClient:
         self.calls: list[dict[str, Any]] = []
 
     async def transcribe(
-        self, audio, *, mime, model=None, language=None, prompt=None, timeout_s=60.0
+        self,
+        audio,
+        *,
+        mime,
+        model=None,
+        language=None,
+        prompt=None,
+        no_verbatim=None,
+        tag_audio_events=None,
+        timeout_s=60.0,
     ):
         self.calls.append(
             {
@@ -82,6 +91,8 @@ class FakeWireClient:
                 "model": model,
                 "language": language,
                 "prompt": prompt,
+                "no_verbatim": no_verbatim,
+                "tag_audio_events": tag_audio_events,
                 "timeout_s": timeout_s,
             }
         )
@@ -91,13 +102,19 @@ class FakeWireClient:
         error = self.behavior.get("error")
         if error is not None:
             raise error
+        text = self.behavior.get("text", f"{self.kind} text")
         return type(
             "Result",
             (),
             {
-                "text": self.behavior.get("text", f"{self.kind} text"),
+                "text": text,
                 "model": model or "some-model",
                 "provider": self.kind,
+                "raw_text": None if no_verbatim else text,
+                "raw_unavailable": "provider_no_verbatim" if no_verbatim else "",
+                "language": "eng" if self.kind == "elevenlabs" else None,
+                "language_probability": 0.99 if self.kind == "elevenlabs" else None,
+                "cleanup": "elevenlabs.no_verbatim" if no_verbatim else "none",
             },
         )()
 
@@ -301,6 +318,71 @@ async def test_language_and_prompt_reach_the_byo_clients(rig) -> None:
 
 
 @pytest.mark.asyncio
+async def test_elevenlabs_auto_sends_native_cleanup_and_carries_provenance(rig) -> None:
+    """The default mode uses the provider switch and says so on the outcome."""
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"})
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.text == "elevenlabs text"
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+    assert outcome.language == "eng"
+    assert outcome.removed == ()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_off_sends_no_provider_fields_and_returns_raw(rig) -> None:
+    """``off`` is the verbatim escape hatch: no switch, raw equals text."""
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"}, cleanup="off")
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is None
+    assert call["tag_audio_events"] is None
+    assert outcome.text == "elevenlabs text"
+    assert outcome.raw_text == "elevenlabs text"
+    assert outcome.raw_unavailable == ""
+    assert outcome.cleanup == "none"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_cleanup_mode_is_refused_before_any_call(rig) -> None:
+    with pytest.raises(ValueError, match="Unknown transcription cleanup mode"):
+        await rig.run({"elevenlabs": "el-key"}, cleanup="bogus")
+
+    assert rig.clients == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_provider_sends_native_fields_without_client_rules(rig) -> None:
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"}, cleanup="provider")
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_edit_is_refused_until_its_slice(rig) -> None:
+    """The +30% experimental mode is not silently mapped to provider or off."""
+    with pytest.raises(ValueError, match="not available yet"):
+        await rig.run({"elevenlabs": "el-key"}, cleanup="edit")
+
+    assert rig.clients == []
+
+
+@pytest.mark.asyncio
 async def test_the_sniffed_container_beats_the_suffix(rig) -> None:
     """Content over extension: the header is the stronger evidence."""
     mangled = rig.audio_path.with_suffix(".mp3")
@@ -364,6 +446,11 @@ async def test_the_token_executor_runs_only_the_named_rung(rig) -> None:
     assert call["mime"] == "audio/wav"
     assert call["language"] == "en"
     assert call["prompt"] == "hint"
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
     assert not any(getattr(client, "kind", "") == "openai" for client in rig.clients)
 
 
@@ -422,3 +509,125 @@ async def test_the_token_executor_bounds_a_hung_rung_as_a_transport_failure(
         )
     assert caught.value.status_code is None
     assert "did not respond within" in str(caught.value)
+
+
+class _RadientResult:
+    """A Radient result carrying the extra language fields through ``model_dump``."""
+
+    def __init__(self, text: str, language: str, probability: float):
+        self.text = text
+        self.provider = "radient"
+        self._language = language
+        self._probability = probability
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "provider": self.provider,
+            "language": self._language,
+            "language_probability": self._probability,
+        }
+
+
+@pytest.mark.asyncio
+async def test_auto_cleans_radient_fillers(rig) -> None:
+    rig.behaviors["radient"]["text"] = "Uh, so I think we should ship."
+
+    outcome = await rig.run(language="en")
+
+    assert outcome.text == "So I think we should ship."
+    assert outcome.raw_text == "Uh, so I think we should ship."
+    assert outcome.cleanup == "client.rules.v1"
+    assert [(span.kind, span.token) for span in outcome.removed] == [("filler", "Uh")]
+
+
+@pytest.mark.asyncio
+async def test_auto_without_a_language_removes_cues_only(rig) -> None:
+    rig.behaviors["radient"]["text"] = "[lip smack] Uh, hello."
+
+    outcome = await rig.run()
+
+    assert outcome.text == "Uh, hello."
+    assert [span.kind for span in outcome.removed] == ["cue"]
+
+
+@pytest.mark.asyncio
+async def test_a_caller_language_hint_is_normalised_for_radient_and_the_rules(rig) -> None:
+    rig.behaviors["radient"]["text"] = "Uh, hello."
+
+    outcome = await rig.run(language="en-US")
+
+    assert rig.client("radient").calls[0]["language"] == "en"
+    assert outcome.text == "Hello."
+    assert outcome.cleanup == "client.rules.v1"
+
+
+@pytest.mark.asyncio
+async def test_a_detected_language_below_threshold_does_not_clean_fillers(rig) -> None:
+    rig.behaviors["radient"]["result"] = _RadientResult("Uh, hello.", "eng", 0.4)
+
+    outcome = await rig.run()
+
+    assert outcome.text == "Uh, hello."
+    assert outcome.removed == ()
+
+
+@pytest.mark.asyncio
+async def test_a_confident_detected_language_cleans_fillers(rig) -> None:
+    rig.behaviors["radient"]["result"] = _RadientResult("Uh, hello.", "eng", 0.9)
+
+    outcome = await rig.run()
+
+    assert outcome.text == "Hello."
+    assert outcome.cleanup == "client.rules.v1"
+
+
+@pytest.mark.asyncio
+async def test_provider_mode_leaves_radient_verbatim(rig) -> None:
+    rig.behaviors["radient"]["text"] = "Uh, hello."
+
+    outcome = await rig.run(cleanup="provider")
+
+    assert outcome.text == "Uh, hello."
+    assert outcome.cleanup == "none"
+    assert outcome.removed == ()
+
+
+@pytest.mark.asyncio
+async def test_client_mode_cleans_elevenlabs_without_the_provider_switch(rig) -> None:
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+    rig.behaviors["elevenlabs"]["text"] = "Uh, so I think."
+
+    outcome = await rig.run({"elevenlabs": "el-key"}, cleanup="client")
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is False
+    assert call["tag_audio_events"] is False
+    assert outcome.text == "So I think."
+    assert outcome.raw_text == "Uh, so I think."
+    assert outcome.cleanup == "client.rules.v1"
+
+
+@pytest.mark.asyncio
+async def test_auto_on_elevenlabs_does_not_double_clean(rig) -> None:
+    """The provider removes; our rules must not run on the already-clean text."""
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+    rig.behaviors["elevenlabs"]["text"] = "Um, so I think."
+
+    outcome = await rig.run({"elevenlabs": "el-key"})
+
+    assert outcome.text == "Um, so I think."
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+
+
+@pytest.mark.asyncio
+async def test_auto_on_openai_uses_client_rules(rig) -> None:
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+    rig.behaviors["elevenlabs"]["error"] = APIError("up", status_code=401)
+    rig.behaviors["openai"]["text"] = "Uh, hello."
+
+    outcome = await rig.run({"openai-key": "oai-key"}, language="en")
+
+    assert outcome.text == "Hello."
+    assert outcome.raw_text == "Uh, hello."
+    assert outcome.cleanup == "client.rules.v1"

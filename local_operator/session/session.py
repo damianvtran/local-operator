@@ -205,6 +205,8 @@ from local_operator.harness.wake import (
     format_duration,
     format_wake_delivery_text,
 )
+from local_operator.i18n.keys import tui_notices as _nt
+from local_operator.i18n.messages import Msg
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
     DELIBERATE_CUT_OFF_CAUSE,
@@ -368,6 +370,34 @@ if TYPE_CHECKING:
     from local_operator.session_factory import _KnowledgeHooks
 
 logger = logging.getLogger(__name__)
+
+
+def _notice(
+    message: Msg,
+    *,
+    kind: Literal["info", "warning", "error"] = "warning",
+    headline: str = "",
+) -> NoticeEvent:
+    """One typed notice: catalogue text plus its additive ``code``/``params``.
+
+    ``text`` stays present and English-first (RFC §2.6) so every existing
+    client keeps rendering what it rendered before; the id and parameters let
+    a locale-aware viewer re-render without parsing the sentence.
+    """
+    body = message.envelope()
+    return NoticeEvent(
+        text=body["text"],
+        code=body["code"],
+        params=body["params"],
+        kind=kind,
+        headline=headline,
+    )
+
+
+def _text(message: Msg) -> str:
+    """The English text of a catalogue message (fragments and headlines)."""
+    return message.envelope()["text"]
+
 
 #: Transcript custom-entry type recording which model is ACTUALLY serving
 #: requests when a provider fallback pins a route away from the selected
@@ -1207,11 +1237,15 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
         # clause would render a parked item as plain pending work.
         reason = item.get("reason")
         rows.append(
-            f"- {item['text']} — blocked: {reason}" if reason else f"- {item['text']} — blocked"
+            # i18n: ignore model-facing system reminder (not shown to the user)
+            f"- {item['text']} — blocked: {reason}"
+            if reason
+            else f"- {item['text']} — blocked"
         )
     paragraphs: list[str] = []
     if pending:
         paragraphs.append(
+            # i18n: ignore model-facing system reminder (not shown to the user)
             "Do not end the turn while pending items remain: either keep "
             "working, or resolve each one honestly — `todo done` when it is "
             "finished, `todo block` with a reason when it needs a user decision "
@@ -1221,6 +1255,7 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
         )
     if blocked:
         paragraphs.append(
+            # i18n: ignore model-facing system reminder (not shown to the user)
             "Before you finish, account for each blocked item: check whether "
             "its condition still holds. If it has cleared, resume the work; if "
             "the decision is the user's, raise it with the `ask` tool; if it "
@@ -1265,7 +1300,9 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
     for project in stale[:_PROJECT_REMINDER_MAX_ROWS]:
         age = reported_age(project, now=now)
         if age is None:
-            rows.append(f"- {project.name} [{project.status}] — no progress recorded")
+            rows.append(
+                f"- {project.name} [{project.status}] — no progress recorded"
+            )  # i18n: ignore model-facing system reminder (not shown to the user)
             continue
         # The reporter clause is dropped when the row carries no reporter (a
         # hand-edited or pre-tool row): "by session " with nothing after it
@@ -1277,12 +1314,15 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
         if len(excerpt) > _PROJECT_REMINDER_EXCERPT_CHARS:
             excerpt = excerpt[: _PROJECT_REMINDER_EXCERPT_CHARS - 1].rstrip() + "…"
         rows.append(
+            # i18n: ignore model-facing system reminder (not shown to the user)
             f"- {project.name} [{project.status}] — progress last reported "
             f'{age} ago{reporter}: "{excerpt}"'
         )
     extra = len(stale) - _PROJECT_REMINDER_MAX_ROWS
     if extra > 0:
-        rows.append(f"… and {extra} more")
+        rows.append(
+            f"… and {extra} more"
+        )  # i18n: ignore model-facing system reminder (not shown to the user)
     return (
         "<system-reminder>\n"
         "Injected by the harness at the turn boundary. Not from the user, and "
@@ -4973,16 +5013,7 @@ class Session:
             self._image_drop_diagnostic(),
         )
         self._spawn_background(
-            self._emit(
-                NoticeEvent(
-                    text=(
-                        f"{label} does not accept images — the images in this "
-                        "conversation are omitted from its context. Switch to a "
-                        "model that accepts images to see them again."
-                    ),
-                    kind="warning",
-                )
-            )
+            self._emit(_notice(_nt.image_unsupported(model=label), kind="warning"))
         )
 
     def _live_todo_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
@@ -5340,16 +5371,7 @@ class Session:
             self._wire_budget_override,
             frames_left,
         )
-        await self._emit(
-            NoticeEvent(
-                text=(
-                    "The provider refused the request as too large. Some screenshots "
-                    "have been dropped from the context and the size limit tightened — "
-                    "send your message again."
-                ),
-                kind="warning",
-            )
-        )
+        await self._emit(_notice(_nt.request_too_large_dropped(), kind="warning"))
         return True
 
     async def _degrade_images_for_size(self, budget: int, frames_left: int) -> bool:
@@ -5394,22 +5416,8 @@ class Session:
             self._image_drop_diagnostic(),
         )
         await self._emit(
-            NoticeEvent(
-                text=(
-                    # Branching on the actual history rather than emitting one
-                    # sentence that is false half the time: this rung is
-                    # reached on the FIRST refusal for a text-only history,
-                    # where "dropping screenshots" and "images have been
-                    # removed" both describe something that never happened
-                    # (agent review round 2, R9).
-                    "This conversation is too large for the provider to accept. "
-                    "Run /compact to summarise it, or start a new conversation."
-                    if frames_left == 0
-                    else "The conversation is too large for this provider even after "
-                    "dropping screenshots, so images have been removed from the "
-                    "context to keep the session working. If it still fails, run "
-                    "/compact or start a new conversation."
-                ),
+            _notice(
+                _nt.too_large_run_compact() if frames_left == 0 else _nt.too_large_images_removed(),
                 kind="warning",
             )
         )
@@ -5458,16 +5466,7 @@ class Session:
             "provider rejected an image; dropping images from this session's context (%s)",
             self._image_drop_diagnostic(),
         )
-        await self._emit(
-            NoticeEvent(
-                text=(
-                    "The provider rejected an image in this conversation's history. "
-                    "Images have been dropped from the context so the session keeps "
-                    "working — send your message again."
-                ),
-                kind="warning",
-            )
-        )
+        await self._emit(_notice(_nt.image_rejected_history(), kind="warning"))
 
     def _missing_media_diagnostic(self) -> str:
         """What the omitted payload-less block(s) look like, for the log.
@@ -17216,15 +17215,7 @@ class Session:
             # to resume" described work they do not have to do and misnamed the
             # state. What they cannot see — and what this exists to say — is
             # that things are arriving and being held rather than run.
-            await self._emit(
-                NoticeEvent(
-                    text=(
-                        "Work arriving into this stopped session is being held, not run. "
-                        "The held items are read on the next turn."
-                    ),
-                    kind="warning",
-                )
-            )
+            await self._emit(_notice(_nt.stopped_session_held(), kind="warning"))
         logger.info(
             "dropped a pre-aborted turn (%d in this run); %d message(s) held for the next turn",
             self._pre_aborted_drops,
@@ -17252,11 +17243,8 @@ class Session:
                     dropped,
                 )
                 await self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"Auto-continuation limit ({_MAX_CONTINUATIONS}) reached; " "stopping."
-                        ),
-                        kind="warning",
+                    _notice(
+                        _nt.auto_continuation_limit(limit=str(_MAX_CONTINUATIONS)), kind="warning"
                     )
                 )
                 return
@@ -19883,12 +19871,7 @@ class Session:
             except Exception:  # noqa: BLE001 - one handler cannot hide rejection from others
                 logger.exception("steering rejection handler failed")
         await self._emit(
-            NoticeEvent(
-                text=(
-                    f"steering command {command_id} was not saved: {reason}; "
-                    "retry with the same command ID"
-                )
-            )
+            _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
         )
         # Mobile projections optimistically count accepted steers. Rejection is
         # another terminal exit from that queue, even though it was not delivered.
@@ -24080,15 +24063,10 @@ class Session:
             )
         lost: list[str] = []
         if adoptions:
-            lost.append(f"{len(adoptions)} aside(s) you added to the conversation")
+            lost.append(_text(_nt.unsaved_asides(count=str(len(adoptions)))))
         if receipts:
-            lost.append(f"{len(receipts)} shell command record(s)")
-        await self._emit(
-            NoticeEvent(
-                text=f"{' and '.join(lost)} could not be saved before the conversation closed",
-                kind="error",
-            )
-        )
+            lost.append(_text(_nt.unsaved_receipts(count=str(len(receipts)))))
+        await self._emit(_notice(_nt.unsaved_records(summary=" and ".join(lost)), kind="error"))
         # DURABLE as well (review R6): the notice reaches only a frontend still
         # connected during teardown. The row is written straight to the
         # transcript, as ``_journal_held_delivery_failure`` does once disposed —
@@ -25079,7 +25057,9 @@ class Session:
                     f"- {schedule.id} (due {_due_label(schedule)}): "
                     "missed while the session was down."
                 )
-            lines.append(f"{header}\n  Message: {schedule.message}")
+            lines.append(
+                f"{header}\n  Message: {schedule.message}"
+            )  # i18n: ignore model-facing wake prompt
         return (
             "(alarm) The session resumed after being closed; the following scheduled wake(s) "
             "came due while it was down. Each fires once now — handle them as missed wakes, "
@@ -25950,14 +25930,10 @@ class Session:
         if self._model_migration_notice:
             self._model_migration_notice = False
             await self._emit(
-                NoticeEvent(
-                    text=(
-                        "Saved model information is incomplete; "
-                        f"using {self.model_label}. "
-                        "This selection is now saved for future resumes."
-                    ),
+                _notice(
+                    _nt.model_info_incomplete(model=self.model_label),
                     kind="warning",
-                    headline="Model selected",
+                    headline=_text(_nt.model_info_incomplete_headline()),
                 )
             )
 
@@ -27433,13 +27409,10 @@ class Session:
             # The model default itself moved: the #785 notice, unchanged.
             self._spawn_background(
                 self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"keeping {self.model_label}; default changed for new sessions. "
-                            "/model saved adopts it here"
-                        ),
+                    _notice(
+                        _nt.model_default_changed(model=self.model_label),
                         kind="info",
-                        headline="Model unchanged",
+                        headline=_text(_nt.model_default_changed_headline()),
                     )
                 )
             )
@@ -27463,13 +27436,10 @@ class Session:
         stored_effort = str(values.get("model_effort") or "")
         self._spawn_background(
             self._emit(
-                NoticeEvent(
-                    text=(
-                        "reasoning effort default changed for new sessions "
-                        f"({stored_effort or 'auto'}); /model saved adopts it here"
-                    ),
+                _notice(
+                    _nt.effort_default_changed(effort=stored_effort or "auto"),
                     kind="info",
-                    headline="Effort default changed",
+                    headline=_text(_nt.effort_default_changed_headline()),
                 )
             )
         )
@@ -27891,13 +27861,19 @@ class Session:
                 failure = task.exception()
         complete = task in done and not cancelled and failure is None
         if task not in done:
-            errors.append(f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)")
+            errors.append(
+                f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if cancelled:
             # Cancellation proves NOTHING about resource state: keep it
             # incomplete and uncached (R3).
-            errors.append("cleanup task was cancelled; owned work state unverified")
+            errors.append(
+                "cleanup task was cancelled; owned work state unverified"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if failure is not None:
-            errors.append(f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}")
+            errors.append(
+                f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         hook_failures = tuple(self._disposal_hook_failures)
         if hook_failures:
             # Ordinary disposal logs-and-continues past a failing hook; the
@@ -27919,10 +27895,14 @@ class Session:
         in_flight = bool(getattr(self._stream_fn, "child_model_requests_in_flight", False))
         if complete and pending_jobs:
             complete = False
-            errors.append(f"{len(pending_jobs)} owned job(s) still running after cleanup")
+            errors.append(
+                f"{len(pending_jobs)} owned job(s) still running after cleanup"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if complete and in_flight:
             complete = False
-            errors.append("a descendant provider stream was still in flight after cleanup")
+            errors.append(
+                "a descendant provider stream was still in flight after cleanup"
+            )  # i18n: ignore structured eval-harness error (no product UI)
         # The observer holder lives on the ROOT stream; a child's stream only
         # REFERENCES it. Reading the child's own attribute would report a
         # local zero while subscriptions and delivery count on the shared
@@ -28007,11 +27987,14 @@ class Session:
         task = self._disposal_task
         if task is not None and task.done():
             if task.cancelled():
-                reasons.append("cleanup task was cancelled; owned work state unverified")
+                reasons.append(
+                    "cleanup task was cancelled; owned work state unverified"
+                )  # i18n: ignore structured eval-harness error (no product UI)
             else:
                 failure = task.exception()
                 if failure is not None:
                     reasons.append(
+                        # i18n: ignore structured eval-harness error (no product UI)
                         f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
                     )
         reasons.extend(self._disposal_hook_failures)
@@ -28031,6 +28014,7 @@ class Session:
         """
         for error in errors:
             self._descendant_cleanup_failures.append(
+                # i18n: ignore structured eval-harness error (no product UI)
                 f"descendant {session_id} cleanup unverified: {error}"
             )
 

@@ -199,7 +199,12 @@ async def test_the_radient_adapter_sends_bytes_off_the_loop_and_cleans_up(
     )
 
     assert outcome == SttOutcome(
-        text="hello world", provider="elevenlabs", model=None, path="provider_stt_radient"
+        text="hello world",
+        provider="elevenlabs",
+        model=None,
+        path="provider_stt_radient",
+        raw_text="hello world",
+        cleanup="client.rules.v1",
     )
     assert seen["bytes"] == b"RIFFfake-bytes"
     assert seen["credential_root"] == tmp_path
@@ -249,6 +254,11 @@ async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_execut
     class _CascadeOutcome:
         text = "phone text"
         path = "provider_stt_openai"
+        raw_text = None
+        raw_unavailable = "provider_no_verbatim"
+        language = "eng"
+        cleanup = "elevenlabs.no_verbatim"
+        removed = ()
 
     async def fake_executor(backend: str, audio: bytes, mime: str, **kwargs: Any) -> Any:
         seen.update(backend=backend, audio=audio, mime=mime, kwargs=kwargs)
@@ -269,6 +279,12 @@ async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_execut
     assert outcome.text == "phone text"
     assert outcome.path == "provider_stt_openai"
     assert outcome.provider == "openai"
+    # The mirror copies the cleanup fields; the daemon's JSON is built from it.
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+    assert outcome.language == "eng"
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.removed == ()
     # The phone's ``model`` form field is an STT-model hint the Radient adapter
     # honors; the cascade executor deliberately does not receive it.
     assert seen == {
@@ -280,8 +296,23 @@ async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_execut
             "store": None,
             "language": "en",
             "prompt": "hint",
+            "cleanup": None,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_cleanup_mode_is_refused_before_availability() -> None:
+    """The Radient path has no cleanup work yet, but the mode is still validated."""
+    with pytest.raises(ValueError, match="Unknown transcription cleanup mode"):
+        await transcribe_audio(b"x", "audio/wav", cleanup="bogus")
+
+
+@pytest.mark.asyncio
+async def test_the_dispatch_seam_validates_cleanup_before_the_token_lookup() -> None:
+    """Direct callers of ``transcribe_with_backend`` get the same refusal."""
+    with pytest.raises(ValueError, match="Unknown transcription cleanup mode"):
+        await transcribe_with_backend("provider_stt_radient", b"x", "audio/wav", cleanup="bogus")
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +572,140 @@ def test_path_provider_label_names_the_rung() -> None:
     assert path_provider_label("provider_stt_radient") == "Radient"
     assert path_provider_label(None) == "upstream"
     assert path_provider_label("nonsense") == "upstream"
+
+
+@pytest.mark.asyncio
+async def test_the_radient_adapter_omits_an_unmapped_language_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q20/Q21: fil-PH normalises to the 3-letter fil, which is not ISO-639-1.
+
+    The field must be omitted (not guessed) and the token rules must no-op;
+    the language-independent cue lexicon still runs.
+    """
+    from local_operator.clients import radient as radient_module
+    from local_operator.providers import radient_credentials
+
+    seen: dict[str, Any] = {}
+
+    class _FakeRadientClient:
+        def __init__(self, api_key: Any, base_url: str) -> None:
+            pass
+
+        def create_transcription(
+            self, *, file_path: str, model: Any, prompt: Any, language: Any
+        ) -> Any:
+            seen["language"] = language
+            return SimpleNamespace(text="[lip smack] Uh, hello.", provider="radient", language=None)
+
+    async def _key(config: Any, base_url: str, *, store: Any = None) -> Any:
+        return SimpleNamespace(get_secret_value=lambda: "fixture-key")
+
+    monkeypatch.setattr(radient_module, "RadientClient", _FakeRadientClient)
+    monkeypatch.setattr(radient_credentials, "resolve_radient_credential", _key)
+
+    outcome = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake",
+        "audio/wav",
+        language="fil-PH",
+        cleanup="auto",
+        config_root=tmp_path,
+    )
+
+    assert seen["language"] is None
+    assert outcome.text == "Uh, hello."
+    assert outcome.raw_text == "[lip smack] Uh, hello."
+    assert [span.kind for span in outcome.removed] == ["cue"]
+
+
+@pytest.mark.asyncio
+async def test_the_radient_adapter_normalises_en_us_and_cleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.clients import radient as radient_module
+    from local_operator.providers import radient_credentials
+
+    seen: dict[str, Any] = {}
+
+    class _FakeRadientClient:
+        def __init__(self, api_key: Any, base_url: str) -> None:
+            pass
+
+        def create_transcription(
+            self, *, file_path: str, model: Any, prompt: Any, language: Any
+        ) -> Any:
+            seen["language"] = language
+            return SimpleNamespace(text="Uh, hello.", provider="radient")
+
+    async def _key(config: Any, base_url: str, *, store: Any = None) -> Any:
+        return SimpleNamespace(get_secret_value=lambda: "fixture-key")
+
+    monkeypatch.setattr(radient_module, "RadientClient", _FakeRadientClient)
+    monkeypatch.setattr(radient_credentials, "resolve_radient_credential", _key)
+
+    outcome = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake",
+        "audio/wav",
+        language="en-US",
+        cleanup="auto",
+        config_root=tmp_path,
+    )
+
+    assert seen["language"] == "en"
+    assert outcome.text == "Hello."
+    assert outcome.cleanup == "client.rules.v1"
+
+
+@pytest.mark.asyncio
+async def test_the_settings_key_changes_the_radient_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config -> resolver -> Radient adapter -> text: the real chain, not a stub."""
+    from local_operator import settings_io
+    from local_operator.clients import radient as radient_module
+    from local_operator.config import ConfigManager
+    from local_operator.providers import radient_credentials
+    from local_operator.stt.cleanup import configured_cleanup
+
+    class _FakeRadientClient:
+        def __init__(self, api_key: Any, base_url: str) -> None:
+            pass
+
+        def create_transcription(
+            self, *, file_path: str, model: Any, prompt: Any, language: Any
+        ) -> Any:
+            return SimpleNamespace(text="Uh, hello.", provider="radient")
+
+    async def _key(config: Any, base_url: str, *, store: Any = None) -> Any:
+        return SimpleNamespace(get_secret_value=lambda: "fixture-key")
+
+    monkeypatch.setattr(radient_module, "RadientClient", _FakeRadientClient)
+    monkeypatch.setattr(radient_credentials, "resolve_radient_credential", _key)
+
+    manager = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+    settings_io.write_setting(manager, setting, "off")
+
+    off = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake",
+        "audio/wav",
+        language="en",
+        cleanup=configured_cleanup(manager),
+        config_root=tmp_path,
+    )
+    assert off.text == "Uh, hello."
+
+    settings_io.write_setting(manager, setting, "auto")
+    auto = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake",
+        "audio/wav",
+        language="en",
+        cleanup=configured_cleanup(manager),
+        config_root=tmp_path,
+    )
+    assert auto.text == "Hello."
+    assert auto.cleanup == "client.rules.v1"

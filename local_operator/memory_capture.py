@@ -15,7 +15,7 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator, NamedTuple
 
 from local_operator.memory import (
     MAX_REVISIONS,
@@ -59,7 +59,67 @@ _LOCATOR = re.compile(
 #: each call linear; windowing makes the worst case independent of input size, and lets
 #: the time budget be checked between windows (a single re call cannot be interrupted).
 SCAN_WINDOW = 4096
+#: How long the scan may look before it stops and hands back what it found. Named because
+#: two things must agree: this value, and ``finish``'s await, which has to be STRICTLY
+#: longer than it (see ``_SCAN_GRACE``) or the partial rows never reach the write.
+SCAN_BUDGET = 2.0
+#: Grace on the await in ``finish``. The scan checks its own budget between windows, so it
+#: normally raises with its partial rows a moment after ``SCAN_BUDGET``; the await only has
+#: to outlast that hand-off. It stays a bound, not a promise: a wedged thread still times
+#: out here, and that path records ``timeout`` without rows (nothing was observable).
+_SCAN_GRACE = 0.5
+#: Coarse, content-free causes recorded BESIDE a ``captures`` row (in ``meta``), so a
+#: pass that captured less than everything is attributable later. Literal members only:
+#: this record exists so a failed pass is attributable at all, so it must never carry
+#: free text (a body, a locator or an exception message) out of the store.
+#: ``refused-row`` = a candidate the admission or write guard would not admit;
+#: ``timeout`` = the scan budget ran out; ``quota`` = the store refused growth;
+#: ``store-error`` = anything else.
+CAPTURE_REASONS = ("timeout", "refused-row", "quota", "store-error")
 _HEADINGS = re.compile(r"^#{1,4}\s*(?:Goal|Key Decisions|Progress|Critical Context)\b", re.I)
+
+
+class CaptureRows(list[dict[str, Any]]):
+    """Candidate rows plus the ADMISSION skips that produced them.
+
+    A list SUBCLASS on purpose: ``extract``'s result crosses a task hand-off
+    (``session._begin_memory_capture`` builds the task and ``finish`` awaits it), and
+    every existing consumer reads it as a list. The count has to travel WITH the rows
+    or the attribution is lost by the time ``persist`` writes.
+
+    ``skipped`` counts candidates the admission guard refused inside ``extract``; they
+    never reach ``persist``, whose ``refused`` count is the WRITE-time belt. The two are
+    recorded separately so a stricter ``guard()`` rule is visible instead of silently
+    shrinking the capture (review round 1, MINOR 2).
+    """
+
+    __slots__ = ("skipped",)
+
+    def __init__(self, rows: Iterable[dict[str, Any]] = (), skipped: int = 0):
+        super().__init__(rows)
+        self.skipped = skipped
+
+
+class BudgetExceeded(TimeoutError):
+    """The scan ran out of its budget; ``rows`` is every candidate found so far.
+
+    A TimeoutError SUBCLASS on purpose: an existing caller that only knows "capture
+    timed out" keeps working, while ``finish`` can tell this apart and persist the partial
+    rows instead of recording a ``failed``/0 marker for a pass that merely ran long.
+    """
+
+    def __init__(self, rows: CaptureRows):
+        super().__init__("memory capture budget")
+        self.rows = rows
+
+
+class _QuotaExceeded(MemoryError):
+    """``MemoryStore._quota`` refused a capture write; ``finish`` records ``quota``.
+
+    Subclasses MemoryError so a caller that only handles the store's refusal keeps
+    working; the subclass exists solely so the row's reason is not mislabelled as a
+    generic store error.
+    """
 
 
 def policy(config: Path) -> dict[str, Any]:
@@ -228,17 +288,38 @@ def extract_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return extract(snapshot(messages))
 
 
-def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
-    """CPU-only bounded scan; returns values, never opens a store or writes state."""
+def _ranked(counts: Counter[str], last: dict[str, int]) -> list[dict[str, Any]]:
+    """The bounded candidate list, ranked by last occurrence then frequency.
+
+    ONE renderer for both exits (the completed scan and the budget-exceeded one), so a
+    partial result is shaped and ordered exactly like a complete one.
+    """
+    return [
+        {"title": locator[:100], "body": locator, "tags": ["locator"]}
+        for locator in sorted(counts, key=lambda x: (last[x], counts[x], x), reverse=True)[:40]
+    ]
+
+
+def extract(text: str, summary: str = "") -> CaptureRows:
+    """CPU-only bounded scan; returns values, never opens a store or writes state.
+
+    Raises :class:`BudgetExceeded` when the scan budget runs out, carrying the rows found
+    up to that point: running out of time is a degraded result, never a lost one.
+
+    The returned list carries ``skipped``, the number of candidates the admission guard
+    refused. They are counted rather than silently dropped: an admission rule stricter
+    than the write's would otherwise shrink a pass with no trace anywhere (review round
+    1, MINOR 2).
+    """
     started = time.monotonic()
-    found = []
     counts: Counter[str] = Counter()
     last: dict[str, int] = {}
+    skipped = 0
     index = 0
     offset = 0
     for window in windows(text[:2000000]):
-        if time.monotonic() - started > 2:
-            raise TimeoutError("memory capture budget")
+        if time.monotonic() - started > SCAN_BUDGET:
+            raise BudgetExceeded(CaptureRows(_ranked(counts, last), skipped=skipped))
         start = offset
         offset += len(window)
         if start and not text[start - 1].isspace():
@@ -264,13 +345,21 @@ def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
                 if "/" not in identifier and not any(char.isdigit() for char in identifier):
                     continue
             try:
-                guard(locator)
+                # WHY opaque=True: ``persist`` re-guards every free-text field with
+                # ``guard(x, opaque=True)`` via ``validate_fact``, and that enables the
+                # long-hex/base64 rule this default guard does NOT. Admitting a locator
+                # here that the write will refuse used to mean the row was accepted by the
+                # scanner and then zeroed the whole pass (221 of 587 rows, 2026-10). A
+                # candidate that would be refused is SKIPPED at admission instead — the
+                # same pattern ``carry_rows`` already uses for the same reason.
+                guard(locator, opaque=True)
             except MemoryError:
+                # Counted, not just dropped: see the docstring.
+                skipped += 1
                 continue
             counts[locator] += 1
             last[locator] = index
-    for locator in sorted(counts, key=lambda x: (last[x], counts[x], x), reverse=True)[:40]:
-        found.append({"title": locator[:100], "body": locator, "tags": ["locator"]})
+    found = _ranked(counts, last)
     semantic = False
     semantic_count = 0
     for line in summary.splitlines()[:1000]:
@@ -282,25 +371,90 @@ def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
         if semantic and line.strip().startswith(("- ", "* ")):
             text = line.strip()[2:202]
             try:
-                guard(text)
+                # Same reason as the locator arm: match the guard the WRITE applies, so a
+                # semantic bullet carrying a long hex/base64 run is skipped here instead of
+                # being refused (fatally, before the belt in ``persist``) later.
+                guard(text, opaque=True)
             except MemoryError:
+                skipped += 1
                 continue
             found.append({"title": text[:100], "body": text, "tags": ["summary"]})
             semantic_count += 1
             if semantic_count >= 12:
                 break
-    return found
+    return CaptureRows(found, skipped=skipped)
 
 
-def watermark(store: MemoryStore, compaction_id: str) -> tuple[str, int] | None:
+class CaptureDetail(NamedTuple):
+    """One capture's terminal row plus the coarse attribution stored beside it."""
+
+    status: str
+    n: int
+    reason: str | None
+    refused: int
+    skipped: int
+
+
+def _capture_key(store: MemoryStore, marker_id: str) -> str:
+    """The ``meta`` key holding one capture's coarse attribution.
+
+    NOT a ``captures`` column on purpose: that table keeps its exact 4-column shape so
+    the previous release's positional ``INSERT INTO captures VALUES (?,?,?,?)`` keeps
+    working against a store this build has opened. Running sessions still hold the old
+    code after an upgrade, and an added column silently stopped their captures until
+    restart (review round 1, MINOR 3). ``meta`` is the store's existing key/value table
+    and needs no migration at all.
+
+    ``session``/``compaction`` are the same pair as the table's primary key; the session
+    id is a hex slug, so the prefix is unambiguous.
+    """
+    return f"capture.{store.identity.session_id}.{marker_id}"
+
+
+def _count(value: Any) -> int:
+    """A non-negative count from an untrusted-in-shape meta record; else zero."""
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def capture_detail(store: MemoryStore, marker_id: str) -> CaptureDetail | None:
+    """The terminal row plus ``reason``/``refused``/``skipped`` from ``meta``.
+
+    One reader for every surface that needs the attribution, so ``hint`` and any future
+    status view cannot disagree about what a pass recorded. A malformed meta value
+    degrades to "no attribution" rather than breaking the hint: the row itself is the
+    truth, and a hint must never cost a turn.
+    """
     if not store.path.exists():
         return None
     with store.connection() as db:
         row = db.execute(
             "SELECT status,n FROM captures WHERE session=? AND compaction=?",
-            (store.identity.session_id, compaction_id),
+            (store.identity.session_id, marker_id),
         ).fetchone()
-        return (row[0], row[1]) if row else None
+        if row is None:
+            return None
+        record = db.execute(
+            "SELECT value FROM meta WHERE key=?", (_capture_key(store, marker_id),)
+        ).fetchone()
+    reason: str | None = None
+    refused = 0
+    skipped = 0
+    if record is not None:
+        try:
+            parsed = json.loads(record[0])
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            if parsed.get("reason") in CAPTURE_REASONS:
+                reason = parsed["reason"]
+            refused = _count(parsed.get("refused"))
+            skipped = _count(parsed.get("skipped"))
+    return CaptureDetail(str(row[0]), int(row[1]), reason, refused, skipped)
+
+
+def watermark(store: MemoryStore, compaction_id: str) -> tuple[str, int] | None:
+    detail = capture_detail(store, compaction_id)
+    return None if detail is None else (detail.status, detail.n)
 
 
 def persist(
@@ -309,29 +463,76 @@ def persist(
     rows: list[dict[str, Any]],
     status: str,
     committed_at: float | None = None,
-) -> None:
-    """Atomic exact-candidate refresh; never overwrite a correction or resurrect a forget."""
+    reason: str | None = None,
+    skipped: int | None = None,
+) -> tuple[str, str | None]:
+    """Atomic exact-candidate refresh; never overwrite a correction or resurrect a forget.
+
+    ``reason`` is the coarse cause recorded beside the row, so a pass that captured less
+    than everything is attributable later (see :data:`CAPTURE_REASONS`). ``skipped`` is
+    the admission-skip count from :func:`extract`; when omitted it is taken from a
+    :class:`CaptureRows` result, so a direct caller cannot silently lose it. Write-time
+    refusals are counted here. Both counts, and the reason, are stored in ``meta`` under
+    :func:`_capture_key` — ``captures`` keeps its 4-column shape for mixed-version
+    rollout.
+
+    A pass that captured nothing is a FAILURE, whatever ended it: a budget stop with no
+    rows, or a pass whose every candidate was refused, is recorded ``failed`` rather
+    than an ``ok``/0 that would hide the loss (review round 1, MAJOR).
+
+    Returns the terminal ``(status, reason)`` actually recorded, so ``finish`` reports
+    the same outcome the store holds.
+    """
     guard(marker_id)
+    if skipped is None:
+        skipped = getattr(rows, "skipped", 0)
     if status not in ("ok", "failed") or len(rows) > 52:
         raise MemoryError("Invalid capture result.")
+    if reason is not None and reason not in CAPTURE_REASONS:
+        raise MemoryError("Invalid capture reason.")
+    if not isinstance(skipped, int) or skipped < 0:
+        raise MemoryError("Invalid capture skip count.")
     timestamp = time.time() if committed_at is None else committed_at
     facts = {}
+    refused = 0
     for row in rows:
-        fact = validate_fact(
-            dict(
-                row,
-                status="candidate",
-                created_at=timestamp,
-                source_time=timestamp,
-                source={
-                    "session": store.identity.session_id,
-                    "entry": marker_id,
-                    "kind": "compaction",
-                    "author": "deterministic-capture",
-                },
+        try:
+            fact = validate_fact(
+                dict(
+                    row,
+                    status="candidate",
+                    created_at=timestamp,
+                    source_time=timestamp,
+                    source={
+                        "session": store.identity.session_id,
+                        "entry": marker_id,
+                        "kind": "compaction",
+                        "author": "deterministic-capture",
+                    },
+                )
             )
-        )
+        except (MemoryError, TypeError, ValueError):
+            # BELT at the write. The admit site now matches ``validate_fact``'s stricter
+            # guard, but that is a rule the scanner KNOWS; a future field-shape rule it
+            # does not yet know would otherwise reach here and — because the loop below
+            # is inside the transaction — raise out of ``persist`` and leave a
+            # ``failed``/0 row, which is how ONE bad row erased 221 passes. A row shape
+            # the store refuses now costs one candidate and is counted. TypeError and
+            # ValueError cover ``dict(row, ...)`` itself: a non-mapping row is the same
+            # one-candidate contract, not a reason to abort the pass (review NIT 1).
+            refused += 1
+            continue
         facts[_dump([fact["body"], fact["tags"]])] = fact
+    if refused:
+        # Count only, never the row: content is untrusted and must not be echoed. The
+        # count itself is also recorded in ``meta`` below, so a pass's loss is queryable
+        # rather than only a line in a log.
+        logger.warning("memory capture skipped %d refused candidate(s)", refused)
+    if reason is None and (refused or skipped):
+        # Either guard losing a candidate makes the pass partial. ``skipped`` arrived
+        # from admission, where the row never reached this function; counting only the
+        # write belt is how a stricter ``extract`` rule became invisible.
+        reason = "refused-row"
     # A moved session's full portable truth must be indexed before a capture
     # exports anything, otherwise the new candidates would replace its old facts.
     store.import_session()
@@ -341,7 +542,7 @@ def persist(
             "SELECT 1 FROM captures WHERE session=? AND compaction=?",
             (store.identity.session_id, marker_id),
         ).fetchone():
-            return
+            return status, reason
         origin = store._origin(db)
         seq = db.execute(
             "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
@@ -407,10 +608,36 @@ def persist(
             )
             store._reindex(db, entity)
             captured += 1
-        store._quota(db, "session", store.identity.session_id)
+        # A pass that captured nothing is a FAILURE, whatever ended it. A budget stop
+        # with no rows, or a pass whose every candidate was refused, must not present as
+        # a completed capture: the hint would claim success and the failed-rate metric
+        # would count it as a good pass.
+        if status == "ok" and not captured and reason in ("timeout", "refused-row"):
+            status = "failed"
+        if facts:
+            try:
+                store._quota(db, "session", store.identity.session_id)
+            except MemoryError as exc:
+                # Re-raised under a subclass so ``finish`` can record ``quota`` rather than
+                # a generic ``store-error``. The message is the store's own (content-free).
+                raise _QuotaExceeded(str(exc)) from None
         db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+        # Attribution lives in ``meta``, not in ``captures``: the 4-column table keeps
+        # the previous release's positional INSERT working for sessions still running
+        # old code during rollout. Written only when there is something to attribute,
+        # so a clean pass adds no meta row.
+        if reason is not None or refused or skipped:
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES (?,?)",
+                (
+                    _capture_key(store, marker_id),
+                    _dump({"reason": reason, "refused": refused, "skipped": skipped}),
+                ),
+            )
+        # Explicit columns on the 4-column table: valid against a store the previous
+        # release wrote, and against one a 6-column pre-fix build already migrated.
         db.execute(
-            "INSERT INTO captures VALUES (?,?,?,?)",
+            "INSERT INTO captures(session,compaction,status,n) VALUES (?,?,?,?)",
             (store.identity.session_id, marker_id, status, captured),
         )
         db.execute(
@@ -418,9 +645,18 @@ def persist(
             "(SELECT compaction FROM captures WHERE session=? ORDER BY rowid DESC LIMIT 32)",
             (store.identity.session_id, store.identity.session_id),
         )
+        # Drop attribution whose capture row was just pruned; ``meta`` must not grow
+        # without bound beside a table that keeps only the last 32 passes per session.
+        prefix = f"capture.{store.identity.session_id}."
+        db.execute(
+            "DELETE FROM meta WHERE substr(key,1,?)=? AND key NOT IN "
+            "(SELECT 'capture.'||session||'.'||compaction FROM captures WHERE session=?)",
+            (len(prefix), prefix, store.identity.session_id),
+        )
         if store.session_dir:
             store._export(db, store.identity.session_id)
         db.commit()
+    return status, reason
 
 
 #: Rows held for the carry arm inside the shared 52-row capture cap. The pass's
@@ -439,12 +675,16 @@ async def finish(
     carry: str = "",
 ) -> str:
     try:
-        rows = await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        scan_rows = await asyncio.wait_for(asyncio.shield(task), timeout=SCAN_BUDGET + _SCAN_GRACE)
         # Summary parsing is deterministic, not another provider request. The
         # carry rows are added ONCE (see ``carry_rows``); the digest is NOT also
         # fed through ``extract`` in the same pass, which would persist the same
-        # bodies twice under two tag sets.
-        rows = rows + await asyncio.to_thread(extract, "", summary)
+        # bodies twice under two tag sets. Admission skips travel with each arm
+        # (``CaptureRows.skipped``) and are summed before the list concatenation
+        # below flattens them into a plain list.
+        semantic_rows = await asyncio.to_thread(extract, "", summary)
+        skipped = getattr(scan_rows, "skipped", 0) + getattr(semantic_rows, "skipped", 0)
+        rows = scan_rows + semantic_rows
         carry_arm = carry_rows(carry) if carry else []
         # The carry is the pass's MARQUEE retention, so it gets its own bounded
         # reserve inside the shared cap instead of sitting behind a locator scan
@@ -453,18 +693,75 @@ async def finish(
         reserved = min(len(carry_arm), _CARRY_ROW_RESERVE)
         scan_rows = rows[: 52 - reserved] if reserved else rows[:52]
         rows = (scan_rows + carry_arm[:_CARRY_ROW_RESERVE])[:52]
-        await asyncio.to_thread(persist, store, marker_id, rows, "ok", committed_at)
-        return "ok"
+        terminal, _ = await asyncio.to_thread(
+            persist, store, marker_id, rows, "ok", committed_at, skipped=skipped
+        )
+        return terminal
     except asyncio.CancelledError:
         raise
-    except Exception:
-        # No exception payload logging: content is untrusted and could be a
-        # sensitive value. Failure is a safe terminal state, never a new turn.
+    except BudgetExceeded as partial:
+        # The scan budget is a DEGRADATION, not a failure: persist what was found and
+        # record why the result is partial. The summary arm belongs to a completed
+        # pass, but the CARRY is not the work that ran out of budget — it is the
+        # pass's marquee retention (the asks/decisions a resumed session cannot
+        # re-derive), so it is merged here with the same bounded reserve. Dropping it
+        # exactly when the budget is tight lost the highest-value rows (review round
+        # 1, MINOR 1). A zero-row stop still lands ``failed``/``timeout`` inside
+        # ``persist``.
+        carry_arm = carry_rows(carry) if carry else []
+        reserved = min(len(carry_arm), _CARRY_ROW_RESERVE)
+        scan_keep = partial.rows[: 52 - reserved] if reserved else partial.rows[:52]
+        rows = (scan_keep + carry_arm[:_CARRY_ROW_RESERVE])[:52]
         try:
-            await asyncio.to_thread(persist, store, marker_id, [], "failed", committed_at)
-        except Exception:
-            pass
+            terminal, _ = await asyncio.to_thread(
+                persist,
+                store,
+                marker_id,
+                rows,
+                "ok",
+                committed_at,
+                reason="timeout",
+                skipped=getattr(partial.rows, "skipped", 0),
+            )
+        except Exception as exc:
+            # A partial write that could not land is still not a success.
+            await _record_failure(
+                store,
+                marker_id,
+                "quota" if isinstance(exc, _QuotaExceeded) else "store-error",
+                committed_at,
+            )
+            return "failed"
+        return terminal
+    except asyncio.TimeoutError:
+        # The await expired before the scan reported (a wedged thread): no rows were
+        # observable, so this stays a failure — but recorded as ``timeout``, which is
+        # the attribution the meta record exists for.
+        await _record_failure(store, marker_id, "timeout", committed_at)
         return "failed"
+    except Exception as exc:
+        await _record_failure(
+            store,
+            marker_id,
+            "quota" if isinstance(exc, _QuotaExceeded) else "store-error",
+            committed_at,
+        )
+        return "failed"
+
+
+async def _record_failure(
+    store: MemoryStore, marker_id: str, reason: str, committed_at: float | None
+) -> None:
+    """Write the terminal ``failed`` marker; never raise and never log a payload.
+
+    Failure is a safe terminal state, never a new turn. Nothing here may escape: a
+    store that refused the failure marker (full, locked, corrupt) has already cost the
+    pass, and ``finish``'s caller only needs the terminal string.
+    """
+    try:
+        await asyncio.to_thread(persist, store, marker_id, [], "failed", committed_at, reason)
+    except Exception:
+        pass
 
 
 def recovery_text(transcript: Any, marker: Any) -> str:
@@ -590,19 +887,46 @@ async def _session_tail(session: Any) -> str:
 
 
 def hint(store: MemoryStore, marker_id: str) -> str:
-    state = watermark(store, marker_id)
+    """The post-compaction hint, including WHY a pass was partial or failed.
+
+    ``reason`` used to be written and read by nobody, which is how 221 failed passes
+    became unattributable. This is the operator surface that carries it: the hint is
+    rendered into the next turn, so a partial capture says so and a total loss says
+    which coarse cause ended it. Reasons are literals, never content.
+    """
+    state = capture_detail(store, marker_id)
     if state is None:
         return ""
-    text = (
-        (
-            f"Context compacted; {state[1]} candidates captured to session memory. "
-            "Search/read memory:// for paths and links, retained asks and decisions. "
-            "Store goals and decisions explicitly."
-        )
-        if state[0] == "ok"
-        else (
-            "Context compacted; automatic memory capture did not complete. "
+    if state.status == "ok":
+        if state.reason == "timeout":
+            text = (
+                f"Context compacted; {state.n} candidates captured to session memory "
+                "before the scan budget ran out (partial capture). "
+                "Search/read memory:// for paths and links, retained asks and decisions. "
+                "Store goals and decisions explicitly."
+            )
+        elif state.reason == "refused-row":
+            text = (
+                f"Context compacted; {state.n} candidates captured to session memory; "
+                "some candidates were withheld by the memory guard. "
+                "Search/read memory:// for paths and links, retained asks and decisions. "
+                "Store goals and decisions explicitly."
+            )
+        else:
+            text = (
+                f"Context compacted; {state.n} candidates captured to session memory. "
+                "Search/read memory:// for paths and links, retained asks and decisions. "
+                "Store goals and decisions explicitly."
+            )
+    else:
+        cause = {
+            "timeout": "the capture scan timed out",
+            "refused-row": "every candidate was refused by the memory store",
+            "quota": "the memory store is at its quota",
+        }.get(state.reason or "")
+        detail = f" ({cause})" if cause else ""
+        text = (
+            f"Context compacted; automatic memory capture did not complete{detail}. "
             "Store key decisions explicitly."
         )
-    )
     return f'<memory_hint compaction="{marker_id}">\n{text}\n</memory_hint>'

@@ -1,0 +1,9 @@
+{
+  "cli.refresh_help.refresh": "Demander aux sessions en cours de passer au build sur disque à leur prochaine limite (sans signaux)",
+  "cli.refresh_help.target": "nom-de-conversation / id-de-session / pid / sous-chaîne du cwd (insensible à la casse)",
+  "cli.refresh_help.pid": "cibler par pid exact",
+  "cli.refresh_help.session": "cibler par id de session exact",
+  "cli.refresh_help.all": "demander à toutes les sessions actives de cette machine (sans confirmation : rien n’est terminé)",
+  "cli.refresh_help.json": "résultat lisible par machine par cible",
+  "cli.refresh_help.timeout": "attente par session de sa réponse (par défaut 10)"
+}

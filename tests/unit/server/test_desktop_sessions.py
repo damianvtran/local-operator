@@ -9969,3 +9969,63 @@ async def test_the_desktop_asks_route_follows_a_window_written_after_start(
         )
         second = await client.get("/v1/desktop/asks")
         assert [r["ask_id"] for r in second.json()["result"]["asks"]] == ["done"]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["new-artifact", "legacy-no-sidecar"])
+def test_real_mp3_waveform_http_writes_and_serves_sidecar(tmp_path, monkeypatch, legacy):
+    """Production MP3 codec, producer, durable sidecar, and authenticated route.
+
+    The legacy case stores only bytes/MIME like an installation without its
+    decoder; no test-manufactured peaks conceal a missing production codec.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.session.attachments import (
+        ATTACHMENTS_DIRNAME,
+        AttachmentStore,
+        cache_media,
+    )
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    raw = (Path(__file__).parents[2] / "fixtures" / "audio" / "tone.mp3").read_bytes()
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    if legacy:
+        ref = store.put_bytes(raw, "audio/mpeg")
+        assert ref is not None
+        digest = ref.digest
+        assert store.get_peaks(digest) is None
+    else:
+        artifact = cache_media(raw, content_type="audio/mpeg")
+        assert artifact is not None
+        digest = artifact.attachment
+        assert digest is not None
+        assert (
+            store.get_peaks(digest) is not None
+        ), "new sound must persist production-decoded peaks"
+
+    monkeypatch.setattr(
+        app.state, "config_manager", SimpleNamespace(config_dir=tmp_path), raising=False
+    )
+    pool = DesktopSessions(tmp_path)
+    monkeypatch.setattr(app.state, "desktop_sessions", pool, raising=False)
+    path = f"/v1/desktop/sessions/0123456789ab/attachments/{digest}/waveform"
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+        assert client.get(path).status_code == 401
+        if legacy:
+            assert store.get_peaks(digest) is None, "unauthorized reads cannot trigger repair"
+        response = client.get(path, headers={"Authorization": "Bearer token"})
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["version"] == 1 and payload["bars"] == 240
+        assert len(payload["peaks"]) == 240 and max(payload["peaks"]) > 0
+        assert store.get_peaks(digest) == payload
+        # A resumed/cold owner and subsequent requests use the persisted repair.
+        monkeypatch.setattr(app.state, "desktop_sessions", DesktopSessions(tmp_path))
+        assert client.get(path, headers={"Authorization": "Bearer token"}).json() == payload
+    assert pool.bridges == {}, "waveform recovery must not start a session owner"

@@ -186,13 +186,17 @@ def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
     assert len(seen) == len(PINS)
     assert {locale for _, locale in seen} == {"fr"}
     for namespace in ("stop", "refresh", "monitor"):
-        assert not (
+        assert (
             REPO / "local_operator/i18n/catalogues/fr" / ("cli." + namespace + "_help.json")
-        ).exists()
-        for key, value in catalogues.load_catalogue("en", "cli." + namespace + "_help").items():
-            alias = {"stop": "_st", "refresh": "_re", "monitor": "_mn"}[namespace]
-            assert (
-                getattr(MODULES[alias], key.rsplit(".", 1)[1])().envelope(locale="fr")["text"]
-                == value
-            )
+        ).is_file()
+        en_values = catalogues.load_catalogue("en", "cli." + namespace + "_help")
+        fr_values = catalogues.load_catalogue("fr", "cli." + namespace + "_help")
+        assert set(fr_values) == set(en_values)
+        alias = {"stop": "_st", "refresh": "_re", "monitor": "_mn"}[namespace]
+        for key, value in en_values.items():
+            message = getattr(MODULES[alias], key.rsplit(".", 1)[1])
+            assert message().envelope(locale="fr")["text"] == fr_values[key]
+            assert fr_values[key] != value
+            # A shipped locale without this namespace still reads the source.
+            assert message().envelope(locale="es")["text"] == value
     assert parser.prog

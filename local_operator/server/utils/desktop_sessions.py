@@ -7316,6 +7316,58 @@ class DesktopSessions:
 
         return await asyncio.to_thread(acknowledge)
 
+    async def tags(self) -> dict[str, Any]:
+        """Counts describe distinct assignments, never conversation deletion."""
+        from local_operator.session.session_tags import read_categories, usage_counts
+
+        def read() -> dict[str, Any]:
+            counts = usage_counts(self.root)
+            return {
+                "tags": [
+                    {**tag, "order": order, "conversations": counts.get(tag["id"], 0)}
+                    for order, tag in enumerate(read_categories(self.root))
+                ]
+            }
+
+        return await asyncio.to_thread(read)
+
+    async def replace_tags(self, desired: list[tuple[str | None, str]]) -> dict[str, Any]:
+        from local_operator.session.session_tags import write_categories
+
+        await asyncio.to_thread(write_categories, self.root, desired)
+        return await self.tags()
+
+    async def set_tags(
+        self, session_id: str, tag_ids: list[str], primary: str | None
+    ) -> dict[str, Any]:
+        from local_operator.session.session_tags import (
+            read_categories,
+            read_entity_tags,
+            set_entity_tags,
+        )
+
+        def apply() -> dict[str, Any]:
+            # Like pins, delegated runs are taggable: directory admission is
+            # intentional, not the user-conversation visibility predicate.
+            if (
+                not SESSION_ID.fullmatch(session_id)
+                or not (self.root / "sessions" / session_id).is_dir()
+            ):
+                raise KeyError("Unknown session")
+            set_entity_tags(self.root, "session", session_id, tag_ids, primary)
+            # Resolve IDs and names against one snapshot: a concurrent deletion
+            # may prune a tag, but must not leave primary outside the returned tags.
+            categories = read_categories(self.root)
+            state = read_entity_tags(self.root, "session", session_id, categories=categories)
+            lookup = {tag["id"]: tag for tag in categories}
+            return {
+                "session_id": session_id,
+                "primary": state["primary"],
+                "tags": [lookup[key] for key in state["tags"] if key in lookup],
+            }
+
+        return await asyncio.to_thread(apply)
+
     async def set_pin(self, session_id: str, pinned: bool) -> dict[str, Any]:
         """Put a session's pin into the state the caller asked for.
 
@@ -7703,21 +7755,25 @@ class DesktopSessions:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
 
         Peaks are a sidecar of the SAME content-addressed store the bytes
-        live in (``<digest>.peaks.json``), computed once at artifact creation
-        (``session.attachments.cache_media``) and read here — never decoded
-        on this path, which is what keeps a render loop off the CPU. The
+        live in (``<digest>.peaks.json``), normally computed at creation.
+        Legacy audio gets one bounded server-side repair on a missing sidecar:
+        a serialized child decoder with an input cap and deadline, off the
+        event loop. Successful repairs persist; failed attempts are cached.
+        No renderer decodes media. The
         session gate is :meth:`attachment`'s, verbatim: the id is an
         EXISTENCE check over the durable user-session namespace (plus the
         peer-row door), and a digest held by another device raises
         :class:`PeerAttachmentUnavailable` so the 409 branch is the same one
         the byte route answers with. A digest with no sidecar — a pre-peaks
-        artifact, a host whose optional decoder was absent at creation, a
+        artifact that cannot be repaired within the recovery limits, or a
         damaged sidecar — is ``KeyError``, an ordinary 404: the surface
         draws its no-waveform state, exactly as a missing image degrades to
         a placeholder.
         """
 
         def read() -> dict[str, Any]:
+            from local_operator.audiogen.recovery import waveform_payload
+
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
@@ -7730,11 +7786,11 @@ class DesktopSessions:
                     raise KeyError("Unknown session")
                 # THIS DEVICE'S STORE FIRST, exactly as the byte route does:
                 # a moved conversation that kept a local copy still serves it.
-                payload = store.get_peaks(digest)
+                payload = waveform_payload(store, digest)
                 if payload is None:
                     raise PeerAttachmentUnavailable(session_id, row)
                 return payload
-            payload = store.get_peaks(digest)
+            payload = waveform_payload(store, digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
@@ -7939,13 +7995,15 @@ class DesktopSessions:
         The mirror of :meth:`attachment_waveform`, and the same containment
         proof runs before the store is touched
         (:func:`_contained_child_dir`) — a child read cannot become a way to
-        enumerate another conversation's media. The 404/no-sidecar rule and
-        the no-decode-on-read rule are identical to the parent's.
+        enumerate another conversation's media. Bounded legacy recovery and
+        the 404 fallback are identical to the parent's.
         """
 
         def read() -> dict[str, Any]:
+            from local_operator.audiogen.recovery import waveform_payload
+
             _contained_child_dir(self.root, session_id, child_id)
-            payload = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get_peaks(digest)
+            payload = waveform_payload(AttachmentStore(self.root / ATTACHMENTS_DIRNAME), digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
@@ -8439,6 +8497,27 @@ class DesktopSessions:
             # row of one answer describes the same pin set, which two reads a
             # millisecond apart would not guarantee.
             pins = set(read_pins(self.root))
+            from local_operator.session.session_tags import (
+                read_categories,
+                read_entity_tags,
+            )
+
+            categories = read_categories(self.root)
+            tag_lookup = {tag["id"]: tag for tag in categories}
+
+            def tags_for(session_id: str) -> dict[str, Any]:
+                try:
+                    state = read_entity_tags(
+                        self.root, "session", session_id, categories=categories
+                    )
+                except ValueError:
+                    # Imported legacy directory names remain listable, not taggable.
+                    state = {"tags": [], "primary": None}
+                return {
+                    "tags": [tag_lookup[key] for key in state["tags"]],
+                    "primary": state["primary"],
+                }
+
             # THE CATALOGUE, SCOPED AND PAGED — one call, and the same one the
             # head page makes: `catalogue_page` with no scope, no cursor and no
             # counts IS `load_catalog` plus the truncation verdict this method
@@ -8567,6 +8646,8 @@ class DesktopSessions:
                         # so a `false` here is load-bearing and omitting it would
                         # let a stale optimistic pin outlive a successful unpin.
                         "pinned": entry.id in pins,
+                        # Always settle optimistic client state, even empty/null.
+                        **tags_for(entry.id),
                         # Same rule, second axis: `archived` is always present and
                         # carries the scan's own answer rather than a re-read, so
                         # a row cannot be filtered out of the catalogue and still

@@ -1694,10 +1694,23 @@ class HintButton(Static):
     :meth:`set_actionable`.
     """
 
-    def __init__(self, key: str, action: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        key: str,
+        action: Callable[[], None] | None = None,
+        *,
+        ink: tuple[str, str] = ("dim", "faint"),
+        lifted_ink: tuple[str, str] = ("fg", "muted"),
+    ) -> None:
         super().__init__(classes="subagent-view-hint")
         self._key = key
         self._action = action
+        #: ``(key, label)`` semantic tokens at rest and while hovered. The
+        #: defaults preserve every existing page; a page whose own surface
+        #: lifts the ``dim``/``faint`` pair below AA passes a readable pair
+        #: (``/review``: muted/muted resting, fg/fg hovered — design D1).
+        self._ink = ink
+        self._lifted_ink = lifted_ink
         self._label = ""
         self._lead = False
         self._hovered = False
@@ -1763,15 +1776,15 @@ class HintButton(Static):
         return self._build(self._label, lead=self._lead, hovered=self._hovered)
 
     def _build(self, label: str, *, lead: bool, hovered: bool) -> Text:
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        faint = Style(color=theme_mod.semantic_color("faint"))
+        key_token, label_token = self._ink
         # Hover lifts each tone one step, so the whole hint answers the pointer
         # rather than only its key — a half-lit hint reads as a rendering
-        # glitch. The lifted tones are the SAME two tokens one rung brighter,
-        # so no colour is introduced and the accent is not spent.
+        # glitch. The lifted pair is the SAME two tokens one rung brighter, so
+        # no colour is introduced and the accent is not spent.
         if hovered and self._actionable:
-            dim = Style(color=theme_mod.semantic_color("fg"))
-            faint = Style(color=theme_mod.semantic_color("muted"))
+            key_token, label_token = self._lifted_ink
+        dim = Style(color=theme_mod.semantic_color(key_token))
+        faint = Style(color=theme_mod.semantic_color(label_token))
         row = Text(no_wrap=True, overflow="ellipsis")
         if lead:
             # The seam belongs to the ROW, not to the hint that follows it, so

@@ -402,6 +402,12 @@ export function transcribeAudio(
 }> {
 	const form = new FormData();
 	form.append("audio", blob, recordingFilename(blob));
+	// The daemon normalises this to an ISO-639-1 code before it reaches Radient
+	// or the client rules; an unmapped tag (e.g. fil-PH -> fil) is omitted, not
+	// guessed. English-only cleanup on a Tagalog take is the failure direction
+	// the cleanup design refuses.
+	const language = typeof navigator !== "undefined" ? navigator.language : "";
+	if (language) form.append("language", language);
 	return fetch("/api/transcribe", { method: "POST", body: form, signal }).then(async (res) => {
 		if (res.status === 401) {
 			handleUnauthorized();

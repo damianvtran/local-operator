@@ -125,6 +125,12 @@ PREFIXES_TEXT_POLICY = {
     # The import vocabulary is the command's own controls, never prose sent to
     # a model; an inline engage splices-and-runs.
     "import": False,
+    # /review is a TUI-only page with no argument vocabulary; trailing text is
+    # never a model prompt.
+    "review": False,
+    # `/schedule` is the same shape: the page's n/e/d keys are its own, and a
+    # sentence after the command word is a message rather than its argument.
+    "schedule": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -216,6 +222,11 @@ ARGUMENT_SHAPE_POLICY = {
     # The import page owns its subcommand vocabulary (`list`, `preview …`,
     # `run …`, `status`, `cancel`), so a whole-draft `/import …` is the command.
     "import": ArgumentShape.ANY,
+    # /review takes no arguments (ArgumentMode.NONE).
+    "review": ArgumentShape.NONE,
+    # NONE, `/review`'s class: the page takes no trailing text (its own keys
+    # create, edit and cancel), and the handler drops any argument typed.
+    "schedule": ArgumentShape.NONE,
     "search": ArgumentShape.WORD,
     "accounts": ArgumentShape.WORD,
     "usage": ArgumentShape.WORD,

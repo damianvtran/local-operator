@@ -1,0 +1,11 @@
+{
+  "cli.config_help.config": "Gérer les paramètres de configuration",
+  "cli.config_help.open": "Ouvrir le fichier de configuration dans l’éditeur par défaut",
+  "cli.config_help.edit": "Modifier une valeur de configuration précise dans le fichier de configuration",
+  "cli.config_help.edit_key": "Clé de configuration à mettre à jour (p. ex. hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)",
+  "cli.config_help.edit_value": "Nouvelle valeur pour la clé de configuration (le type est converti automatiquement selon la clé)",
+  "cli.config_help.list": "Lister les options de configuration disponibles et leur description",
+  "cli.config_help.create": "Créer un nouveau fichier de configuration",
+  "cli.config_help.instructions": "Afficher les fichiers d’instructions personnalisées qu’une session assemble, dans l’ordre (chemins et tailles uniquement, jamais leur contenu)",
+  "cli.config_help.instructions_description": "Afficher les fichiers d’instructions personnalisées qu’une session assemble, dans l’ordre, avec la taille apportée par chacun et s’il a été écarté comme doublon, tronqué, ou s’il chevauche une source antérieure. Chemins et tailles uniquement, jamais le contenu."
+}

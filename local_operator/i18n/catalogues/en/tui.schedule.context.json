@@ -1,0 +1,307 @@
+{
+  "tui.schedule.cadence_every": {
+    "note": "Recurring interval, `{'every ' + duration}`; {interval} is already formatted (1d, 1h30m).",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.cadence_once": {
+    "note": "A wake with no interval: it fires once.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.cancel_confirm": {
+    "note": "Inline y/n confirm; {id} is the wake handle. `y` cancels, esc keeps the row.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.detail_cadence": {
+    "note": "Detail-pane label for the repeat interval.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.detail_ends": {
+    "note": "Detail-pane label for the bound (limit or until).",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.detail_fired": {
+    "note": "Detail-pane label for the delivered count.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.detail_next": {
+    "note": "Detail-pane label for the next due instant.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.detail_notify": {
+    "note": "Detail-pane label for the notification flag.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.detail_status": {
+    "note": "Detail-pane label for the schedule state word.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.due_in": {
+    "note": "Relative due phrase for a future wake; {duration} is already formatted (30m, 1h30m).",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.due_now": {
+    "note": "The wake is due at this instant but has not fired yet.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.due_overdue": {
+    "note": "Overdue relative phrase; {age} is a single-unit ladder (2m, 3h).",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.empty_body": {
+    "note": "Empty state: names the one key that creates a wake. The em dash clause explains what a wake is.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.empty_header": {
+    "note": "Empty-state heading; the session has no user-facing wakes.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.ends_left": {
+    "note": "Remaining fires under a `limit`; ICU plural, # is the count.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.ends_limit": {
+    "note": "Bound phrase for a fire budget; {limit} is a raw integer.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.ends_until": {
+    "note": "Bound phrase for a hard stop; {time} is an absolute local timestamp.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.ends_until_left": {
+    "note": "Time left before the `until` bound; {duration} is already formatted.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.fired": {
+    "note": "Delivered count with no bound; ICU plural, # is the count.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.fired_detail": {
+    "note": "Detail-pane delivered count with no bound; {count} is a raw integer.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.fired_detail_of": {
+    "note": "Detail-pane delivered count under a bound; {count} and {limit} are raw integers.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.fired_of": {
+    "note": "Delivered count against a limit; ICU plural, # is the count and {limit} the budget.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_ends_hint": {
+    "note": "Field hint: a blank Ends field means no bound.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_ends_label": {
+    "note": "Form field label for the bound (limit or until).",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_ends_placeholder": {
+    "note": "Placeholder showing both accepted spellings; the `until` example is a literal date format, not translatable prose.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_keys_hint": {
+    "note": "Form footer naming the three keys. `ctrl+s`, `tab` and `esc` stay literal.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_message_label": {
+    "note": "Form field label for the self-prompt.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_message_placeholder": {
+    "note": "Message editor placeholder: what the wake will be told to do.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_notify_hint": {
+    "note": "Checkbox hint: the completion notification this wake asks for.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_notify_label": {
+    "note": "Form field label for the notification checkbox.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_repeat_hint": {
+    "note": "Field hint: a blank Repeat field means a one-shot wake.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_repeat_label": {
+    "note": "Form field label for the repeat interval.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_repeat_placeholder": {
+    "note": "Placeholder showing the interval spelling; `every` and `1d` stay literal.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_title_edit": {
+    "note": "Edit form heading; {id} is the wake handle.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_title_new": {
+    "note": "Create form heading.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_when_hint": {
+    "note": "Field hint teaching the one When input: duration = in, clock/ISO/+duration = at, blank keeps the row's time on edit.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_when_label": {
+    "note": "Form field label for the due time.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.form_when_placeholder": {
+    "note": "Placeholder showing both accepted When spellings; `in`, `30m`, `at` and `09:00` stay literal.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.hint_back": {
+    "note": "Footer hint label for escape: leave the page.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.hint_cancel": {
+    "note": "Footer hint label for d: cancel the selected wake.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.hint_edit": {
+    "note": "Footer hint label for e/enter: edit the selected wake.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.hint_move": {
+    "note": "Footer hint label for the arrow keys: move the selection.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.hint_new": {
+    "note": "Footer hint label for n: open the create form.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.hint_refresh": {
+    "note": "Footer hint label for r: re-read the session's scheduler. Deliberately the user's word `reread`, not the network word `refresh`.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_cancelled": {
+    "note": "Receipt after a cancel lands; {id} is the wake handle.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_created": {
+    "note": "Receipt after a create lands; {id} is the handle and {due} an absolute local timestamp.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_edited": {
+    "note": "Receipt after an edit lands; {id} is the handle and {due} the new next instant.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_no_scheduler": {
+    "note": "Read-only notice when the session exposes no wake scheduler at all.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_read_only": {
+    "note": "Read-only notice for a follower: the runtime owning these wakes is on another device.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_supervisor": {
+    "note": "One-line state notice covering BOTH supervisor conditions — unsupported on this platform and installed-but-not-running. Names the CONVERSATION's runtime as the thing that keeps wakes firing, not the /schedule page: closing the page does not stop the runtime.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notice_write_failed": {
+    "note": "A failed write; {error} is the exception's own sentence.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.notify_on": {
+    "note": "Marker on a row whose wake asks for a completion notification.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.session_unavailable": {
+    "note": "Slash-command refusal while the session is still booting.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.slash_help": {
+    "note": "One-line /help and command-picker description. Sized to the description column.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.status_due": {
+    "note": "Detail-pane state word: due, not yet fired.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.status_overdue": {
+    "note": "Detail-pane state word with the age; {age} is a single-unit ladder (2m).",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.status_scheduled": {
+    "note": "Detail-pane state word for a future wake.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.subtitle": {
+    "note": "Count of wakes under the page title; ICU plural, # is the count.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.title": {
+    "note": "Page title.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.value_off": {
+    "note": "Detail-pane value: the notification flag is off.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.schedule.value_on": {
+    "note": "Detail-pane value: the notification flag is on.",
+    "role": "TUI /schedule page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  }
+}

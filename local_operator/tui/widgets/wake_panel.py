@@ -119,8 +119,32 @@ class WakePanel(Container):
         ) = None
         #: ``(config root, deliveries dir mtime_ns, ledger)`` — see :meth:`_owed`.
         self._owed_cache: tuple[str, int, dict[str, dict[str, Any]]] | None = None
+        #: Set while a full-page surface owns the screen and this duplicate list
+        #: must not compete with it (see :meth:`set_suppressed`).
+        self._suppressed = False
         # Hidden until the first schedule exists: an empty panel is not content.
         self.display = False
+
+    def set_suppressed(self, suppressed: bool) -> None:
+        """Hide the band while a page that manages the SAME wakes owns the screen.
+
+        A bare ``display = False`` at the call site would not hold: :meth:`sync`
+        runs on the app's 1 Hz poll and re-decides ``display`` from the
+        scheduler's contents on every tick, so the band would come back a second
+        later and reflow a page the user was already reading (round-1 design D1
+        measured the 60x24 list collapsing from a 56x7 viewport to 56x1 when the
+        band arrived late). The flag outlives those ticks; clearing it lets the
+        next :meth:`sync` paint the band again.
+        """
+        self._suppressed = suppressed
+        if suppressed:
+            self.display = False
+        else:
+            # Forget the last paint. `sync` returns early when the contents and
+            # budgets are unchanged, so without this the restore tick would see
+            # the same rows, return, and leave a panel that was hidden by the
+            # flag hidden for good.
+            self._shown = None
 
     def compose(self):  # type: ignore[override]
         yield self._body
@@ -137,6 +161,10 @@ class WakePanel(Container):
         the next tick without either surface polling harder. Never raises: a
         status surface must not be able to take the app down.
         """
+        if self._suppressed:
+            # A page is showing these rows in full; see :meth:`set_suppressed`.
+            self.display = False
+            return
         try:
             scheduler = getattr(session, "wake_scheduler", None)
             # HIDDEN rows (patience waits) never paint: the panel is a human

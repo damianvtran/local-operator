@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "État des mises à jour de l’Agent Hub",
+  "cli.hub_help.status": "Afficher les agents récupérés et les équipes qui ont des mises à jour du hub",
+  "cli.hub_help.status_json": "Émettre la charge utile de la route desktop",
+  "cli.hub_help.links": "Lister chaque lien de hub (sain ou non) avec sa source, sa portée et sa politique",
+  "cli.hub_help.links_json": "Émettre la charge utile des liens desktop",
+  "cli.hub_help.link": "Modifier la politique indépendante d’un lien de hub",
+  "cli.hub_help.link_set": "Définir la politique subscribe et/ou auto_push de ce lien",
+  "cli.hub_help.link_set_link_id": "L’id du lien affiché par `lop hub links`",
+  "cli.hub_help.link_set_subscribe": "Synchronisation entrante sans surveillance pour ce lien",
+  "cli.hub_help.link_set_auto_push": "Publication sortante sans surveillance pour ce lien",
+  "cli.hub_help.link_set_expected_revision": "La révision de politique que vous avez vue en dernier (CAS) ; si elle est omise, sa valeur est d’abord relue",
+  "cli.hub_help.link_set_confirm_public_egress": "Consentement explicite à publier des changements écrits localement vers une origine PUBLIQUE"
+}
