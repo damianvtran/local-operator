@@ -28,17 +28,29 @@
 # instead of thirty, so it is served while the big matrix is still queued.
 #
 # The durable reason is CREATION ORDER, and it is a property of the workflow
-# graph rather than of GitHub's scheduler: this file's two jobs exist the
+# graph rather than of GitHub's scheduler: this file's four jobs exist the
 # moment the push lands, while `ci.yml`'s heavy jobs are only CREATED after
 # that run's 13-second `changes` classifier has won a runner slot -- measured
-# p50 12.5 minutes, max 18.5. A scheduler that serves the queue in order
-# therefore reaches this file's jobs before the matrix's, because the matrix's
-# do not exist yet. The slot count is the second reason: two against thirty.
+# p50 12.5 minutes, max 18.5. So the matrix's jobs enter the queue 12-18
+# minutes LATER than this file's do.
 #
-# The queue was ALSO measured not to be strict FIFO (118 jobs started in a
-# 45-minute window that had been created after the oldest job still waiting),
-# which helps, but it is an observation about an implementation detail rather
-# than a contract, so nothing here depends on it.
+# AND WHAT THAT IS WORTH WAS MEASURED, because it is smaller than it sounds.
+# This file was run for real on a saturated account (40 of 40 slots running,
+# 81 queued): its four jobs were created at 21:48:27Z and the first started at
+# 22:00:41Z -- a 12.2 minute wait, and the remaining legs 13.0, 13.8 and
+# 14.9 minutes. Creation order does NOT buy priority when the pool is full;
+# the gate waited about the median age of the standing backlog. The win is
+# the SLOT COUNT and the SCOPE, not the order:
+#
+#   - this file asks for four slots and the matrix asks for about thirty, so
+#     when slots do free, the gate drains in under two minutes of work where
+#     the matrix's ten unit shards alone each need a slot for ~30 minutes;
+#   - and the gate covers the release branch, where `ci.yml` runs nothing.
+#
+# MEASURED END TO END, on the same account in the same saturation, same day:
+# this file went from push to fully green in 15.9 MINUTES (12.2 of queue
+# wait, 3.7 of work), while the full `ci.yml` matrix on `main` took 120.4
+# MINUTES from push to its last job. That is the number this file is for.
 #
 # It does NOT replace `ci.yml`. The unit suite, the lint and type gates and
 # the e2e freeze guard stay exactly where they are, and a release still needs
@@ -124,7 +136,7 @@ permissions:
 # third push to `main` would EVICT the pending gate -- and an evicted gate is
 # exactly the failure this file exists to prevent. A gate that is never
 # evicted is worth more than a bound on how many gates run at once, and the
-# gate is two short jobs, so the burst is small and the pushes are
+# gate is four short jobs, so the burst is small and the pushes are
 # operator-paced.
 concurrency:
   group: release-gate-${{ github.ref }}-${{ github.sha }}

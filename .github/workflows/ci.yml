@@ -1307,19 +1307,30 @@ jobs:
     # own `flock` files and its own app lifecycles, so no shard can see a
     # sibling's hang.
     #
-    # WHY THREE AND NOT TWO, and what the trade is. Measured on run 35420676112
-    # (the split from CI-measured timings): legs of 414/412/401 s on ubuntu and
-    # 442/441/400 s on macOS, i.e. ~7.5 min per leg including install, against a
-    # unit shard whose job wall is ~12-15 min. So the e2e job is NO LONGER the
-    # critical path at three shards, and two shards would also finish first:
-    # on the 2026-10-19 tree the heaviest two-way leg projects 1165.8350s
-    # (19.4 min) against the unit shard's 1805.1008s (30.1 min), so the
-    # freeze guard still lands first. (The "~11 min per leg" figure quoted
-    # below was measured on the 2026-07-30 tree, when the e2e tree was half
-    # this size; the leg grew with it.) Three buys earlier freeze-guard
-    # feedback on a tree that only
-    # grows, and costs two more jobs per run: this matrix takes a pull request
-    # from 17 jobs to 21, against the ~20-job account-wide budget the `test`
+    # WHY TWO SHARDS, and what the trade is. This matrix was three shards
+    # until 2026-10-19, and the trade was recorded then: three bought earlier
+    # freeze-guard feedback and cost two more jobs per run, on the explicit
+    # understanding that "if runner queue pressure becomes the binding
+    # constraint, `shard: [0, 1]` with `--total 2` restores the job count at
+    # the same critical path". Runner queue pressure then became the binding
+    # constraint, and this is the trade being taken.
+    #
+    # The critical path is unchanged, and that is the property three shards
+    # were buying. At two shards the heaviest e2e leg projects 1165.8350s
+    # (19.4 min) on one worker, against the unit shard's 1805.1008s (30.1
+    # min) on 4, so the freeze guard still lands first. (The "~7.5 min per
+    # leg" figure below was measured on run 35420676112, when the e2e tree was
+    # half this size; the leg grew with it, and the number that matters now is
+    # the projection above.)
+    #
+    # What it costs is two jobs per run, and the two it costs are the ones the
+    # account cannot afford: HALF of this matrix's jobs land on macOS, whose
+    # concurrent-job cap is 5 for the WHOLE ACCOUNT, so 22 in-flight pull
+    # requests were asking for 66 macOS jobs to compete for 5 slots. Two
+    # shards ask for 44.
+    #
+    # The job count this matrix contributes to a pull request went from 6 to
+    # 4, against the ~20-job account-wide budget the `test`
     # job's comment names, on main from 20 to 24. That is a deliberate trade,
     # not an oversight: if runner queue pressure becomes the binding constraint,
     # `shard: [0, 1]` with `--total 2` restores the job count at the same

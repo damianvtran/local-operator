@@ -180,7 +180,7 @@ class Tree:
 
     ``default_shards`` is the count the matching CI job passes as ``--total``.
     It is per-tree because the two trees are split across different things --
-    five unit shards on one OS versus three e2e shards on EACH of two OSes --
+    five unit shards on one OS versus two e2e shards on EACH of two OSes --
     and a count that silently disagreed with the job's matrix is how a shard
     ends up orphaned (see `test_ci_shard_matrix_covers_every_shard_...`).
     """
@@ -218,7 +218,7 @@ TREES: dict[str, Tree] = {
         name="e2e",
         glob="tests/e2e/**/test_*.py",
         manifest=REPO / "tests" / "durations-e2e.json",
-        default_shards=3,
+        default_shards=2,
     ),
 }
 DEFAULT_TREE = "unit"
