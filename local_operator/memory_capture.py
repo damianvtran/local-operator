@@ -150,7 +150,6 @@ _WORD = re.compile(
 #: grammar does not own (that grammar is pinned byte-identical to
 #: ``compaction/mine.py``). Everything else is classified by structure below.
 _HOST = re.compile(r"(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}", re.IGNORECASE)
-_HOST_WITH_PATH = re.compile(r"(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}/.*", re.IGNORECASE)
 _HEX = re.compile(r"(?=[0-9a-fA-F]{7,12}\Z)[0-9a-fA-F]*\d[0-9a-fA-F]*")
 #: Where a locator STARTS a new address rather than continuing the current one.
 #: This is what keeps `C:\repo\app to C:\repo\out` prose (`to` is followed by
@@ -512,14 +511,18 @@ def _is_locator_token(token: str) -> bool:
 
 
 def _is_continuation_token(token: str) -> bool:
-    """A locator that continues the current path instead of starting a new one."""
-    if not _is_locator_token(token):
+    r"""A locator that continues the current path instead of starting a new one.
+
+    Only a BACKSLASH path can continue across whitespace: `(x86)\app`,
+    `Code\app`, `Files\proof.txt`. A forward-slash locator (`tests/a.py`,
+    `src/foo.py`) starts a new path or ref, never the tail of the preceding
+    one, so a plain run between two of them is prose. Without this, a Progress
+    bullet such as `tests/a.py moved to tests/b.py` lost its sentence to the
+    unbounded-run rule (round 6).
+    """
+    if not _is_locator_token(token) or "\\" not in token:
         return False
     if _ABSOLUTE_LOCATOR.match(token):
-        return False
-    if _HOST.fullmatch(token) or token.lower().startswith("mailto:"):
-        return False
-    if _HOST_WITH_PATH.fullmatch(token):
         return False
     return True
 

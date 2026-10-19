@@ -247,6 +247,7 @@ RESIDUE_DEBRIS = [
     "thread: fix/x;",
     "44fa24a65c.",
     "secret QA_SAMPLE_KEY",
+    "tests/a.py tests/b.py",
     "A",
 ]
 RESIDUE_KNOWLEDGE = [
@@ -274,6 +275,10 @@ RESIDUE_KNOWLEDGE = [
     "and/or",
     "read/write",
     "rotate the dashboard key each quarter",
+    "tests/a.py moved to tests/b.py",
+    "scripts/a.mjs moved to scripts/b.mjs",
+    "src/foo.py now imports src/bar.py",
+    "lib/foo.py calls lib/bar.py",
     "C:\\repo\\app docs at example.com/docs",
     "C:\\repo\\app see www.example.com/path for details",
     # prose-first controls
