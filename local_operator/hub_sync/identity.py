@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 from urllib.parse import urlsplit, urlunsplit
+
+logger = logging.getLogger(__name__)
 
 Kind = Literal["agent", "team", "skill"]
 Visibility = Literal["public", "org"]
@@ -90,6 +93,69 @@ def approve_source(source: str, approved: tuple[str, ...]) -> str:
     if normalized not in {normalize_source(candidate) for candidate in approved}:
         raise LinkError("origin-conflict", "hub source is not configured or approved")
     return normalized
+
+
+@dataclass(frozen=True)
+class LinkOrigin:
+    """Where a link was served from: the base, and the scope it was served under.
+
+    THE SCOPE IS A FACT ABOUT THE ARM THAT SERVED THE ROW, never about the
+    document it served. A team document carries ``tenant_id`` and no visibility
+    field, and a team in the PUBLIC catalogue carries its PUBLISHER's
+    ``tenant_id`` (measured on the live hub on 2026-10-19: ``list_public_teams``
+    answers ``software-development`` with ``tenant_id=5b72d9f4-...`` and
+    ``visibility=None``). So "the document names a tenant" is not a scope: it
+    would put a public row behind an organization identity and past the public
+    egress gate in ``_eligibility``.
+
+    The organization's tenant is the tenant the scope names -- ``None`` for a
+    public scope, and REQUIRED for an organization one. It is also the tenant
+    the RECORD has to carry: an origin and a record that disagree are a scope
+    conflict, which the write path refuses rather than silently relinks.
+    """
+
+    hub_source: str
+    visibility: Visibility
+    tenant_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.visibility not in ("public", "org"):
+            raise LinkError("origin-conflict", "hub link visibility is unsupported")
+        if self.visibility == "public" and self.tenant_id:
+            raise LinkError("origin-conflict", "a public origin must not name an organization")
+        if self.visibility == "org" and not self.tenant_id:
+            raise LinkError("origin-conflict", "an organization origin must name its organization")
+        object.__setattr__(self, "hub_source", normalize_source(self.hub_source))
+
+
+def link_origin(
+    hub_source: str | None, visibility: str, tenant_id: str | None = None
+) -> "LinkOrigin | None":
+    """The origin a served row was read under, or ``None`` when it cannot be stated.
+
+    A pull, an accepted publication and the origin repair all name their origin
+    the same way, and none of them may FAIL over it: an origin that cannot be
+    stated (no base, a base that is not a credential-free API base, a scope that
+    does not match the tenant it names) yields ``None``, and the caller records
+    the row WITHOUT an identity -- the honest "origin unknown" state the
+    inventory reports as unresolved.
+    """
+
+    if not hub_source or visibility not in ("public", "org"):
+        return None
+    try:
+        return LinkOrigin(
+            hub_source=hub_source,
+            visibility=cast(Visibility, visibility),
+            tenant_id=tenant_id,
+        )
+    except LinkError:
+        logger.warning(
+            "could not state the hub origin for a %s scope; the link stays unresolved",
+            visibility,
+            exc_info=True,
+        )
+        return None
 
 
 @dataclass(frozen=True)

@@ -35,7 +35,13 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
 from local_operator.config_writer import serialized_config_path_write
-from local_operator.hub_sync.identity import Kind, LinkError, LinkIdentity
+from local_operator.hub_sync.identity import (
+    Kind,
+    LinkError,
+    LinkIdentity,
+    LinkOrigin,
+    normalize_source,
+)
 from local_operator.hub_sync.segment import norm
 
 logger = logging.getLogger(__name__)
@@ -584,6 +590,117 @@ def prune(
     return removed
 
 
+def canonical_hub_source(config_manager: Any) -> str | None:
+    """The CONFIGURED hub base, normalized exactly as source resolution approves it.
+
+    A link's ``hub_source`` must name the ONE destination this machine is
+    configured to address. The desktop's source-resolution route approves a
+    request against ``(configured_radient_base_url(ctx.config_manager),)`` and
+    returns its NORMALIZED form, so a link minted by a pull or by a publication
+    has to carry that same string: otherwise the same row would get two
+    different ``link_id``s depending on which path created it, and the answer
+    the resolve dialog would mint would not match the link the pull already
+    wrote.
+
+    ``None`` when the configuration cannot answer. The caller then records the
+    row WITHOUT an identity -- the honest "origin unknown" state -- because a
+    pull or a publication must never fail over its bookkeeping.
+    """
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    try:
+        return normalize_source(configured_radient_base_url(config_manager))
+    except Exception:  # noqa: BLE001 - an unreadable configuration means "no origin"
+        logger.warning("could not resolve the configured hub base", exc_info=True)
+        return None
+
+
+def serving_base(client: Any, config_dir: Path | None = None) -> str | None:
+    """The base a hub client ADDRESSED, or the CONFIGURED one when it does not say.
+
+    The origin of a link is the base the operation addressed: it is the base a
+    check reports as ``served_by`` and the one the integration and push gates
+    compare the link's source against, so a link that named a different base
+    could never be integrated. A client that does not expose its base (a test
+    rig's shape, or a client built before the attribute existed) falls back to
+    the CONFIGURED base -- which is what such a client addresses anyway.
+    """
+
+    base = str(getattr(client, "base_url", "") or "")
+    if base:
+        return base
+    if config_dir is None:
+        return None
+    from local_operator.config import ConfigManager
+
+    return canonical_hub_source(ConfigManager(Path(config_dir)))
+
+
+def link_identity(
+    kind: Kind,
+    local_id: str,
+    hub_id: str,
+    *,
+    origin: LinkOrigin | None,
+) -> LinkIdentity | None:
+    """The identity of a link whose origin is KNOWN, or None when it cannot be built.
+
+    A pull, an accepted publication and the origin repair all name the same
+    facts -- the kind, the local row, the hub row, the base that served it and
+    the scope it was served under -- and the identity is a digest of exactly
+    those, so the three paths cannot mint different links for the same row.
+
+    The organization's tenant comes from the ORIGIN, so the identity and the
+    record cannot disagree: a caller that already holds a record uses the
+    origin the record's own scope implies, and a caller that mints a new record
+    writes that same tenant into it.
+
+    ``None`` is a real answer, not a failure. An unusable base, a public scope
+    that names a tenant, an organization scope that names none, or an id the
+    identity refuses all make the link unbuildable; the caller then records the
+    row WITHOUT one and the inventory honestly reports it as unresolved.
+    """
+
+    if origin is None:
+        return None
+    try:
+        return LinkIdentity(
+            kind=kind,
+            local_id=local_id,
+            hub_source=origin.hub_source,
+            visibility=origin.visibility,
+            tenant_id=origin.tenant_id,
+            hub_id=hub_id,
+        )
+    except LinkError:
+        logger.warning(
+            "could not build the hub link identity for %s %s; the link stays unresolved",
+            kind,
+            local_id,
+            exc_info=True,
+        )
+        return None
+
+
+def attach_origin(
+    config_dir: Path, record: BaselineRecord, origin: LinkOrigin | None
+) -> BaselineRecord | None:
+    """Write a baseline record WITH the origin it was served under.
+
+    The record keeps everything it carries -- its fields, its fingerprint, its
+    lineage -- and gains the identity when the origin can be stated. An origin
+    that cannot produce one is NOT an error: the record is still written and
+    the inventory honestly keeps listing it as unresolved.
+    """
+
+    identity = link_identity(record.kind, record.local_id, record.hub_id, origin=origin)
+    if identity is not None:
+        record = replace(record, identity=identity)
+    write_baseline(config_dir, record)
+    return record
+
+
 def make_record(
     kind: Kind,
     local_id: str,
@@ -615,22 +732,47 @@ def record_agent_baseline(
     description: str,
     tenant_id: str | None = None,
     recorded_by: str = "pull",
+    origin: LinkOrigin | None = None,
 ) -> BaselineRecord | None:
     """Write B for an agent. Never raises: a pull must not fail over bookkeeping.
 
     A failure leaves the row without a record, which degrades it to
     baseline-unknown (check-only, never auto-applied) — the safe direction.
+
+    ``origin`` is what the SERVING ARM proved -- the base it addressed and the
+    scope it was served under. With it, the row also carries its
+    :class:`~local_operator.hub_sync.identity.LinkIdentity`, which is what the
+    links inventory reports as a confirmed source; without it the row is written
+    exactly as before (the pre-fix state: a hub id, no origin). An origin that
+    cannot produce an identity is NOT an error: the row is still written, and
+    the inventory honestly keeps listing it as unresolved.
     """
 
     try:
+        # The ORIGIN is the authority for the scope whenever there is one: the
+        # record's tenant has to EQUAL the identity's tenant (the write path
+        # refuses a mismatch), and the origin is the arm's own statement of the
+        # scope it served the row under. A disagreement is a caller bug, logged
+        # and resolved in the origin's favour -- never by guessing.
+        tenant = tenant_id or None
+        if origin is not None:
+            if tenant != origin.tenant_id:
+                logger.warning(
+                    "the hub origin for agent %s names a different organization than the pull did",
+                    local_id,
+                )
+            tenant = origin.tenant_id
         record = make_record(
             "agent",
             local_id,
             hub_id,
-            tenant_id,
+            tenant,
             {"instructions": norm(instructions), "description": norm(description)},
             recorded_by,
         )
+        identity = link_identity("agent", local_id, hub_id, origin=origin)
+        if identity is not None:
+            record = replace(record, identity=identity)
         write_baseline(config_dir, record)
         return record
     except (BaselineError, OSError, ValueError):
@@ -645,6 +787,7 @@ def record_team_pull(
     *,
     tenant_id: str,
     recorded_by: str = "pull",
+    origin: LinkOrigin | None = None,
 ) -> BaselineRecord | None:
     """Link a freshly imported team to its hub document (B1.2).
 
@@ -652,6 +795,14 @@ def record_team_pull(
     normalisation is reflected — the bytes a later re-fetch is compared with).
     Returns None (and logs) if the document names no id or the write fails; the
     pull itself has already succeeded and stays successful.
+
+    ``origin`` is what the SERVING ARM proved -- the base it addressed and the
+    scope it was served under -- and it is what makes the row a CONFIRMED link
+    instead of a hub id with no source. It is never inferred from the
+    document: a publicly listed team carries its publisher's ``tenant_id``, so
+    a scope read from the document would put a public row behind an
+    organization identity. The public arm therefore passes ``tenant_id=""``
+    (the record names no organization) and a public origin.
     """
 
     hub_id = str(document.get("id") or "").strip()
@@ -659,11 +810,24 @@ def record_team_pull(
         logger.warning("hub team document for %r carries no id; not linking it", team.name)
         return None
     try:
+        # The ORIGIN is the authority for the scope whenever there is one: the
+        # record's tenant has to EQUAL the identity's tenant (the write path
+        # refuses a mismatch), and the origin is the arm's own statement of the
+        # scope it served the row under. A disagreement is a caller bug, logged
+        # and resolved in the origin's favour -- never by guessing.
+        tenant = tenant_id or None
+        if origin is not None:
+            if tenant != origin.tenant_id:
+                logger.warning(
+                    "the hub origin for team %s names a different organization than the pull did",
+                    team.id,
+                )
+            tenant = origin.tenant_id
         record = make_record(
             "team",
             team.id,
             hub_id,
-            tenant_id or None,
+            tenant,
             team_fields(
                 description=team.description,
                 manager=team.manager,
@@ -673,6 +837,9 @@ def record_team_pull(
             ),
             recorded_by,
         )
+        identity = link_identity("team", team.id, hub_id, origin=origin)
+        if identity is not None:
+            record = replace(record, identity=identity)
         write_baseline(config_dir, record)
         return record
     except (BaselineError, OSError, ValueError):
