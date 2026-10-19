@@ -58,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from lop_osworld_v2_adapter import guest_disk, guest_loss, scoring
+from lop_osworld_v2_adapter import guest_disk, guest_loss, guest_supervisor, scoring
 from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_INSTANCE_ABSENT,
     EVIDENCE_INSTANCE_TERMINATED,
@@ -72,6 +72,7 @@ from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
+    GuestServerRecovered,
     InstructionUnavailable,
     bounded_observation_cause,
     guest_deadline_for,
@@ -724,6 +725,11 @@ class AwsProvider:
         # (teardown-only) provider never allocates and never needs one.
         self._cache_root: Path | None = None
         self._schedule_created = False
+        self._supervisor_install_attempted = False
+        self._supervisor_unit: str | None = None
+        self._supervisor_password = ""
+        self._supervisor_restart: int | None = None
+        self._supervisor_records: list[Any] = []
         # The provider's OWN secret values, for the exact-value half of the
         # console scrub (``guest_loss``): console text is the one guest-authored
         # artifact this module persists, and the AWS credentials, the session
@@ -822,7 +828,108 @@ class AwsProvider:
         # that did NOT land now refuses the episode here instead of being
         # recorded and stepped over.
         await asyncio.to_thread(self._prepare_guest_disk, plan)
+        await asyncio.to_thread(self._install_guest_supervisor, plan)
         await asyncio.to_thread(self._start_desktop_env, plan, task)
+
+    def _install_guest_supervisor(self, plan: ProvisioningPlan) -> None:
+        """Optional preparation only; installation must never reject an episode."""
+        if self._supervisor_install_attempted:
+            return
+        self._supervisor_install_attempted = True
+        status: dict[str, Any] = {"installed": False, "status": "supervision unavailable"}
+        try:
+            result = self._run_guest_command(
+                guest_supervisor.install_command(plan.client_password), timeout=15.0
+            )
+            if result.returncode == 0:
+                response = guest_supervisor.parse_output(result.stdout)
+                if isinstance(response, dict) and response.get("installed") is True:
+                    self._supervisor_unit = guest_supervisor.installed_unit(result.stdout)
+                    self._supervisor_password = plan.client_password
+                    status = {
+                        "installed": True,
+                        "unit": self._supervisor_unit,
+                        "status": "supervised",
+                    }
+                else:
+                    reason = (
+                        response.get("reason", "invalid response")
+                        if isinstance(response, dict)
+                        else "invalid response"
+                    )
+                    safe = guest_loss._scrub(str(reason)[:512], self._known_secret_values)
+                    status["cause"] = safe or "installation reason withheld"
+            else:
+                status["cause"] = "privilege escalation or installation command failed"
+        except Exception as error:
+            # Neither guest output nor exception text is safe to persist.
+            status["cause"] = type(error).__name__
+        self._write_supervisor_evidence("guest-supervisor-setup.json", status)
+
+    def _write_supervisor_evidence(self, name: str, value: object) -> None:
+        try:
+            if self._cache_root is not None:
+                (self._cache_root / name).write_text(json.dumps(value, sort_keys=True) + "\n")
+        except Exception:
+            logger.warning("guest supervisor evidence unavailable")
+
+    def _recover_guest_supervisor(self, delivery: str = "pre_action") -> bool | None:
+        """Wait for the local manager, never start/restart anything over HTTP.
+
+        A bounded wait cannot convert an ambiguous delivery into a replay.
+        The record retains that ambiguity. On recovery the adapter
+        discards the remainder of this batch and rebinds from a fresh frame.
+        """
+        if self._supervisor_unit is None:
+            return None
+        for _ in range(6):
+            if self._probe_control_server(0.5):
+                try:
+                    result = self._run_guest_command(
+                        guest_supervisor.report_command(
+                            self._supervisor_unit, self._supervisor_password
+                        ),
+                        timeout=5.0,
+                    )
+                    if result.returncode != 0:
+                        return None
+                    records = guest_supervisor.parse_output(result.stdout)
+                    if not isinstance(records, list) or not records:
+                        return None
+                    restart = records[-1].get("restart")
+                    if not isinstance(restart, int) or restart == self._supervisor_restart:
+                        return None
+                    self._supervisor_restart = restart
+                    # Use the console evidence's fail-closed secret treatment;
+                    # stderr can contain arbitrary guest/application output.
+                    safe = guest_loss._scrub(json.dumps(records), self._known_secret_values)
+                    if safe is None:
+                        safe = "[]"
+                    self._supervisor_records = json.loads(safe)
+                    self._write_supervisor_evidence(
+                        "guest-supervisor-recovery.json",
+                        {
+                            "recovered": True,
+                            "failed_action_delivery": delivery,
+                            "remaining_batch": "not_sent",
+                            "records": self._supervisor_records,
+                        },
+                    )
+                    return True
+                except Exception:
+                    return None
+            self._sleep(0.5)
+        self._write_supervisor_evidence(
+            "guest-supervisor-recovery.json",
+            {
+                "recovered": False,
+                "cause": "supervisor recovery budget exhausted; server unreachable",
+                "records": self._supervisor_records,
+                "final_guest_record": "not retrieved: action-server transport unavailable",
+                "guest_record_path": f"/var/lib/lop-action-supervisor/{self._supervisor_unit}.json",
+            },
+        )
+        return False
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float
@@ -1431,6 +1538,10 @@ class AwsProvider:
 
     async def observe(self) -> dict[str, Any]:
         env = self._require_env()
+        if self._supervisor_unit is not None:
+            # Consume the generation BEFORE reading the frame. Consuming it
+            # afterwards could bless a screenshot taken before that restart.
+            await asyncio.to_thread(self._recover_guest_supervisor, "observation")
         # Attached only for the duration of upstream's own retry loop, exactly as
         # ``evaluate`` captures judge errors. The records are the ONLY trace of
         # why a capture failed (``get_screenshot`` logs and returns None), and
@@ -1501,11 +1612,44 @@ class AwsProvider:
         except Exception:  # pragma: no cover - capture_guest_console never raises
             logger.warning("guest console capture failed unexpectedly")
 
+    def _execute_guest_health_cause(self) -> str:
+        cause = "readiness check failed"
+        try:
+            if self._instance_id is not None:
+                health = guest_loss.capture_guest_health(
+                    self._clients.ec2, self._instance_id, self._cache_root, self._run_guest_command
+                )
+                cause = health["cause"]
+        except Exception:
+            # Keep the delivery verdict even if diagnostics violate fail-open.
+            logger.warning("guest health capture failed unexpectedly")
+        return cause
+
     async def execute(self, statements: list[str], *, settle: bool = True) -> None:
         env = self._require_env()
 
         def run() -> None:
             for index, statement in enumerate(statements):
+                # A restart can finish BETWEEN calls without any refusal. Check
+                # each action, not just the first statement of a long batch.
+                if self._supervisor_unit is not None:
+                    recovered = self._recover_guest_supervisor()
+                    if recovered:
+                        raise GuestServerRecovered("action server restarted; refresh binding")
+                    if recovered is False:
+                        # Do not send an action just to discover the server came
+                        # back after the deadline: that would bypass re-binding.
+                        self._capture_guest_console(
+                            guest_loss.STAGE_EXECUTE, "supervisor-exhausted"
+                        )
+                        cause = self._execute_guest_health_cause()
+                        verdict = guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT)
+                        message = guest_loss.describe_failed_action(index, verdict)
+                        raise GuestExecutionError(
+                            message + "; supervisor recovery budget exhausted; "
+                            f"guest down: {cause}; no transport retry",
+                            delivery=verdict.delivery,
+                        )
                 # Upstream retries failed HTTP requests and logs their full body.
                 # A lost response can already have typed text, so reuse our
                 # single-shot transport, preserving the controller's input patch.
@@ -1524,6 +1668,14 @@ class AwsProvider:
                         verdict = guest_loss.classify_transport_failure(
                             error, origin=self._guest_origin()
                         )
+                        if self._supervisor_unit is not None:
+                            recovered = self._recover_guest_supervisor(verdict.delivery)
+                            if recovered:
+                                raise GuestServerRecovered(
+                                    "action server restarted; refresh binding"
+                                ) from None
+                            if recovered is False:
+                                ready = False
                         if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
                             if ready is None:
                                 ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
@@ -1547,20 +1699,9 @@ class AwsProvider:
                         )
                         message = guest_loss.describe_failed_action(index, verdict)
                         if ready is False:
-                            cause = "readiness check failed"
-                            try:
-                                if self._instance_id is not None:
-                                    health = guest_loss.capture_guest_health(
-                                        self._clients.ec2,
-                                        self._instance_id,
-                                        self._cache_root,
-                                        self._run_guest_command,
-                                    )
-                                    cause = health["cause"]
-                            except Exception:
-                                # Keep the original delivery verdict even if a
-                                # diagnostics hook itself violates fail-open.
-                                logger.warning("guest health capture failed unexpectedly")
+                            cause = self._execute_guest_health_cause()
+                            if self._supervisor_unit is not None:
+                                cause += "; supervisor recovery budget exhausted"
                             message += f"; guest down: {cause}; no transport retry"
                         raise GuestExecutionError(message, delivery=verdict.delivery) from None
                 else:

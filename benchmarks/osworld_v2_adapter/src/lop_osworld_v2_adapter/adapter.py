@@ -54,6 +54,7 @@ from lop_osworld_v2_adapter import scoring, taskfile, vendor_bridge
 from lop_osworld_v2_adapter.observation import ObservationBuilder
 from lop_osworld_v2_adapter.providers.base import (
     EnvironmentProvider,
+    GuestServerRecovered,
     InstructionUnavailable,
 )
 
@@ -1050,37 +1051,45 @@ class OSWorldV2Adapter:
         # would apply the click or the keystroke a second time, so the mutation
         # is skipped and only the read-back below runs. The parent sets this
         # flag solely after we declared the commit via ObservationPhaseError.
-        if not params.resume_observation and runs:
-            if self._action_settle_policy == "paper":
-                # Each semantic action settles independently. A WAIT's asked
-                # duration comes first; an empty provider execute then supplies
-                # only its own ``DEFAULT_ACTION_DELAY_S`` settle before the next
-                # action. The
-                # pure-wait path already settles for every wait here, so it must
-                # not receive the throughput empty-batch fallback below.
-                for kind, payload in paper_runs:
-                    if kind == "exec":
-                        await self._provider.execute(cast(list[str], payload), settle=True)
-                    else:
-                        await asyncio.sleep(cast(int, payload) / 1000.0)
-                        await self._provider.execute([], settle=True)
-            else:
-                # Keep the original throughput call sequence unchanged: only
-                # the last guest run settles, and pure waits advance the clock
-                # through one default-settling empty execute.
-                last_exec = max(
-                    (index for index, (kind, _) in enumerate(runs) if kind == "exec"),
-                    default=-1,
-                )
-                for index, (kind, payload) in enumerate(runs):
-                    if kind == "exec":
-                        await self._provider.execute(
-                            cast(list[str], payload), settle=index == last_exec
-                        )
-                    else:
-                        await asyncio.sleep(cast(int, payload) / 1000.0)
-                if not guest_lines:
-                    await self._provider.execute([])
+        try:
+            if not params.resume_observation and runs:
+                if self._action_settle_policy == "paper":
+                    # Each semantic action settles independently. A WAIT's asked
+                    # duration comes first; an empty provider execute then supplies
+                    # only its own ``DEFAULT_ACTION_DELAY_S`` settle before the next
+                    # action. The
+                    # pure-wait path already settles for every wait here, so it must
+                    # not receive the throughput empty-batch fallback below.
+                    for kind, payload in paper_runs:
+                        if kind == "exec":
+                            await self._provider.execute(cast(list[str], payload), settle=True)
+                        else:
+                            await asyncio.sleep(cast(int, payload) / 1000.0)
+                            await self._provider.execute([], settle=True)
+                else:
+                    # Keep the original throughput call sequence unchanged: only
+                    # the last guest run settles, and pure waits advance the clock
+                    # through one default-settling empty execute.
+                    last_exec = max(
+                        (index for index, (kind, _) in enumerate(runs) if kind == "exec"),
+                        default=-1,
+                    )
+                    for index, (kind, payload) in enumerate(runs):
+                        if kind == "exec":
+                            await self._provider.execute(
+                                cast(list[str], payload), settle=index == last_exec
+                            )
+                        else:
+                            await asyncio.sleep(cast(int, payload) / 1000.0)
+                    if not guest_lines:
+                        await self._provider.execute([])
+
+        except GuestServerRecovered:
+            # The server, not the desktop, restarted. Do not replay the refused
+            # input or send the remaining batch against the pre-restart frame.
+            # A normal fresh observation below re-establishes the binding; if
+            # it fails, the existing observation-phase retry remains in charge.
+            pass
 
         # PAST THE POINT OF NO RETURN. The guest has moved; from here every
         # failure is a failure to READ, and saying so is what lets the parent
