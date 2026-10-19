@@ -140,8 +140,10 @@ _CONTEXT_LOCATORS = 8
 #: A word, after locators are removed, is what distinguishes a decision/goal line
 #: from a bare path. Unicode letters in ANY script: `[^\W\d_]` is a letter (not a
 #: digit or underscore), so CJK/Cyrillic/Greek knowledge is not silently English-only
-#: (QA Q8). The floor is TWO: one loose character is not prose, while a two-letter
-#: word is a word, and real CJK/Greek/Cyrillic words run longer than that.
+#: (QA Q8). The floor is TWO: one loose character is too often debris (a stray
+#: letter, an enumerated label), while two-letter words are real. This deliberately
+#: does NOT admit a one-character CJK word; that is the accepted tradeoff, not a
+#: claim that such words do not exist.
 _WORD = re.compile(r"[^\W\d_]{2,}")
 #: Locator shapes that `_LOCATOR` deliberately does NOT own (that grammar is pinned
 #: byte-identical to ``compaction/mine.py``): Windows drive paths, UNC shares, bare
@@ -152,18 +154,27 @@ _ADJACENT_LOCATOR = re.compile(
     r"\b[A-Za-z]:[\\/][^\s<>\"']{1,400}"
     r"|\\\\[^\s<>\"']{1,400}"
     r"|(?<![\w@.-])mailto:[^\s<>\"']{0,400}"
-    r"|(?<![\w@.-])(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?"
-    r"|(?<![\w@.-])[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s<>\"']*",
+    r"|(?<![\w@.-])(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?",
     re.IGNORECASE,
 )
-#: The WHOLE candidate is one locator. A token rule cannot see a Windows path with
-#: spaces or a bare host followed by a path, so this full-body predicate is the
+#: One path segment for the full-body predicate. Spaces belong to a segment only
+#: when ANOTHER separator follows it, which is what keeps `C:\Program Files\app`
+#: a path while `C:\repo\app is the build root` is a path plus prose (QA round 3,
+#: B1). A final segment with spaces is deliberately not admitted: it is
+#: indistinguishable from prose, and over-blocking knowledge is the worse error.
+_PATH_SEGMENT = r"[^\\/<>\"'\s]+(?:\s+[^\\/<>\"'\s]+)*"
+_PATH_TAIL = r"[^\\/<>\"'\s]+"
+_DRIVE_PATH = rf"[A-Za-z]:[\\/](?:{_PATH_SEGMENT}[\\/])*{_PATH_TAIL}"
+_UNC_PATH = rf"\\\\(?:{_PATH_SEGMENT}[\\/])*{_PATH_TAIL}"
+_POSIX_PATH = rf"/(?:{_PATH_SEGMENT}/)*{_PATH_TAIL}"
+#: The WHOLE candidate is one locator. A token rule cannot see a path with spaces
+#: or a bare host followed by a path, so this full-body predicate is the
 #: shape-complete rule: a candidate is context when it IS a locator, never merely
-#: because a locator appears inside a sentence (QA MINOR 1).
+#: because a locator appears inside a sentence (QA MINOR 1). The path grammars
+#: stop before trailing prose, so a leading locator plus a sentence is KNOWLEDGE
+#: and is admitted (QA round 3, B1).
 _LOCATOR_ONLY = re.compile(
-    r"^\s*(?:"
-    r"[A-Za-z]:[\\/][^<>\"'\n]*"
-    r"|\\\\[^<>\"'\n]*"
+    rf"^\s*(?:{_DRIVE_PATH}|{_UNC_PATH}|{_POSIX_PATH}"
     r"|mailto:[^\s<>\"']*"
     r"|[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s<>\"']*"
     r"|(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?"
