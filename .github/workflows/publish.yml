@@ -242,6 +242,49 @@ jobs:
           name: release-dists
           path: dist/
 
+  # Gate the EXACT artifact that will be uploaded: install the release wheel in
+  # a throwaway venv per interpreter, import the server app from the installed
+  # location, and start `lop serve` + `/health`. This is the gap v0.77.0 fell
+  # through: publish.yml built and uploaded a wheel it never installed, while
+  # ci.yml only ever installed the source tree on 3.12.
+  #
+  # Runs on a manual dispatch as well (there is no event gate, and it publishes
+  # nothing): a rehearsal should prove the artifact starts before a tag exists.
+  # It must not run when release-build was skipped, hence the success/skip_build
+  # clauses rather than an event condition.
+  #
+  # The matrix is one entry per failure class: 3.12 is the `requires-python`
+  # floor, 3.13 a declared classifier, 3.14 the deferred-annotation interpreter
+  # on which v0.77.0 was unstartable. The wheel is `py3-none-any`, so the same
+  # downloaded artifact is installed three times — the artifact is what is under
+  # test, not the builder.
+  wheel-smoke:
+    needs: [release-build]
+    if: ${{ needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Install and start the release wheel
+        run: python scripts/smoke_wheel.py --wheel dist/local_operator-*-py3-none-any.whl
+
   # ---------------------------------------------------------------------------
   # The macOS key agent: build it, sign it, and retag the wheel around it.
   #
@@ -620,6 +663,10 @@ jobs:
     timeout-minutes: 20
     needs:
       - release-build
+      # The exact artifact was installed and started on three interpreters
+      # before this job is allowed to upload it. A failed smoke skips the
+      # publish rather than shipping a wheel nobody has run.
+      - wheel-smoke
       # HARD DEPENDENCY, on purpose: a release that cannot build the signed key
       # agent must not silently ship a macOS wheel without it. `supported()` is
       # True on macOS and the operator key's presence tier is what this wheel
@@ -634,7 +681,7 @@ jobs:
     # release from a rehearsal. `github.event_name == 'release'` is what makes the
     # dispatch rehearsal-only, and it is checked on the JOB so a dispatched run
     # reports `pypi-publish: skipped` rather than a job that runs and declines.
-    if: ${{ github.event_name == 'release' && needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' && needs.keyagent-macos.result == 'success' }}
+    if: ${{ github.event_name == 'release' && needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' && needs.wheel-smoke.result == 'success' && needs.keyagent-macos.result == 'success' }}
     permissions:
       id-token: write
 
@@ -684,3 +731,35 @@ jobs:
           # astral-sh/uv#9122), so this is audit evidence rather than an
           # install-time guarantee — stated plainly rather than implied.
           attestations: true
+
+  # The upload is irreversible, so this is the ALERT rather than a gate: it runs
+  # only after `pypi-publish` succeeded, installs the release from the real
+  # index on every interpreter, and starts it. It cannot prevent a bad upload —
+  # nothing after the upload can — but a red here names the exact interpreter
+  # and version that reached users, and it retries while PyPI's simple index
+  # propagates (the upload job and this job race the same eventual consistency).
+  #
+  # The matrix matches `wheel-smoke`: 3.12 floor, 3.13 classifier, 3.14 the
+  # interpreter class that made v0.77.0 unstartable for real users.
+  post-publish-verify:
+    needs: [pypi-publish]
+    if: ${{ needs.pypi-publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install from PyPI and start it
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/smoke_wheel.py --index-version "${TAG#v}" --index-wait 300

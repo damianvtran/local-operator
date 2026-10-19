@@ -1,0 +1,367 @@
+{
+  "tui.review.activity_close": {
+    "note": "act word: closed",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_comment": {
+    "note": "act word: commented",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_edit": {
+    "note": "act word: edited",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_merge": {
+    "note": "act word: merged",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_push": {
+    "note": "act word: pushed",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_ready": {
+    "note": "act word: marked ready",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_review": {
+    "note": "act word: reviewed",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.activity_you": {
+    "note": "trailing tag for acts this session performed; {acts} is a joined list",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.age_days": {
+    "note": "updated tail in days; # is the count; `d` stays short",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.age_hours": {
+    "note": "updated tail in hours; # is the count; `h` stays short",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.age_just_now": {
+    "note": "updated tail under a minute old",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.age_minutes": {
+    "note": "updated tail in minutes; # is the count",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.checked_just_now": {
+    "note": "settled receipt after a refresh pass",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_failing": {
+    "note": "CI clause when the host reported a failing count",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_failing_status": {
+    "note": "CI clause when only the status word failed",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_no_checks": {
+    "note": "CI clause when no checks exist yet",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_passed_count": {
+    "note": "CI clause with the host's own counts; both numbers are host data",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_passed_status": {
+    "note": "CI clause for a passed status with no counts",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_pending": {
+    "note": "CI clause for a pending status with no counts",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.ci_running": {
+    "note": "CI clause when jobs are still running",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.comments_count": {
+    "note": "comment total beside the other meta figures",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.empty_body": {
+    "note": "empty-state explanation of what will appear",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.empty_header": {
+    "note": "empty-state heading; a claim about an answer, not a failure",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.error_body": {
+    "note": "reassures that the conversation itself is untouched",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.error_detail": {
+    "note": "the technical failure; {error} is the exception text, never translated",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.error_header": {
+    "note": "index-read failure heading",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.error_retry": {
+    "note": "retry hint; `r` is the key token, keep it in situ",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.group_mentioned": {
+    "note": "group header for mentioned rows",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.group_opened": {
+    "note": "group header for opened/unknown/inherited rows",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.hint_back": {
+    "note": "footer hint label beside esc",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.hint_move": {
+    "note": "footer hint label beside the arrow keys",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.hint_open": {
+    "note": "footer hint label beside enter",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.hint_refresh": {
+    "note": "footer hint label beside the r key",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_awaiting_rereview": {
+    "note": "tail appended to remediation posted; keeps the state word",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_code": {
+    "note": "lane display name for the agent lane",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_design": {
+    "note": "lane display name for the design lane",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_no_review": {
+    "note": "clause for an open request with no agent review yet",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_qa": {
+    "note": "lane display name for the QA lane (an acronym in every locale)",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_round": {
+    "note": "full lane clause with its round number",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_stale": {
+    "note": "freshness tail when neither SHA is known",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_stale_head": {
+    "note": "freshness tail naming both short SHAs",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_stale_reviewed": {
+    "note": "freshness tail with only the reviewed SHA",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_state_clean": {
+    "note": "lane state word: clean",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_state_findings_open": {
+    "note": "lane state word: findings open",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_state_remediation_posted": {
+    "note": "lane state word: remediation posted",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_state_terminal": {
+    "note": "lane state word: terminal",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_state_unstated": {
+    "note": "lane state word when the verdict was not stated",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.lane_ux": {
+    "note": "lane display name for the UX lane (an acronym in every locale)",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.link_only": {
+    "note": "caption for a row with no fetched state",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.loading": {
+    "note": "cold-read loading line; the ellipsis is part of the copy",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.notice_cooling": {
+    "note": "row notice while the host's rate-limit window is closed",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.notice_fetch_failed": {
+    "note": "row notice for a failed fetch pass that will retry",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.notice_refresh_error": {
+    "note": "row notice for a failed refresh; {error} is the backend sentence",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.notice_stale": {
+    "note": "row notice for stale data with no recorded failure",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.notice_stale_error": {
+    "note": "row notice for stale data whose last attempt failed; {error} is the backend sentence",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.refreshing": {
+    "note": "status while `r`'s forge pass is in flight",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.relation_inherited": {
+    "note": "relation tag for a row inherited from a fork",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.relation_subagent": {
+    "note": "via tag with no path or name",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.relation_subagent_named": {
+    "note": "via tag falling back to the agent role or label",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.relation_subagent_path": {
+    "note": "via tag naming the delegation path; `›` is a separator",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.relation_unknown": {
+    "note": "relation tag for a possible open the evidence did not prove",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.relation_unknown_title": {
+    "note": "the longer sentence behind the unknown relation tag",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.row_fetching": {
+    "note": "loading line inside a row whose first read has not resolved",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.scan_failed": {
+    "note": "one-line page status when the transcript scan failed but recorded rows are still shown",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.session_unavailable": {
+    "note": "refusal when /review runs before a session exists",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.slash_help": {
+    "note": "one-line description in /help and the command picker",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.state_closed": {
+    "note": "state pill for a closed request",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.state_draft": {
+    "note": "state pill; draft wins over open",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.state_merged": {
+    "note": "state pill for a merged request",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.state_open": {
+    "note": "state pill for an open request",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.state_unknown": {
+    "note": "state pill when the forge word is empty",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.subtitle": {
+    "note": "one-line promise under the title and in the pane",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
+  "tui.review.title": {
+    "note": "page title, the ledger's name",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  }
+}

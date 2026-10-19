@@ -473,5 +473,15 @@
     "role": "overflow",
     "tone": "muted",
     "note": "Row-count overflow when the card cannot show every row."
+  },
+  "tui.projects.notice_read_only": {
+    "role": "read-only notice",
+    "tone": "plain",
+    "note": "Pinned on page entry and every refused write for a follower session whose runtime lives on another device. Full sentence; the footer paints one line and wraps. Names no command because there is none on this surface."
+  },
+  "tui.projects.refusal_done_gate": {
+    "role": "form refusal",
+    "tone": "plain",
+    "note": "Edit form's status-field refusal when marking done with open milestones. {names} is the comma-joined milestone names in store order. Deliberately omits force_done: the form cannot supply that parameter, so suggesting it sends the reader to a surface this page does not have (UX round 1, U4)."
   }
 }

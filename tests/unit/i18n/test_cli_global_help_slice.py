@@ -224,7 +224,10 @@ def test_one_build_snapshot_covers_global_and_recursive_help(monkeypatch):
     assert len(propagated) > 1 and set(propagated) == {"fr"}
     assert len(renders) == 12 + 5 * (len(propagated) - 1)
     assert set(renders) == {"fr"}
-    assert not (REPO / "local_operator/i18n/catalogues/fr/cli.global_help.json").exists()
+    assert (REPO / "local_operator/i18n/catalogues/fr/cli.global_help.json").is_file()
+    assert set(catalogues.load_catalogue("fr", "cli.global_help")) == set(
+        catalogues.load_catalogue("en", "cli.global_help")
+    )
 
 
 def _standalone_tree():
@@ -266,13 +269,13 @@ def test_standalone_propagation_is_fresh_and_explicit_locale_never_reads(monkeyp
         cli._propagate_global_flags(root)
         assert resolutions == [locale]
         assert renders == [locale] * 10
-        assert (
-            ordinary._option_string_actions["--yolo"].help
-            == _fixture()["messages"]["cli.global_help.yolo"]
-        )
+        # The expected bytes are the locale's own catalogue: fr now ships here,
+        # while en keeps the frozen fixture value.
+        expected = catalogues.load_catalogue(locale, "cli.global_help")
+        assert ordinary._option_string_actions["--yolo"].help == expected["cli.global_help.yolo"]
         assert (
             conditional._option_string_actions["--yolo"].help
-            == _fixture()["messages"]["cli.global_help.yolo_conditional"]
+            == expected["cli.global_help.yolo_conditional"]
         )
 
     def forbidden():

@@ -159,6 +159,14 @@ _SCHEDULES_READERS: dict[str, dict[str, str]] = {
     "local_operator/tui/widgets/wake_panel.py": {
         "sync": "a HUMAN surface — subtracts via ``scheduled_rows``",
     },
+    "local_operator/tui/widgets/schedule_view.py": {
+        "_owned": (
+            "the /schedule page's owned-list read: the raw list feeds its "
+            "full-list writes (a write that filtered would cancel hidden "
+            "timers) and its row builder; the VISIBLE rows subtract via "
+            "``scheduled_rows`` in ``_reload``"
+        ),
+    },
     "local_operator/tui/app.py": {
         "_cmd_fork": (
             "the switch guard's presence probe: a non-empty owned list means the "

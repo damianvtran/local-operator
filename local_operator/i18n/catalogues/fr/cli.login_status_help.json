@@ -1,0 +1,4 @@
+{
+  "cli.login_status_help.login_status": "Lister les identifiants de fournisseur stockés et leur état",
+  "cli.login_status_help.status_alias": "Alias de login-status : lister les identifiants de fournisseur stockés"
+}

@@ -696,6 +696,25 @@ class Pin(Input):
     pinned: StrictBool
 
 
+class TagCategory(Input):
+    id: str | None = None
+    name: str = Field(
+        description="Trimmed unique category name, 1..24 characters; Untagged is reserved."
+    )
+
+
+class TagRegistry(Input):
+    tags: list[TagCategory] = Field(max_length=32)
+
+
+class TagAssignment(Input):
+    tags: list[str] = Field(
+        max_length=8,
+        description="Existing assignment order is preserved; new tags append in this order.",
+    )
+    primary: str | None
+
+
 class Archive(Input):
     """The ARCHIVE state the caller wants this session to be in.
 
@@ -3732,9 +3751,10 @@ async def attachment_waveform(session_id: str, digest: AttachmentDigest, request
     The audio surfaces' waveform source. Peaks are computed ONCE at artifact
     creation (``session.attachments.cache_media`` -> ``audiogen.peaks``: 240
     max-abs bars at 8 kHz mono, 0..1) and stored as the ``<digest>.peaks.json``
-    sidecar beside the bytes; this route only READS them, so a render loop
-    never pays a decode — the frozen rule that keeps a heavy codec off every
-    repaint. The server contract's v1 result carries no ``waveform`` field, so
+    sidecar beside the bytes. A missing legacy sidecar gets a bounded server
+    repair off the event loop (8 MiB input, one decoder, 10-second deadline);
+    successful repairs persist and failed attempts are cached. A render loop
+    never decodes media. The server contract's v1 result carries no ``waveform`` field, so
     the sidecar is the default source and remains the source when a future
     server lane ships its own peaks.
 
@@ -3744,8 +3764,8 @@ async def attachment_waveform(session_id: str, digest: AttachmentDigest, request
     routes unambiguously distinct), the session id is the same existence
     check, and a digest held by another device answers the same 409
     ``attachment_on_peer`` the byte route does. A digest with no sidecar is an
-    ordinary 404 — a pre-peaks artifact or a host without the optional
-    decoder at creation time — and the surface paints its no-waveform state,
+    ordinary 404 when bounded recovery is unavailable or fails — and the
+    surface paints its no-waveform state,
     exactly as a missing image degrades to a placeholder.
 
     ``no-store`` rides along with ``nosniff`` for the family's reason:
@@ -4410,6 +4430,34 @@ async def notified(session_id: str, body: Notified, request: Request):
         await _refuse_remote_write(request, session_id, noun="notification")
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
+
+
+@router.get("/v1/desktop/tags", response_model=CRUDResponse[dict[str, Any]])
+async def tags(request: Request):
+    async with errors(request):
+        return reply(await host(request).tags())
+
+
+@router.put("/v1/desktop/tags", response_model=CRUDResponse[dict[str, Any]])
+async def replace_tags(body: TagRegistry, request: Request):
+    # Desired state is retry-safe and admits no work, so no receipt is needed.
+    async with errors(request):
+        try:
+            return reply(
+                await host(request).replace_tags([(tag.id, tag.name) for tag in body.tags])
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+
+@router.put("/v1/desktop/sessions/{session_id}/tags", response_model=CRUDResponse[dict[str, Any]])
+async def session_tags(session_id: str, body: TagAssignment, request: Request):
+    async with errors(request):
+        await _refuse_remote_write(request, session_id, noun="tag assignment")
+        try:
+            return reply(await host(request).set_tags(session_id, body.tags, body.primary))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
 
 @router.post("/v1/desktop/sessions/{session_id}/pin", response_model=CRUDResponse[PinState])

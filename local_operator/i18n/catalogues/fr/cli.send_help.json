@@ -1,0 +1,9 @@
+{
+  "cli.send_help.send": "Envoyer un message à une autre session lop locale (sans cmux)",
+  "cli.send_help.target": "nom-de-conversation / id-de-session / sous-chaîne du cwd (insensible à la casse). Omettre quand vous ciblez avec --pid/--session ; fournir les deux est refusé.",
+  "cli.send_help.message": "texte du message ; omettre pour lire le corps depuis stdin. Avec --pid/--session, un seul argument positionnel EST le message, et en saisir un tout en redirigeant un corps est refusé.",
+  "cli.send_help.pid": "cibler par pid exact",
+  "cli.send_help.session": "cibler par id de session exact",
+  "cli.send_help.steer": "injecter en cours de tour (steer) au lieu de la boîte aux lettres par défaut",
+  "cli.send_help.wake": "si la cible est inactive, déclencher un tour maintenant (mode boîte aux lettres uniquement)"
+}

@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "Changer le modèle d’une autre session lop en cours (comme /model dans cette session)",
+  "cli.model_help.target": "nom-de-conversation / id-de-session / sous-chaîne du cwd (insensible à la casse). Omettre quand vous ciblez avec --pid/--session.",
+  "cli.model_help.selector": "le modèle vers lequel basculer, p. ex. deepseek/deepseek-flash",
+  "cli.model_help.pid": "cibler par pid exact",
+  "cli.model_help.session": "cibler par id de session exact"
+}

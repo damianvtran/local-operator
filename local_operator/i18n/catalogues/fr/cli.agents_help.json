@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "Gérer les agents",
+  "cli.agents_help.list": "Lister tous les agents",
+  "cli.agents_help.list_page": "Numéro de page à afficher (par défaut : 1)",
+  "cli.agents_help.list_perpage": "Nombre d’agents par page (par défaut : 10)",
+  "cli.agents_help.create": "Créer un agent",
+  "cli.agents_help.create_name": "Nom de l’agent à créer",
+  "cli.agents_help.delete": "Supprimer un agent (local par nom ou Radient par ID)",
+  "cli.agents_help.delete_name": "Nom de l’agent à supprimer localement",
+  "cli.agents_help.delete_id": "ID de l’agent à supprimer de Radient",
+  "cli.agents_help.delete_org": "Supprimer un agent de l’espace de travail de cette organisation plutôt que du hub public (partage d’organisation Agent Hub ; nécessite `lop login radient`)",
+  "cli.agents_help.push": "Envoyer (push) un agent vers Radient ; `--org` et `--hub-id` passent par le flux aperçu/confirmation (codes de sortie : 0 publié, 1 erreur, 2 aperçu seul avec des changements en attente, 3 refusé, 130 annulé)",
+  "cli.agents_help.push_name": "Nom de l’agent à envoyer vers Radient",
+  "cli.agents_help.push_id": "ID de l’agent à envoyer vers Radient (écrasement explicite)",
+  "cli.agents_help.push_org": "Publier dans l’espace de travail de cette organisation plutôt que dans le hub public (partage d’organisation Agent Hub ; nécessite `lop login radient`)",
+  "cli.agents_help.push_hub_id": "Republier (écraser) cette annonce du hub à partir de l’agent local (vérifie d’abord les références personnelles) ; nécessite --name (--id est un id local)",
+  "cli.agents_help.pull": "Récupérer (pull) un agent depuis Radient",
+  "cli.agents_help.pull_id": "ID de l’agent à récupérer depuis Radient",
+  "cli.agents_help.pull_org": "Récupérer depuis l’espace de travail de cette organisation plutôt que depuis le hub public (partage d’organisation Agent Hub ; nécessite `lop login radient`)",
+  "cli.agents_help.sync": "Mettre à jour les rôles initiaux installés et les agents récupérés du hub vers leur dernier texte",
+  "cli.agents_help.sync_name": "Synchroniser uniquement le profil installé portant ce nom",
+  "cli.agents_help.sync_all": "Synchroniser tous les rôles initiaux installés et tous les agents récupérés du hub (par défaut quand --name est absent)"
+}

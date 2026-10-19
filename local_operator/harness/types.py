@@ -2484,6 +2484,13 @@ class ToolExecutionEndEvent(AgentEvent[Literal["tool_execution_end"]]):
 class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
+    #: Optional catalogue id and parameters behind ``text`` (RFC §2.6).
+    #:
+    #: ``text`` stays present and English-first so older clients read exactly
+    #: what they read before; a locale-aware viewer can re-render from
+    #: ``code``/``params`` without parsing prose. Additive, like ``headline``.
+    code: str = ""
+    params: dict[str, Any] = Field(default_factory=dict)
     kind: Literal["info", "warning", "error"] = "info"
     #: A SHORT glance for the boot toast, when the emitter knows the state.
     #:

@@ -926,7 +926,9 @@ def test_the_start_hint_carries_the_specs_own_label() -> None:
     detail_labels = {
         label for plan, _esc in view._detail_hint_rungs() for _hint, label, _lead in plan
     }
-    assert " start" in detail_labels
+    # The detail ladder's labels are BARE (`HintButton._build` supplies the
+    # one-cell gap); the canvas ladder above still carries its own lead.
+    assert "start" in detail_labels
 
 
 # -- the boot flow (the app's own handler) ----------------------------------

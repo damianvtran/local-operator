@@ -187,8 +187,50 @@ def test_success_answers_with_the_path_that_actually_ran(
         "model": "gpt-transcribe",
         # The token that RAN — never re-derived from the availability answer.
         "path": "provider_stt_radient",
+        "cleanup": "none",
+        "raw_text": None,
+        "raw_unavailable": "",
+        "language": None,
+        "removed": [],
     }
     assert calls[0]["audio"] == b"not-really-audio"
+
+
+def test_cleanup_is_forwarded_and_provenance_is_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(
+            text="So I think we should ship.",
+            provider="elevenlabs",
+            path="provider_stt_elevenlabs",
+            raw_text=None,
+            raw_unavailable="provider_no_verbatim",
+            language="eng",
+            cleanup="elevenlabs.no_verbatim",
+        ),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "auto"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["cleanup"] == "auto"
+    body = response.json()
+    assert body["cleanup"] == "elevenlabs.no_verbatim"
+    assert body["raw_text"] is None
+    assert body["raw_unavailable"] == "provider_no_verbatim"
+    assert body["language"] == "eng"
+    assert body["removed"] == []
+
+
+def test_a_refused_cleanup_mode_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_dispatch(monkeypatch, error=ValueError("Unknown transcription cleanup mode 'bogus'."))
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "bogus"}, **_audio())
+
+    assert response.status_code == 422
+    assert "Unknown transcription cleanup mode" in response.json()["error"]
 
 
 def test_a_backend_refusal_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,3 +327,97 @@ def test_the_strip_gate_fails_closed_without_the_constant(monkeypatch: pytest.Mo
     frame = {"op": "steer", "text": "hi", "input_mode": "mixed"}
     daemon_mod._strip_unsupported_annotation(_CapabilityRecord(["input-mode-v1"]), frame)
     assert "input_mode" not in frame
+
+
+def test_the_phone_forwards_the_locale_hint_to_the_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The web client sends navigator.language; the daemon passes it through.
+
+    Normalisation and the Radient wire value are covered at the adapter seam;
+    this pins the route half so a form-field rename cannot silently drop it.
+    """
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"language": "en-US"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["language"] == "en-US"
+
+
+def test_the_phone_omits_the_language_field_when_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["language"] is None
+
+
+def test_the_settings_mode_supplies_the_cleanup_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    manager = ConfigManager(config_dir())
+    settings_io.write_setting(manager, settings_io.BY_KEY["speech.transcription.cleanup"], "off")
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["cleanup"] == "off"
+
+
+def test_the_request_cleanup_field_wins_over_the_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    manager = ConfigManager(config_dir())
+    settings_io.write_setting(manager, settings_io.BY_KEY["speech.transcription.cleanup"], "off")
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "client"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["cleanup"] == "client"
+
+
+def test_a_request_cleanup_does_not_read_the_settings_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-call field wins, so the YAML read is skipped entirely (review r1 m1)."""
+    from local_operator.stt import cleanup as cleanup_policy
+
+    def _must_not_read(source: Any) -> str:
+        raise AssertionError(f"configured_cleanup called for {source!r}")
+
+    monkeypatch.setattr(cleanup_policy, "configured_cleanup", _must_not_read)
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "client"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["cleanup"] == "client"

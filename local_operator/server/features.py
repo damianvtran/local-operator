@@ -113,6 +113,9 @@ def feature_flags() -> dict[str, Any]:
         # and pays the cold engage on its first send, exactly as
         # before. Gating nothing, it needs no key of its own.
         "session_catalogue": 3,
+        # Own key: release-skewed clients must fail closed without hiding the
+        # catalogue itself when durable tags are unavailable.
+        "session_tags": 1,
         # A catalogue that can be asked for ONE scope at a time, resumed
         # by an opaque cursor, and counted per group: the
         # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
