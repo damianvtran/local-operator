@@ -674,10 +674,22 @@ class _GrantIndex:
             return self._cache[url][0]
         if self._unreadable:
             return "unknown"
+        if self._store is None:
+            # NO STORE FILE IS A DEFINITE ABSENCE (the constructor's own rule).
+            # Falling through would resolve the AMBIENT store from an injected
+            # root and describe somebody else's login as this device's.
+            return "absent"
         try:
-            from local_operator.mcp.auth import server_has_stored_grant
+            from local_operator.mcp.auth import McpTokenStorage, server_has_stored_grant
 
-            state = "present" if server_has_stored_grant(url, self._store) else "absent"
+            # PRESENCE AND USABILITY ARE DIFFERENT QUESTIONS (review M4). A
+            # tombstoned row answers ``server_has_stored_grant`` False — by
+            # design, it cannot serve a bearer — but it still PROVES a sign-in
+            # existed here and was refused. Treating it as absent rendered
+            # "needs operator login" for a server whose grant simply expired.
+            usable = server_has_stored_grant(url, self._store)
+            tombstoned = False if usable else McpTokenStorage(url, self._store).grant_is_dead()
+            state = "present" if (usable or tombstoned) else "absent"
         except Exception:  # noqa: BLE001 — see :meth:`__init__`
             return "unknown"
         self._cache[url] = (state, False)
