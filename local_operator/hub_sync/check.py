@@ -453,7 +453,11 @@ def check_hub_teams(
             )
             continue
         try:
-            document = client.get_team(record.hub_id, timeout=REQUEST_TIMEOUT_S)
+            # Public baselines select the anonymous client. Optional-auth detail
+            # reads must explicitly omit credentials rather than demanding a key.
+            document = client.get_team(
+                record.hub_id, timeout=REQUEST_TIMEOUT_S, with_credential=bool(tenant)
+            )
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error)
             checks.append(
