@@ -9215,10 +9215,7 @@ class AttachedSession:
         self._require_owner_can_serve(model.provider)
         # /effort changes only the reasoning rung; /model changes identity.
         if (model.provider, model.model_id) == (old.provider, old.model_id):
-            if effort_choice is EFFORT_CHOICE_UNSET:
-                effort = model.reasoning_effort or "auto"
-                asyncio.create_task(client.set_effort(effort))
-            else:
+            if effort_choice is not EFFORT_CHOICE_UNSET:
                 # The decision rides the MODEL op rather than ``set_effort``
                 # because ``set_effort`` validates against the ladder and so
                 # cannot express a WITHDRAWAL; ``auto`` is the owner's word for
@@ -9227,6 +9224,17 @@ class AttachedSession:
                 asyncio.create_task(
                     client.set_model(model.provider, model.model_id, effort=chosen)
                 )
+            elif model.reasoning_effort != old.reasoning_effort:
+                # A LEVEL moved but this caller stated no DECISION (a carried
+                # spec, an adoption). `set_effort` is an explicit choice on the
+                # owner, and since the explicit-decision split it RECORDS one —
+                # so forwarding the spec's level here promoted a failover carry
+                # (or a `/fast`-era seed) into the conversation's durable choice
+                # (review round 2, M4). A pair-only switch lets the owner CARRY
+                # its own choice, which is the local Session's semantics for a
+                # level change with no decision; a spec whose level did not move
+                # (`/fast`) sends nothing at all.
+                asyncio.create_task(client.set_model(model.provider, model.model_id))
         else:
             asyncio.create_task(client.set_model(model.provider, model.model_id))
 

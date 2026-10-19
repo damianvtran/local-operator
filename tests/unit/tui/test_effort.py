@@ -250,7 +250,9 @@ async def test_effort_with_a_level_sets_it_and_says_what_changed() -> None:
         level = _level(app)
         notices = _notices(app)
         band = _band(app)
+        session = app._session
     assert level == "low"
+    assert session.last_effort_choice == "low", "the TUI applied but never stated the choice"
     assert "low" in band
     receipt = [n for n in notices if "reasoning effort" in n]
     assert receipt, notices
@@ -317,8 +319,10 @@ async def test_effort_auto_returns_to_the_models_own_default() -> None:
         await _submit(pilot, app, "/effort auto")
         level = _level(app)
         remembered = app._effort_choice
+        session = app._session
     assert level == "high"
     assert remembered is None
+    assert session.last_effort_choice is None, "the withdrawal was never stated to the session"
 
 
 @pytest.mark.asyncio
