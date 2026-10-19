@@ -2363,9 +2363,7 @@ async def test_conversation_send_forwards_the_text_and_key(api):
 
 async def test_conversation_read_requires_something_to_do(api):
     client, _root, _d = api
-    response = await client.post(
-        "/v1/desktop/team-bridge/conversations/bcv_abc12345/read", json={}
-    )
+    response = await client.post("/v1/desktop/team-bridge/conversations/bcv_abc12345/read", json={})
     assert response.status_code == 422
 
 
@@ -2436,9 +2434,7 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
     calls_before = FakeClient.calls
     for method, path, payload in cases:
         response = (
-            await client.get(path)
-            if method == "get"
-            else await client.post(path, json=payload)
+            await client.get(path) if method == "get" else await client.post(path, json=payload)
         )
         assert response.status_code == 422, (path, response.text)
     # None of the guards admitted a transport call.
