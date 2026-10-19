@@ -571,7 +571,7 @@
   "wire.settings.session_scratchpad.description": "Cuánto puede guardar el área de borrador propia de una sesión. El límite se comprueba en cada escritura y se aplica al instante.",
   "wire.settings.session_scratchpad.title": "Scratchpad",
   "wire.settings.session_scratchpad_max_bytes.help": "Bytes que puede guardar el scratchpad de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
-  "wire.settings.session_scratchpad_max_bytes.label": "Límite de tamaño del scratchpad (bytes)",
+  "wire.settings.session_scratchpad_max_bytes.label": "Límite de scratchpad (bytes)",
   "wire.settings.shell_environment.description": "Qué puede ver un comando que ejecuta el agente. Se resuelve una vez por sesión, así que una edición aquí se aplica en el siguiente arranque y no puede debilitar una sesión ya en marcha.",
   "wire.settings.shell_environment.title": "Shell del agente",
   "wire.settings.shell_environment_exclude.help": "Vacío = no se quita nada. Nombres que nunca se pasan a un comando que ejecuta el agente, en ningún modo — incluidas las propias inyecciones del almacén de credenciales de la sesión, así que esta es la forma de negar una variable de plano. Solo cubre los hijos de bash y eval; los servidores MCP y los propios procesos del harness no se rigen por esto.",

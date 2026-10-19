@@ -2222,3 +2222,19 @@ def test_a_live_subagents_scratchpad_and_record_survive_the_full_pass(root: Path
     assert directory.exists() and (directory / dr.TRANSCRIPT_FILENAME).exists()
     assert shaped.exists() and notes.exists()
     assert ("livemod", "claimed by a live process") in result.content_kept
+
+
+def test_a_spent_budget_stops_even_when_no_pad_has_reclaimable_content(root: Path) -> None:
+    """Minor 1: the pre-fix deadline check ran only at a 100-removal/100-failure
+    batch boundary, so a pool of pads with nothing to reclaim walked to the end
+    and never set ``content_budget_exhausted``. The per-pad check must stop after
+    the one-pad progress guarantee."""
+    for name in ("plain-a", "plain-b", "plain-c"):
+        pad = _kept_pad(root, name)
+        (pad / "notes.md").write_text("keep\n")
+
+    result = _pass(root, batch_size=100, budget_s=0.0)
+
+    assert result.content == []
+    assert result.content_budget_exhausted is True
+    assert result.content_remaining == 2

@@ -8412,3 +8412,57 @@ async def test_a_cd_shrink_and_no_growth_operations_still_run(tmp_path, monkeypa
     (pad / "build").mkdir()
     noop_child = await run("bash-pad-mkdir-existing", f'mkdir -p "{pad}/build"')
     assert noop_child.is_error is False, noop_child.text
+
+    (pad / "notes.md").write_text("keep\n")
+    touched = await run("bash-pad-touch-existing", f'touch "{pad}/notes.md"')
+    assert touched.is_error is False, touched.text  # Minor 2: an existing FILE adds no bytes
+
+
+@pytest.mark.asyncio
+async def test_the_post_hoc_shape_audit_still_names_a_build_tree_the_precheck_exempts(
+    tmp_path, monkeypatch
+) -> None:
+    """R2-1: the no-growth exemptions are PRECHECK-ONLY. ``mkdir -p`` of an
+    existing build tree adds no bytes, so the precheck lets it run — but the
+    tree is still there, and the post-hoc audit must keep naming it."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "build" / "sub").mkdir(parents=True)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-shape-after-exempt",
+        {"command": 'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build/sub"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "'build' is a build or dependency directory" in result.text
+
+
+@pytest.mark.asyncio
+async def test_no_growth_forms_are_allowed_on_a_pad_under_cap(tmp_path) -> None:
+    """The same exemptions on the ordinary side, so they are not accidentally
+    tied to the over-cap branch: touch an existing file, mkdir the pad itself
+    and rename a file, all on a healthy pad."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    def run(name: str, command: str):
+        return tools["bash"].execute(name, {"command": command}, None, None, context)
+
+    touched = await run("bash-pad-touch", f'touch "{pad}/notes.md"')
+    assert touched.is_error is False, touched.text
+
+    mkdir_self = await run("bash-pad-mkdir-self", f'mkdir -p "{pad}"')
+    assert mkdir_self.is_error is False, mkdir_self.text
+
+    renamed = await run("bash-pad-rename", f'mv "{pad}/notes.md" "{pad}/notes2.md"')
+    assert renamed.is_error is False, renamed.text
+    assert (pad / "notes2.md").exists()
