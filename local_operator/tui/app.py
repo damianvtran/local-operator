@@ -430,6 +430,12 @@ from local_operator.tui.widgets.harness_import_view import (
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
+from local_operator.tui.widgets.library_view import (
+    LibraryView,
+    LibraryViewAskRequested,
+    LibraryViewDismissed,
+    LibraryViewLibrarianRequested,
+)
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
@@ -444,12 +450,6 @@ from local_operator.tui.widgets.projects_send import (
     refusal_notice,
     send_fault_notice,
     sent_line,
-)
-from local_operator.tui.widgets.library_view import (
-    LibraryView,
-    LibraryViewAskRequested,
-    LibraryViewDismissed,
-    LibraryViewLibrarianRequested,
 )
 from local_operator.tui.widgets.projects_start import StartTarget, start_targets
 from local_operator.tui.widgets.projects_view import (
@@ -36777,16 +36777,12 @@ class OperatorApp(App[None]):
             # and the caret lands after it ready to send. Round 1 UX finding:
             # `load_text` silently discarded a half-typed prompt.
             existing = editor.text
-            editor.load_text(
-                f"{existing.rstrip()}\n\n{prompt}" if existing.strip() else prompt
-            )
+            editor.load_text(f"{existing.rstrip()}\n\n{prompt}" if existing.strip() else prompt)
             editor.focus()
         except Exception:  # noqa: BLE001 — the page already left; never strand it
             logger.debug("library: seeding the composer failed", exc_info=True)
 
-    def on_library_view_librarian_requested(
-        self, message: LibraryViewLibrarianRequested
-    ) -> None:
+    def on_library_view_librarian_requested(self, message: LibraryViewLibrarianRequested) -> None:
         """``L`` — leave the page and open the Librarian's pinned conversation."""
         message.stop()
         if self._library_view is None:
@@ -36818,13 +36814,9 @@ class OperatorApp(App[None]):
             notice(tr("tui.library")(tui_library.librarian_usage()), "warning")
             return
         if verb == "open":
-            self.run_worker(
-                self._librarian_open(notice), group="librarian", exclusive=True
-            )
+            self.run_worker(self._librarian_open(notice), group="librarian", exclusive=True)
             return
-        self.run_worker(
-            self._librarian_control(verb, notice), group="librarian", exclusive=True
-        )
+        self.run_worker(self._librarian_control(verb, notice), group="librarian", exclusive=True)
 
     async def _librarian_control(self, verb: str, notice: NoticeFn) -> None:
         from local_operator.tui import librarian_control
@@ -36835,9 +36827,7 @@ class OperatorApp(App[None]):
             return
         if result.missing_hook:
             notice(
-                tr("tui.library")(
-                    tui_library.librarian_hook_missing(hook=result.missing_hook)
-                ),
+                tr("tui.library")(tui_library.librarian_hook_missing(hook=result.missing_hook)),
                 "warning",
             )
             return
@@ -36875,16 +36865,12 @@ class OperatorApp(App[None]):
                 notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
             elif reason == "ensure_session":
                 notice(
-                    tr("tui.library")(
-                        tui_library.librarian_hook_missing(hook="ensure_session")
-                    ),
+                    tr("tui.library")(tui_library.librarian_hook_missing(hook="ensure_session")),
                     "warning",
                 )
             else:
                 notice(
-                    tr("tui.library")(
-                        tui_library.librarian_open_failed(error=reason)
-                    ),
+                    tr("tui.library")(tui_library.librarian_open_failed(error=reason)),
                     "warning",
                 )
             return
