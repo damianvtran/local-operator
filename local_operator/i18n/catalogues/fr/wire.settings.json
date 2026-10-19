@@ -571,7 +571,7 @@
   "wire.settings.session_scratchpad.description": "Ce que peut contenir la zone de brouillon propre à une session. Le plafond est vérifié à chaque écriture et s’applique immédiatement.",
   "wire.settings.session_scratchpad.title": "Scratchpad",
   "wire.settings.session_scratchpad_max_bytes.help": "Octets que le scratchpad d’une session peut contenir : de 16 MiB à 8 GiB. Par défaut : 256 MiB.",
-  "wire.settings.session_scratchpad_max_bytes.label": "Plafond de taille du scratchpad (octets)",
+  "wire.settings.session_scratchpad_max_bytes.label": "Plafond scratchpad (octets)",
   "wire.settings.shell_environment.description": "Ce qu’une commande exécutée par l’agent peut voir. Résolu une fois par session : une modification ici s’applique au prochain lancement et ne peut pas affaiblir une session déjà en cours.",
   "wire.settings.shell_environment.title": "Shell de l’agent",
   "wire.settings.shell_environment_exclude.help": "Vide = rien n’est retiré. Noms jamais transmis à une commande exécutée par l’agent, dans les deux modes — y compris les injections propres au coffre d’identifiants de la session ; c’est ainsi qu’une variable est refusée purement et simplement. Ne couvre que les enfants bash et eval ; les serveurs MCP et les processus du harness n’y sont pas soumis.",

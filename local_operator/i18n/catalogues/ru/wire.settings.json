@@ -571,7 +571,7 @@
   "wire.settings.session_scratchpad.description": "Сколько может хранить собственное черновое пространство сессии. Лимит проверяется при каждой записи и применяется сразу.",
   "wire.settings.session_scratchpad.title": "Скрэтчпад",
   "wire.settings.session_scratchpad_max_bytes.help": "Байты, которые может хранить скрэтчпад сессии: от 16 MiB до 8 GiB. По умолчанию 256 MiB.",
-  "wire.settings.session_scratchpad_max_bytes.label": "Ограничение размера скрэтчпада (байты)",
+  "wire.settings.session_scratchpad_max_bytes.label": "Лимит скрэтчпада (байты)",
   "wire.settings.shell_environment.description": "Что видит команда, запускаемая агентом. Определяется один раз за сессию, поэтому правка здесь применяется при следующем запуске и не может ослабить уже работающую сессию.",
   "wire.settings.shell_environment.title": "Shell агента",
   "wire.settings.shell_environment_exclude.help": "Пусто = ничего не удаляется. Имена, которые никогда не передаются команде, запускаемой агентом, ни в одном из режимов — включая собственные инъекции хранилища учётных данных сессии; так переменная запрещается полностью. Охватывает только дочерние процессы bash и eval; серверы MCP и собственные процессы харнесса ему не подчиняются.",

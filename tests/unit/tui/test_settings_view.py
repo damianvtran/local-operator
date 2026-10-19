@@ -5775,3 +5775,22 @@ async def test_a_valid_delegated_age_is_written_nested(tmp_path: Path) -> None:
             )
             == 96
         )
+
+
+def test_every_scratchpad_cap_label_fits_the_settings_label_budget() -> None:
+    """R2-2: a localized label is painted in the same 29-cell column as English;
+    the unit-bearing lengths for es/fr/ru/vi overshot it before this test."""
+    from local_operator.i18n import catalogues
+    from local_operator.tui.widgets.settings_view import _LABEL_BUDGET
+
+    assert _LABEL_BUDGET == 29
+    checked = 0
+    for locale in catalogues.locales():
+        if "wire.settings" not in catalogues.namespaces(locale):
+            continue
+        label = catalogues.load_catalogue(locale, "wire.settings")[
+            "wire.settings.session_scratchpad_max_bytes.label"
+        ]
+        assert cell_len(label) <= _LABEL_BUDGET, (locale, cell_len(label), label)
+        checked += 1
+    assert checked >= 6

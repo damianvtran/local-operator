@@ -7851,7 +7851,7 @@ def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
         return None
     created: list[Path] = []
     expanded = _expand_scratchpad_spellings(command, pad)
-    for candidate, _sources in _bash_created_entries(expanded, pad=pad):
+    for candidate, _sources in _bash_created_entries(expanded, pad=pad, exempt_no_growth=True):
         target = _pad_target(candidate, pad)
         if target is not None and scratchpad_contains(target, pad):
             created.append(target)
@@ -7987,7 +7987,7 @@ def _pad_target(candidate: str, pad: Path) -> Path | None:
 
 
 def _bash_created_entries(
-    command: str, *, pad: Path | None = None
+    command: str, *, pad: Path | None = None, exempt_no_growth: bool = False
 ) -> Iterator[tuple[str, tuple[str, ...]]]:
     """The candidate paths ``command`` creates, in the order the shell meets
     them, each with the SOURCE operands a copy or move reads from.
@@ -8010,13 +8010,16 @@ def _bash_created_entries(
     ``pad`` turns on the PAD walk's extra context, and only that caller passes
     it: ``cd``/``pushd`` operands update a base directory so a relative creating
     operand after ``cd "<pad>"`` is judged as pad-relative (review round 1 M1 —
-    the idiom was the bypass), the base resets on a ``cd`` elsewhere or a
-    subshell/group boundary the walk cannot follow, and two no-growth shapes are
-    skipped: an ``mv`` whose sources and destination are all inside the pad (a
-    rename), and a ``mkdir``/``touch`` target that already exists as a directory
-    (the command adds no bytes). The exemptions live here rather than in the
-    caller so the post-hoc shape audit and the pre-execution gate agree about
-    what a command created.
+    the idiom was the bypass), and the base resets on a ``cd`` elsewhere or a
+    subshell/group boundary the walk cannot follow.
+
+    ``exempt_no_growth`` is PRECHECK-ONLY (review round 2, R2-1): it skips an
+    ``mv`` whose sources and destination are all inside the pad (a rename) and an
+    existing entry for ``touch`` / an existing directory for ``mkdir``, because
+    those commands add no bytes and refusing them was a false positive. The
+    POST-HOC shape audit must NOT pass it: ``mkdir -p "$PAD/build/sub"`` leaves a
+    build tree even when it adds no bytes, and the shape line is the only
+    feedback that names it.
     """
     tokens = _bash_tokens(_strip_heredoc_bodies(command))
     index = 0
@@ -8104,9 +8107,10 @@ def _bash_created_entries(
             for operand in operands:
                 target = resolved(operand)
                 if (
-                    pad is not None
+                    exempt_no_growth
+                    and pad is not None
                     and name in ("mkdir", "touch")
-                    and _pad_existing_dir(target, pad)
+                    and _pad_existing_entry(target, pad, allow_file=name == "touch")
                 ):
                     continue
                 yield target, ()
@@ -8133,17 +8137,22 @@ def _pad_cd_base(operand: str | None, base: Path | None, pad: Path) -> Path | No
     return None
 
 
-def _pad_existing_dir(candidate: str, pad: Path) -> bool:
-    """Whether ``candidate`` is already a directory inside the pad.
+def _pad_existing_entry(candidate: str, pad: Path, *, allow_file: bool) -> bool:
+    """Whether ``candidate`` is an existing entry inside the pad that adds nothing.
 
-    ``mkdir -p <pad>`` and ``mkdir -p <pad>/build`` (when it exists) add no
-    bytes; refusing them taught the operator the gate fires on no-ops.
+    ``mkdir -p <pad>`` / ``mkdir -p <pad>/build`` (existing dir) and ``touch`` of
+    an existing file or directory add no bytes; refusing them taught the operator
+    the gate fires on no-ops (review round 2, M2). A SYMLINK is never exempt:
+    ``touch`` through a dangling link can create its target outside the pad, and
+    the gate cannot judge where that lands.
     """
     target = _pad_target(candidate, pad)
     if target is None or not scratchpad_contains(target, pad):
         return False
     try:
-        return target.is_dir()
+        if target.is_symlink():
+            return False
+        return target.is_dir() or (allow_file and target.is_file())
     except OSError:
         return False
 
