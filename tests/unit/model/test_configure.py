@@ -6116,3 +6116,24 @@ def test_the_listing_does_not_construct_a_mesh_store_without_placement(
     monkeypatch.setattr(mesh_store, "build_auth_store", explode)
 
     assert configure_mod._oauth_listing_token("radient", base=root) == ("", False, None)
+
+
+@pytest.mark.asyncio
+async def test_the_listing_bridge_does_not_wait_forever_in_a_running_loop(
+    holder_root, monkeypatch
+) -> None:
+    """F5: the thread branch caps the caller's wait; the daemon finishes on its own."""
+    from local_operator.model import configure as configure_mod
+    from local_operator.network import credentials as credentials_pkg
+
+    async def slow_borrow(provider: str, config_dir=None) -> str:
+        await asyncio.sleep(5.0)
+        return "late-token"
+
+    monkeypatch.setattr(credentials_pkg, "borrowed_provider_key", slow_borrow)
+
+    started = time.monotonic()
+    assert configure_mod._oauth_listing_token("radient", base=holder_root) == ("", False, None)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3.0, "the running-loop branch must not wait out the borrow"

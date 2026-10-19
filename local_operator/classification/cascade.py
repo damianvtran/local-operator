@@ -62,14 +62,22 @@ VENDOR_CHOICES: tuple[str, ...] = (DEFAULT_VENDOR, *VENDOR_ORDER)
 
 #: Why a leg was skipped, in the vocabulary the decision and spend rows speak.
 #:
-#: ``not_synced`` is the one this slice exists to surface: a placement row says
+#: ``borrow_unavailable`` is the one this slice exists to surface: a placement row
+#: says another device owns this credential and lends it to us, yet the borrow did
+#: not produce one — so the operator is being served by a later leg they did not
+#: choose. The word is deliberately CAUSE-NEUTRAL: the borrow helper collapses
+#: every broker refusal (owner asleep, unreachable, quota-blocked, not-holder)
+#: into ``None``, so the trace cannot honestly claim the credential is unshared.
+#: ``borrow_failed`` carries a broker code in ``detail`` when a refusal reaches the
+#: trace as a raised exception; ``resolution_failed`` is a leg whose probe raised
+#: anything else. Plain absence is not a defect.
 #: another device owns this credential and lends it to us, yet the borrow produced
 #: nothing — so the operator is being served by a later leg they did not choose.
 #: ``borrow_failed`` carries the broker's own code in ``detail``; ``resolution_failed``
 #: is a leg whose credential probe raised. ``no_credential_here`` is absence, which
 #: is not a defect.
 SKIP_NO_CREDENTIAL = "no_credential_here"
-SKIP_NOT_SYNCED = "not_synced"
+SKIP_BORROW_UNAVAILABLE = "borrow_unavailable"
 SKIP_BORROW_FAILED = "borrow_failed"
 SKIP_RESOLUTION_FAILED = "resolution_failed"
 
@@ -109,8 +117,8 @@ def _skip_row(config_dir: "Path | None", name: str) -> dict[str, str]:
 
     The placement document and the client's own holder predicate answer the
     question locally: a row this device is a holder for and does not own means a
-    borrow was (or should have been) attempted, which is ``not_synced``; anything
-    else is plain absence. Deliberately no grant request here — the trace must not
+    borrow was (or should have been) attempted, which is ``borrow_unavailable``;
+    anything else is plain absence. Deliberately no grant request here — the trace must not
     turn a diagnostic into a second borrow, and the resolved leg never reaches this
     helper at all (see :func:`resolve_vendor_with_trace`).
 
@@ -128,7 +136,7 @@ def _skip_row(config_dir: "Path | None", name: str) -> dict[str, str]:
             return {"vendor": name, "reason": SKIP_NO_CREDENTIAL}
         mesh = MeshCredentialClient.for_this_device(config_dir)
         if mesh is not None and mesh.should_borrow(key_for(provider=name)):
-            return {"vendor": name, "reason": SKIP_NOT_SYNCED}
+            return {"vendor": name, "reason": SKIP_BORROW_UNAVAILABLE}
     except Exception:  # noqa: BLE001 — a diagnostic read is never worth a failure
         logger.debug("classification: placement probe failed for %s", name, exc_info=True)
     return {"vendor": name, "reason": SKIP_NO_CREDENTIAL}

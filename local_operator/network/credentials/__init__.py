@@ -32,6 +32,7 @@ Two facts about a refusal worth keeping beside the code that raises one:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,6 +49,15 @@ logger = logging.getLogger(__name__)
 #: owner (build plan §2.4); the Mac↔EC2 grant latency measured in rollout settles
 #: whether it moves (design Q3).
 GRANT_TTL_S = 900.0
+
+#: The borrow rung's own ceiling, deliberately far below classification's 1.5 s
+#: per-call deadline. A local control-socket grant is microseconds to tens of ms
+#: when the owner answers; when the owner is asleep the client says so quickly.
+#: This bound exists for the third case the reviewer measured: a relay that is up
+#: but whose owner is slow could otherwise consume the whole decision budget and
+#: turn a working fallback into ``skipped="timeout"``. A timed-out borrow reads as
+#: "no credential" and is retried on the next resolve.
+BORROW_BUDGET_S = 0.5
 
 #: The owner-side deadline for one ``net_broker`` request (seconds): the provider
 #: refresh's own total budget (``providers.auth_store.PROVIDER_REFRESH_TOTAL_BUDGET_S``,
@@ -78,7 +88,12 @@ def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | No
     return _build(config_dir, db_path=db_path)
 
 
-async def borrowed_provider_key(provider: str, config_dir: Path | None = None) -> str | None:
+async def borrowed_provider_key(
+    provider: str,
+    config_dir: Path | None = None,
+    *,
+    timeout_s: float = BORROW_BUDGET_S,
+) -> str | None:
     """A provider credential this device may BORROW from a mesh owner, or ``None``.
 
     THE RUNG THE CLASSIFICATION AND MODEL-LISTING SEAMS WERE MISSING. Those seams
@@ -95,6 +110,12 @@ async def borrowed_provider_key(provider: str, config_dir: Path | None = None) -
     with nothing lent to it never constructs a store, a client or a socket — the
     pre-slice behaviour, byte for byte.
 
+    THE BORROW IS BOUNDED SEPARATELY FROM THE CALLER'S DEADLINE. Classification
+    resolves this inside its 1.5 s per-call budget, and a slow owner (a relay that
+    is up, a head that is asleep) must cost a traced fallback, not a timed-out
+    answer. ``timeout_s`` caps the borrow well below that budget; a timeout reads
+    as no credential and the next resolve tries again.
+
     Best-effort by construction. A provider leg that cannot resolve is not a failed
     turn, so every failure — an unreadable document, a refused broker borrow, a
     closed relay — returns ``None`` rather than propagating. The VALUE is never
@@ -109,8 +130,13 @@ async def borrowed_provider_key(provider: str, config_dir: Path | None = None) -
             return None
         from local_operator.network.credentials.store import build_auth_store as _build
 
-        store = _build(config_dir)
-        key = await store.get_api_key(provider, read_only=True)
+        # ``config_dir`` does NOT select the database (see ``build_auth_store``'s
+        # own note): an explicit root must spell its own ``auth.db`` or the local
+        # tier silently reads the AMBIENT profile's credentials.
+        store = _build(
+            config_dir, db_path=(config_dir / "auth.db") if config_dir is not None else None
+        )
+        key = await asyncio.wait_for(store.get_api_key(provider, read_only=True), timeout=timeout_s)
         return key or None
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
         logger.debug("credentials: borrowed provider key unavailable for %s", provider)
