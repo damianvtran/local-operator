@@ -98,6 +98,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
     INHERIT_EFFORT,
     _advertise_effort_tiers,
@@ -359,7 +360,7 @@ def _profile_line(
     # Ellipsis when the cut fires: a bare slice ends mid-word, and the reader
     # cannot tell an author's fragment from text we dropped.
     cap = _STARTER_ROW_CAP if compact else _ROW_CAP
-    return row if len(row) <= cap else row[: cap - 1].rstrip() + "…"
+    return truncate_row(row, cap=cap)
 
 
 def _format_field(value: Any, *, absent: str = "(unset)") -> str:

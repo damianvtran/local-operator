@@ -30,6 +30,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.projects import truncate_row
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     TeamEditFields,
@@ -310,7 +311,7 @@ def _row(team: Any, *, context: ToolContext | None = None) -> str:
         f"- {identifier_text(context, display_form(team.name, team.label))} "
         f"[{slots} {member_word}, led by {identifier_text(context, team.manager)}]: {summary}"
     )
-    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
+    return truncate_row(row, cap=_ROW_CAP)
 
 
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:

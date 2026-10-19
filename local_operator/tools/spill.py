@@ -72,6 +72,7 @@ import re
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +173,11 @@ class SpillMeta:
     session_id: str
     created_ms: int
     last_read_ms: int
+    # (line, start, end) in the stored PLAIN text: identifiers that were
+    # protected by a span when the entry was written, so a read-back can
+    # re-mint the span without storing any marker or token on disk (LOH-28
+    # R3-2). Empty for entries written before this field existed.
+    identifier_spans: tuple[tuple[int, int, int], ...] = ()
 
     @property
     def handle(self) -> str:
@@ -319,7 +325,13 @@ class SpillStore:
     # -- write -------------------------------------------------------------
 
     def write(
-        self, text: str, *, tool_name: str = "", session_id: str = "", source_complete: bool = True
+        self,
+        text: str,
+        *,
+        tool_name: str = "",
+        session_id: str = "",
+        source_complete: bool = True,
+        identifier_spans: Sequence[tuple[int, int, int]] | None = None,
     ) -> SpillMeta | None:
         """Store one output as an install+evict transaction.
 
@@ -329,11 +341,21 @@ class SpillStore:
         """
         with self._write_lock:
             return self._write_locked(
-                text, tool_name=tool_name, session_id=session_id, source_complete=source_complete
+                text,
+                tool_name=tool_name,
+                session_id=session_id,
+                source_complete=source_complete,
+                identifier_spans=identifier_spans,
             )
 
     def _write_locked(
-        self, text: str, *, tool_name: str = "", session_id: str = "", source_complete: bool = True
+        self,
+        text: str,
+        *,
+        tool_name: str = "",
+        session_id: str = "",
+        source_complete: bool = True,
+        identifier_spans: Sequence[tuple[int, int, int]] | None = None,
     ) -> SpillMeta | None:
         """Store ``text`` and return its metadata, or ``None`` on failure.
 
@@ -359,6 +381,19 @@ class SpillStore:
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
             now = _now_ms()
+            # A clipped entry (head+tail) breaks positional ranges: the
+            # tail is renumbered, so a kept range would point at unrelated
+            # bytes on read-back. Drop them rather than risk protecting the
+            # wrong substring; the plain content is still safe.
+            stored_spans: tuple[tuple[int, int, int], ...] = ()
+            if complete and identifier_spans:
+                lines = clipped.splitlines()
+                stored_spans = tuple(
+                    (int(line_no), int(start), int(end))
+                    for line_no, start, end in identifier_spans
+                    if 1 <= int(line_no) <= len(lines)
+                    and 0 <= int(start) <= int(end) <= len(lines[int(line_no) - 1])
+                )
             meta = SpillMeta(
                 digest=digest,
                 bytes=len(data),
@@ -370,6 +405,7 @@ class SpillStore:
                 session_id=session_id,
                 created_ms=now,
                 last_read_ms=now,
+                identifier_spans=stored_spans,
             )
             self._write_entry(digest, data, meta)
             # Evict AFTER the write, never before: sizing the eviction against
@@ -402,6 +438,7 @@ class SpillStore:
                 "session_id": meta.session_id,
                 "created_ms": meta.created_ms,
                 "last_read_ms": meta.last_read_ms,
+                "identifier_spans": [list(span) for span in meta.identifier_spans],
             }
         ).encode("utf-8")
         _atomic_write_bytes(self._meta_path(digest), encoded_meta)
@@ -428,6 +465,16 @@ class SpillStore:
             return None
         if not self._content_path(digest).exists():
             return None
+        spans: list[tuple[int, int, int]] = []
+        raw_spans = raw.get("identifier_spans") or []
+        if isinstance(raw_spans, list):
+            for item in raw_spans:
+                if (
+                    isinstance(item, (list, tuple))
+                    and len(item) == 3
+                    and all(isinstance(value, int) for value in item)
+                ):
+                    spans.append((item[0], item[1], item[2]))
         try:
             return SpillMeta(
                 digest=str(raw.get("digest", digest)),
@@ -438,6 +485,7 @@ class SpillStore:
                 session_id=str(raw.get("session_id", "")),
                 created_ms=int(raw.get("created_ms", 0)),
                 last_read_ms=int(raw.get("last_read_ms", 0)),
+                identifier_spans=tuple(spans),
             )
         except (TypeError, ValueError):
             return None

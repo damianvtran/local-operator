@@ -831,16 +831,26 @@ def _spill(text: str, tool_name: str, context: ToolContext | None) -> SpillMeta 
     only to protect one rendered result, and a spill file must not preserve it
     for a later read (LOH-28). A context with no capable store is unchanged.
     """
-    strip = cast(
-        Callable[[str], str] | None,
-        getattr(getattr(context, "variables", None), "strip_identifier_spans", None),
+    store = getattr(context, "variables", None)
+    spans: list[tuple[int, int, int]] | None = None
+    strip_ranges = cast(
+        Callable[[str], tuple[str, list[tuple[int, int, int]]]] | None,
+        getattr(store, "strip_identifier_spans_with_ranges", None),
     )
-    if callable(strip):
-        text = strip(text)
+    if callable(strip_ranges):
+        text, spans = strip_ranges(text)
+    else:
+        strip = cast(
+            Callable[[str], str] | None,
+            getattr(store, "strip_identifier_spans", None),
+        )
+        if callable(strip):
+            text = strip(text)
     return get_store().write(
         text,
         tool_name=tool_name,
         session_id=(context.session_id if context else "") or "",
+        identifier_spans=spans,
     )
 
 
@@ -5870,7 +5880,46 @@ def _capped_list_body(
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
 
 
-def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolResult:
+def _spill_span_map(meta: Any) -> dict[int, list[tuple[int, int]]]:
+    """The sidecar's identifier ranges, grouped by 1-based line."""
+    by_line: dict[int, list[tuple[int, int]]] = {}
+    for line_no, start, end in getattr(meta, "identifier_spans", ()) or ():
+        by_line.setdefault(line_no, []).append((start, end))
+    return by_line
+
+
+def _remark_spill_line(
+    line: str,
+    line_number: int,
+    spans: Mapping[int, list[tuple[int, int]]],
+    context: ToolContext | None,
+) -> str:
+    """Re-mint this store's span around stored identifier ranges (R3-2).
+
+    The spill keeps PLAIN text and integer positions, never a marker or
+    token. On a read-back the positions become spans again so the read
+    result's redaction pass leaves the identifier readable; a forged or
+    stale range cannot do more than mark bytes that are already in the
+    plain text, and a missing store leaves the line untouched.
+    """
+    ranges = spans.get(line_number)
+    if not ranges:
+        return line
+    span = cast(
+        Callable[[str], str] | None,
+        getattr(getattr(context, "variables", None), "identifier_span", None),
+    )
+    if not callable(span):
+        return line
+    for start, end in sorted(ranges, reverse=True):
+        if 0 <= start <= end <= len(line):
+            line = line[:start] + span(line[start:end]) + line[end:]
+    return line
+
+
+def _read_spill(
+    tool_call_id: str, target: str, range_spec: str | None, context: ToolContext | None = None
+) -> ToolResult:
     """Serve a ``spill://`` handle: a line range, or a regex search inside it.
 
     Routed here BEFORE the host's internal-URL resolver rather than registered
@@ -5906,7 +5955,7 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
         )
 
     if ref.query:
-        return _search_spill(tool_call_id, store, ref, meta, range_spec)
+        return _search_spill(tool_call_id, store, ref, meta, range_spec, context)
 
     start, end = 1, None
     if range_spec:
@@ -5918,6 +5967,11 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if result is None:
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     selected, total = result
+    span_map = _spill_span_map(meta)
+    selected = [
+        _remark_spill_line(line, start + offset, span_map, context)
+        for offset, line in enumerate(selected)
+    ]
     details: dict[str, Any] = {"url": ref.handle, "range": range_spec or "full"}
     if not selected:
         return _text(
@@ -5997,6 +6051,7 @@ def _search_spill(
     ref: SpillRef,
     meta: SpillMeta,
     range_spec: str | None,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     """``?q=<regex>`` over one spilled output: line numbers, then a range.
 
@@ -6054,6 +6109,10 @@ def _search_spill(
     store_has_matches = bool(matches)
     if range_spec:
         matches = matches[first_match_index - 1 : page_end]
+    span_map = _spill_span_map(meta)
+    matches = [
+        (number, _remark_spill_line(line, number, span_map, context)) for number, line in matches
+    ]
     # The page the caller asked for decides the NEXT page's width: continuing a
     # "1-5" page with "6-10" is what they were reading.
     page_size = max(len(matches), 1)
@@ -6620,7 +6679,7 @@ async def execute_read(
     # handle is that it answers a RANGE. Checked first so a host that also
     # claims 'spill://' cannot shadow the expansion path a footer promised.
     if target.startswith(SPILL_SCHEME):
-        return _read_spill(tool_call_id, target, params.range)
+        return _read_spill(tool_call_id, target, params.range, context)
 
     # ``read https://…`` is sugar for a web fetch: it delegates to the SAME
     # engine web_fetch uses, returning the same bounded preview + spill handle,
