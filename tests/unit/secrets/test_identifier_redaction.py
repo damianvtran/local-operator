@@ -853,19 +853,21 @@ def test_span_aware_truncation_never_cuts_a_span(store: VariableStore) -> None:
 def test_extractor_scales_to_megabyte_text(store: VariableStore) -> None:
     """R3-3: one piece per segment/span, not one 3-tuple per character.
 
-    The wall ceiling is deliberately loose: a coverage-instrumented shared
-    runner measured 10 s for 4 MB where this worktree venv takes ~0.5 s, so
-    30 s is 3x the observation and still far below the per-character cut's
-    ~70 s. The tracemalloc peak is the timing-independent discriminator: the
-    old structure allocated ~376 MB for 4 MB of text, the segment walk ~16 MB.
+    The 4 MB case was not viable on the shared coverage runner: 0.5 s in this
+    worktree venv, 10-37.5 s under coverage/load, repeatedly busting a ceiling
+    that still had to be below the per-character cut. The sizes are therefore
+    256 KB and 1 MB (4x the work), and the tracemalloc peak is the PRIMARY
+    discriminator: the per-character structure measured ~91 MB at 1 MB (367 MB
+    at 4 MB), while the segment walk is ~4 MB at 1 MB. The absolute ceilings
+    are a loose second guard; the relative bound catches superlinearity.
     """
     import tracemalloc
 
     elapsed_by_size: dict[int, float] = {}
     peak_by_size: dict[int, float] = {}
-    for megabytes, ceiling in ((1, 20.0), (4, 30.0)):
-        unit = ("x" * 1024 + "\n") * (megabytes * 1024 + 1)
-        text = unit[: megabytes * 1024 * 1024]
+    for kilobytes, ceiling in ((256, 10.0), (1024, 20.0)):
+        unit = ("x" * 1024 + "\n") * (kilobytes + 1)
+        text = unit[: kilobytes * 1024]
         chunks: list[str] = []
         step = 64 * 1024
         spans = 0
@@ -885,16 +887,16 @@ def test_extractor_scales_to_megabyte_text(store: VariableStore) -> None:
         finally:
             tracemalloc.stop()
         assert len(extracted) == spans
-        assert elapsed < ceiling, f"{megabytes}MB took {elapsed:.1f}s"
-        elapsed_by_size[megabytes] = elapsed
-        peak_by_size[megabytes] = peak / 1024 / 1024
+        assert elapsed < ceiling, f"{kilobytes}KB took {elapsed:.1f}s"
+        elapsed_by_size[kilobytes] = elapsed
+        peak_by_size[kilobytes] = peak / 1024 / 1024
 
-    t1, t4 = elapsed_by_size[1], elapsed_by_size[4]
+    t0, t1 = elapsed_by_size[256], elapsed_by_size[1024]
     # RELATIVE guard: absolute ceilings alone cannot see a return to
     # superlinear behaviour, and coverage inflates both sizes by the same
-    # factor. 4 MB is ~4x the work, so 6x plus fixed overhead is the bound.
-    assert t4 <= 6 * t1 + 2.0, f"4MB {t4:.2f}s vs 1MB {t1:.2f}s (superlinear)"
-    assert peak_by_size[4] < 100, f"4MB peak {peak_by_size[4]:.0f}MB"
+    # factor. 1 MB is ~4x the work, so 6x plus a fixed second is the bound.
+    assert t1 <= 6 * t0 + 1.0, f"1MB {t1:.2f}s vs 256KB {t0:.2f}s (superlinear)"
+    assert peak_by_size[1024] < 40, f"1MB peak {peak_by_size[1024]:.0f}MB"
 
 
 # --- round 4: splitlines parity and search-window marking -------------------
