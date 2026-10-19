@@ -76,6 +76,12 @@ RECALL_HARD_TOKENS = 2000
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_OWNER_OPS = 20000
 MAX_REVISIONS = 128
+#: One confirmed filter-based forget accepts this many facts. The human preview
+#: must refuse ABOVE it rather than print a confirmation the store will reject:
+#: a command that cannot run is worse than no command. Reachable within the caps
+#: (measured in review round 1: 205 minimal facts fit the global 16,000-token
+#: bank), so the preview checks it before offering anything.
+MAX_BULK_FORGET = 200
 MAX_TOMBSTONES = 5000
 MAX_BATCH_BYTES = 256 * 1024
 INVENTORY_HELP = (
@@ -361,7 +367,10 @@ def _looks_sensitive(text: str, *, opaque: bool) -> bool:
     return False
 
 
-_STOP = set(
+#: Words that carry no discriminating evidence. Public because the read-only
+#: duplicate preview in ``memory_duplicates`` must weigh the SAME vocabulary the
+#: search ranker drops; a second private copy would drift and score differently.
+STOP_WORDS = frozenset(
     (
         "a an and are as at be by can could did do does for from have how i in is it me my of on "
         "or our please should that the their this to use was we what when where which who will "
@@ -829,6 +838,73 @@ def quota_relief(scope: str) -> tuple[str, str]:
     )
 
 
+def _contains_unbounded_repeat(text: str) -> bool:
+    """Whether ``text`` contains an unbounded repeat outside a character class."""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            # A quantifier inside a character class is a literal, not a repeat.
+            index += 1
+            if index < len(text) and text[index] == "^":
+                index += 1
+            if index < len(text) and text[index] == "]":
+                index += 1
+            while index < len(text) and text[index] != "]":
+                index += 2 if text[index] == "\\" else 1
+            index += 1
+            continue
+        if char in "*+":
+            return True
+        if char == "{" and re.match(r"\{\d+,\}", text[index:]):
+            return True
+        index += 1
+    return False
+
+
+def _nested_unbounded_repeat(pattern: str) -> bool:
+    """Whether a repeated group contains an unbounded repeat, e.g. ``(a+)+``.
+
+    WHY refuse instead of compile: that shape backtracks exponentially in the
+    subject (measured in review round 1: ``(a+)+$`` on 29 characters ran longer
+    than three seconds), and Python's ``re`` has no timeout. This is a lexical
+    HEURISTIC, not a proof — an overlapping alternation such as ``(a|aa)+`` is not
+    detected — so the contract is "recognised catastrophic shapes are refused",
+    not "every accepted pattern runs in bounded time". Filter subjects are
+    bounded by the store (title <= 160 chars, item <= ITEM_BYTES).
+    """
+    stack: list[int] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            index += 1
+            if index < len(pattern) and pattern[index] == "^":
+                index += 1
+            if index < len(pattern) and pattern[index] == "]":
+                index += 1
+            while index < len(pattern) and pattern[index] != "]":
+                index += 2 if pattern[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "(":
+            stack.append(index)
+        elif char == ")" and stack:
+            start = stack.pop()
+            following = pattern[index + 1 : index + 2]
+            repeated = following in ("*", "+") or bool(re.match(r"\{\d+,\}", pattern[index + 1 :]))
+            if repeated and _contains_unbounded_repeat(pattern[start + 1 : index]):
+                return True
+        index += 1
+    return False
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -1248,6 +1324,119 @@ class MemoryStore:
             "status": "forgotten" if clean is None else clean["status"],
             "quota": quota,
         }
+        if warning:
+            result["warning"] = warning
+        return result
+
+    def forget_many(self, scope: str, expected: dict[str, str]) -> dict[str, Any]:
+        """Forget a set of facts in ONE transaction, refusing if any revision moved.
+
+        WHY this exists: the human bulk-forget preview is only honest if the
+        confirmed run cannot leave half the set deleted. ``put(forget=True)`` is
+        one fact per call and commits each, so looping it would make a partial
+        failure permanent. This method re-reads every head inside a single
+        ``BEGIN IMMEDIATE`` transaction and inserts every tombstone there: a
+        mismatch on any entry refuses the WHOLE set with nothing written.
+
+        ``expected`` maps entity id to the head revision the caller previewed —
+        the same token ``put`` takes. The write lock is taken before the first
+        re-read, which closes the window between a caller's SELECT and commit; a
+        concurrent correction therefore surfaces as a refusal, never as a
+        silently forgotten fact under a filter that merely still matched it.
+        """
+        if not isinstance(expected, dict) or not expected:
+            raise MemoryError("Bulk forget needs at least one memory ID and revision.")
+        if len(expected) > MAX_BULK_FORGET:
+            raise MemoryError(f"A bulk forget accepts at most {MAX_BULK_FORGET} memories at once.")
+        owner = self.identity.owner(scope)
+        for entity, revision in expected.items():
+            # Neither value is free text; refusing a malformed one here keeps the
+            # transaction from opening on a request that cannot succeed.
+            safe_segment(entity)
+            safe_segment(revision)
+        if scope == "session" and self.session_dir:
+            self.import_session()
+        if not self.path.exists():
+            raise MemoryError("Memory not found in the authorized scope.")
+        forgotten: list[dict[str, Any]] = []
+        tokens = 0
+        with self.connection() as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                origin = self._origin(db)
+                last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
+                clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
+                for entity in sorted(expected):
+                    ops = self._ops(db, entity)
+                    if not ops or any(
+                        op["scope"] != scope or op["owner_key"] != owner for op in ops
+                    ):
+                        raise MemoryError("Memory not found in the authorized scope.")
+                    if any(op["kind"] == "tombstone" for op in ops):
+                        raise MemoryError(
+                            "Memory was forgotten concurrently. Read the current set and "
+                            "retry; no fact in this bulk forget was changed."
+                        )
+                    heads = self._heads(ops)
+                    if not heads or heads[0]["op_id"] != expected[entity]:
+                        raise MemoryError(
+                            "Memory changed concurrently. Read its current revision and retry; "
+                            "no fact in this bulk forget was changed."
+                        )
+                    seq = db.execute(
+                        "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
+                    ).fetchone()[0]
+                    # One strictly increasing HLC per tombstone in this transaction:
+                    # two ops sharing a clock would make head order depend on op_id.
+                    clock = max(clock + 1, int(time.time() * 1000))
+                    op = {
+                        "v": 1,
+                        "op_id": _id(),
+                        "entity_id": entity,
+                        "origin_device": origin,
+                        "seq": seq,
+                        "hlc": [clock, 0, origin],
+                        "parents": [expected[entity]],
+                        "kind": "tombstone",
+                        "scope": scope,
+                        "owner_key": owner,
+                        "fact": None,
+                        "body_sha": heads[0]["body_sha"],
+                    }
+                    validate_op(op)
+                    db.execute(
+                        "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                        (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
+                    )
+                    db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+                    row = db.execute(
+                        "SELECT tokens FROM current WHERE entity_id=?", (entity,)
+                    ).fetchone()
+                    tokens += int(row[0]) if row else 0
+                    self._reindex(db, entity)
+                    forgotten.append(
+                        {
+                            "id": entity,
+                            "version": op["op_id"],
+                            "scope": scope,
+                            "status": "forgotten",
+                        }
+                    )
+                self._quota(db, scope, owner, relief=True)
+                quota, warning = self._quota_notice(db, scope, owner)
+                if scope == "session" and self.session_dir:
+                    self._export(db, owner)
+                db.commit()
+            except BaseException:
+                # sqlite would roll back on close as well; being explicit keeps a
+                # caller's error handler from seeing a half-applied batch if the
+                # connection is ever reused or pooled.
+                db.rollback()
+                raise
+            db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
+            db.commit()
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        result: dict[str, Any] = {"forgotten": forgotten, "tokens": tokens, "quota": quota}
         if warning:
             result["warning"] = warning
         return result
@@ -2157,6 +2346,118 @@ class MemoryStore:
                 "available_scopes": [name for name, _ in self.identity.scopes()],
             }
 
+    def scan(self, scope: str | None = None) -> list[dict[str, Any]]:
+        """Every current fact in the authorised scope(s), flattened for a preview.
+
+        WHY not ``search()``: a maintenance preview must see the WHOLE scope —
+        including facts the FTS ranker would not return together and rows whose
+        status is candidate/disputed/expired, which are precisely the ones a
+        cleanup is asked to retire. Read-only by construction: it checks for the
+        file before ``connection()`` (which would create an empty store) and runs
+        one SELECT, so ``consolidate`` can promise it changed nothing.
+        """
+        where, values = self._where(scope)
+        if not self.path.exists():
+            return []
+        with self.connection() as db:
+            rows = db.execute(
+                f"SELECT entity_id,scope,op_id,fact,tokens FROM current WHERE {where} "
+                "ORDER BY entity_id DESC",
+                values,
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            fact = json.loads(row[3])
+            items.append(
+                {
+                    "id": row[0],
+                    "scope": row[1],
+                    "version": row[2],
+                    "title": fact["title"],
+                    "body": fact["body"],
+                    "tags": fact["tags"],
+                    "status": fact["status"],
+                    "created_at": fact["created_at"],
+                    "verified_at": fact["verified_at"],
+                    "tokens": row[4],
+                }
+            )
+        return items
+
+    def select(
+        self,
+        scope: str,
+        *,
+        older_than: float | None = None,
+        unverified: bool = False,
+        tags: list[str] | None = None,
+        title_matches: str | None = None,
+        body_matches: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Predicate selection over one scope for a bulk-forget preview.
+
+        Composable: predicate KINDS are ANDed, repeated ``tags`` are ANY-of.
+        Regexes are case-insensitive and length-capped; a group repeated around an
+        unbounded repeat (``(a+)+``) is refused before compilation because Python's
+        ``re`` has no timeout and that shape backtracks exponentially. The check is
+        a lexical heuristic, not a proof (see ``_nested_unbounded_repeat``), so the
+        contract is "recognised catastrophic shapes are refused", never "every
+        accepted pattern is bounded". Read-only: the caller prints the result and
+        hands the returned ``(id, version)`` pairs to :meth:`forget_many`, which
+        re-checks every revision at commit time.
+        """
+        patterns: dict[str, re.Pattern[str]] = {}
+        for name, value in (("title", title_matches), ("body", body_matches)):
+            if value:
+                if len(value) > 500:
+                    raise MemoryError(f"--{name}-matches is limited to 500 characters.")
+                if _nested_unbounded_repeat(value):
+                    raise MemoryError(
+                        f"--{name}-matches repeats a group that itself contains an "
+                        "unbounded repeat (for example '(a+)+'); that shape can backtrack "
+                        "exponentially, so it is refused rather than run. Rewrite it "
+                        "without nesting repetitions."
+                    )
+                try:
+                    patterns[name] = re.compile(value, re.IGNORECASE)
+                except re.error:
+                    # Never echo the pattern: a half-typed value may be a secret.
+                    raise MemoryError(
+                        f"--{name}-matches is not a valid regular expression."
+                    ) from None
+        current = time.time() if now is None else now
+        cutoff = None
+        if older_than is not None:
+            if older_than <= 0:
+                raise MemoryError("--older-than needs a positive duration.")
+            cutoff = current - older_than
+        wanted = {tag.lower() for tag in (tags or [])}
+        rows = self.scan(scope)
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            created = row["created_at"]
+            # A fact with no retention timestamp cannot be shown to be old; a
+            # time filter must not quietly treat it as ancient.
+            if cutoff is not None and not (isinstance(created, (int, float)) and created <= cutoff):
+                continue
+            if unverified and row["verified_at"] is not None:
+                continue
+            if wanted and not wanted & {tag.lower() for tag in row["tags"]}:
+                continue
+            if "title" in patterns and not patterns["title"].search(row["title"]):
+                continue
+            if "body" in patterns and not patterns["body"].search(row["body"]):
+                continue
+            matched.append(row)
+        return {
+            "scope": scope,
+            "items": matched,
+            "total": len(rows),
+            "tokens": sum(row["tokens"] for row in matched),
+            "total_tokens": sum(row["tokens"] for row in rows),
+        }
+
     def search(
         self,
         query: str,
@@ -2186,7 +2487,7 @@ class MemoryStore:
             raise MemoryError("Search accepts ≤2048 characters, 1–20 results and 1–2000 tokens.")
         where, values = self._where(scope)
         words = [t.lower() for t in re.findall(r"[\w]+", query) if len(t) >= 2]
-        terms = list(dict.fromkeys(t for t in words if t not in _STOP))[:24]
+        terms = list(dict.fromkeys(t for t in words if t not in STOP_WORDS))[:24]
         if not self.path.exists():
             return []
         if words and not suggest:
@@ -2196,7 +2497,7 @@ class MemoryStore:
             # suggestion path keeps its generic-word suppression.
             where_alias, alias_values = self._where(scope)
             with self.connection() as db:
-                for word in dict.fromkeys(w for w in words if w in _STOP):
+                for word in dict.fromkeys(w for w in words if w in STOP_WORDS):
                     hit = db.execute(
                         "SELECT 1 FROM recall JOIN current c ON c.entity_id=recall.entity_id "
                         "WHERE recall MATCH ? AND "
