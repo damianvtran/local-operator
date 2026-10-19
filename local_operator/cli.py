@@ -4947,7 +4947,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     directions. That phase is gated by ``session.cleanup.delegated.scratchpad.
     enabled`` (default on; ``--force`` runs it once when off), and content
     reclaims are the only reason a run with no session rows still proceeds to
-    confirmation — with its own confirmation sentence.
+    confirmation — with its own confirmation sentence. Content is reclaimed
+    only from sessions PAST the retention window (``max_age_hours``); a live or
+    recently-touched session keeps its pad whole. Every real reclaim writes a
+    path-level manifest under ``<config>/sessions/.cleanup-manifests/`` before
+    the first removal, and its cleanup-log row names that manifest.
 
     A class runs when its switch is on (or ``--force``); the parent class also
     needs a limit. A dry run lists both whatever the switches say and notes it,
@@ -4957,11 +4961,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
 
     ``--scratchpads-only`` narrows the command to the content layer. With
     ``--dry-run`` it prints the audit and the reclaim plan and removes nothing;
-    without, it reclaims content from non-live delegated pads and NEVER runs
-    the record pass or touches the parent class — so cache-shaped data can go
-    without deleting one transcript. ``--force`` still overrides the delegated
-    switches for that one run; the confirmation says "reclaim scratchpad
-    content" and nothing else.
+    without, it reclaims content from non-live delegated pads past the
+    retention window and NEVER runs the record pass or touches the parent
+    class — so cache-shaped data can go without deleting one transcript.
+    ``--force`` still overrides the delegated switches for that one run; the
+    confirmation says "reclaim scratchpad content" and nothing else.
 
     Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
     delegated cleanup off); 2 refused (parent switch off without ``--force`` and
@@ -5104,7 +5108,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         moment = time.time()
         with file_logging():
             preview = run_delegated_pass(
-                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+                root,
+                lambda: policy,
+                dry_run=True,
+                force=force,
+                actor="cli",
+                trigger="manual",
+                now=moment,
+                only=(),
             )
         audit = audit_scratchpads(root / "sessions")
         if args.json:
@@ -5162,7 +5173,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         moment = time.time()
         with file_logging():
             preview = run_delegated_pass(
-                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+                root,
+                lambda: policy,
+                dry_run=True,
+                force=force,
+                actor="cli",
+                trigger="manual",
+                now=moment,
+                only=(),
             )
         audit = audit_scratchpads(root / "sessions")
         if not args.json:
@@ -5239,6 +5257,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 lambda: policy,
                 force=force,
                 actor="cli",
+                trigger="manual",
                 now=moment,
                 budget_s=UNBOUNDED,
                 only=(),
@@ -5310,7 +5329,13 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         else:
             parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
         delegated_preview = run_delegated_pass(
-            root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment
+            root,
+            lambda: policy,
+            dry_run=True,
+            force=force,
+            actor="cli",
+            trigger="manual",
+            now=moment,
         )
     parent_policy_line = (
         f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
@@ -5488,6 +5513,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 lambda: policy,
                 force=force,
                 actor="cli",
+                trigger="manual",
                 now=moment,
                 budget_s=UNBOUNDED,
                 only=[c.session for c in delegated_preview.removed],

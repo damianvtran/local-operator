@@ -1601,11 +1601,29 @@ def _has_open_asks(directory: Path) -> bool:
 
     FAIL-CLOSED on anything unreadable, like every probe in this module: the
     fold may raise on a hand-edited line, and an ask file that cannot be read is
-    an ask that might be open.
+    an ask that might be open. The explicit readability probe is load-bearing:
+    ``asks.store.read_events`` deliberately swallows an unreadable log into
+    ``[]`` (it runs beside live writers), which without this probe would read as
+    "no asks" and let both cleanup passes delete an answerable question
+    (QA Q-1, reproduced with ``chmod 000``).
     """
     try:
         from local_operator.asks import store as ask_store
 
+        path = ask_store.asks_log_path(directory)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        try:
+            # Open it: ``read_events`` turns a permission error into ``[]``, so
+            # the one place that can tell "absent" from "unreadable" is here.
+            with path.open("rb"):
+                pass
+        except OSError:
+            return True
         records = ask_store.fold(ask_store.read_events(directory), ask_store.now_ms())
         return any(
             record.get("status")
@@ -1917,7 +1935,16 @@ def run_cleanup(
 
     entries: list[_Entry] = []
     try:
-        children = [child for child in sessions_dir.iterdir() if child.is_dir()]
+        # A hidden directory is a SIDECAR, not a conversation (review M1):
+        # ``sessions/.cleanup-manifests/`` holds the content pass's path-level
+        # reclaim records, and ``sessions/.cleanup-log.jsonl`` lives beside them.
+        # Counting a sidecar as a transcriptless user session let `remove_empty`
+        # delete the whole audit trail and log a phantom row.
+        children = [
+            child
+            for child in sessions_dir.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        ]
     except OSError as exc:
         logger.warning("session cleanup: cannot scan %s: %s", sessions_dir, exc)
         result.errors += 1

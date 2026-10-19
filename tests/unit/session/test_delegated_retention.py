@@ -1565,6 +1565,114 @@ def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
     assert row["bytes"] == size and row["entries"] == 1
     assert row["title"] == "" and row["actor"] == "startup"
     assert row["classes"] == ["stale output"]
+    # Provenance: the aggregate row points at a manifest that names the path.
+    assert row["trigger"] == "startup"
+    assert row["paths"] == 1
+    assert 99.0 < row["activity_age_hours"] < 101.0
+    manifest = Path(row["manifest"])
+    assert manifest.parent == root / "sessions" / dr.CONTENT_MANIFEST_DIRNAME
+    assert manifest.is_file() and manifest.name.endswith("-rowy.json")
+    body = json.loads(manifest.read_text())
+    assert body["schema"] == dr.CONTENT_MANIFEST_SCHEMA
+    assert body["session"] == "rowy" and body["origin"] == "subagent"
+    assert body["actor"] == "startup" and body["trigger"] == "startup"
+    assert body["policy"] == "delegated_scratchpad"
+    assert body["planned"] == [
+        {"path": str(big), "bytes": size, "class": "stale output", "method": "remove"}
+    ]
+    assert body["completed"] == body["planned"]
+    assert body["bytes"] == size and body["entries"] == 1
+
+
+def test_a_manifest_write_failure_never_fails_the_removal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest is best-effort: the removal the operator asked for proceeds,
+    and the log row records ``manifest_error`` instead of a path."""
+    pad = _kept_pad(root, "nomanifest")
+    big = _stale_file(pad / "desktop-suite.log")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("manifest store is read-only")
+
+    monkeypatch.setattr(dr, "_write_cleanup_manifest", boom)
+    _pass(root)
+    assert not big.exists(), "a manifest failure must not keep the content"
+    row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
+    assert row["manifest"] == ""
+    assert row["manifest_error"].startswith("planned: OSError")
+    # No manifest to point at: the row carries path-level provenance itself.
+    assert row["paths"] == [str(big)]
+    assert row["paths_total"] == 1
+    assert row["trigger"] == "startup"
+
+
+def test_a_failed_completed_rewrite_still_names_the_taken_paths(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m1: planned write OK, completed rewrite fails.
+
+    The manifest exists, but its ``completed`` list is empty while the files are
+    gone. Pointing the log row at it alone would lose path-level provenance, so
+    the row must carry the taken paths itself.
+    """
+    pad = _kept_pad(root, "halfmanifest")
+    big = _stale_file(pad / "desktop-suite.log")
+    real = dr._write_cleanup_manifest
+    calls: list[int] = []
+
+    def flaky(path: Path, payload: dict[str, Any]) -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real(path, payload)
+
+    monkeypatch.setattr(dr, "_write_cleanup_manifest", flaky)
+    _pass(root)
+    assert not big.exists(), "the completed-rewrite failure must not undo the removal"
+    row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
+    assert row["manifest"] != "" and row["manifest_error"].startswith("completed: OSError")
+    assert row["paths"] == [str(big)] and row["paths_total"] == 1
+    body = json.loads(Path(row["manifest"]).read_text())
+    assert body["planned"] and body["completed"] == []
+
+
+def test_an_unreadable_ask_log_keeps_the_record_and_the_content(root: Path) -> None:
+    """QA Q-1: ``chmod 000`` on asks.jsonl must fail closed, not read as no asks.
+
+    ``asks.store.read_events`` deliberately swallows an unreadable log into
+    ``[]``; without the explicit readability probe, both passes would treat this
+    as "no asks" and delete an ask the user can still answer.
+    """
+    from local_operator.asks import store as ask_store
+
+    directory = _mk(root, "asklocked", age_h=100)  # no roster: the RECORD is at risk
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    stamp = ask_store.now_ms()
+    assert ask_store.append_event(
+        directory,
+        {
+            "ask_id": "ask-locked",
+            "kind": ask_store.EVENT_QUEUED,
+            "at": stamp,
+            "expires_at": stamp + 600_000,
+            "timeout_s": 600,
+        },
+    )
+    asks = directory / "asks.jsonl"
+    asks.chmod(0o000)
+    try:
+        result = _pass(root)
+    finally:
+        asks.chmod(0o600)
+    assert result.removed == [], "the unreadable ask must keep the RECORD"
+    assert result.content == []
+    assert ("asklocked", "has open asks") in result.content_kept
+    assert shaped.exists() and directory.exists()
 
 
 def test_content_totals_land_in_the_state_file_without_touching_the_notice_keys(
@@ -1604,6 +1712,10 @@ def test_a_dry_run_lists_the_content_it_would_take_and_writes_nothing(root: Path
     row = result.content[0]
     assert row.classes == ("merged-clean clone", "stale output")
     assert row.rescue_bundle.endswith("reap-rescue-clone.bundle")
+    assert row.paths_total == 2
+    assert set(row.paths) == {str(tree), str(pad / "desktop-suite.log")}
+    assert row.manifest == "", "a dry run writes no manifest"
+    assert not (root / "sessions" / dr.CONTENT_MANIFEST_DIRNAME).exists()
     assert tree.exists() and (pad / "desktop-suite.log").exists()
     assert not (pad / "reap-rescue-clone.bundle").exists(), "a dry run writes no bundle"
     assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
@@ -2074,22 +2186,22 @@ def test_the_content_guard_re_stat_mirrors_rule_six(root: Path) -> None:
     transcript = directory / "transcript.jsonl"
     os.utime(transcript, (NOW, NOW))
     cand = dr._Cand(directory, clock=NOW - 100 * HOUR, has_transcript=True)
-    reason = dr._content_guard(
+    guard = dr._content_guard(
         cand, config_dir=root, now=NOW, cutoff=NOW - 48 * HOUR, live_resolved=None
     )
-    assert reason == "active since the scan"
+    assert guard.reason == "active since the scan"
+    assert guard.age_hours(NOW) == 0.0
 
 
-def test_content_of_a_young_dead_session_reclaims_shapes_but_keeps_notes(root: Path) -> None:
-    """The policy change of 2026-10-19: AGE IS NOT A CONTENT GUARD.
+def test_content_of_a_young_session_is_kept_whole_inside_the_retention_window(
+    root: Path,
+) -> None:
+    """The age gate is back (2026-10-19): live-adjacent content is not ours.
 
-    This test used to pin the opposite — a pad inside the record window was
-    never evaluated, so a dead 1-hour-old subagent held its build tree for the
-    full 48 hours. Cache-shaped data (a build directory, a stale log) has no
-    reading as scratch, and the desk's authority is merged+clean+stale, not
-    old transcript; the LIVENESS guards are what keep live work safe. So the
-    shape goes while the notes beside it, which are the session's own work,
-    stay — and the RECORD stays too, because it is inside the window.
+    The reversed policy reclaimed a build shape from a transcript touched an
+    hour ago as long as no claim/lease/wake was visible. A pad whose activity is
+    inside the record window is being worked in; its build shape survives, the
+    guard's kept reason says why, and the RECORD stays too.
     """
     young = _mk(root, "young", age_h=1)
     pad = young / "scratchpad"
@@ -2100,11 +2212,26 @@ def test_content_of_a_young_dead_session_reclaims_shapes_but_keeps_notes(root: P
     notes = pad / "notes.md"
     notes.write_text("keep me\n")
     result = _pass(root)
-    assert [row.session for row in result.content] == ["young"]
-    assert not shaped.exists()
+    assert result.content == []
+    assert ("young", "inside the retention window") in result.content_kept
+    assert shaped.exists(), "a build shape inside the window is NOT reclaimed"
     assert notes.read_text() == "keep me\n"
-    assert young.exists(), "the RECORD stays: the age window still governs it"
+    assert young.exists(), "the RECORD stays: the age window governs it"
     assert result.removed == []
+
+
+def test_content_of_a_pad_with_no_activity_clock_is_kept(root: Path) -> None:
+    """No clock is not old: the content guard fails closed like rule 1."""
+    directory = _mk(root, "clockless", age_h=None)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    result = _pass(root)
+    assert result.content == []
+    assert ("clockless", "no activity clock") in result.content_kept
+    assert shaped.exists()
 
 
 def test_content_of_a_live_claimed_session_is_untouched(root: Path) -> None:
@@ -2139,6 +2266,44 @@ def test_content_of_a_monitored_session_is_untouched(root: Path) -> None:
     result = _pass(root)
     assert result.content == []
     assert result.content_kept == [("watched", "armed monitor for this session")]
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_pad_with_unread_spooled_mail_is_untouched(root: Path) -> None:
+    """A question the user has not seen outranks reclaiming cache bytes."""
+    pad = _kept_pad(root, "mailed")
+    _stale_file(pad / "big.log")
+    (pad.parent / "inbox.jsonl").write_text('{"x":1}\n')
+    # Backdate the spool: a mailbox touched NOW is "active since the scan"
+    # (mail is part of the activity clock), which would keep the pad before the
+    # dedicated mail guard is consulted.
+    os.utime(pad.parent / "inbox.jsonl", (NOW - 100 * HOUR, NOW - 100 * HOUR))
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("mailed", "has unread spooled mail")]
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_pad_with_an_open_ask_is_untouched(root: Path) -> None:
+    """An answerable ask is live conversation, whatever the transcript age."""
+    from local_operator.asks import store as ask_store
+
+    pad = _kept_pad(root, "asking")
+    _stale_file(pad / "big.log")
+    stamp = ask_store.now_ms()
+    assert ask_store.append_event(
+        pad.parent,
+        {
+            "ask_id": "ask-1",
+            "kind": ask_store.EVENT_QUEUED,
+            "at": stamp,
+            "expires_at": stamp + 600_000,
+            "timeout_s": 600,
+        },
+    )
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("asking", "has open asks")]
     assert (pad / "big.log").exists()
 
 
@@ -2202,10 +2367,28 @@ def test_a_parent_users_pad_is_never_content_reclaimed(root: Path) -> None:
     assert user.exists()
 
 
+def test_an_agent_workstream_pad_is_never_in_the_content_pool(root: Path) -> None:
+    """Visible parent-class work is audit-only, however shaped and however old.
+
+    ``agent-workstream`` is the user-facing parent class; the content pool is
+    built from ``_is_deletable_dir`` candidates only, so its build tree is not
+    even a content candidate.
+    """
+    directory = _mk(root, "flowpad", origin="agent-workstream", age_h=100)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    result = _pass(root)
+    assert result.content == []
+    assert shaped.exists()
+
+
 def test_a_live_subagents_scratchpad_and_record_survive_the_full_pass(root: Path) -> None:
-    """Liveness, not age, is the content gate now — so the full pass (record
-    AND content) must leave a live child's pad and its transcript exactly
-    where they were, even though the record is well past the window."""
+    """Liveness and the age window are the content gates — so the full pass
+    (record AND content) must leave a live child's pad and its transcript
+    exactly where they were, even though the record is well past the window."""
     directory = _mk(root, "livemod", age_h=100)
     (directory / ".session.pid").write_text(str(os.getpid()))
     pad = directory / "scratchpad"

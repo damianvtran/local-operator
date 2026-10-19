@@ -439,6 +439,7 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
 ) -> None:
     pad = _content_pad(store, "content-kid-03")
     big = _big_log(pad / "desktop-suite.log")
+    big_size = big.stat().st_size
     monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     assert sessions_cleanup_command(_args()) == 0
@@ -458,6 +459,30 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
     ]
     assert len(rows) == 1 and rows[0]["policy"] == "delegated_scratchpad"
     assert rows[0]["session"] == "content-kid-03" and rows[0]["actor"] == "cli"
+    # The CLI is a MANUAL trigger, and its row points at a path-level manifest.
+    assert rows[0]["trigger"] == "manual" and rows[0]["paths"] == 1
+    manifest = json.loads(Path(rows[0]["manifest"]).read_text())
+    assert manifest["actor"] == "cli" and manifest["trigger"] == "manual"
+    assert manifest["session"] == "content-kid-03"
+    assert manifest["completed"] == [
+        {"path": str(big), "bytes": big_size, "class": "stale output", "method": "remove"}
+    ]
+
+
+def test_a_recently_touched_pad_is_kept_by_the_content_phase(store: Path, capsys: Any) -> None:
+    """The restored age gate, through the CLI: a live-adjacent pad is not ours."""
+    pad = _content_pad(store, "content-kid-08")
+    big = _big_log(pad / "desktop-suite.log")
+    transcript = store / "sessions" / "content-kid-08" / "transcript.jsonl"
+    stamp = time.time() - 3600
+    os.utime(transcript, (stamp, stamp))
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: would reclaim 0 pad(s)" in out
+    assert "content kept content-kid-08  (inside the retention window)" in out
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    assert big.exists(), "a pad touched inside the window keeps its content"
+    assert "Reclaimed scratchpad content" not in capsys.readouterr().out
 
 
 def test_the_scratchpad_switch_off_reclaims_nothing_and_says_so(store: Path, capsys: Any) -> None:
