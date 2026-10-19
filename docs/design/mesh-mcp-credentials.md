@@ -145,10 +145,17 @@ classification (and to `model/configure.py`, which reads the same seam).
 
 The shape table gains the provider classes already defined in
 `mesh-credentials.md` §1: provider OAuth (class 3) stays **broker-only** (the
-owner refreshes; no refresh token moves), provider API keys (class 4) are copied,
-device-bound providers refuse. The fix is not a new mechanism: route every
-provider-read seam that a session can use through the mesh-aware resolver
-(`build_auth_store`), and keep the zero-peer path byte-identical.
+owner refreshes; no refresh token moves); provider API keys (class 4) are
+copy-eligible only by explicit per-key opt-in/selection (§2.2), and the
+implementation borrows the key at call time rather than copying it
+(`build_auth_store`'s `get_api_key`: local, then the session's binding, then the
+broker); the device-bound grant (class 6b) brokers the **access token** — which
+then rides the owner's fingerprint — and refuses only the **device id**, never
+the login. The fix is not a new mechanism: add the borrow fallback rung at the
+two provider-read seams that classification and model listing use
+(`classification/vendors.py::auth_store_api_key` and
+`model/configure.py::_oauth_listing_token`), leave `shared_auth_store` in place
+everywhere else, and keep the zero-peer path byte-identical.
 
 **A fall-through must say so.** When the cascade skips a preferred leg because
 its credential is absent on this device, the decision and the spend row carry the

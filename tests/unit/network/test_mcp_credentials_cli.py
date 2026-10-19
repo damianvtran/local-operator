@@ -349,7 +349,7 @@ def test_invite_prints_a_conflict_only_adoption_line(
     rc, out = _run_invite(root, capsys, monkeypatch, as_json=False)
 
     assert rc == 0, out
-    assert "0 MCP credentials adopted into the encrypted store; 1 conflicts" in out, out
+    assert "0 MCP credentials adopted into the encrypted store; 1 conflict" in out, out
 
 
 def test_invite_json_carries_counts_only_when_there_are_some(
@@ -447,6 +447,105 @@ def test_http_read_and_pool_holders_never_receive_a_class_two_copy(
     item = payload["servers"][0]["grants"][0]
     assert set(item["devices"]) == {SELF, DRIVE}
     assert set(_holders(credential_key_for_secret("MCP_GL_AUTHORIZATION"), root)) == {
+        SELF,
+        DRIVE,
+    }
+
+
+def test_invite_prints_a_reused_only_adoption_line(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reuse still rewrote the config to references; the mint must say so."""
+    from local_operator.secrets import access
+
+    store = access.open_store(root, create=True)
+    store.set("GITHUB_TOKEN", b"REUSE_ME_42")
+    _write_config(
+        root,
+        {"gh": {"type": "stdio", "command": "npx", "env": {"GITHUB_TOKEN": "REUSE_ME_42"}}},
+    )
+
+    rc, out = _run_invite(root, capsys, monkeypatch, as_json=False)
+
+    assert rc == 0, out
+    assert "0 MCP credentials adopted into the encrypted store, 1 reused; 0 conflicts" in out, out
+
+    # The human run already rewrote the literal to a reference; restore it so the
+    # JSON run exercises the same reused-only state rather than an empty one.
+    _write_config(
+        root,
+        {"gh": {"type": "stdio", "command": "npx", "env": {"GITHUB_TOKEN": "REUSE_ME_42"}}},
+    )
+
+    rc, out = _run_invite(root, capsys, monkeypatch, as_json=True)
+
+    assert rc == 0, out
+    assert json.loads(out)["mcp_credentials"] == {"adopted": 0, "reused": 1, "conflicts": 0}
+
+
+def test_an_oauth_server_with_only_refused_refs_shows_the_skip(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The brokered note must not hide a refused reference either."""
+    network_store.save(_record(), root)
+    _seed_server_holders(root)
+    _write_config(
+        root,
+        {
+            "dd": {
+                "type": "http",
+                "url": URL,
+                "auth": {"type": "oauth"},
+                "headers": {"X-Api-Key": "${MISSING_KEY}"},
+            }
+        },
+    )
+
+    rc, out = _run_human(capsys, "--repair")
+
+    assert rc == 0, out
+    assert "brokered; no copy" not in out, out
+    # One row per targeted device (SELF and DRIVE are both mcp:<url> holders).
+    assert "2 skipped" in out, out
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0, payload
+    row = payload["servers"][0]
+    assert row["note"] == ""
+    assert [item["reason"] for item in row["skipped"]] == [
+        "no_local_credential",
+        "no_local_credential",
+    ]
+
+
+def test_an_http_server_without_a_brokered_key_grants_to_the_provisioning_population(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The header-only shape (slack): no mcp:<url> entry, yet the copy must land.
+
+    ``_repair_targets`` falls back to the provisioning population (active
+    drive/admin device members, pool excluded) instead of returning nobody.
+    """
+    network_store.save(_record(), root)
+    _write_config(
+        root,
+        {
+            "slack": {
+                "type": "http",
+                "url": "https://slack.test/mcp",
+                "headers": {"Authorization": f"Bearer {SLACK_SENTINEL}"},
+            }
+        },
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0, payload
+    item = payload["servers"][0]["grants"][0]
+    assert item["key"] == "secret:MCP_SLACK_AUTHORIZATION"
+    assert set(item["devices"]) == {SELF, DRIVE}
+    assert set(_holders(credential_key_for_secret("MCP_SLACK_AUTHORIZATION"), root)) == {
         SELF,
         DRIVE,
     }

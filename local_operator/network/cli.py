@@ -3129,13 +3129,16 @@ def _cmd_invite(args: argparse.Namespace) -> int:
         "and --print",
         command,
     ]
-    if adopted or conflicts:
-        # ONE bounded line when anything needs saying — a conflict is the case
-        # where the value will NOT travel, so a silent mint there would hide the
-        # one state that needs a human decision. A clean config says nothing.
-        lines.append(
-            f"{adopted} MCP credentials adopted into the encrypted store; " f"{conflicts} conflicts"
-        )
+    if adopted or reused or conflicts:
+        # ONE bounded line when anything needs saying — a reuse rewrote the
+        # config to references, and a conflict is the case where the value will
+        # NOT travel, so a silent mint in either state hides what happened. A
+        # clean config says nothing.
+        detail = f"{adopted} MCP credentials adopted into the encrypted store"
+        if reused:
+            detail += f", {reused} reused"
+        noun = "conflict" if conflicts == 1 else "conflicts"
+        lines.append(f"{detail}; {conflicts} {noun}")
     return _emit(args, payload, lines)
 
 
@@ -9160,11 +9163,16 @@ def _repair_targets(document: Any, record: Any, server: Mapping[str, Any]) -> li
 
     transport = str(server.get("transport") or "")
     url = str(server.get("url") or "")
+    candidates: list[str]
     if transport in ("http", "sse") and url:
         entry = document.entry(credential_key_for_mcp(url))
-        if entry is None:
-            return []
-        candidates = [holder.device for holder in entry.holders]
+        if entry is not None:
+            candidates = [holder.device for holder in entry.holders]
+        else:
+            # NO BROKERED KEY EXISTS for this server (a header/env-only server
+            # such as slack): there is no holder population to widen, so the
+            # reference copies go to the population provisioning would use.
+            candidates = [str(member.device_id) for member in record.active_members()]
     else:
         candidates = [str(member.device_id) for member in record.active_members()]
     targets: list[str] = []
@@ -9317,11 +9325,11 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
                 [row for row in skipped_rows if row.get("server") == name]
             ),
         }
-        if shape == "oauth" and not key_rows:
+        if shape == "oauth" and not key_rows and not row["skipped"]:
             # The note describes the mcp:<url> path only. An OAuth-shaped server
-            # that ALSO declares env/header refs received real copies, and saying
-            # "no copy" over a granted row would hide them (the human line returns
-            # early on any note).
+            # that ALSO declares env/header refs received real copies — or had
+            # them refused — and saying "no copy" over a granted/skipped row would
+            # hide it (the human line returns early on any note).
             row["note"] = "brokered; no copy"
         elif not row["refs"]:
             row["note"] = "no referenced credentials"
@@ -9374,10 +9382,10 @@ def _render_mcp_credential_row(row: Mapping[str, Any]) -> str:
     grants = [item for item in row.get("grants") or [] if isinstance(item, Mapping)]
     if note:
         return f"{name} ({transport}, {shape}): {note}"
-    granted = ", ".join(f"{item.get('key')} to {item.get('count')}" for item in grants)
-    if not granted:
-        granted = "no grant needed"
     skipped = len([item for item in row.get("skipped") or [] if isinstance(item, Mapping)])
+    if not grants:
+        return f"{name} ({transport}, {shape}): no grant; {skipped} skipped"
+    granted = ", ".join(f"{item.get('key')} to {item.get('count')}" for item in grants)
     return f"{name} ({transport}, {shape}): granted {granted}; {skipped} skipped"
 
 
