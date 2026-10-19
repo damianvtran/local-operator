@@ -466,16 +466,38 @@ async def auth_store_api_key(config_dir: "Path | None", provider: str) -> str | 
     longer closes what it did not open. It still degrades identically on
     failure: a dead store raises inside the call and lands on the ``None``
     below, exactly as a dead per-call store did.
+
+    WHEN THE LOCAL STORE HAS NOTHING, ONE BORROW RUNG IS TRIED last
+    (:func:`local_operator.network.credentials.borrowed_provider_key`):
+    the provider login may live on the mesh head and be lent to this device.
+    That rung is itself a no-op on a zero-peer device, and every failure —
+    local or borrowed — still lands on ``None``. The value is never logged.
     """
     from local_operator.providers.auth_store import shared_auth_store
 
+    # The registry alias may raise (a broken import in a caller-supplied tree);
+    # the leg id is then still the right borrow key, so initialise to it rather
+    # than let a registry fault turn "this tier said nothing" into a raise.
+    storage = provider
     try:
+        storage = storage_provider_id(provider)
         store = shared_auth_store(
             (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
         )
-        return await store.get_api_key(storage_provider_id(provider), read_only=True)
+        local = await store.get_api_key(storage, read_only=True)
+        if local:
+            return local
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
         logger.warning("classification: %s auth store unavailable", provider, exc_info=True)
+    # The borrow helper catches its own failures; the local ``except`` above and
+    # this one both keep the "advisory, never fails a turn" contract even when a
+    # test double (or a future implementation) raises through it.
+    try:
+        from local_operator.network.credentials import borrowed_provider_key
+
+        return await borrowed_provider_key(storage, config_dir)
+    except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+        logger.debug("classification: %s provider borrow unavailable", provider, exc_info=True)
         return None
 
 
