@@ -111,7 +111,7 @@ class LibraryParams(BaseModel):
     convention_id: str | None = Field(default=None, description="conventions: a stable id.")
 
 
-def _store() -> MetadataStore:
+def _metadata_store() -> MetadataStore:
     return MetadataStore(config_dir())
 
 
@@ -138,7 +138,7 @@ def _compact(row: dict[str, Any]) -> dict[str, Any]:
 
 def _stats() -> dict[str, Any]:
     catalog = service.list_assets(config_dir(), service.Query(limit=1), budget_s=None)
-    metadata = _store().stats()
+    metadata = _metadata_store().stats()
     counts = catalog["counts"]
     return {
         "assets": catalog["total"],
@@ -255,7 +255,7 @@ async def _dispatch(tool_call_id: str, params: LibraryParams) -> ToolResult:
         return _tags(tool_call_id, params)
 
     # conventions
-    store = _store()
+    store = _metadata_store()
     if params.body is not None:
         if not params.kind_name:
             return _error(tool_call_id, "library", "setting a convention needs kind_name.")
@@ -271,7 +271,7 @@ async def _dispatch(tool_call_id: str, params: LibraryParams) -> ToolResult:
 
 
 def _tags(tool_call_id: str, params: LibraryParams) -> ToolResult:
-    store = _store()
+    store = _metadata_store()
     action = params.action or "list"
     if action == "list":
         return _text(tool_call_id, "library", _render({"tags": store.list_tags()}))
