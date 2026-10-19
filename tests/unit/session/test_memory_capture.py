@@ -184,6 +184,7 @@ def test_carry_identifiers_are_context_only_and_never_standalone():
         ("Key Decisions", "Используем заголовки вместо сканирования локаторов.", "decision"),
         ("Progress", "Проверка завершена успешно.", "progress"),
         ("Key Decisions", "Deploy в staging через the new parser.", "decision"),
+        ("Progress", "好", "progress"),
     ],
 )
 def test_knowledge_in_any_script_is_captured(heading, body, tag):
@@ -201,6 +202,79 @@ def test_a_section_with_no_judgeable_prose_is_counted_not_silent_ok_zero(store):
         "declined",
         "admission-skip",
     )
+
+
+#: The residue table. The verdict is what remains after every locator token is
+#: removed, so the same table covers M1/MS2 and the round-2/3 cases; that is the
+#: point of the design (QA round 4).
+RESIDUE_DEBRIS = [
+    # M1: trailing separators, spaced and unspaced
+    "C:\\Program Files\\app\\",
+    "C:\\Users\\First Last\\",
+    "C:\\repo\\My App\\",
+    "\\\\server\\Long Folder\\",
+    "C:/Program Files/app/",
+    # spaced final segment with no separator of its own
+    "C:\\Program Files",
+    "C:\\repo\\My App",
+    "\\\\server\\Long Folder",
+    # round 2/3 path-only shapes
+    "C:\\Program Files\\Common Files\\proof.txt",
+    "C:\\Users\\First Last\\file.txt",
+    "C:\\Users\\damian\\file.txt",
+    "\\\\server\\share\\file.txt",
+    "/srv/app",
+    "/Users/First Last/app",
+    "www.example.com",
+    "www.example.com/path",
+    "mailto:ops@example.com",
+    "MAILTO:ops@example.com",
+    "https://example.invalid/a",
+    # other locator-only tokens
+    "#2652",
+    "44fa24a65c",
+    "branch fix/memory-capture-knowledge-first",
+    "A",
+]
+RESIDUE_KNOWLEDGE = [
+    # M2: prose after a path, including a later separator that used to absorb it
+    "C:\\repo\\app is the build root at C:\\repo\\out",
+    "/srv/app needs read/write",
+    "/opt/app handles input/output",
+    # leading path plus prose
+    "C:\\repo\\app is the build root",
+    "C:\\Users\\First Last\\repo\\app is where we deploy from",
+    "\\\\server\\share is the evidence root",
+    "C:\\Program Files\\app is installed for all users",
+    "\\\\server\\share\\dir is where evidence lives",
+    "/srv/app is the build root",
+    "/Users/First Last/repo/app is where we deploy from",
+    "C:\\repo\\My App is the build root",
+    # trailing and middle paths
+    "The build root is C:\\repo\\app",
+    "Store evidence at C:\\Program Files\\app for later",
+    "C:\\repo\\app done",
+    # prose-first controls
+    "We deploy at example.com/docs every Friday.",
+    "We deploy from C:\\Program Files\\app every Friday.",
+    "Use the docs at https://example.invalid/runbook when shipping.",
+]
+
+
+@pytest.mark.parametrize("body", RESIDUE_DEBRIS)
+def test_residue_is_empty_for_a_locator_only_body(body):
+    """B1/round 4: no prose left after locator removal means debris, not a fact."""
+    rows = extract("## Progress\n- " + body)
+    assert list(rows) == [] and rows.skipped == 1
+
+
+@pytest.mark.parametrize("body", RESIDUE_KNOWLEDGE)
+def test_residue_is_prose_for_a_body_that_contains_a_locator(body):
+    """B1/round 4: prose on either side of a path keeps the fact."""
+    rows = extract("## Key Decisions\n- " + body)
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == ["decision"]
+    assert rows.skipped == 0
 
 
 @pytest.mark.parametrize(
