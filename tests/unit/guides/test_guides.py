@@ -689,15 +689,22 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
 
     assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
-    # The boundary: a write is refused before it lands; the shell channel is
-    # checked AFTER the command and can only be reported on — and the check's
-    # trigger is the pad being NAMED, not any command that touched it.
-    assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
-    assert "a command that names the pad" in collapsed
+    # The boundary is TWO halves now: a write is refused before it lands, and a
+    # shell command that would ADD bytes to an over-cap pad is stopped before
+    # the child exists; the after-the-fact `[scratch]` line is the backstop for
+    # what the scan could not resolve. The triggers are pinned too, so a guide
+    # that stopped documenting either half fails here.
+    assert (
+        "enforced at the TOOLS, and the shell is refused BEFORE IT RUNS when it "
+        "would ADD bytes to an over-cap pad" in collapsed
+    )
+    assert "is stopped before the child exists" in collapsed
+    assert "the after-the-fact line still reports what it left behind" in collapsed
+    assert "A command that names the pad" in collapsed
+    assert "`[scratch]` line when it ran and left the pad over its budget" in collapsed
     assert "copied it in" in collapsed
     assert "reads the command, not the disk" in collapsed
-    assert "The `eval` kernel gets the budget and entry-cap line only." in collapsed
-    assert "it cannot undo" in collapsed
+    assert "The `eval` kernel gets the budget and entry-cap line only" in collapsed
 
 
 def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:

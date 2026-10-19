@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from local_operator import settings_io
+from local_operator import scratchpad, settings_io
 from local_operator.compaction.thresholds import CompactionSettings
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests, process_watcher
@@ -439,6 +439,15 @@ def _librarian_name(watcher: Any) -> str:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    # -- scratchpad: re-read from config on every pad-addressed call -----------
+    # Not a session attribute: `scratchpad_budget_bytes()` resolves
+    # `session.scratchpad.max_bytes` through `config_dir()` at call time, which
+    # is exactly why the row is LIVE. The probe observes that function, and
+    # 32 MiB is a non-default value inside the reader's 16 MiB–8 GiB range.
+    "session.scratchpad.max_bytes": (
+        32 * 1024 * 1024,
+        lambda s, w: scratchpad.scratchpad_budget_bytes(),
+    ),
     # -- compaction: the session's typed settings object -----------------------
     "compaction.enabled": (False, lambda s, w: compaction_of(s).enabled),
     "compaction.strategy": ("snapcompact", lambda s, w: compaction_of(s).strategy),

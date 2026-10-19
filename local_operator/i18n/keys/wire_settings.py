@@ -2292,6 +2292,22 @@ def session_delegated_title() -> Msg:
     return Msg("wire.settings.session_delegated.title", {})
 
 
+def session_scratchpad_description() -> Msg:
+    return Msg("wire.settings.session_scratchpad.description", {})
+
+
+def session_scratchpad_title() -> Msg:
+    return Msg("wire.settings.session_scratchpad.title", {})
+
+
+def session_scratchpad_max_bytes_help() -> Msg:
+    return Msg("wire.settings.session_scratchpad_max_bytes.help", {})
+
+
+def session_scratchpad_max_bytes_label() -> Msg:
+    return Msg("wire.settings.session_scratchpad_max_bytes.label", {})
+
+
 def shell_environment_description() -> Msg:
     return Msg("wire.settings.shell_environment.description", {})
 

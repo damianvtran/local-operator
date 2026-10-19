@@ -2603,6 +2603,120 @@
       },
       "status": "passed",
       "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent four-key scratchpad settings delta audit (i18n-auditor, anthropic/claude-sonnet-5-5, 2026-10-19) at 0b208b2159: semantics, session scope, per-write/immediate enforcement, explicit cap+bytes labels, 16 MiB–8 GiB bounds, 256 MiB default, glossary/register/typography, key/argument parity and NFC all checked. No blocker/major, no accepted MINOR. Certifies this delta composed with the prior independent audit of unchanged namespace content; not a fresh whole-namespace audit. Translation authored in the implementation slice (coder, deepseek-flash) and independently audited. Independent width-delta recheck at a171e247d3eacb4dd170b725c098e59b3a69a5fc by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19: shortened es/fr/ru/vi cap labels pass semantics, idiom and byte-unit checks at 28/27/24/26 Rich cells respectively (unchanged hi/en: 19/27), all within 29 cells; only these four catalogue values changed, English source hash remains b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1, and zero blocker/major or accepted MINOR findings remain."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent four-key scratchpad settings delta audit (i18n-auditor, anthropic/claude-sonnet-5-5, 2026-10-19) at 0b208b2159: semantics, session scope, per-write/immediate enforcement, explicit cap+bytes labels, 16 MiB–8 GiB bounds, 256 MiB default, glossary/register/typography, key/argument parity and NFC all checked. No blocker/major, no accepted MINOR. Certifies this delta composed with the prior independent audit of unchanged namespace content; not a fresh whole-namespace audit. Translation authored in the implementation slice (coder, deepseek-flash) and independently audited. Independent width-delta recheck at a171e247d3eacb4dd170b725c098e59b3a69a5fc by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19: shortened es/fr/ru/vi cap labels pass semantics, idiom and byte-unit checks at 28/27/24/26 Rich cells respectively (unchanged hi/en: 19/27), all within 29 cells; only these four catalogue values changed, English source hash remains b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1, and zero blocker/major or accepted MINOR findings remain."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent four-key scratchpad settings delta audit (i18n-auditor, anthropic/claude-sonnet-5-5, 2026-10-19) at 0b208b2159: semantics, session scope, per-write/immediate enforcement, explicit cap+bytes labels, 16 MiB–8 GiB bounds, 256 MiB default, glossary/register/typography, key/argument parity and NFC all checked. No blocker/major, no accepted MINOR. Certifies this delta composed with the prior independent audit of unchanged namespace content; not a fresh whole-namespace audit. Translation authored in the implementation slice (coder, deepseek-flash) and independently audited. Independent width-delta recheck at a171e247d3eacb4dd170b725c098e59b3a69a5fc by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19: shortened es/fr/ru/vi cap labels pass semantics, idiom and byte-unit checks at 28/27/24/26 Rich cells respectively (unchanged hi/en: 19/27), all within 29 cells; only these four catalogue values changed, English source hash remains b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1, and zero blocker/major or accepted MINOR findings remain."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent four-key scratchpad settings delta audit (i18n-auditor, anthropic/claude-sonnet-5-5, 2026-10-19) at 0b208b2159: semantics, session scope, per-write/immediate enforcement, explicit cap+bytes labels, 16 MiB–8 GiB bounds, 256 MiB default, glossary/register/typography, key/argument parity and NFC all checked. No blocker/major, no accepted MINOR. Certifies this delta composed with the prior independent audit of unchanged namespace content; not a fresh whole-namespace audit. Translation authored in the implementation slice (coder, deepseek-flash) and independently audited. Independent width-delta recheck at a171e247d3eacb4dd170b725c098e59b3a69a5fc by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19: shortened es/fr/ru/vi cap labels pass semantics, idiom and byte-unit checks at 28/27/24/26 Rich cells respectively (unchanged hi/en: 19/27), all within 29 cells; only these four catalogue values changed, English source hash remains b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1, and zero blocker/major or accepted MINOR findings remain."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent four-key scratchpad settings delta audit (i18n-auditor, anthropic/claude-sonnet-5-5, 2026-10-19) at 0b208b2159: semantics, session scope, per-write/immediate enforcement, explicit cap+bytes labels, 16 MiB–8 GiB bounds, 256 MiB default, glossary/register/typography, key/argument parity and NFC all checked. No blocker/major, no accepted MINOR. Certifies this delta composed with the prior independent audit of unchanged namespace content; not a fresh whole-namespace audit. Translation authored in the implementation slice (coder, deepseek-flash) and independently audited. Independent width-delta recheck at a171e247d3eacb4dd170b725c098e59b3a69a5fc by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19: shortened es/fr/ru/vi cap labels pass semantics, idiom and byte-unit checks at 28/27/24/26 Rich cells respectively (unchanged hi/en: 19/27), all within 29 cells; only these four catalogue values changed, English source hash remains b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1, and zero blocker/major or accepted MINOR findings remain."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent delta recheck by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19, at e6684b09e0: I1 (récupérez meant retrieve, not delete) resolved with supprimez uniquement; verified build/cache, jamais les transcriptions, jamais vos conversations, --dry-run retained, French grammar/glossary and U+202F before the semicolon. Git diff 0b208b2159..e6684b09e0 is that one line; earlier compatible audit evidence applies. Zero unresolved blocker/major; no accepted MINOR. Certifies the requested delta composed with prior independent audits; earlier unsupported fallback claim corrected."
     }
   ]
 }

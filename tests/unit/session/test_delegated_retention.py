@@ -1345,7 +1345,7 @@ def test_a_merged_clean_clone_past_the_window_is_reclaimed_whole(root: Path) -> 
     assert (root / "sessions" / "reapme").exists(), "only content goes; the record stays"
     assert not tree.exists()
     assert [(row.session, row.reason) for row in result.content] == [
-        ("reapme", "merged-clean clone past the window")
+        ("reapme", "merged-clean clone")
     ]
     row = result.content[0]
     assert row.classes == ("merged-clean clone",) and row.entries >= 1 and row.bytes > 0
@@ -1435,7 +1435,7 @@ def test_a_loose_node_modules_is_reclaimed_whole(root: Path) -> None:
     result = _pass(root)
     assert not (pad / "node_modules").exists()
     assert [(row.session, row.reason, row.classes) for row in result.content] == [
-        ("mods", "build shapes past the window", ("build shapes",))
+        ("mods", "build shapes", ("build shapes",))
     ]
 
 
@@ -1477,7 +1477,7 @@ def test_a_build_named_directory_with_a_gitdir_is_judged_as_a_tree(root: Path) -
     result = _pass(root)
     assert build.exists() and (build / ".git").exists() and (build / "junk.txt").exists()
     assert not loose.exists()
-    assert [row.reason for row in result.content] == ["build shapes past the window"]
+    assert [row.reason for row in result.content] == ["build shapes"]
     assert (
         "treeshape",
         "build: HEAD does not resolve (or the gitdir link is broken)",
@@ -1561,7 +1561,7 @@ def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
     row = rows[0]
     assert row["session"] == "rowy"
     assert row["policy"] == "delegated_scratchpad"
-    assert row["reason"] == "stale output past the window"
+    assert row["reason"] == "stale output"
     assert row["bytes"] == size and row["entries"] == 1
     assert row["title"] == "" and row["actor"] == "startup"
     assert row["classes"] == ["stale output"]
@@ -1625,7 +1625,7 @@ def test_unique_sidebar_refs_are_rescued_into_a_bundle_before_the_tree_goes(
     result = _pass(root)
     assert not tree.exists()
     row = result.content[0]
-    assert row.reason == "merged-clean clone past the window"
+    assert row.reason == "merged-clean clone"
     bundle = Path(row.rescue_bundle)
     assert bundle == pad / "reap-rescue-clone.bundle"
     assert bundle.exists()
@@ -1705,7 +1705,7 @@ def test_a_merged_clean_linked_worktree_is_removed_not_bundled(root: Path) -> No
     listed = _git_stdout("-C", os.fspath(owner), "worktree", "list", "--porcelain")
     assert "lo-before" not in listed, "the registration is pruned by the removal itself"
     assert [(row.session, row.reason) for row in result.content] == [
-        ("wtpad", "merged-clean clone past the window")
+        ("wtpad", "merged-clean clone")
     ]
     row = result.content[0]
     assert row.method == "worktree-remove" and row.rescue_bundle == ""
@@ -1835,7 +1835,7 @@ def test_evidence_paths_are_never_taken_by_the_shape_arm(root: Path) -> None:
     assert (archive / "bundle.tar.gz").exists()
     assert own_name.exists() and (own_name / "keep.bin").exists()
     assert [(row.session, row.reason) for row in result.content] == [
-        ("evidence", "build shapes past the window + stale output past the window")
+        ("evidence", "build shapes + stale output")
     ]
     reasons = [reason for session, reason in result.content_kept if session == "evidence"]
     assert any("session-load-central-cache: evidence path" in r for r in reasons)
@@ -2080,14 +2080,31 @@ def test_the_content_guard_re_stat_mirrors_rule_six(root: Path) -> None:
     assert reason == "active since the scan"
 
 
-def test_content_of_a_young_session_is_never_evaluated(root: Path) -> None:
+def test_content_of_a_young_dead_session_reclaims_shapes_but_keeps_notes(root: Path) -> None:
+    """The policy change of 2026-10-19: AGE IS NOT A CONTENT GUARD.
+
+    This test used to pin the opposite — a pad inside the record window was
+    never evaluated, so a dead 1-hour-old subagent held its build tree for the
+    full 48 hours. Cache-shaped data (a build directory, a stale log) has no
+    reading as scratch, and the desk's authority is merged+clean+stale, not
+    old transcript; the LIVENESS guards are what keep live work safe. So the
+    shape goes while the notes beside it, which are the session's own work,
+    stay — and the RECORD stays too, because it is inside the window.
+    """
     young = _mk(root, "young", age_h=1)
     pad = young / "scratchpad"
     pad.mkdir()
-    _stale_file(pad / "big.log")
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    notes = pad / "notes.md"
+    notes.write_text("keep me\n")
     result = _pass(root)
-    assert result.content == [] and result.content_kept == []
-    assert (pad / "big.log").exists()
+    assert [row.session for row in result.content] == ["young"]
+    assert not shaped.exists()
+    assert notes.read_text() == "keep me\n"
+    assert young.exists(), "the RECORD stays: the age window still governs it"
+    assert result.removed == []
 
 
 def test_content_of_a_live_claimed_session_is_untouched(root: Path) -> None:
@@ -2160,3 +2177,64 @@ def test_the_scratchpad_remover_refuses_outside_paths_and_keeps_its_contract(
     os.symlink(os.fspath(victim), os.fspath(symlinked))
     assert remove_scratchpad_entry(symlinked, config_dir=None, sessions_dir=sessions) is False
     assert piece.exists() and victim.exists() and symlinked.is_symlink()
+
+
+def test_a_parent_users_pad_is_never_content_reclaimed(root: Path) -> None:
+    """The audit reports both classes; the CONTENT layer takes from one.
+
+    A parent (user) directory is not in the delegated pool at all, so its build
+    tree survives however old and however shaped — and that is the promise the
+    module docstring makes about the user's own conversations.
+    """
+    user = _mk(root, "mine", origin=None, age_h=100)
+    pad = user / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "bundle.js").write_bytes(b"x" * 4096)
+    notes = pad / "notes.md"
+    notes.write_text("keep me\n")
+
+    result = _pass(root)
+
+    assert result.content == []
+    assert shaped.exists() and notes.exists()
+    assert user.exists()
+
+
+def test_a_live_subagents_scratchpad_and_record_survive_the_full_pass(root: Path) -> None:
+    """Liveness, not age, is the content gate now — so the full pass (record
+    AND content) must leave a live child's pad and its transcript exactly
+    where they were, even though the record is well past the window."""
+    directory = _mk(root, "livemod", age_h=100)
+    (directory / ".session.pid").write_text(str(os.getpid()))
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    notes = pad / "notes.md"
+    notes.write_text("keep me\n")
+
+    result = _pass(root)
+
+    assert result.removed == []
+    assert directory.exists() and (directory / dr.TRANSCRIPT_FILENAME).exists()
+    assert shaped.exists() and notes.exists()
+    assert ("livemod", "claimed by a live process") in result.content_kept
+
+
+def test_a_spent_budget_stops_even_when_no_pad_has_reclaimable_content(root: Path) -> None:
+    """Minor 1: the pre-fix deadline check ran only at a 100-removal/100-failure
+    batch boundary, so a pool of pads with nothing to reclaim walked to the end
+    and never set ``content_budget_exhausted``. The per-pad check must stop after
+    the one-pad progress guarantee."""
+    for name in ("plain-a", "plain-b", "plain-c"):
+        pad = _kept_pad(root, name)
+        (pad / "notes.md").write_text("keep\n")
+
+    result = _pass(root, batch_size=100, budget_s=0.0)
+
+    assert result.content == []
+    assert result.content_budget_exhausted is True
+    assert result.content_remaining == 2

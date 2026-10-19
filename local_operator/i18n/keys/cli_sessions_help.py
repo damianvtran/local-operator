@@ -54,6 +54,10 @@ def cleanup_remove_empty() -> Msg:
     return Msg("cli.sessions_help.cleanup_remove_empty", {})
 
 
+def cleanup_scratchpads_only() -> Msg:
+    return Msg("cli.sessions_help.cleanup_scratchpads_only", {})
+
+
 def cleanup_yes() -> Msg:
     return Msg("cli.sessions_help.cleanup_yes", {})
 
