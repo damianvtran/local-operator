@@ -203,7 +203,11 @@ async def test_patch_bad_fields_are_422_not_500(api) -> None:
 
     for body in (
         {"organized": "garbage"},
+        {"organized": None},
+        {"favorite": None},
         {"name": None},
+        {"name": ""},
+        {"name": "   "},
     ):
         response = await client.patch(
             f"/v1/desktop/library/assets/{text_id}", json=body
