@@ -283,6 +283,25 @@ def is_openable(url: str) -> bool:
 #: affordance to special-case.
 FILE_AFFORDANCE_SUFFIXES: frozenset[str] = frozenset(
     {
+        # Read-only source preview uses the same root/executable-bit gate as
+        # callouts. Shell/program launch formats remain denied below.
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".css",
+        ".scss",
+        ".sql",
+        ".rs",
+        ".go",
+        ".java",
+        ".c",
+        ".h",
+        ".cpp",
+        ".rb",
+        ".swift",
+        ".kt",
+        ".htm",
         ".txt",
         ".text",
         ".log",

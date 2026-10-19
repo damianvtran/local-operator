@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "visor de archivos",
+  "tui.viewer.description": "Ver un archivo de texto local",
+  "tui.viewer.usage": "Uso: /view <path>",
+  "tui.viewer.loading": "leyendo…",
+  "tui.viewer.legend": "w ajustar líneas · r recargar · y copiar ruta · o abrir externamente · esc cerrar",
+  "tui.viewer.truncated": "Vista previa truncada — límite: 1 MiB / 20.000 líneas",
+  "tui.viewer.unreadable": "No se puede leer este archivo — no existe, no se puede leer o está fuera de los directorios raíz permitidos",
+  "tui.viewer.unsupported": "Este tipo de archivo no tiene vista previa integrada — ábrelo externamente",
+  "tui.viewer.binary": "No se puede mostrar una vista previa de un archivo binario",
+  "tui.viewer.changed": "Este archivo ha cambiado desde que se incluyó en la lista — vuelve a listar los archivos antes de abrirlo",
+  "tui.viewer.copied": "Ruta copiada",
+  "tui.viewer.copy_failed": "Portapapeles no disponible — ruta: {path}",
+  "tui.viewer.open_failed": "No se pudo abrir este archivo externamente",
+  "tui.viewer.kind_code": "código",
+  "tui.viewer.kind_markdown": "Markdown",
+  "tui.viewer.kind_text": "texto",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "Ajuste de líneas activado",
+  "tui.viewer.wrap_off": "Ajuste de líneas desactivado"
+}

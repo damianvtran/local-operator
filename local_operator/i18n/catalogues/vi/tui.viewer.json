@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "trình xem tệp",
+  "tui.viewer.description": "Xem tệp văn bản cục bộ",
+  "tui.viewer.usage": "Cách dùng: /view <path>",
+  "tui.viewer.loading": "đang đọc…",
+  "tui.viewer.legend": "w ngắt dòng · r tải lại · y sao chép đường dẫn · o mở bằng ứng dụng ngoài · esc đóng",
+  "tui.viewer.truncated": "Bản xem trước bị cắt ngắn — giới hạn: 1 MiB / 20.000 dòng",
+  "tui.viewer.unreadable": "Không thể đọc tệp này — không tìm thấy tệp, không đọc được hoặc nằm ngoài các thư mục gốc được phép",
+  "tui.viewer.unsupported": "Loại tệp này không có bản xem trước tích hợp — hãy mở bằng ứng dụng ngoài",
+  "tui.viewer.binary": "Không thể xem trước tệp nhị phân",
+  "tui.viewer.changed": "Tệp này đã thay đổi kể từ khi được liệt kê — hãy liệt kê lại trước khi mở",
+  "tui.viewer.copied": "Đã sao chép đường dẫn",
+  "tui.viewer.copy_failed": "Không dùng được bộ nhớ tạm — đường dẫn: {path}",
+  "tui.viewer.open_failed": "Không thể mở tệp này bằng ứng dụng ngoài",
+  "tui.viewer.kind_code": "mã",
+  "tui.viewer.kind_markdown": "Markdown",
+  "tui.viewer.kind_text": "văn bản",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "Đã bật ngắt dòng",
+  "tui.viewer.wrap_off": "Đã tắt ngắt dòng"
+}

@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "फ़ाइल व्यूअर",
+  "tui.viewer.description": "स्थानीय टेक्स्ट फ़ाइल देखें",
+  "tui.viewer.usage": "उपयोग: /view <path>",
+  "tui.viewer.loading": "पढ़ा जा रहा है…",
+  "tui.viewer.legend": "w पंक्तियाँ समेटें · r फिर से लोड करें · y पथ कॉपी करें · o बाहरी ऐप में खोलें · esc बंद करें",
+  "tui.viewer.truncated": "पूर्वावलोकन सीमित किया गया — सीमा: 1 MiB / 20,000 पंक्तियाँ",
+  "tui.viewer.unreadable": "यह फ़ाइल पढ़ी नहीं जा सकती — फ़ाइल मौजूद नहीं है, पढ़ी नहीं जा सकती या अनुमत मूल फ़ोल्डरों के बाहर है",
+  "tui.viewer.unsupported": "इस प्रकार की फ़ाइल का पूर्वावलोकन यहाँ उपलब्ध नहीं है — इसे बाहरी ऐप में खोलें",
+  "tui.viewer.binary": "बाइनरी फ़ाइल का पूर्वावलोकन नहीं दिखाया जा सकता",
+  "tui.viewer.changed": "सूची में दिखाए जाने के बाद यह फ़ाइल बदल गई है — खोलने से पहले फ़ाइलों की सूची फिर से देखें",
+  "tui.viewer.copied": "पथ कॉपी किया गया",
+  "tui.viewer.copy_failed": "क्लिपबोर्ड उपलब्ध नहीं है — पथ: {path}",
+  "tui.viewer.open_failed": "यह फ़ाइल बाहरी ऐप में नहीं खुल सकी",
+  "tui.viewer.kind_code": "कोड",
+  "tui.viewer.kind_markdown": "Markdown",
+  "tui.viewer.kind_text": "टेक्स्ट",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "पंक्तियाँ समेटना चालू",
+  "tui.viewer.wrap_off": "पंक्तियाँ समेटना बंद"
+}

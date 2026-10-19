@@ -145,8 +145,12 @@ from local_operator.clipboard import (
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
-from local_operator.sigils import at_token, at_token_spans, split_token
-from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
+from local_operator.sigils import at_token_spans, split_token
+from local_operator.tui.autocomplete import (
+    ArgumentMode,
+    SlashCommand,
+    file_completion_token as at_token,
+)
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     CompletionMode,

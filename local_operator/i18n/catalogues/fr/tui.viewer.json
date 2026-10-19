@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "visionneuse de fichiers",
+  "tui.viewer.description": "Afficher un fichier texte local",
+  "tui.viewer.usage": "Utilisation : /view <path>",
+  "tui.viewer.loading": "lecture…",
+  "tui.viewer.legend": "w retour à la ligne · r recharger · y copier le chemin · o ouvrir en externe · esc fermer",
+  "tui.viewer.truncated": "Aperçu tronqué — limite : 1 MiB / 20 000 lignes",
+  "tui.viewer.unreadable": "Impossible de lire ce fichier — introuvable, illisible ou hors des répertoires autorisés",
+  "tui.viewer.unsupported": "Ce type de fichier n’a pas d’aperçu intégré — ouvrez-le en externe",
+  "tui.viewer.binary": "Impossible d’afficher un aperçu d’un fichier binaire",
+  "tui.viewer.changed": "Ce fichier a changé depuis qu’il a été listé — actualisez la liste avant de l’ouvrir",
+  "tui.viewer.copied": "Chemin copié",
+  "tui.viewer.copy_failed": "Presse-papiers indisponible — chemin : {path}",
+  "tui.viewer.open_failed": "Impossible d’ouvrir ce fichier en externe",
+  "tui.viewer.kind_code": "code",
+  "tui.viewer.kind_markdown": "Markdown",
+  "tui.viewer.kind_text": "texte",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "Retour à la ligne activé",
+  "tui.viewer.wrap_off": "Retour à la ligne désactivé"
+}

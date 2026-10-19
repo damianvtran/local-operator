@@ -6199,6 +6199,8 @@ class OperatorApp(App[None]):
         # for the same reason — the Esc chain and every approval/ask/clear
         # yield close it the same way, and ``_sync_boot_layout_class`` counts
         # it against the boot layout.
+        self._file_viewer: Any | None = None
+        self._file_viewer_focus_restore: Any | None = None
         self._projects_view: Any | None = None
         self._team_form: Any | None = None
         self._team_form_focus_restore: Any | None = None
@@ -17960,7 +17962,8 @@ class OperatorApp(App[None]):
     #: the handler never runs, while the marks it lists are on disk in front of
     #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/sidebar", "/help", "/settings", "/hub", "/resume", "/notifications"}
+        {"/copy", "/links", "/view", "/sidebar", "/help", "/settings", "/hub", "/resume",
+         "/notifications"}
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -25284,6 +25287,7 @@ class OperatorApp(App[None]):
                 # read-only composer already claims the keyboard: the claim
                 # must not depend on that side effect, or a future focusable
                 # mode rebuilds the hole (agent review round 1, finding 11).
+                or self._file_viewer is not None
                 or self._projects_view is not None
                 or self._agent_form is not None
                 or self._team_form is not None
@@ -26118,6 +26122,8 @@ class OperatorApp(App[None]):
             return
         if self._agent_form is not None:
             self._agent_form.action_cancel_request()
+            return
+        if self._close_file_viewer():
             return
         if self._projects_view is not None and self._projects_view.escape_surface():
             return
@@ -30213,6 +30219,7 @@ class OperatorApp(App[None]):
             and self._settings_view is None
             and self._subagent_view is None
             and self._org_chart_view is None
+            and self._file_viewer is None
             and self._projects_view is None
             and self._agent_form is None
             and self._team_form is None
@@ -36220,6 +36227,7 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         comms = getattr(self._session, "_subagent_comms", None)
@@ -36419,6 +36427,7 @@ class OperatorApp(App[None]):
         # Conversation boot needs the dismissal message, not the optional
         # renderer. Import before registry/focus/layout work so a first-use
         # import failure remains observable without leaving a half-entered mode.
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         from local_operator.tui.widgets.org_chart_view import OrgChartView
@@ -36548,6 +36557,7 @@ class OperatorApp(App[None]):
         Its data loading is async in the widget's own worker, so the first
         frame is the loading state rather than a blocked app.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._import_view is not None:
@@ -36623,6 +36633,7 @@ class OperatorApp(App[None]):
         loading is async in the widget's own worker, so the first frame is the
         loading state rather than a blocked app.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._review_view is not None:
@@ -36702,6 +36713,7 @@ class OperatorApp(App[None]):
         page reads the live scheduler synchronously, so its first frame is the
         populated (or empty) list rather than a loading state.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._schedule_view is not None:
@@ -36798,6 +36810,7 @@ class OperatorApp(App[None]):
         ``on_mount`` so the first painted frame already says "reading the
         library" instead of flashing an empty list for one tick.
         """
+        self._close_file_viewer()
         if self._library_view is not None:
             return
         from local_operator.paths import config_dir
@@ -37014,6 +37027,7 @@ class OperatorApp(App[None]):
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._settings_view is not None:
@@ -37585,6 +37599,7 @@ class OperatorApp(App[None]):
         view switch, zoom and cursor movement without ever re-reading, so a
         repaint costs no registry or filesystem I/O.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._projects_view is not None:
@@ -37653,6 +37668,9 @@ class OperatorApp(App[None]):
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
         """
+        # Every mode/session transition already closes the projects sibling;
+        # keep the local-file worker on that same lifecycle boundary.
+        self._close_file_viewer()
         view = self._projects_view
         if view is None:
             return False
@@ -40893,7 +40911,7 @@ class OperatorApp(App[None]):
             )
         }
         remote_capability = remote_capabilities.get(command)
-        if command in {"/loop", "/sidebar"}:
+        if command in {"/loop", "/sidebar", "/view"}:
             # The invoking TUI owns scheduling/interaction, even when a legacy
             # owner advertises the older authoritative classification. Each
             # loop iteration still uses the source's real owner prompt route.
@@ -41168,6 +41186,8 @@ class OperatorApp(App[None]):
                 notice("Use /sidebar or /sidebar focus", "error")
             else:
                 self.action_toggle_sidebar()
+        elif command == "/view":
+            self._cmd_view(arg)
         elif command == "/settings":
             self._cmd_settings(notice)
         elif command == "/import":
@@ -48924,7 +48944,7 @@ class OperatorApp(App[None]):
 
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         projects: list[ArgumentChoice] = []
-        if not message.directory:
+        if not message.directory and not self._editor().text.startswith("/view "):
             projects = self._project_picker_choices(await project_picker_rows())
         prepended = len(projects)
         choices = [*projects, *choices]
@@ -59431,8 +59451,67 @@ class OperatorApp(App[None]):
         self._supplement_read_inflight.clear()
         self._supplement_live.clear()
 
-    def open_transcript_file(self, url: str, *, source_path: str = "") -> None:
-        """Reveal a file callout in Finder — the open half of the affordance.
+    def _cmd_view(self, arg: str) -> None:
+        from local_operator.i18n.keys import tui_viewer as viewer_msg
+        from local_operator.i18n.text import tr
+
+        if not arg.strip():
+            self._notice(tr("tui.viewer")(viewer_msg.usage()), "warning")
+            return
+        raw = arg.strip()
+        if len(raw) > 1 and raw[0] == raw[-1] == '"':
+            raw = raw[1:-1]
+        self._open_file_viewer(raw)
+
+    def _open_file_viewer(self, raw: str, *, expected: Any = None) -> None:
+        from pathlib import Path
+        from local_operator.tui.widgets.file_viewer import FileViewer
+
+        self._close_projects_view()
+        self._close_settings_view()
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_org_chart_view()
+        self._close_subagent_view()
+        self._file_viewer_focus_restore = self.focused
+        page = FileViewer(raw, cwd=Path(self.session_cwd()), expected=expected)
+        self._file_viewer = page
+        self._transcript_view().display = False
+        self.screen.mount(page, before=self.query_one("#input-dock"))
+        self.screen.add_class(PROJECTS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_file_viewer(self) -> bool:
+        page = self._file_viewer
+        if page is None:
+            return False
+        self._file_viewer = None
+        page.cancel_read()
+        page.remove()
+        self.screen.remove_class(PROJECTS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._file_viewer_focus_restore
+        self._file_viewer_focus_restore = None
+        target = (
+            restore if restore is not None and restore.is_attached and restore.display
+            else self._editor()
+        )
+        target.focus()
+        return True
+
+    def on_file_viewer_dismissed(self, message: Any) -> None:
+        message.stop()
+        self._close_file_viewer()
+
+    def open_transcript_file(
+        self, url: str, *, source_path: str = "", expected: Any = None
+    ) -> None:
+        """Preview supported text locally; retain Finder reveal for other files.
 
         ``open -R``, never ``webbrowser``: the callout hands the user the FILE,
         and revealing it is the least authority that answers "where is it".
@@ -59461,6 +59540,22 @@ class OperatorApp(App[None]):
         from urllib.parse import unquote, urlparse
 
         path = unquote(urlparse(checked).path)
+        from pathlib import Path
+        from local_operator.tui.file_viewer import file_identity, viewer_kind
+
+        if expected is not None:
+            try:
+                changed = file_identity(Path(path)) != expected
+            except OSError:
+                changed = True
+            if changed:
+                from local_operator.i18n.keys import tui_viewer as viewer_msg
+                from local_operator.i18n.text import tr
+                notice(tr("tui.viewer")(viewer_msg.changed()), "warning")
+                return
+        if viewer_kind(Path(path)) is not None:
+            self._open_file_viewer(source_path, expected=expected)
+            return
         self.run_worker(self._reveal_file(path, notice), group="reveal-file")
 
     async def _reveal_file(self, path: str, notice: NoticeFn) -> None:
