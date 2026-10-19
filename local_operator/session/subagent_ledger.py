@@ -225,6 +225,10 @@ def build_lane_payload(
         "bound_s": lane_bound_s(),
         "bound_source": lane_bound_source(),
         "written_at": time.time(),
+        "last_step": "",
+        "last_step_at": None,
+        "wip_ref": "",
+        "state": "running",
     }
 
 
@@ -242,6 +246,30 @@ def write_lane_receipt(child_dir: Path, payload: Mapping[str, Any]) -> Path | No
     except Exception:  # noqa: BLE001 — a launch must not fail over evidence
         return None
     return target
+
+
+def note_lane_step(
+    child_dir: Path, job_id: str, step: str, at: float, wip_ref: str = "", *, force: bool = False
+) -> None:
+    """Persist the last completed operation before a hard death can erase it."""
+    target = lane_receipt_path(child_dir, job_id)
+    try:
+        payload = json.loads(target.read_text())
+        # A new recovery ref must be durable with its step even inside the
+        # throttle window; ordinary high-frequency tool completions may lag.
+        now = time.time()
+        if (
+            not force
+            and now - float(payload.get("step_written_at") or 0) < 5
+            and payload.get("wip_ref", "") == wip_ref
+        ):
+            return
+        payload.update(
+            last_step=step, last_step_at=at, wip_ref=wip_ref, state="running", step_written_at=now
+        )
+        _staged_write(target, payload)
+    except (OSError, ValueError, TypeError):
+        pass  # Evidence failure must not fail a running child.
 
 
 def withdraw_lane_receipt(child_dir: Path, job_id: str) -> None:
@@ -382,6 +410,11 @@ class LaneEvidence:
     #: True when a lane receipt survived with no stop receipt and no recorded
     #: outcome — "a lane ran here and never settled".
     never_settled: bool = False
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
+    wip_files: int = 0
+    wip_at: float = 0.0
 
 
 def reconcile_lane_evidence(
@@ -420,7 +453,21 @@ def reconcile_lane_evidence(
         child_dir = Path(str(raw_dir))
         if not child_dir.is_absolute() and base is not None:
             child_dir = base / child_dir
-        stops = read_stop_receipts(child_dir)
+        stops = [r for r in read_stop_receipts(child_dir) if r.get("job_id") == job_id]
+        lanes = [r for r in read_lane_receipts(child_dir) if r.get("job_id") == job_id]
+        lane = lanes[-1] if lanes else {}
+        try:
+            wip = json.loads((child_dir / f"subagent-wip-{job_id}.v1.json").read_text())
+            if not isinstance(wip, dict):
+                wip = {}
+        except (OSError, ValueError):
+            wip = {}
+        recovery: dict[str, Any] = dict(
+            last_step=str(lane.get("last_step") or wip.get("step") or ""),
+            wip_ref=str(lane.get("wip_ref") or (wip.get("ref") if wip.get("commit") else "") or ""),
+            wip_files=len(wip.get("files") or []),
+            wip_at=float(wip.get("at") or 0),
+        )
         outcome = record.get("outcome")
         if stops:
             # Newest stop wins: a resume mints a new job id, but a record folded
@@ -431,11 +478,25 @@ def reconcile_lane_evidence(
                     job_id=job_id,
                     ended_by=str(latest.get("actor") or ""),
                     cancel_reason=str(latest.get("reason") or ""),
+                    **recovery,
+                    death_cause=(
+                        "child-paused"
+                        if latest.get("mechanism") == "pause"
+                        else (
+                            "child-parent-gone"
+                            if latest.get("actor") == "parent-teardown"
+                            else "child-cancelled"
+                        )
+                    ),
                 )
             )
             continue
-        if outcome is None and read_lane_receipts(child_dir):
-            out.append(LaneEvidence(job_id=job_id, never_settled=True))
+        if outcome is None and lanes:
+            out.append(
+                LaneEvidence(
+                    job_id=job_id, never_settled=True, **recovery, death_cause="child-never-settled"
+                )
+            )
     return out
 
 

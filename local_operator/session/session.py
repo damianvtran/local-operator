@@ -19783,6 +19783,10 @@ class Session:
         """
         label = getattr(job, "label", job_id)
         status = getattr(job, "status", "completed")
+        # Pause uses cancellation as its transport, not as its user-visible
+        # outcome. Match the comms roster's deliberate, resumable halt.
+        if status == "cancelled" and getattr(job, "death_cause", "") == "child-paused":
+            status = "paused"
         summary = (text or "").strip()
         if len(summary) > 2000:
             summary = summary[:2000] + "…[truncated; full result via jobs/wait]"
@@ -19836,6 +19840,22 @@ class Session:
             if summary
             else f"background job '{label}' {status}{pin_clause}."
         )
+        # Background shell jobs register as "bash"; "task" is the child
+        # runner's actual job kind (there is no "subagent" JobType).
+        if status in ("failed", "cancelled", "paused") and getattr(job, "type", "") == "task":
+            from local_operator.incidents import render_child_death
+
+            cause = str(getattr(job, "death_cause", "") or getattr(job, "cut_off_cause", "") or "")
+            step = str(getattr(job, "last_step", "") or "not recorded")
+            detail = str(getattr(job, "error_text", "") or "") if cause == "child-failed" else ""
+            delivery = f"background job '{label}' {status}{pin_clause} — " + render_child_death(
+                cause, detail=detail, last_step=step
+            )
+            ref = str(getattr(job, "wip_ref", "") or "")
+            if ref:
+                delivery += f"; WIP checkpoint: {ref} (resume with hub op='resume')"
+            if summary:
+                delivery += "; result: " + " ".join(summary.split())
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True
