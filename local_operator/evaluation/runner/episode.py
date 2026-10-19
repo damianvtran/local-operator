@@ -371,24 +371,31 @@ class EpisodeConfig:
     declares nothing and is cut off exactly as before.
 
     ``score_timeout`` is the one timeout whose work grows with the episode
-    rather than with a single request. Measured on ``osworld-task_005``
-    (2026-10-19): a 453-step episode issued 478 judge requests at roughly
-    0.6 s each, so one score ran just past 300 s -- exactly the budget the
-    operator script used to set, which discarded a completed 2.4 h episode
-    with ``TimeoutError: score exceeded its 300s budget`` and ``steps: 0``.
-    A 500-step episode extrapolates to ~528 requests / ~330 s at that rate,
-    and judge latency under fleet load is not bounded here, so the dataclass
-    default is 900 s (2.7x the 500-step extrapolation) and
-    ``scripts/run_episode.py`` sets 1800 s for paid campaigns. Both stay far
-    below the 6 h episode wall cap, and a scorer wedged for 15-30 minutes is
-    still cut off.
+    rather than with a single request: one call grades everything the episode
+    did. Measured on ``osworld-task_005`` (2026-10-19): the score over a
+    453-step, 2.4 h episode consumed the whole 300 s the operator script used
+    to set, and the episode was discarded with ``TimeoutError: score exceeded
+    its 300s budget after 300.0s (request 478; operation_id score-ep-...)``
+    and ``steps: 0``. ``request 478`` there is the parent-wire RPC id
+    (``RpcClient._next_id``), NOT a count of judge requests: the adapter
+    scores in its own process, so its internal round-trips never reach this
+    side. What is measured is the 300 s the single score call took at 453
+    steps; a 500-step episode is 1.10x that work, so the dataclass default is
+    900 s (~2.7x the projected 330 s) and ``scripts/run_episode.py`` sets
+    1800 s for paid campaigns. Judge latency under fleet load is not bounded
+    anywhere in this repo, so the margin is headroom, not a guarantee.
 
-    THE 478 REQUESTS ARE ALSO AN EFFICIENCY RECORD, not only a budget input:
-    scoring makes about one judge round-trip per step (1.055 measured), so
-    its cost is linear in ``max_steps``. The next optimisation pass should
-    batch, cache or replay judgements rather than raise this number again;
-    raising it was the minimal fix for a budget that was losing paid work,
-    and it deliberately changes no scoring behaviour.
+    THIS CONSTANT IS THE ONLY BOUND ON THE SCORE CALL. ``--max-wall-s``
+    (default 18000 s) is a guest-side ``BudgetAuthorization`` resource and the
+    owner lease, not a parent-side deadline on ``score``: a scorer that hangs
+    is cut off here or not at all.
+
+    THE COST SIDE IS UNMEASURED FROM HERE. Both facts the parent can see --
+    one score call, and its duration growing with episode length -- point the
+    next optimisation pass inside the adapter: instrument the judge's own
+    round-trip count there before deciding whether to batch, cache or replay
+    judgements. Raising this budget was the minimal fix for a budget that was
+    losing paid work; it deliberately changes no scoring behaviour.
     """
 
     evidence_root: Path

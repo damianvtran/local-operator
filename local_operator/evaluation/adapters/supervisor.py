@@ -930,24 +930,21 @@ class VerifiedAdapterSession:
         timeout_context: str | None = None,
     ) -> AdapterResult:
         self._ensure_usable()
+        # Built exactly as ``AdapterSupervisor._call_raw`` builds its own kwargs:
+        # a None context is DROPPED, not sent. The in-process doubles that
+        # replace the supervisor mirror that method's signature, and an
+        # unconditional keyword turned every ``execute``/``observe`` into a
+        # TypeError in them (the whole adapters/osworld suite went red when
+        # the score context was introduced).
+        extras: dict[str, Any] = {}
+        if execution_overhead_seconds_per_action:
+            extras["execution_overhead_seconds_per_action"] = execution_overhead_seconds_per_action
+        if timeout_context is not None:
+            extras["timeout_context"] = timeout_context
         try:
-            if execution_overhead_seconds_per_action:
-                result = await self._supervisor._call_raw(
-                    method,
-                    params,
-                    result_type,
-                    timeout=timeout,
-                    execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
-                    timeout_context=timeout_context,
-                )
-            else:
-                result = await self._supervisor._call_raw(
-                    method,
-                    params,
-                    result_type,
-                    timeout=timeout,
-                    timeout_context=timeout_context,
-                )
+            result = await self._supervisor._call_raw(
+                method, params, result_type, timeout=timeout, **extras
+            )
             validate(result)
             return result
         except BaseException as error:
