@@ -54,7 +54,7 @@ Existing session rows are not promoted or rewritten. Guards, quotas, provenance 
 host approvals are shared. Explicit role allowlists are never widened; when the
 helper is absent, use read/write/edit URLs with the same scope boundaries.
 
-The human CLI verbs are `list`, `show`, `search`, `edit`, `forget`, `status` — there
+The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `status` — there
 are no `lop memory remember` or `recall` CLI commands.
 
 ## Existing read/write/edit tools
@@ -90,6 +90,20 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
 - Correct with `edit(path="memory://session/ID", old_text="REV",
   new_text=<replacement JSON string>)`. Read again on conflict; do not retry a
   stale version blindly. File hunks/replace-all do not apply to memory.
+- Move a fact between scopes instead of re-creating it: `lop memory move ID --to
+  session` (batch: several IDs before `--to`; an agent uses `edit(path="memory://SCOPE/ID",
+  old_text="REV", new_text='{"move":"session"}')`). The move is atomic, refuses when
+  the destination would exceed its cap, keeps the fact's text, provenance and
+  timestamps, and records the source as `moved_from` in the destination's history.
+  Moving to the scope it is already in is refused. The source entity then ends
+  exactly like a forget: its own revisions are closed, not kept. A source with
+  unmerged concurrent revisions is refused. A trusted peer **running this
+  release** that holds a correction the moving device never saw refuses the
+  replication rather than erase it — resolve the conflict first. That protection
+  is version-bound: an older peer applies the move as a forget (its own unseen
+  correction is erased), and an older mover's single-parent tombstone cannot be
+  told apart from a forget even by an upgraded peer. Moved facts replicate to
+  trusted peers exactly like any other mutation.
 - Replace a separate old fact with `replaces:"OLD_ID"` on an explicit new store.
   Without that intent both facts stay visible, even near-duplicates. Superseded
   facts remain inspectable. Exact same-body/source repeats are idempotent;
@@ -108,7 +122,11 @@ Items cap at 256 tokens/8192 bytes including metadata. Global active quota is
 16k tokens; each session/team/agent owner 50k. Recall, suggestions (≤3/180 tokens)
 and compaction hints (≤80 tokens) have separate budgets. History, conflicts,
 tombstones, metadata, storage and WAL are bounded too. Overflow refuses with
-inventory/consolidation guidance; it never evicts explicit or pinned facts.
+inventory/consolidation guidance; it never evicts explicit or pinned facts. Every
+write reports the scope's headroom and percent, and crossing 80% or 90% warns
+once (in the write result) with relief for the scope under pressure: forget
+stale facts everywhere, and move work-state facts to session scope where that
+move exists (global); session and the other scopes consolidate in place.
 
 ## Compaction and mobility
 
@@ -135,7 +153,7 @@ No live-peer interoperability claim follows from isolated loopback tests.
 Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
 `.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
 for policy, quotas and peer exclusions. Human inspection/correction uses
-`lop memory` / `/memory`: list, show, search, edit, forget and status. Rows print
+`lop memory` / `/memory`: list, show, search, move, edit, forget and status. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
 (automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
