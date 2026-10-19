@@ -507,8 +507,8 @@ class FakeClient:
         )
         return self._answer("conversation_consent")
 
-    async def conversation_join(self, conversation_id: str, *, access=None):
-        FakeClient.behavior["last_join"] = conversation_id
+    async def conversation_join(self, conversation_id: str, *, tenant_id=None, access=None):
+        FakeClient.behavior["last_join"] = (conversation_id, tenant_id)
         return self._answer("conversation_join")
 
     async def conversation_leave(self, conversation_id: str, *, access=None):
@@ -587,9 +587,16 @@ class FakeClient:
         return self._answer("conversation_admit")
 
     async def conversation_read(
-        self, conversation_id: str, *, seq=None, muted=None, tenant_id=None, access=None
+        self,
+        conversation_id: str,
+        *,
+        seq=None,
+        muted=None,
+        notify=None,
+        tenant_id=None,
+        access=None,
     ):
-        FakeClient.behavior["last_read"] = (conversation_id, seq, muted, tenant_id)
+        FakeClient.behavior["last_read"] = (conversation_id, seq, muted, notify, tenant_id)
         return self._answer("conversation_read")
 
     async def unread(self, *, tenant_id=None, scope=None, access=None):
@@ -2487,6 +2494,43 @@ async def test_conversation_send_forwards_the_text_and_key(api):
         "tenant_id": "tnt_1",
         "agent_label": None,
     }
+
+
+async def test_conversation_join_forwards_the_tenant(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/join",
+        json={"tenant_id": "tnt_2"},
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_join"] == ("bcv_abc12345", "tnt_2")
+
+
+async def test_conversation_join_without_a_body_defaults_to_the_single_org(api):
+    client, _root, _d = api
+    response = await client.post("/v1/desktop/team-bridge/conversations/bcv_abc12345/join")
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_join"][1] is None
+
+
+async def test_conversation_read_forwards_the_notify_policy(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/read",
+        json={"notify": "mute"},
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_read"][3] == "mute"
+    assert FakeClient.behavior["last_read"][2] is None
+
+
+async def test_conversation_read_refuses_muted_and_notify_together(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/read",
+        json={"muted": True, "notify": "mention"},
+    )
+    assert response.status_code == 422
 
 
 async def test_conversation_read_requires_something_to_do(api):
