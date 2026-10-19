@@ -414,8 +414,8 @@ class ClassificationService:
         Empty when the first preferred leg resolved (the ordinary case), when the
         cascade has not resolved yet, and when it resolved nothing at all — there
         is no "using X" to say in the last case. After a fallback it names the
-        skipped leg and the trace's reason, e.g. ``"radient not available on this
-        device (not_synced); using openrouter"``, so a diagnostics surface can
+        skipped leg and the trace's reason, e.g. ``"radient could not be borrowed on this
+        device (borrow_unavailable); using openrouter"``, so a diagnostics surface can
         report the downgrade instead of presenting it as the choice.
 
         Cleared with ``_legs`` (see :attr:`_routing_trace`): a reason describes one
@@ -426,7 +426,7 @@ class ClassificationService:
             return ""
         first = trace.skipped[0]
         return (
-            f"{first['vendor']} not available on this device ({first['reason']}); "
+            f"{first['vendor']} could not be borrowed on this device ({first['reason']}); "
             f"using {trace.vendor.name}"
         )
 
@@ -949,6 +949,13 @@ class ClassificationService:
         # from ``_legs is None`` anyway, and keeping the skipped rows here lets the
         # caller's diagnostics explain WHY no leg was available.
         self._routing_trace = resolution
+        note = self.routing_note
+        if note:
+            # ONE LINE PER RESOLUTION, and that is the point: the recommendation and
+            # the spend row carry the downgrade, but this is the surface an operator
+            # reads without inspecting either — the silent fall-through this slice
+            # exists to remove must be visible here too.
+            logger.info("classification: %s", note)
         first = resolution.vendor
         if first is None:
             self._legs = ()

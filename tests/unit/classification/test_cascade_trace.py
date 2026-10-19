@@ -43,7 +43,9 @@ async def test_a_zero_peer_skip_is_plain_absence(bare_manager) -> None:
     )
 
 
-async def test_a_lent_login_left_unborrowed_is_named_not_synced(holder_root, install_legs) -> None:
+async def test_a_lent_login_left_unborrowed_is_named_borrow_unavailable(
+    holder_root, install_legs
+) -> None:
     """The measured case: the row exists on the owner, and this device could not borrow.
 
     The Radient leg is a stub that reports no credential, exactly the state the
@@ -56,7 +58,7 @@ async def test_a_lent_login_left_unborrowed_is_named_not_synced(holder_root, ins
     resolution = await resolve_vendor_with_trace(holder_root)
 
     assert resolution.vendor is not None and resolution.vendor.name == "typesafe"
-    assert resolution.skipped == ({"vendor": "radient", "reason": "not_synced"},)
+    assert resolution.skipped == ({"vendor": "radient", "reason": "borrow_unavailable"},)
 
 
 async def test_the_first_leg_resolving_costs_no_trace_probe(bare_manager, monkeypatch) -> None:

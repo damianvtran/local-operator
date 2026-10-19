@@ -1926,6 +1926,13 @@ def _catalogue_credential(
     return _oauth_listing_token(provider, base=base)
 
 
+#: How long the synchronous listing bridge waits for its borrow thread. The
+#: borrow itself is bounded well below classification's budget; this adds thread
+#: startup and store teardown, and caps the caller's wait so a stuck daemon thread
+#: cannot freeze the event loop it was created to protect.
+_LISTING_BORROW_JOIN_S = 1.5
+
+
 def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
     """A listing credential this device may BORROW from a mesh owner, or ``""``.
 
@@ -1974,7 +1981,7 @@ def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
-        worker.join()
+        worker.join(timeout=_LISTING_BORROW_JOIN_S)
         return outcome[0] if outcome else ""
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not borrow a %s token for the listing: %s", provider, exc)
