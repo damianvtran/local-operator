@@ -411,17 +411,23 @@ def _persist(
     *,
     visible: set[str],
     force: bool = False,
-) -> tuple[dict[str, Any], float, bool] | None:
+    partial: bool = False,
+) -> tuple[dict[str, Any], float, bool, tuple[int, int, int] | None] | None:
     """Read-merge-write under the cross-process lock.
 
-    Returns ``(merged sessions, built_at, wrote)``, or ``None`` when another
-    process holds the lock — the caller then serves its last aggregate rather
-    than waiting. The rate limit applies only to non-structural churn: a new
-    session or a first completion always lands.
+    Returns ``(merged sessions, built_at, wrote, stat)``, or ``None`` when
+    another process holds the lock — the caller then serves its last aggregate
+    rather than waiting. ``stat`` is the index identity observed UNDER the lock
+    (after any write), which is the identity of the payload ``merged`` came
+    from. The rate limit applies only to non-structural churn: a new session or
+    a first completion always lands. The top-level ``complete`` flag lets a
+    reader tell a finished index from a budget-limited one that has only
+    complete rows so far.
     """
     with _index_lock(path.with_name("index.lock")) as locked:
         if not locked:
             return None
+        stat = _index_stat(path)
         disk = _load(path)
         raw = disk.get("sessions")
         disk_sessions: dict[str, Any] = raw if isinstance(raw, dict) else {}
@@ -429,10 +435,17 @@ def _persist(
         # complete disk entry survive for a session this build did not reach.
         merged = _merge_sessions(disk_sessions, sessions, keep=visible)
         built_at = float(disk.get("built_at") or 0.0)
-        if merged == disk_sessions:
-            return merged, built_at, False
-        if not force and not _structural_change(disk_sessions, merged) and _written_recently(path):
-            return merged, built_at, False
+        complete = not partial
+        flag_changed = disk.get("complete") is not complete
+        if merged == disk_sessions and not flag_changed:
+            return merged, built_at, False, stat
+        if (
+            not force
+            and not flag_changed
+            and not _structural_change(disk_sessions, merged)
+            and _written_recently(path)
+        ):
+            return merged, built_at, False, stat
         stamp = time.time()
         revision = int(sum(_entry_revision_value(entry) for entry in merged.values()))
         _write(
@@ -441,10 +454,11 @@ def _persist(
                 "version": INDEX_SCHEMA,
                 "built_at": stamp,
                 "revision": revision,
+                "complete": complete,
                 "sessions": merged,
             },
         )
-        return merged, stamp, True
+        return merged, stamp, True, _index_stat(path)
 
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
@@ -898,15 +912,18 @@ def catalog_for_read(config_dir: str | Path) -> Catalog:
                 if isinstance(entry, dict) and entry.get("complete")
             )
             # A partial index is how a cold/incremental build looks on disk;
-            # a reader must not call it ready just because it has rows.
+            # a reader must not call it ready just because it has rows. An index
+            # written before the flag existed, or by a build that stopped early,
+            # may have only complete rows and still be missing sessions.
             incomplete = any(
                 isinstance(entry, dict) and not entry.get("complete") for entry in sessions.values()
             )
+            indexed_all = payload.get("complete") is True
             catalog = Catalog(
                 assets=_build_assets(sessions),
                 revision=int(payload.get("revision") or 0)
                 or int(sum(_entry_revision_value(entry) for entry in sessions.values())),
-                state="building" if not sessions or incomplete else "ready",
+                state="ready" if sessions and indexed_all and not incomplete else "building",
                 sessions_total=len(sessions),
                 sessions_scanned=complete,
                 built_at=float(payload.get("built_at") or 0.0),
@@ -1028,9 +1045,11 @@ def _build_locked(
             building = True
 
     state = "building" if building else "ready"
+    complete = not building
     changed = sessions != cached_sessions
+    flag_written = payload.get("complete") is complete
     cached = _cached(key)
-    if not changed and cached is not None and cached[0] == stat_before:
+    if not changed and flag_written and cached is not None and cached[0] == stat_before:
         # Every persisted entry already matched its journal, and the cached
         # aggregate was built from this exact file: no rebuild, no write. Return
         # it directly — this build is finished, so its own in-flight marker must
@@ -1040,7 +1059,8 @@ def _build_locked(
     merged = sessions
     built_at = float(payload.get("built_at") or 0.0)
     wrote = False
-    if changed:
+    disk_stat = stat_before
+    if changed or not flag_written:
         persisted = _persist(
             path,
             sessions,
@@ -1048,6 +1068,7 @@ def _build_locked(
             # An unbounded build (background finisher, CLI, tests) must land its
             # result; only the poll path trades persistence for latency.
             force=budget_s is None,
+            partial=building,
         )
         if persisted is None:
             # Another process holds the write lock; never wait on the request
@@ -1055,15 +1076,15 @@ def _build_locked(
             if cached is not None:
                 return _serve(key, cached[2])
         else:
-            merged, disk_built_at, wrote = persisted
+            merged, disk_built_at, wrote, disk_stat = persisted
             built_at = disk_built_at
-            if wrote:
-                stat_before = _index_stat(path)
-            elif cached is not None:
+            if not wrote and changed and cached is not None:
                 # Rate-limited non-structural churn: keep the last aggregate and
                 # let a later poll persist; refresh its freshness window so the
-                # next poll does not repeat the scan for the same churn.
-                _remember(key, stat_before, cached[2])
+                # next poll does not repeat the scan for the same churn — but
+                # only if the file it came from is still the one on disk.
+                if disk_stat == stat_before:
+                    _remember(key, disk_stat, cached[2])
                 return _serve(key, cached[2])
 
     if changed:
@@ -1081,10 +1102,11 @@ def _build_locked(
         built_at=built_at or time.time(),
     )
     stat_after = _index_stat(path)
-    if wrote or stat_after == stat_before:
+    if stat_after == disk_stat:
         # Only an identity that matches the payload these assets came from may
-        # be cached. A writer that landed while this build scanned (and that we
-        # did not perform) leaves the aggregate uncached; the next read reloads.
+        # be cached. ``disk_stat`` was captured under the write lock; a writer
+        # that landed while ``_build_assets`` ran (outside that lock) leaves the
+        # aggregate uncached and the next read reloads.
         _remember(key, stat_after, catalog)
     return catalog
 

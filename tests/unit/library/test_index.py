@@ -296,7 +296,7 @@ def _payload_with_extra(root, extra: "os.PathLike[str]") -> dict:
         "key": identity.key_for(str(extra), None),
         "path": str(extra),
         "digest": None,
-        "name": "extra.txt",
+        "name": extra.name,
         "kind": "document",
         "content_type": "text/plain",
         "size": 1,
@@ -318,6 +318,7 @@ def _payload_with_extra(root, extra: "os.PathLike[str]") -> dict:
         "version": index.INDEX_SCHEMA,
         "built_at": 2.0,
         "revision": 1,
+        "complete": True,
         "sessions": {
             OTHER: {
                 "sig": {"size": 0, "mtime": 0.0, "inode": 0},
@@ -556,3 +557,71 @@ def test_catalog_for_read_reloads_after_another_process_writes(tmp_path, monkeyp
 
     asset_id = identity.asset_id(identity.key_for(str(extra), None))
     assert any(asset.id == asset_id for asset in catalog.assets)
+
+
+def test_build_never_caches_assets_under_a_stat_from_a_racing_writer(tmp_path, monkeypatch) -> None:
+    """A writer landing during ``_build_assets`` must not poison the cache.
+
+    ``_persist`` releases the lock before the aggregate is built, so the stat
+    captured under the lock is the only identity the assets can be trusted
+    under. Reproduced: the newer file's stat was recorded with the older asset
+    set, and ``refresh=True``/``get_asset`` kept serving the stale one.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    index._CACHE.clear()
+
+    raced = tmp_path / "raced.txt"
+    raced.write_text("x")
+    newer = _payload_with_extra(root, raced)
+    newer["sessions"] = {
+        **index._load(index.index_path(root))["sessions"],
+        **newer["sessions"],
+    }
+    real_build_assets = index._build_assets
+    fired: list[int] = []
+
+    def racing_build_assets(sessions):
+        assets = real_build_assets(sessions)
+        if not fired:
+            fired.append(1)
+            index._write(index.index_path(root), newer)
+        return assets
+
+    monkeypatch.setattr(index, "_build_assets", racing_build_assets)
+    index.build_catalog(root, budget_s=None)
+
+    assert fired, "the racing writer must have fired"
+    assert index._cached(index._cache_key(root)) is None, "stale assets must not be cached"
+    raced_id = identity.asset_id(identity.key_for(str(raced), None))
+    assert any(asset.id == raced_id for asset in index.catalog_for_read(root).assets)
+    assert service.get_asset(root, raced_id)["name"] == "raced.txt"
+
+
+def test_a_truncated_partial_index_is_not_ready_even_when_its_rows_are(
+    tmp_path, monkeypatch
+) -> None:
+    """A budget-limited build can persist only complete entries and stop early.
+
+    ``sessions_scanned == sessions_total`` is not proof of completeness; the
+    top-level flag is. An index predating the flag is treated as building too,
+    so it gets rebuilt rather than served as ready.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    session(root, OTHER, write_rows("w2", 2, tmp_path / "b.txt"))
+    index.build_catalog(root, budget_s=None)
+    index._CACHE.clear()
+    path = index.index_path(root)
+    payload = index._load(path)
+    payload["sessions"] = {SESSION: payload["sessions"][SESSION]}
+    payload["complete"] = False
+    index._write(path, payload)
+
+    assert index.catalog_for_read(root).state == "building"
+
+    payload.pop("complete")
+    index._write(path, payload)
+    index._CACHE.clear()
+    assert index.catalog_for_read(root).state == "building"
