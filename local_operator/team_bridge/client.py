@@ -1436,7 +1436,6 @@ class TeamBridgeClient:
             params["limit"] = int(limit)
         return await self._send("GET", "/messaging/decisions", params=params, access=access)
 
-
     # -- conversations ------------------------------------------------------
     #
     # The conversation domain (docs/TEAM-BRIDGE-CONVERSATIONS.md): DMs, groups
@@ -1464,7 +1463,9 @@ class TeamBridgeClient:
             params["limit"] = int(limit)
         if before:
             params["before"] = before
-        return await self._send("GET", "/messaging/conversations", params=params or None, access=access)
+        return await self._send(
+            "GET", "/messaging/conversations", params=params or None, access=access
+        )
 
     async def conversation(
         self,
