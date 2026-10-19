@@ -1830,6 +1830,35 @@ class SyncEngine:
             logger.debug("credentials sync: copy request for %s failed", key, exc_info=True)
             return "offline"
         detail = reply.get("detail") if isinstance(reply, dict) else None
+        return self.apply_copy_reply(key, detail, owner=owner, held_gen=held_gen)
+
+    def apply_copy_reply(
+        self,
+        key: str,
+        detail: Any,
+        *,
+        owner: str,
+        held_gen: int = 0,
+    ) -> str:
+        """Validate and apply one ``net_broker kind=copy`` reply.
+
+        THE ONE APPLY PATH. The scheduled pull (``_pull_blocking``) and the
+        CLI's direct fallback (``MeshCredentialClient.pull_copy_sync``) both end
+        here, so a value applied by a ``--repair`` and one applied by the tick
+        go through the same digest check, the same monotonicity rule, the same
+        provenance write, the same ack and the same evidence row. A second copy
+        of this sequence is how the two diverge on the day one of them is fixed.
+
+        Returns the same bounded outcome words ``_pull_blocking`` documents.
+        """
+        from local_operator.network.credentials import mcp_state
+
+        document = self._placement()
+        if document is None:
+            return ""
+        entry = document.entry(key)
+        if entry is None or str(entry.owner_device) != owner:
+            return "refused:not_a_holder"
         if not isinstance(detail, dict) or str(detail.get("kind") or "") != "copy":
             logger.debug("credentials sync: copy for %s answered %s", key, detail)
             code = str(detail.get("code") or "") if isinstance(detail, dict) else ""
@@ -1900,8 +1929,6 @@ class SyncEngine:
             detail={"credential_key": key, "act": self._self_device, "sub": owner, "gen": served},
         )
         self._send_ack(document.network_id, owner, key, served, reply_digest)
-        from local_operator.network.credentials import mcp_state
-
         # A SUCCESSFUL COPY APPLY IS A SYNCED STATE: it is the one durable proof
         # this device has that the key resolves here, and it replaces an older
         # expired/unauthorized/revoked row that the new value just disproved.
@@ -2077,6 +2104,11 @@ class SyncEngine:
         """Tell the owner what this device holds now. Best effort, never blocking."""
         if gen <= 0 or not digest:
             return
+        if self._server is None:
+            # The CLI's direct fallback has a client dialer but no relay server:
+            # the value is applied and recorded, and the owner's ledger closes on
+            # its next announce (the recompute-on-contact rule, §5.1).
+            return
         link = self._server._ensure_link(owner)  # noqa: SLF001 — the one dial seam
         if link is None:
             return
@@ -2180,6 +2212,17 @@ def install() -> None:
     """
     from local_operator.network import definitions
 
+    # INDEPENDENT OF net_definitions, DELIBERATELY (measured on cloud-node-1).
+    # ``credentials_sync_step`` was registered as an ordinary sibling, so the
+    # dispatcher ran it only AFTER the ``net_definitions`` capability gate — and
+    # ``net_definitions`` maps to ``admin``. A member on the ``drive`` role (the
+    # live node's row: ``drive broker_credential list move prompt slash steer
+    # stop view``) therefore never ran the credential cadence at all: the
+    # definitions arrived through the on-demand push while every adopted secret
+    # sat at ``not yet synced (gen 1)`` forever. The step's own gate is
+    # ``net_broker``/``broker_credential`` and stays — credentials have never
+    # required definitions authority, and the two capabilities are independent.
+    setattr(credentials_sync_step, "independent_cadence", True)
     definitions.add_tick_step(credentials_sync_step)
 
 

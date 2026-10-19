@@ -9386,6 +9386,45 @@ def _credential_states(root: Path) -> dict[str, dict[str, Any]]:
         return {}
 
 
+def _direct_copy_pull(root: Path, key: str) -> dict[str, Any]:
+    """Pull one copy WITHOUT the relay's new local op — the downgrade path.
+
+    WHY: a branch CLI can meet a relay that predates ``credential_sync_pull`` (the
+    live 0.82.3 node is exactly that). Refusing the repair there would mean an
+    operator cannot fix a member without first replacing the relay, which is not
+    the deployment the branch is meant to work against. So the CLI builds a
+    relay object that is NEVER STARTED (no listener, no control socket) purely as
+    a dialer, asks the owner itself, and applies through the same engine.
+
+    BOUNDED AND LOCAL: ``pull_copy_sync`` refuses without a dial when this device
+    is not a holder or owns the key, so a zero-peer device and an own key never
+    open a socket. The one link this may open is closed before returning.
+    """
+    from local_operator.network import relay as relay_mod
+    from local_operator.network.credentials import client as client_mod
+
+    server = None
+    try:
+        # ``RelayServer`` binds nothing until ``start()``; constructing it is how
+        # this process gets the mesh's ONE handshake/dial implementation instead
+        # of a second one written here (``_ask_owner_directly`` states the same
+        # rule on the client side).
+        server = relay_mod.RelayServer(root=root)
+        client = client_mod.MeshCredentialClient.for_this_device(root, relay=server)
+        if client is None:
+            return {"ok": False, "state": "unknown", "code": "no_placement"}
+        return client.pull_copy_sync(key)
+    except Exception as exc:  # noqa: BLE001 — reported per key, never fatal
+        return {"ok": False, "state": "unknown", "code": exc.__class__.__name__}
+    finally:
+        if server is not None:
+            for link in list(getattr(server, "links", {}).values()):
+                try:
+                    link.close("cli-pull-done")
+                except Exception:  # noqa: BLE001 — teardown must not mask the result
+                    pass
+
+
 def _member_repair_receipt(
     root: Path, servers: Sequence[Mapping[str, Any]]
 ) -> dict[str, dict[str, Any]]:
@@ -9480,6 +9519,12 @@ def _member_repair_receipt(
             try:
                 detail = _relay_answer("credential_sync_pull", timeout=30.0, credential_key=key)
             except MeshRefusal as exc:
+                if exc.code in ("relay_unavailable", "unknown_op"):
+                    # AN OLD RELAY IS NOT A DEAD END (see ``_direct_copy_pull``).
+                    result = _direct_copy_pull(root, key)
+                    receipt["pulled"].append({"key": key, **result})
+                    receipt["fallback"] = True
+                    continue
                 receipt["pulled"].append({"key": key, "ok": False, "code": exc.code})
                 continue
             except Exception as exc:  # noqa: BLE001 — one key never aborts the rest

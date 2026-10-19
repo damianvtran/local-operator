@@ -153,9 +153,20 @@ def _server_row(
         for field in ("env", "headers")
         if isinstance(getattr(cfg, field, None), Mapping) and getattr(cfg, field)
     }
+    has_refs = bool(field_bindings or raw_fields)
+    # A PLACEMENT ROW IS NOT PROOF OF OAUTH. ``--repair`` mints an ``mcp:<url>``
+    # entry for a header/env server too (it is how the holder population is
+    # addressed), so treating its presence as OAuth classified slack as an OAuth
+    # server and IGNORED its ``Authorization`` reference — the status then said
+    # "needs sign-in" for a server whose key was simply not copied yet. The
+    # config's own ``auth.type``, or a live OAuth grant on a server that declares
+    # no references, is the distinguishing fact.
+    oauth_shape = bool(url) and (
+        auth_type == "oauth" or (grant_live and not has_refs)
+    )
     shape = (
         "oauth"
-        if (url and (auth_type == "oauth" or grant_live or placement))
+        if oauth_shape
         else (
             "header-ref"
             if "headers" in field_bindings or "headers" in raw_fields

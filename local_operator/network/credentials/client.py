@@ -204,12 +204,20 @@ class MeshCredentialClient:
         self.deadline_s = deadline_s
         self.grants = GrantCache()
         self._state_lock = threading.Lock()
+        #: The sync engine used by the CLI's direct fallback. Built lazily; the
+        #: runtime never reaches it (it asks its own relay, leg 1).
+        self._engine: Any = None
 
     # -- construction -------------------------------------------------------
 
     @classmethod
     def for_this_device(
-        cls, root: Path | None = None, network_id: str = "", *, include_bridged: bool = False
+        cls,
+        root: Path | None = None,
+        network_id: str = "",
+        *,
+        include_bridged: bool = False,
+        relay: Any = None,
     ) -> MeshCredentialClient | None:
         """A runtime-side client, or ``None`` when this device may borrow nothing.
 
@@ -240,6 +248,10 @@ class MeshCredentialClient:
             network_id=network_id or found_network,
             placement=document,
             state=PlacementState.load(network_id or found_network, root),
+            # The CLI's direct fallback passes a relay it built for ONE dial (see
+            # ``pull_copy_sync``); every runtime caller keeps the default ``None``,
+            # where leg 1 goes through the control socket instead.
+            relay=relay,
         )
 
     @classmethod
@@ -525,6 +537,15 @@ class MeshCredentialClient:
         state = mcp_state.state_for_code(error.code)
         if not state:
             return
+        if state == "revoked" and not self._has_prior_claim(key):
+            # A COLD "not a holder" IS NOT A REVOCATION (requirement-6 inversion).
+            # A server that was just mirrored, or one whose share has not arrived,
+            # answers ``not_a_holder`` before any dial because ``should_borrow`` is
+            # false. Recording ``revoked`` there made the status say access had
+            # been withdrawn for a server nobody ever shared — the exact opposite
+            # of ``not_yet_synced`` / ``needs_operator_login``. Only a device that
+            # HAD a claim (a cached grant or an existing evidence row) can lose it.
+            return
         mcp_state.record(
             self.network_id,
             key,
@@ -534,6 +555,15 @@ class MeshCredentialClient:
             owner_name=error.owner_device_name or self.owner_label(key),
             root=self.root,
         )
+
+    def _has_prior_claim(self, key: str) -> bool:
+        """Whether this device ever held a claim on ``key``: a grant or evidence."""
+        if self.grants.peek(key, "") is not None:
+            return True
+        try:
+            return bool(mcp_state.load(self.network_id, self.root).get(key))
+        except Exception:  # noqa: BLE001 — unknown is not a claim
+            return False
 
     def _save_state(self) -> None:
         try:
@@ -987,6 +1017,113 @@ class MeshCredentialClient:
             for key, entry in document.entries.items()
             if entry.owner_device != self.self_device and entry.is_holder(self.self_device)
         }
+
+    def _auth_store(self) -> Any:
+        """This root's credential database, explicitly — see :meth:`_sync_engine`."""
+        from local_operator.providers.auth_store import AuthStore
+
+        return AuthStore(db_path=self.root / "auth.db", config_dir=self.root)
+
+    def _sync_engine(self) -> Any:
+        """The engine the direct fallback applies through. Built once, lazily."""
+        if self._engine is None:
+            from local_operator.network.credentials import sync as sync_mod
+
+            # THE STORE IS ROOTED EXPLICITLY. ``SyncEngine``'s default store derives
+            # its database from the AMBIENT config dir (``AuthStore`` defaults
+            # ``db_path`` to ``default_db_path()``), so a CLI working under an
+            # injected root would apply the copy into the operator's own store — or,
+            # in a test, into whichever store happens to exist outside the root.
+            self._engine = sync_mod.SyncEngine(
+                self._relay,
+                root=self.root,
+                self_device=self.self_device,
+                self_device_name=self._self_label(),
+                auth_store_factory=self._auth_store if self.root is not None else None,
+            )
+        return self._engine
+
+    def pull_copy_sync(self, key: str) -> dict[str, Any]:
+        """Pull ONE copy from its owner over ``net_broker kind=copy``, directly.
+
+        THE CLI'S FALLBACK PATH, and why it exists: a branch CLI talking to an
+        older relay (or any relay without the local ``credential_sync_pull`` op)
+        must still repair a member. The client built for this call holds a relay
+        object for ONE dial (``for_this_device(..., relay=...)``), asks the owner
+        itself, and applies the reply through the SAME ``SyncEngine.apply_copy_reply``
+        the tick uses — same digest check, same monotonicity rule, same evidence.
+
+        NO DIAL when it cannot help: not a holder, a key this device owns, or a
+        broker-only key all answer locally. The receipt is ``{ok, state, code}``,
+        the same three fields ``pull_now`` answers, and no value crosses it.
+        """
+        from local_operator.network.credentials import mcp_state, sync as sync_mod
+
+        placement = self.placement
+        entry = placement.entry(key) if placement is not None else None
+        if entry is None or not entry.is_holder(self.self_device):
+            # A placement fact, not something to ask the owner about. The state is
+            # ``revoked`` only for a device that had a claim; a cold device gets
+            # ``unknown`` and the status surface reads placement for itself.
+            return {
+                "ok": False,
+                "state": "revoked" if self._has_prior_claim(key) else "unknown",
+                "code": "not_a_holder",
+            }
+        owner = str(entry.owner_device)
+        if not owner or owner == self.self_device:
+            return {"ok": False, "state": "synced", "code": "local_owner"}
+        if not sync_mod.copies_by_class(str(entry.kind)):
+            return {"ok": False, "state": "unavailable", "code": "not_copyable"}
+        state = sync_mod.SyncState.load(placement.network_id, root=self.root)
+        held = state.applied_for(key) or {}
+        held_gen = int(held.get("gen") or 0)
+        reply = self._ask_owner_directly(
+            owner,
+            {
+                "op": PEER_BROKER_OP,
+                "kind": "copy",
+                "network_id": placement.network_id,
+                "from_device": self.self_device,
+                "from_device_name": self._self_label(),
+                "key": key,
+                "gen": 0,
+                "held": held_gen,
+            },
+        )
+        if reply is None:
+            mcp_state.record(
+                placement.network_id,
+                key,
+                state="unavailable",
+                code="owner_offline",
+                owner_device=owner,
+                owner_name=str(entry.owner_device_name or ""),
+                root=self.root,
+            )
+            return {"ok": False, "state": "unavailable", "code": "owner_offline"}
+        detail = reply.get("detail") if isinstance(reply, dict) else None
+        outcome = self._sync_engine().apply_copy_reply(
+            key, detail, owner=owner, held_gen=held_gen
+        )
+        if outcome in ("applied", "in_sync"):
+            return {"ok": True, "state": "synced", "code": ""}
+        if outcome.startswith("refused:"):
+            code = outcome.split(":", 1)[1]
+            mapped = mcp_state.state_for_code(code) or "unavailable"
+            if mapped == "revoked" and not self._has_prior_claim(key):
+                return {"ok": False, "state": "unknown", "code": code}
+            mcp_state.record(
+                placement.network_id,
+                key,
+                state=mapped,
+                code=code,
+                owner_device=owner,
+                owner_name=str(entry.owner_device_name or ""),
+                root=self.root,
+            )
+            return {"ok": False, "state": mapped, "code": code}
+        return {"ok": False, "state": "unknown", "code": "no_answer"}
 
     def revoke_local_grants(self, keys: list[str] | None = None) -> list[str]:
         """Drop every cached grant this device may no longer hold. Returns the keys.
