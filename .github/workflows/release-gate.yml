@@ -27,20 +27,23 @@
 # is NEW at the moment the push lands, and it asks for four runner slots
 # instead of thirty, so it is served while the big matrix is still queued.
 #
-# The durable reason is CREATION ORDER, and it is a property of the workflow
-# graph rather than of GitHub's scheduler: this file's four jobs exist the
-# moment the push lands, while `ci.yml`'s heavy jobs are only CREATED after
-# that run's 13-second `changes` classifier has won a runner slot -- measured
-# p50 12.5 minutes, max 18.5. So the matrix's jobs enter the queue 12-18
-# minutes LATER than this file's do.
+# The structural difference is CREATION ORDER, and it is a property of the
+# workflow graph rather than of GitHub's scheduler: this file's four jobs
+# EXIST the moment the push lands, while `ci.yml`'s heavy jobs are only
+# CREATED after that run's 13-second `changes` classifier has won a runner
+# slot -- measured p50 12.5 minutes, max 18.5. So the matrix's heavy jobs
+# enter the queue 12-18 minutes LATER than this file's do, and a queued
+# `ci.yml` run is a run whose heavy jobs DO NOT EXIST YET.
 #
-# AND WHAT THAT IS WORTH WAS MEASURED, because it is smaller than it sounds.
-# This file was run for real on a saturated account (40 of 40 slots running,
-# 81 queued): its four jobs were created at 21:48:27Z and the first started at
-# 22:00:41Z -- a 12.2 minute wait, and the remaining legs 13.0, 13.8 and
-# 14.9 minutes. Creation order does NOT buy priority when the pool is full;
-# the gate waited about the median age of the standing backlog. The win is
-# the SLOT COUNT and the SCOPE, not the order:
+# AND WHAT THAT IS WORTH WAS MEASURED, because it is smaller than it sounds
+# and it is not priority. This file was run for real on a saturated account
+# (40 of 40 slots running, 81 queued): its four jobs were created at
+# 21:48:27Z and the first started at 22:00:41Z -- a 12.2 minute wait, and
+# the remaining legs 13.0, 13.8 and 14.9 minutes. Creation order buys a place
+# in the queue, NOT a runner: the gate waited 12.2 minutes while the median
+# queued RUN was 22.6 minutes old, and every one of those queued `ci.yml`
+# runs still had its heavy jobs uncreated. The win is therefore the SLOT
+# COUNT and the SCOPE, and the order is the mechanism, not the benefit:
 #
 #   - this file asks for four slots and the matrix asks for about thirty, so
 #     when slots do free, the gate drains in under two minutes of work where
@@ -90,7 +93,9 @@
 #   - LATENCY: this file's jobs are CREATED the moment the push lands, while
 #     `ci.yml`'s heavy jobs are only created after that run's 13-second
 #     `changes` classifier wins a runner slot (measured p50 12.5 minutes), so
-#     the gate's verdict arrives while the matrix is still queued.
+#     the gate's verdict arrives while the matrix is still queued -- and the
+#     matrix's own jobs do not exist yet. That is a queue-position advantage,
+#     not priority: the gate still waited 12.2 minutes for its first slot.
 #   - THE RELEASE BRANCH: `ci.yml`'s push list is `[main]` only, so on
 #     `release-next*` it runs nothing at all. This file is the only CI the
 #     release branch has, and the bump is amended there.
