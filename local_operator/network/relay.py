@@ -1673,9 +1673,7 @@ def remove_member(
     try:
         from local_operator.network.credentials import mcp_state, placement
 
-        pruned = placement.revoke_device_everywhere(
-            record.network_id, device_id, root=root, by=by
-        )
+        pruned = placement.revoke_device_everywhere(record.network_id, device_id, root=root, by=by)
         # Evidence about a login that belonged to the removed device is gone with
         # it: a status surface must not keep naming an owner nobody can reach.
         # Unconditional on ``pruned`` — a device that held no placement row can
