@@ -59,7 +59,11 @@ def test_dry_run_is_default_deletes_nothing_and_echoes_the_filter(rig):
     assert "Filter: scope global · older than 30d" in text
     assert "3 match(es) of 4 fact(s) in global (75%)" in text
     assert "Nothing was deleted." in text
-    assert "To forget exactly these 3 fact(s), run:" in text
+    # 3 of 4 is above the guard: the confirmation must be marked as needing
+    # --force, never presented as a paste-and-run line.
+    assert "To forget exactly these" not in text
+    assert "add --force to the command below" in text
+    assert "cannot be undone" in text
     assert statuses(store, matched) == ["active", "active", "active"]
     assert store.show("global", keep["id"])["status"] == "active"
 
@@ -162,6 +166,14 @@ def test_whole_scope_match_is_refused_without_force_then_allowed_with_it(rig):
     root, identity, session_dir, store = rig
     matched = [old_fact(store, f"Old personal note {index}") for index in range(2)]
 
+    text, failed = human("forget --scope global --older-than 30d", root, identity, session_dir)
+    assert not failed
+    # Every fact is in scope, so the command is guarded: the guidance sits beside
+    # the line and the line is never labelled as directly runnable.
+    assert "To forget exactly these" not in text
+    assert "add --force to the command below" in text
+    assert "This removes 2 of 2 fact(s)" in text and "cannot be undone" in text
+
     preview = payload(
         "forget --scope global --older-than 30d",
         root,
@@ -198,6 +210,12 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
         session_dir,
         prefix="lop memory",
     )
+    guarded_text, failed = human(
+        "forget --scope global --older-than 30d", root, identity, session_dir
+    )
+    assert not failed
+    assert "To forget exactly these" not in guarded_text
+    assert "add --force to the command below" in guarded_text
     # 4 of 6 is above half: the guard must refuse without --force.
     assert preview["count"] == 4 and preview["total"] == 6
     assert preview["guarded"] is True and "--force" not in preview["confirm"]
@@ -225,6 +243,14 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
     )
     assert allowed["count"] == 2 and allowed["total"] == 4
     assert allowed["guarded"] is False and "--force" not in allowed["confirm"]
+    # Exactly half is unguarded, so the paste-ready label is back and carries no
+    # --force caveat.
+    allowed_text, failed = human(
+        "forget --scope global --older-than 30d", root, identity, session_dir
+    )
+    assert not failed
+    assert "To forget exactly these 2 fact(s), run:" in allowed_text
+    assert "add --force to the command below" not in allowed_text
     confirmed, failed = human(allowed["confirm"][len("lop memory ") :], root, identity, session_dir)
     assert not failed and "Forgotten 2 fact(s)" in confirmed
     assert statuses(store, old[2:]) == ["forgotten", "forgotten"]
@@ -232,7 +258,7 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
 
 def test_preview_refuses_above_the_bulk_cap(rig):
     root, identity, session_dir, store = rig
-    old = [old_fact(store, f"Old personal note {index}") for index in range(201)]
+    old = [old_fact(store, f"Old personal note {index}", tags=["stale"]) for index in range(201)]
     store.put("global", {"title": "Recent note", "body": "Note"})
 
     text, failed = human("forget --scope global --older-than 30d", root, identity, session_dir)
@@ -242,6 +268,28 @@ def test_preview_refuses_above_the_bulk_cap(rig):
     assert failed
     assert "201 fact(s)" in text and "at most 200" in text
     assert "Narrow the filter" in text and "chunks" in text
+    # --older-than already produced this selection: offering it again is circular.
+    assert "add --tag or --title-matches" in text
+    assert "add --older-than" not in text
+
+    # With --tag also applied, only the unapplied flag is offered.
+    tagged_text, failed = human(
+        "forget --scope global --older-than 30d --tag stale", root, identity, session_dir
+    )
+    assert failed
+    assert "add --title-matches" in tagged_text
+    assert "add --tag" not in tagged_text and "add --older-than" not in tagged_text
+
+    # Every narrowing flag applied: name none of them, and say what remains.
+    all_text, failed = human(
+        "forget --scope global --older-than 30d --tag stale --title-matches 'Old personal note'",
+        root,
+        identity,
+        session_dir,
+    )
+    assert failed
+    assert "Every narrowing flag" in all_text and "tighten those values" in all_text
+    assert "add --" not in all_text
     assert statuses(store, old) == ["active"] * 201
 
     # Exactly the cap still previews, and its command is runnable.
