@@ -170,6 +170,14 @@ def new_project() -> Msg:
     return Msg("tui.projects.new_project", {})
 
 
+def notice_read_only() -> Msg:
+    return Msg("tui.projects.notice_read_only", {})
+
+
+def refusal_done_gate(*, names: str) -> Msg:
+    return Msg("tui.projects.refusal_done_gate", {"names": names})
+
+
 def render_filed_by(*, ids: str, more: str) -> Msg:
     return Msg("tui.projects.render.filed_by", {"ids": ids, "more": more})
 

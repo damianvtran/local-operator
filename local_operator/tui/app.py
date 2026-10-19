@@ -131,6 +131,9 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_library
+from local_operator.i18n.keys import tui_projects as _pc
+from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
 
@@ -427,6 +430,12 @@ from local_operator.tui.widgets.harness_import_view import (
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
+from local_operator.tui.widgets.library_view import (
+    LibraryView,
+    LibraryViewAskRequested,
+    LibraryViewDismissed,
+    LibraryViewLibrarianRequested,
+)
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
@@ -450,8 +459,11 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsViewAttachmentPreviewRequested,
     ProjectsViewComposeChanged,
     ProjectsViewDismissed,
+    ProjectsViewEditSubmitted,
     ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
+    ProjectsViewMilestoneAddedRequested,
+    ProjectsViewMilestoneRemoved,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
     ProjectsViewSendRequested,
@@ -559,6 +571,14 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The projects edit slice's copy (LOH-19 P2). The app composes exactly two of
+#: its sentences — the "project vanished mid-write" refusals that only the
+#: write's own KeyError can produce; every other sentence belongs to the page.
+_te_projects_edit = tr("tui.projects_edit")
+#: The projects page's shared vocabulary. The app composes exactly one of its
+#: sentences — the EDIT form's done-gate refusal — because the store's own
+#: exception is raised HERE, in the write handler (UX round 1, U4).
+_te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
@@ -6167,12 +6187,21 @@ class OperatorApp(App[None]):
         # it exactly like its siblings.
         self._schedule_view: Any | None = None
         self._schedule_focus_restore: Any | None = None
+        # The library mode (``/library``): the same full-page MODE contract,
+        # fed by THIS machine's global asset catalog through a worker. Held
+        # here so teardown and the Esc chain close it exactly like its
+        # siblings — a catalog read left mounted behind a session swap would
+        # keep its worker pointed at the previous config root.
+        self._library_view: Any | None = None
+        self._library_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
         # yield close it the same way, and ``_sync_boot_layout_class`` counts
         # it against the boot layout.
         self._projects_view: Any | None = None
+        self._agent_form: Any | None = None
+        self._agent_form_focus_restore: Any | None = None
         #: The KEY of a ``/settings`` page write this pane could not loosen — the
         #: gate belongs to an attached runtime. Read and cleared by the page right
         #: after its save (`_take_page_kept_loosening`), because
@@ -9658,6 +9687,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_agent_form()
             self._close_projects_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
@@ -11305,6 +11335,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_agent_form()
             self._close_projects_view()
         self._set_sidebar_open(not self._session_sidebar.display)
 
@@ -16443,6 +16474,7 @@ class OperatorApp(App[None]):
         self._close_settings_view()
         # The projects page hides that same region, so it cannot outlive the
         # conversation either.
+        self._close_agent_form()
         self._close_projects_view()
         # The aside goes too, and this is the general form of the interrupt
         # case. It is a question ABOUT a conversation that is being replaced,
@@ -20525,6 +20557,18 @@ class OperatorApp(App[None]):
             logger.debug("projects: associated set failed", exc_info=True)
             return frozenset()
 
+    def _projects_read_only(self) -> bool:
+        """Whether this session may WRITE projects (QA round 1, Q1).
+
+        A follower's runtime lives on another device: the projects this page
+        lists come from the OWNER's machine, and a write from here would land
+        in a store that does not own the project (measured: a follower edit,
+        add and remove all persisted). ``_is_viewer`` is the same predicate the
+        rest of the app uses for a non-owning session, and a bare terminal
+        with no session is False — locally writable, as it always was.
+        """
+        return _is_viewer(self._session)
+
     def _projects_payload(self) -> list[Any]:
         """Compose every project's view ONCE — the page's whole data input.
 
@@ -20978,11 +21022,11 @@ class OperatorApp(App[None]):
         return choices
 
     def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
-        """Rows for the ``/agent <…>`` list: agent NAMES first, then the reserved verb.
+        """Rows for ``/agent <…>``: profile NAMES first, then reserved verbs.
 
-        The ``/team`` ordering rule, applied to this command's one reserved
-        first token. In the first slot the agent NAMES come first and the
-        reserved ``class`` row is appended AFTER them: ``argument_suggestions``
+        The ``/team`` ordering rule, applied to ``class``, ``new`` and ``edit``.
+        In the first slot the profile NAMES come first and the reserved
+        rows are appended AFTER them: ``argument_suggestions``
         returns rows in list order for an empty query, so a bare ``/agent `` +
         Tab completes the sole (or first) AGENT — the common action is
         attaching/messaging — and the verb can never be what Tab silently
@@ -21001,9 +21045,9 @@ class OperatorApp(App[None]):
         strip removes exactly one and the doubled form resolves the literal
         name.
 
-        Once ``class `` is in the buffer the second slot re-offers the profile
-        names as ``class <name>`` compounds, which complete to the report
-        form.
+        ``class `` and ``edit `` re-offer names in their second slot; ``new ``
+        offers none, since its draft is entered on the form, not the command.
+        Names in the second slot need escaping only when they begin with `=`.
         """
         from local_operator.tui.widgets.command_picker import slash_argument
 
@@ -21020,7 +21064,9 @@ class OperatorApp(App[None]):
         if not space:
             rows: list[ArgumentChoice] = []
             for choice in names:
-                if choice.name.casefold() == "class" or choice.name.startswith("="):
+                if choice.name.casefold() in {
+                    word for word, _help in agent_subcommand_rows()
+                } or choice.name.startswith("="):
                     # The escape row. Two cases, one shape: completing a bare
                     # `class` would route to the subcommand, and completing a
                     # name that already starts with `=` would resolve its
@@ -21043,7 +21089,7 @@ class OperatorApp(App[None]):
                 for word, help_text in agent_subcommand_rows()
             )
             return rows
-        if first.casefold() not in {word for word, _help in agent_subcommand_rows()}:
+        if first.casefold() not in {"class", "edit"}:
             return []
         return [
             ArgumentChoice(
@@ -21197,6 +21243,10 @@ class OperatorApp(App[None]):
             # profile can find their way back to base instructions without
             # guessing.
             out.append(Text(_t(_x.skills_detach_agent()), style=body))
+            from local_operator.i18n.keys import tui_authoring as author_keys
+            from local_operator.i18n.text import tr as author_tr
+
+            out.append(Text(author_tr("tui.authoring")(author_keys.footer()), style=body))
         return RichBlock(Group(*out))
 
     def _sync_agent_band(self) -> None:
@@ -21321,7 +21371,7 @@ class OperatorApp(App[None]):
             return
         # The first argument token is a small RESERVED subcommand namespace,
         # exactly as `/team` reserves `chart` and `/aida` reserves pause/resume/
-        # status. One reserved word: `class`, the R36 proactive-class switch.
+        # status. `class` switches policy; `new` and `edit` open authoring.
         # It wins in first position, with the two `/team` escape hatches —
         # `/agent class class <cls>` switches an agent literally named `class`
         # (the second token is the name), and a leading `=` on the name
@@ -21332,8 +21382,24 @@ class OperatorApp(App[None]):
         # (`/agent ==foo` reaches the profile literally named `=foo`; review
         # round 4, R4-2: the escape is positional, not a charset restriction).
         first, _, rest = arg.partition(" ")
-        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+        verb = first.strip().casefold()
+        if verb == "class":
             self._cmd_agent_class(rest.strip(), notice)
+            return
+        if verb in ("new", "edit"):
+            from local_operator.i18n.keys import tui_authoring as author_keys
+            from local_operator.i18n.text import tr as author_tr
+
+            translate = author_tr("tui.authoring")
+            if (verb == "new" and rest.strip()) or (verb == "edit" and not rest.strip()):
+                self._system_notice(
+                    translate(
+                        author_keys.usage_new() if verb == "new" else author_keys.usage_edit()
+                    ),
+                    "warning",
+                )
+                return
+            self._open_agent_form(None if verb == "new" else rest.strip().removeprefix("="))
             return
         name, _, request = arg.partition(" ")
         name = name.strip()
@@ -21462,9 +21528,18 @@ class OperatorApp(App[None]):
             # later turns, not merely "is active"), and borrow /team's "ready"
             # idiom so the two surfaces read as siblings. Plain wording, no
             # em dashes. /agent clear detaches it again.
+            # The receipt must suggest an invokable literal name, using the
+            # same one-leading-`=` grammar as the picker and attach parser.
+            resolved_name = str(resolved)
+            escaped = (
+                f"={resolved_name}"
+                if resolved_name.casefold() in {word for word, _help in agent_subcommand_rows()}
+                or resolved_name.startswith("=")
+                else resolved_name
+            )
             notice(
                 f"agent {resolved} is ready and now governs this session's replies. "
-                f"Send a request with /agent {resolved} <message>, or /agent clear to detach."
+                f"Send a request with /agent {escaped} <message>, or /agent clear to detach."
             )
             return
         # `_submit_prompt` writes the user row (the message is what the newly
@@ -24136,7 +24211,11 @@ class OperatorApp(App[None]):
         if name in _FRONTEND_LOCAL_SLASHES:
             return False
         head = arg.partition(" ")[0].strip().casefold()
-        if (name == "model" and head == "default") or (name == "team" and head == "chart"):
+        if (
+            (name == "model" and head == "default")
+            or (name == "team" and head == "chart")
+            or (name == "agent" and head in {"new", "edit"})
+        ):
             return False
         # These bare forms only read the cold projection or open local UI.
         # New owner commands conservatively wait unless explicitly classified
@@ -25186,6 +25265,7 @@ class OperatorApp(App[None]):
                 # must not depend on that side effect, or a future focusable
                 # mode rebuilds the hole (agent review round 1, finding 11).
                 or self._projects_view is not None
+                or self._agent_form is not None
                 or self._key_prompt is not None
             ):
                 return True
@@ -25556,6 +25636,16 @@ class OperatorApp(App[None]):
         already exists for "the user is done with this card": it discards the
         aside and hands back the main-chat draft it borrowed.
         """
+        if self._agent_form is not None:
+            # A form draft belongs to its editor, not the conversation's exit
+            # ladder. Repeated Ctrl+C must not turn a discard question into an
+            # implicit yes or arm a later process exit behind that question.
+            self._last_interrupt_at = 0.0
+            if self._exit_hint is not None:
+                self._transcript_view().remove_block(self._exit_hint)
+                self._exit_hint = None
+            self._agent_form.action_cancel_request(keep_confirm=True)
+            return
         if self._sidebar_navigation.requested_id:
             self._sidebar_navigation.cancel()
             return
@@ -25608,6 +25698,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_agent_form()
             self._close_projects_view()
             self._close_aside()
             # Same two lines the draft and barren-click rungs run for the same
@@ -25777,6 +25868,7 @@ class OperatorApp(App[None]):
         # behind it, where the hidden transcript cannot show it — while a second
         # press quit the app: a silent dead end (QA round 1, Q1 / review
         # finding 1).
+        self._close_agent_form()
         self._close_projects_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
@@ -25991,6 +26083,9 @@ class OperatorApp(App[None]):
         # caret while composing, so the key arrives HERE rather than at the
         # page's own binding, and closing the page instead would throw away a
         # draft the band promises to keep (`esc cancel`).
+        if self._agent_form is not None:
+            self._agent_form.action_cancel_request()
+            return
         if self._projects_view is not None and self._projects_view.escape_surface():
             return
         if self._close_projects_view():
@@ -26539,6 +26634,7 @@ class OperatorApp(App[None]):
         # the one thing a user must not be able to miss.
         self._close_settings_view()
         # The projects page too — the same region, the same reason.
+        self._close_agent_form()
         self._close_projects_view()
         # The aside yields for the identical reason, one layer up: the card
         # floats OVER the transcript, so the question would be drawn behind it
@@ -26717,6 +26813,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_agent_form()
         self._close_projects_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
@@ -29438,6 +29535,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_agent_form()
         self._close_projects_view()
         # Same rule for the aside card, and the same sentence: Ctrl+L acts on
         # the CONVERSATION, and the aside is a floating question about it that
@@ -30080,9 +30178,11 @@ class OperatorApp(App[None]):
             and self._subagent_view is None
             and self._org_chart_view is None
             and self._projects_view is None
+            and self._agent_form is None
             and self._import_view is None
             and self._review_view is None
             and self._schedule_view is None
+            and self._library_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -36083,6 +36183,7 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        self._close_agent_form()
         comms = getattr(self._session, "_subagent_comms", None)
         node_lookup = getattr(comms, "node", None)
         node = node_lookup(job_id) if callable(node_lookup) else None
@@ -36280,6 +36381,7 @@ class OperatorApp(App[None]):
         # Conversation boot needs the dismissal message, not the optional
         # renderer. Import before registry/focus/layout work so a first-use
         # import failure remains observable without leaving a half-entered mode.
+        self._close_agent_form()
         from local_operator.tui.widgets.org_chart_view import OrgChartView
 
         registry = self._team_registry()
@@ -36407,6 +36509,7 @@ class OperatorApp(App[None]):
         Its data loading is async in the widget's own worker, so the first
         frame is the loading state rather than a blocked app.
         """
+        self._close_agent_form()
         if self._import_view is not None:
             return
         if self._settings_view is not None:
@@ -36480,6 +36583,7 @@ class OperatorApp(App[None]):
         loading is async in the widget's own worker, so the first frame is the
         loading state rather than a blocked app.
         """
+        self._close_agent_form()
         if self._review_view is not None:
             return
         if self._settings_view is not None:
@@ -36557,6 +36661,7 @@ class OperatorApp(App[None]):
         page reads the live scheduler synchronously, so its first frame is the
         populated (or empty) list rather than a loading state.
         """
+        self._close_agent_form()
         if self._schedule_view is not None:
             return
         if self._settings_view is not None:
@@ -36622,6 +36727,220 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_schedule_view()
 
+    # -- the library page (``/library``) -----------------------------------
+
+    def _cmd_library(self, notice: NoticeFn) -> None:
+        """``/library`` — open THIS machine's global asset catalog.
+
+        Frontend-LOCAL (see ``_FRONTEND_LOCAL_SLASHES``): the rows come from
+        this machine's session journals and metadata database, and the page's
+        writes (name, description, tags) land in that database. Routed to a
+        runtime it would paint a catalog belonging to the host the runtime
+        lives on while the user reads it here — the wrong-machine answer
+        ``/settings`` and ``/import`` refuse.
+
+        The PAGE is the receipt (the ``/settings`` rule): it replaces the
+        transcript region, so a notice printed behind it would only be read
+        after leaving.
+        """
+        self._open_library_view()
+
+    def _open_library_view(self) -> None:
+        """Enter the full-page library mode (idempotent while it is up).
+
+        The MODE contract is :meth:`_open_settings_view`'s, one sibling later:
+        capture focus, hide the transcript, mount before ``#input-dock``, add
+        the shared layout class, make the composer inert, then seed the page
+        BEFORE its deferred mount handler repaints. The page's own
+        :meth:`LibraryView.start` begins the worker here rather than in
+        ``on_mount`` so the first painted frame already says "reading the
+        library" instead of flashing an empty list for one tick.
+        """
+        if self._library_view is not None:
+            return
+        from local_operator.paths import config_dir
+
+        # One mode at a time: the settings page's close is the single teardown
+        # seam its siblings share, and it now closes this page too.
+        self._close_settings_view()
+        self._library_focus_restore = self.focused
+        view = LibraryView(config_dir())
+        self._library_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+        view.start()
+
+    def _close_library_view(self) -> bool:
+        """Leave the library mode and put the conversation back. True if open.
+
+        Mirror of :meth:`_close_schedule_view`: everything the mode changed is
+        restored here and nowhere else. The transcript was only hidden, so its
+        blocks, scroll position and any half-typed prompt come back exactly as
+        they were left.
+        """
+        view = self._library_view
+        if view is None:
+            return False
+        self._library_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._library_focus_restore
+        self._library_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_library_view_dismissed(self, message: LibraryViewDismissed) -> None:
+        """The page's ``esc`` hint was clicked — same exit as the key itself."""
+        message.stop()
+        self._close_library_view()
+
+    def on_library_view_ask_requested(self, message: LibraryViewAskRequested) -> None:
+        """``a`` — leave the page and seed the ONE composer with the asset.
+
+        The prompt names the asset by path where the index has one, because a
+        path is what the agent's own tools can read; a digest-only asset is
+        named by its opaque id instead of inventing a path it does not have
+        (``library_render.asset_prompt``). The draft is SEEDED, never sent:
+        the user still owns the question, and the ordinary composer decides
+        which conversation it starts or resumes.
+        """
+        message.stop()
+        if self._library_view is None:
+            return
+        from local_operator.i18n.keys import tui_library
+        from local_operator.tui import library_render
+
+        shape, values = library_render.ask_reference(message.row)
+        message_obj = (
+            tui_library.ask_prompt(**values)
+            if shape == "path"
+            else tui_library.ask_prompt_digest(**values)
+        )
+        prompt = tr("tui.library")(message_obj)
+        self._close_library_view()
+        try:
+            editor = self._editor()
+            # NEVER replace a draft the user already wrote. `a` is an
+            # insertion gesture on a shared composer, not a new conversation:
+            # the reference joins the existing words as a second paragraph,
+            # and the caret lands after it ready to send. Round 1 UX finding:
+            # `load_text` silently discarded a half-typed prompt.
+            existing = editor.text
+            editor.load_text(f"{existing.rstrip()}\n\n{prompt}" if existing.strip() else prompt)
+            editor.focus()
+        except Exception:  # noqa: BLE001 — the page already left; never strand it
+            logger.debug("library: seeding the composer failed", exc_info=True)
+
+    def on_library_view_librarian_requested(self, message: LibraryViewLibrarianRequested) -> None:
+        """``L`` — leave the page and open the Librarian's pinned conversation."""
+        message.stop()
+        if self._library_view is None:
+            return
+        self._close_library_view()
+        self._cmd_librarian("open", self._system_notice)
+
+    # -- the Librarian (``/librarian``) ------------------------------------
+
+    def _cmd_librarian(self, arg: str, notice: NoticeFn) -> None:
+        """``/librarian [status|pause|resume|run|open]`` — the Librarian's door.
+
+        The module itself belongs to the Librarian work package and is absent
+        on this branch, so the command is a thin, lazy bridge
+        (:mod:`local_operator.tui.librarian_control`): absent is a clear
+        sentence, a present package's own hooks do the work, and nothing here
+        implements organizing, a cadence or a taxonomy.
+
+        Frontend-LOCAL: ``pause``/``resume``/``run`` read and write THIS
+        machine's Librarian state, and ``open`` is a session transition like
+        ``/resume``. Routed to a remote runtime they would pause or organize
+        the wrong machine's library and then try to attach a conversation
+        nobody is sitting at.
+        """
+        from local_operator.tui import librarian_control
+
+        verb = arg.strip().casefold() or "status"
+        if verb not in librarian_control.VERBS:
+            notice(tr("tui.library")(tui_library.librarian_usage()), "warning")
+            return
+        if verb == "open":
+            self.run_worker(self._librarian_open(notice), group="librarian", exclusive=True)
+            return
+        self.run_worker(self._librarian_control(verb, notice), group="librarian", exclusive=True)
+
+    async def _librarian_control(self, verb: str, notice: NoticeFn) -> None:
+        from local_operator.tui import librarian_control
+
+        result = await librarian_control.call_async(verb)
+        if not result.available:
+            notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
+            return
+        if result.missing_hook:
+            notice(
+                tr("tui.library")(tui_library.librarian_hook_missing(hook=result.missing_hook)),
+                "warning",
+            )
+            return
+        if result.error:
+            notice(
+                tr("tui.library")(tui_library.librarian_error(error=result.error)),
+                "warning",
+            )
+            return
+        notice(tr("tui.library")(tui_library.librarian_status(state=result.state)))
+
+    async def _librarian_open(self, notice: NoticeFn) -> None:
+        """Open (creating on first use) the Librarian's pinned conversation.
+
+        ``/aida``'s shape one noun over: the module's ``ensure_session`` is the
+        ONE creator, and the app only switches to the id it returns through the
+        ordinary resume path. A package without the hook, or a refusal, is
+        answered with the module's own sentence — never a silent no-op.
+        """
+        from local_operator.tui import librarian_control
+
+        # Availability BEFORE the launcher check: a build without the package
+        # cannot open her whatever the launcher offers, and "needs a
+        # session-capable launcher" would send the reader to the CLI for a
+        # command that still would not exist there.
+        if librarian_control.module() is None:
+            notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
+            return
+        if self._resume_factory is None:
+            notice(tr("tui.library")(tui_library.librarian_no_launcher()), "warning")
+            return
+        session_id, reason = await librarian_control.ensure_session()
+        if session_id is None:
+            if not reason:
+                notice(tr("tui.library")(tui_library.librarian_unavailable()), "warning")
+            elif reason == "ensure_session":
+                notice(
+                    tr("tui.library")(tui_library.librarian_hook_missing(hook="ensure_session")),
+                    "warning",
+                )
+            else:
+                notice(
+                    tr("tui.library")(tui_library.librarian_open_failed(error=reason)),
+                    "warning",
+                )
+            return
+        self._resume_session(session_id, notice)
+
     def _cmd_settings(self, notice: NoticeFn) -> None:
         """``/settings`` — open the full-page settings surface.
 
@@ -36650,6 +36969,7 @@ class OperatorApp(App[None]):
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
         """
+        self._close_agent_form()
         if self._settings_view is not None:
             return
         from local_operator.config import ConfigManager
@@ -36845,6 +37165,7 @@ class OperatorApp(App[None]):
         self._close_schedule_view()
         self._close_review_view()
         self._close_import_view()
+        self._close_library_view()
         view = self._settings_view
         if view is None:
             return False
@@ -36902,6 +37223,129 @@ class OperatorApp(App[None]):
         self._close_settings_view()
 
     # -- the projects page (``/project show``) ------------------------------
+    def _open_agent_form(self, name: str | None = None) -> None:
+        """Profiles use the same full-page mount/restore contract as projects.
+
+        Only installed profile rows are editable. A packaged starter is a
+        discoverable template, not permission to create a shadow registry row.
+        """
+        from local_operator.agent_profiles import is_role, is_specialist, load_seed
+        from local_operator.harness.subagent import configured_effort_tiers
+        from local_operator.hub_sync.definition import definition_revision
+        from local_operator.i18n.keys import tui_authoring as keys
+        from local_operator.i18n.text import tr
+        from local_operator.tui.agent_authoring import AgentDraft
+        from local_operator.tui.widgets.agent_form import AgentFormPage
+
+        translate = tr("tui.authoring")
+        if self._projects_read_only():
+            self._system_notice(translate(keys.notice_read_only()), "warning")
+            return
+        registry = getattr(self._session, "agent_registry", None)
+        if registry is None:
+            self._system_notice(translate(keys.registry_missing()), "warning")
+            return
+        initial = None
+        revision = None
+        if name is not None:
+            try:
+                row = registry.get_agent_by_name(name)
+                data = registry.definition_revision_fields(str(row.id)) if row is not None else None
+            except Exception as exc:  # noqa: BLE001 — unreadable registry refuses, not a pump crash
+                self._system_notice(translate(keys.save_error(reason=str(exc))), "warning")
+                return
+            if row is None or not (is_role(row) or is_specialist(row)):
+                sentence = (
+                    keys.seed_not_installed()
+                    if load_seed(name) is not None
+                    else keys.missing(name=name)
+                )
+                self._system_notice(translate(sentence), "warning")
+                return
+            assert data is not None
+            revision = definition_revision("agent", str(row.id), data)
+            initial = AgentDraft(
+                **{
+                    **data,
+                    "tools": ", ".join(data["tools"] or []),
+                    "effort": data["effort"] or "inherit",
+                }
+            )
+        if self._agent_form is not None:
+            # Do not discard an existing draft when an integration invokes a
+            # second command while the full-page editor owns the keyboard.
+            self._agent_form.focus()
+            return
+        self._close_subagent_view()
+        self._close_org_chart_view()
+        self._close_import_view()
+        self._close_review_view()
+        self._close_schedule_view()
+        self._close_projects_view()
+        self._close_settings_view()
+        self._agent_form_focus_restore = self.focused
+        page = AgentFormPage(
+            initial,
+            tiers=tuple(configured_effort_tiers()),
+            on_submit=lambda plan, draft: self._save_agent_form(plan, draft, revision),
+            on_cancel=self._close_agent_form,
+            read_only=self._projects_read_only,
+        )
+        self._agent_form = page
+        self._transcript_view().display = False
+        self.screen.mount(page, before=self.query_one("#input-dock"))
+        self.screen.add_class(PROJECTS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_agent_form(self) -> bool:
+        page = self._agent_form
+        if page is None:
+            return False
+        self._agent_form = None
+        page.remove()
+        self.screen.remove_class(PROJECTS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._agent_form_focus_restore
+        self._agent_form_focus_restore = None
+        if restore is not None and restore.is_attached:
+            restore.focus()
+        else:
+            self._editor().focus()
+        return True
+
+    def _save_agent_form(self, plan: Any, draft: Any, revision: str | None) -> None:
+        """Refusals stay inline; the shared writer owns policy, CAS and prompts."""
+        from local_operator.hub_sync.definition import DefinitionRevisionMismatch
+        from local_operator.i18n.keys import tui_authoring as keys
+        from local_operator.i18n.text import tr
+        from local_operator.tools.agent_tool import AgentParams, write_profile
+
+        page = self._agent_form
+        if page is None or page.refuse_read_only():
+            return
+        translate = tr("tui.authoring")
+        registry = getattr(self._session, "agent_registry", None)
+        try:
+            creating = page.initial is None
+            payload = {"op": "create" if creating else "update", "name": draft.name, **plan.changes}
+            params = AgentParams(**payload)
+            write_profile(
+                registry, params, creating=creating, expected_definition_revision=revision
+            )
+        except DefinitionRevisionMismatch:
+            page.receipt(translate(keys.revision_changed()))
+            return
+        except (ValueError, OSError) as exc:
+            page.receipt(translate(keys.save_error(reason=str(exc))))
+            return
+        self._close_agent_form()
+        self._system_notice(translate(keys.saved(name=draft.name)))
+
     def _open_projects_view(
         self,
         *,
@@ -36924,6 +37368,7 @@ class OperatorApp(App[None]):
         view switch, zoom and cursor movement without ever re-reading, so a
         repaint costs no registry or filesystem I/O.
         """
+        self._close_agent_form()
         if self._projects_view is not None:
             if view is not None or associated is not None:
                 import time as _time
@@ -36939,6 +37384,7 @@ class OperatorApp(App[None]):
                     associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
                     own_session=self._own_session_id(),
+                    read_only=self._projects_read_only(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
@@ -36974,6 +37420,7 @@ class OperatorApp(App[None]):
             associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         # The start picker's rows ride the same seed (P5b): the page never reads
         # a registry, so the host hands them over while it is still building the
@@ -37075,6 +37522,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.set_start_rows(self._start_picker_rows())
 
@@ -37295,6 +37743,11 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        # The page already refuses the key; this is the boundary check that
+        # holds for a message already in flight (QA round 1, Q1) — a follower
+        # must not reach the store through ANY of this page's write paths.
+        if view.refuse_read_only():
+            return
         from local_operator.projects import MilestoneEdit, store_error_text
 
         try:
@@ -37320,6 +37773,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
 
     def _projects_manager_target(self) -> SendTarget | None:
@@ -37563,6 +38017,7 @@ class OperatorApp(App[None]):
         # page closes first, exactly as the `↵`-to-conversation jump does
         # (`on_projects_view_jump_requested`): a mode that hides the transcript
         # must be gone before the conversation it hid comes back.
+        self._close_agent_form()
         self._close_projects_view()
         self._resume_session(session_id, self._notice)
 
@@ -37892,6 +38347,8 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        if view.refuse_read_only():
+            return
         import time as _time
 
         from local_operator.projects import store_error_text
@@ -37915,8 +38372,148 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.form_created(project.id, project.title or project.name)
+
+    def on_projects_view_edit_submitted(self, message: ProjectsViewEditSubmitted) -> None:
+        """`ctrl+s` on the EDIT form: write ONLY the changed fields, then re-show.
+
+        The form's builder already diffed the values against the state it
+        opened on, and the store applies ``model_fields_set`` per field — so a
+        concurrent session's change to an untouched field survives this write
+        (the per-field last-writer-wins contract). A refusal stays IN the form,
+        under the field the store's exception names, with the draft intact.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        if view.refuse_read_only():
+            return
+        import time as _time
+
+        from local_operator.projects import ProjectDoneGateError, store_error_text
+        from local_operator.tui.projects_edit import refusal_field
+
+        try:
+            result = registry.update_project(message.project_id, message.edit)
+        except KeyError:
+            name = message.project_name or "that project"
+            view.show_form_refusal(
+                _te_projects_edit(_pe.refusal_project_gone_edit(name=name)), field="key"
+            )
+            return
+        except ProjectDoneGateError as exc:
+            # The store's own sentence ends with `pass force_done=true`, a
+            # parameter this form has no field for: a reader sent there has no
+            # route on this surface (UX round 1, U4). The form's copy names
+            # the milestones and stops at the actionable rule.
+            view.show_form_refusal(
+                _te_projects(_pc.refusal_done_gate(names=", ".join(exc.incomplete))),
+                field="status",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_form_refusal(store_error_text(exc), field=refusal_field(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+        )
+        view.form_edited(changed=result.changed)
+
+    def on_projects_view_milestone_added_requested(
+        self, message: ProjectsViewMilestoneAddedRequested
+    ) -> None:
+        """`a` submitted: add-or-update the milestone through the store core.
+
+        The store's ``set_milestone`` is the SAME core the tool and the routes
+        use, and it is add-or-update BY NAME: the returned action is the
+        receipt (added/updated/unchanged), never an assumption. A refusal lands
+        on the page's notice line with the prompt still up, so the reader can
+        correct the name and press enter again.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        if view.refuse_read_only():
+            return
+        import time as _time
+
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        # The same tri-state rule as the prompt's: a blank optional date is
+        # ABSENT, not a clear. ``target_date=None`` in model_fields_set would
+        # erase an existing milestone's stored date when the reader only echoed
+        # its name.
+        fields: dict[str, Any] = {"name": message.name}
+        if message.target_date:
+            fields["target_date"] = message.target_date
+        try:
+            _project, action = registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(**fields),
+            )
+        except KeyError:
+            # The store's add path raises KeyError only for a vanished project;
+            # the message names the PROJECT, not the raw uuid.
+            name = message.project_name or "that project"
+            view.show_notice(_te_projects_edit(_pe.refusal_project_gone_milestone(name=name)))
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_notice(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+        )
+        view.milestone_added(message.name, action)
+
+    def on_projects_view_milestone_removed(self, message: ProjectsViewMilestoneRemoved) -> None:
+        """The y/n confirm answered yes: remove through the store, then re-show.
+
+        The confirm is gone by the time this runs (the page disarmed it on the
+        answer), so a refusal has only the page's notice line to land on —
+        which is where the reader is looking.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        if view.refuse_read_only():
+            return
+        import time as _time
+
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, remove=True),
+            )
+        except KeyError:
+            name = message.project_name or "that project"
+            view.show_notice(_te_projects_edit(_pe.refusal_project_gone_milestone(name=name)))
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_notice(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
+        )
+        view.milestone_removed(message.name)
 
     def _own_session_id(self) -> str | None:
         """THIS process's session id, or ``None`` — the detail page's anchor.
@@ -40011,6 +40608,14 @@ class OperatorApp(App[None]):
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
+        # Authoring is a frontend-owned page, never a slash sent to an owner
+        # on another device. Refuse here before its capability table can route
+        # these two words as attach requests (or an older class subcommand).
+        if command == "/agent" and arg.partition(" ")[0].casefold() in {"new", "edit"}:
+            if self._projects_read_only():
+                self._open_agent_form()
+                return
+
         # A AttachedSession keeps process/terminal commands local, but every
         # command the owner advertises as ``authoritative_session`` in its
         # capability list runs on the owner through the routing seam below —
@@ -40340,6 +40945,10 @@ class OperatorApp(App[None]):
             self._cmd_review(notice)
         elif command == "/schedule":
             self._cmd_schedule(notice)
+        elif command == "/library":
+            self._cmd_library(notice)
+        elif command == "/librarian":
+            self._cmd_librarian(arg, notice)
         elif command == "/hub":
             # The Hub links surface. The action is SYNC and owns its own worker,
             # the fleet-door and usage-panel pattern: calling it directly keeps
@@ -43769,6 +44378,9 @@ class OperatorApp(App[None]):
         # projects create form could therefore never see the chord. Delegating
         # the ONE key to the page keeps every other binding — including ctrl+c
         # — exactly where disarming the app's hotkeys would have moved them.
+        if self._agent_form is not None:
+            self._agent_form.action_previous_field()
+            return
         page = self._projects_view
         if page is not None and getattr(page, "wants_field_tab", False):
             page.form_focus_previous()
@@ -51343,6 +51955,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_agent_form()
         self._close_projects_view()
         self._close_aside()
         instructions = None
@@ -53502,10 +54115,19 @@ class OperatorApp(App[None]):
         # a session hosted by THIS app answers a follower out of here, and the
         # switch must be reachable from that seam too (review/UX round 1, U1).
         first, _, rest = arg.partition(" ")
-        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+        if first.strip().casefold() == "class":
             from local_operator.action_class import class_switch_receipt
 
             return await class_switch_receipt(self._session, rest.strip(), SlashResult)
+        if first.strip().casefold() in {"new", "edit"}:
+            from local_operator.i18n.keys import tui_authoring as author_keys
+            from local_operator.i18n.text import tr
+
+            return SlashResult(
+                kind="notice",
+                text=tr("tui.authoring")(author_keys.notice_read_only()),
+                style="warning",
+            )
         return self._agent_attach_slash_result(arg, SlashResult)
 
     def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:

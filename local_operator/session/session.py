@@ -4452,6 +4452,14 @@ class Session:
         #: the gate on every aida hook below (load hold, persist reconcile,
         #: config-watch reconcile, delivery guard, after-turn tray drain).
         self._aida_duty = False
+        #: Whether this session is THE LIBRARIAN'S (``local_operator.librarian``),
+        #: resolved once per open beside ``_aida_duty`` — one stat of
+        #: ``<config>/librarian/state.json`` on every session that is not hers,
+        #: and the gate on the cadence filter/persist/config-watch hooks below.
+        self._librarian_duty = False
+        #: The accepted ``librarian-cadence`` occurrence, consumed by the
+        #: persist boundary after retirement (the twin of ``_aida_cadence_delivered``).
+        self._librarian_cadence_delivered: WakeSchedule | None = None
         #: Distinct wake-supervisor refusal reasons already reported (M3). The
         #: install hook runs on every schedule persist, so the set is what keeps
         #: "your check-ins need a session open" from printing on every write.
@@ -14621,7 +14629,7 @@ class Session:
         # that a turn died.
         if notify and kind != "error" and self._run_ended_quiet(event):
             notify = False
-        if notify and kind != "error" and self._aida_cadence_banner_veto(event):
+        if notify and kind != "error" and self._proactive_banner_veto(event):
             notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
         # of her check-in banners is judged HERE, once, beside ``notify``. The
@@ -14728,6 +14736,61 @@ class Session:
         from local_operator.aida import proactive
 
         return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _proactive_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Which engine's check-in veto applies — Aida's or the Librarian's.
+
+        Dispatched on the already-resolved duty flags, so a session pays one
+        attribute read per settle. The two vetoes are deliberate twins: the
+        quiet-day sentinel must silence the Librarian's daily pass exactly as
+        it silences Aida's check-in, and an Aida-only veto was the reported
+        defect (a quiet library day would have raised the completion banner).
+        """
+        if getattr(self, "_aida_duty", False):
+            return self._aida_cadence_banner_veto(event)
+        if getattr(self, "_librarian_duty", False):
+            return self._librarian_cadence_banner_veto(event)
+        return False
+
+    def _librarian_checkin_run(self) -> bool:
+        """Whether THIS run's notifying deliveries are EXCLUSIVELY her passes.
+
+        The Librarian's half of the scope test: hers, wake-delivery-only
+        triggers, every recorded wake id one of her cadence-family rows
+        (``librarian-cadence`` or ``librarian-extra-N``), and no unconsumed user
+        message. Anything else — a user-armed wake, a peer note, a job result,
+        a mixed run — keeps normal notification semantics.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return False
+        if self._has_awaiting_user():
+            return False
+        if set(self._run_triggers) != {WAKE_PROMPT_MESSAGE_TYPE}:
+            return False
+        wake_ids = set(self._run_wake_ids)
+        if not wake_ids:
+            return False
+        from local_operator.librarian import proactive
+
+        return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _librarian_cadence_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Whether one of the Librarian's passes must stay SILENT.
+
+        The quiet-day rule, applied to her own rows: an empty reply (nothing
+        was produced) or the exact sentinel normalised by
+        ``librarian.proactive.reply_is_quiet`` vetoes the banner. There is no
+        greeting ledger or banner budget on her side — she is not a personal
+        assistant and must not spend Aida's budget — so nothing else is read.
+        """
+        if not self._librarian_checkin_run():
+            return False
+        from local_operator.librarian import proactive
+
+        reply = self._run_last_assistant_text(event)
+        if not reply:
+            return True
+        return proactive.reply_is_quiet(reply)
 
     def _run_last_assistant_text(self, event: AgentEndEvent) -> str:
         """The run's LAST assistant reply text, or ``""`` when it produced none.
@@ -24134,6 +24197,11 @@ class Session:
         # hold, the persist reconcile, the config-watch reconcile, the
         # delivery guard and the after-turn tray drain.
         self._aida_duty = self._aida_is_hers()
+        # THE LIBRARIAN'S DUTY rides the same seam and the same early placement
+        # reason: a session with no wake entry is exactly the state her engine
+        # must recover from, so the flag cannot sit behind "this session already
+        # has rows".
+        self._librarian_duty = self._librarian_is_hers()
         # A wake is active ownership, not conversation history. A fork declines
         # only snapshots copied at its creation boundary; snapshots appended
         # afterwards belong to the fork and must survive its next resume.
@@ -24162,6 +24230,8 @@ class Session:
         # ``delivery_allowed`` in the same module for the fire-time half).
         if self._aida_duty:
             schedules = self._aida_filter_rows(schedules)
+        elif self._librarian_duty:
+            schedules = self._librarian_filter_rows(schedules)
         # PATIENCE ROWS PAST THEIR EPISODE TTL RETIRE AT LOAD (§8.2.4): the
         # process was down past the 2 h hard stop, so the wait can never be
         # honoured and a row left armed would fire a note nobody can act on.
@@ -24278,6 +24348,67 @@ class Session:
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
             return schedules
 
+    # -- librarian engine attachment ----------------------------------------
+
+    def _librarian_is_hers(self) -> bool:
+        """Whether THIS session is the one ``librarian/state.json`` names.
+
+        One stat on every other session on the machine, and the flag every
+        Librarian hook is gated on. Failure answers False: a session that cannot
+        prove it is hers must not run her engine.
+        """
+        try:
+            from local_operator.librarian import state as librarian_state
+            from local_operator.paths import config_dir
+
+            return librarian_state.is_librarian_session(config_dir(), self._session_id)
+        except Exception:  # noqa: BLE001 — a lookup, never a boot dependency
+            logger.debug("librarian: could not resolve her session identity", exc_info=True)
+            return False
+
+    def _librarian_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+        """Drop her ``librarian-*`` rows when she is paused or disabled."""
+        try:
+            from local_operator.librarian import proactive
+
+            return proactive.filter_on_load(schedules, config_dir=self._config_dir)
+        except Exception:  # noqa: BLE001 — the fire-time guard still holds
+            logger.warning("librarian: load-time hold failed; arming unfiltered", exc_info=True)
+            return schedules
+
+    async def _librarian_reconcile_rows(
+        self,
+        schedules: list[WakeSchedule],
+        *,
+        cadence_fired: WakeSchedule | None = None,
+    ) -> list[WakeSchedule]:
+        """Her engine's reconcile over one schedule list, notes journaled.
+
+        Called from the persist (so a fire's automatic re-arm and every wake
+        tool mutation land through ONE writer) and from the config watcher (a
+        pause/resume issued in another process arrives within its 2 s tick).
+        Never raises: a failure leaves the list exactly as the caller gave it,
+        and an accepted occurrence is re-raised only so the retirement is not
+        committed without its successor.
+        """
+        try:
+            from local_operator.librarian import proactive
+
+            result = proactive.reconcile(
+                schedules,
+                config_dir=self._config_dir,
+                session_id=self._session_id,
+                cadence_fired=cadence_fired,
+            )
+            if result.notes:
+                await proactive.append_notes(self._transcript, result.notes)
+            return result.schedules
+        except Exception:  # noqa: BLE001 — the schedule write outranks the engine
+            if cadence_fired is not None:
+                raise
+            logger.warning("librarian: reconcile failed; leaving the list as given", exc_info=True)
+            return schedules
+
     async def _aida_reconcile_rows(
         self,
         schedules: list[WakeSchedule],
@@ -24293,6 +24424,10 @@ class Session:
         the list exactly as the caller gave it.
         """
         try:
+            if getattr(self, "_librarian_duty", False):
+                # THE SAME ONE-WRITER SEAM, a different engine: her persist
+                # path re-arms her own cadence and never touches Aida's rows.
+                return await self._librarian_reconcile_rows(schedules, cadence_fired=cadence_fired)
             from local_operator.aida import proactive
 
             # The stash is cleared BEFORE the reconcile: a token may only ever
@@ -24350,6 +24485,8 @@ class Session:
         # the sidebar all read what this writes. Equal values do nothing,
         # which is what keeps :meth:`_sync_aida_display_name` (which a rename
         # rings) from ringing the watcher straight back.
+        if not getattr(self, "_aida_duty", False):
+            return
         try:
             from local_operator.aida import naming as aida_naming
             from local_operator.paths import config_dir
@@ -25139,10 +25276,40 @@ class Session:
                     # cannot consume the authoritative replacement's owed phase.
                     schedules = [*schedules, previous_cadence]
             schedules = await self._aida_reconcile_rows(schedules, cadence_fired=cadence_fired)
+        if getattr(self, "_librarian_duty", False):
+            from local_operator.librarian import proactive as librarian_proactive
+
+            accepted = getattr(self, "_librarian_cadence_delivered", None)
+            previous = self._transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+            previous_rows = (
+                previous.payload.get("details", {}).get("schedules", []) if previous else []
+            )
+            # The accepted occurrence must match the authoritative retired arm:
+            # an unrelated same-id replacement is not a fire.
+            if not any(row.id == librarian_proactive.CADENCE_ID for row in schedules):
+                previous_cadence = next(
+                    (
+                        WakeSchedule.model_validate(raw)
+                        for raw in previous_rows
+                        if raw.get("id") == librarian_proactive.CADENCE_ID
+                    ),
+                    None,
+                )
+                if (
+                    accepted is not None
+                    and previous_cadence is not None
+                    and accepted.request_id == previous_cadence.request_id
+                    and accepted.created_at == previous_cadence.created_at
+                ):
+                    cadence_fired = accepted
+            schedules = await self._librarian_reconcile_rows(schedules, cadence_fired=cadence_fired)
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
+        if getattr(self, "_librarian_duty", False) and cadence_fired is not None:
+            # The successor is durable now; the receipt may go.
+            self._librarian_cadence_delivered = None
         if getattr(self, "_aida_duty", False):
             from local_operator.aida import proactive
 
@@ -26283,6 +26450,20 @@ class Session:
                     return
             except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
                 logger.debug("aida: delivery guard could not read the hold", exc_info=True)
+        elif getattr(self, "_librarian_duty", False):
+            # Her fire-time hold, the twin of the block above: a pause that
+            # landed in another process suppresses this fire, and the load-time
+            # filter covers the session that opens while held.
+            try:
+                from local_operator.librarian import proactive as librarian_proactive
+
+                if librarian_proactive.is_librarian_row(
+                    due.schedule.id
+                ) and not librarian_proactive.delivery_allowed(self._config_dir):
+                    logger.info("librarian: dropping held wake %s (paused)", due.schedule.id)
+                    return
+            except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
+                logger.debug("librarian: delivery guard could not read the hold", exc_info=True)
         text = format_wake_delivery_text(due)
         missed_note = self._missed_delivery_note(due)
         if missed_note:
@@ -26322,6 +26503,11 @@ class Session:
                 # Aida-only accepted occurrence, consumed by the existing persist
                 # boundary after retirement. No generic fire/dedup behavior changes.
                 self._aida_cadence_delivered = due.schedule
+        elif getattr(self, "_librarian_duty", False):
+            if due.schedule.id == "librarian-cadence":
+                # Her accepted occurrence, consumed by the persist boundary
+                # after retirement exactly as Aida's is.
+                self._librarian_cadence_delivered = due.schedule
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
@@ -26896,6 +27082,14 @@ class Session:
         and only on her session — every other session short-circuits on the
         duty flag. Fail OPEN like the delivery guard it mirrors.
         """
+        if getattr(self, "_librarian_duty", False):
+            try:
+                from local_operator.librarian import proactive as librarian_proactive
+
+                return librarian_proactive.hold_active(self._config_dir)
+            except Exception:  # noqa: BLE001 — fail OPEN, matching the delivery guard
+                logger.debug("could not resolve the librarian hold", exc_info=True)
+                return False
         if not getattr(self, "_aida_duty", False):
             return False
         try:
@@ -27265,6 +27459,13 @@ class Session:
         # reconcile persists through the normal writer, so the index and
         # transcript follow in the same breath.
         if getattr(self, "_aida_duty", False) and any(key.startswith("aida.") for key in changed):
+            self._spawn_background(self._aida_reconcile_now())
+        # THE LIBRARIAN'S LIVE-CONFIG SEAM, the same registry-key diff: a pause
+        # or resume written by the desktop route in another process reaches
+        # this session's own reconcile within the watcher's tick.
+        if getattr(self, "_librarian_duty", False) and any(
+            key.startswith("librarian.") for key in changed
+        ):
             self._spawn_background(self._aida_reconcile_now())
         if "asks.lapsed_visible_for" in changed and self._ask_queue is not None:
             # The window is applied at publish time (``frontend_state.ask_wire``

@@ -851,9 +851,12 @@ jobs:
     # minimum, ceil((1500.42 + 60)/60); measured walls are still far below it.
     # Leave growth margin: the 2026-10-15 merge refs project up to 1562.952s
     # plus 60s setup overhead, exceeding the former 27-minute ceiling.
-    # Thirty minutes leaves 177s of headroom; weights, worker count, shard
-    # formula and watchdogs are unchanged. This is not a test-failure waiver.
-    timeout-minutes: 30
+    # Thirty minutes left 177s of headroom at that tree. P3a's test growth
+    # projects 1741.21s on the heaviest shard, just beyond the 1740s test
+    # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
+    # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
+    # unchanged; this is scheduling headroom, not a test-failure waiver.
+    timeout-minutes: 31
     strategy:
       fail-fast: false
       matrix:

@@ -298,7 +298,13 @@ def test_http_gate_and_login_flow() -> None:
     # branch is not the default.
     assert payload["unread"] == {"count": 0, "revision": [0, 0, 0], "degraded": []}
     capabilities = payload["capabilities"]
-    assert sorted(capabilities) == ["features", "i18n", "session_tags", "stt"]
+    # ``library`` is conditional on the module being importable and IS in this
+    # tree; the capability is how the phone knows to offer the destination.
+    # NOT an exact key set: capabilities are additive (the Librarian will add
+    # its own key), so a new key must not fail this relay's contract test.
+    for key in ("features", "i18n", "stt", "library", "session_tags"):
+        assert key in capabilities
+    assert capabilities["library"] == 1
     # The relay capability says these routes exist in THIS build; it is a
     # sibling of, and not a substitute for, the core feature flag (asserted
     # as the untouched build fact it is).

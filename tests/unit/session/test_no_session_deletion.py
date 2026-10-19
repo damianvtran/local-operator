@@ -2265,6 +2265,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_agent_form",
+        "<path>.remove",
+        "Textual AgentFormPage.remove unmounts the page; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_review_view",
         "<path>.remove",
         "Textual ReviewView.remove unmounts the page; no filesystem path",
@@ -2674,6 +2679,94 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/aida/bootstrap.py::_discard_failed_create",
         "shutil.rmtree",
         "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
+    ),
+    # The Librarian's small stores and her create-failure cleanup: the same
+    # shapes, the same arguments as Aida's block above.
+    (
+        "local_operator/librarian/state.py::write_json",
+        "os.replace",
+        "tmp FILE -> <config_dir>/librarian/*.json FILE; librarian-derived, never sessions/",
+    ),
+    (
+        "local_operator/librarian/state.py::write_json",
+        "os.unlink",
+        "clears the mkstemp FILE this call just wrote, on the failure path",
+    ),
+    (
+        "local_operator/librarian/state.py::clear_extras",
+        "<path>.unlink",
+        "removes the <config_dir>/librarian/extras.json tray FILE after processing it",
+    ),
+    (
+        "local_operator/librarian/bootstrap.py::_discard_failed_create",
+        "shutil.rmtree",
+        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
+    ),
+    (
+        "local_operator/librarian/proactive.py::reconcile",
+        "<path>.remove",
+        "list.remove on the IN-MEMORY schedule list when it exceeds the cap; no path",
+    ),
+    # The sidebar's deliberate-unpin ledger: a FILE beside the pin index under
+    # the config root. Emptying the set removes that file; the replace is the
+    # same tmp-file->file atomic write its sibling ``_write_pins`` is allowed.
+    (
+        "local_operator/tui/sidebar_pins.py::_write_unpinned",
+        "<path>.unlink",
+        "removes <config>/sidebar-pins.unpinned.json when empty, and its failed mkstemp FILE",
+        2,
+    ),
+    (
+        "local_operator/tui/sidebar_pins.py::_write_unpinned",
+        "os.replace",
+        "tmp FILE -> <config>/sidebar-pins.unpinned.json FILE; config-root, never sessions/",
+    ),
+    # The Library packages (backend core) write only under <config>/cache/library:
+    # the derived index's atomic replace and a thumbnail cache temp file. Neither
+    # builds a path from a session id or a caller-supplied directory.
+    (
+        "local_operator/library/index.py::_write",
+        "os.replace",
+        "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
+    ),
+    (
+        "local_operator/library/service.py::thumbnail",
+        "os.replace",
+        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
+    ),
+    # The Library VIEW's flagged calls are heap/Textual operations, not
+    # filesystem ones: the viewport cursor is an in-memory integer, the
+    # metadata row's ``remove`` is a list.remove, and closing the view removes
+    # a mounted Textual widget. None receives a Path or a config/session dir.
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_down",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_down",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView._row_meta",
+        "<path>.remove",
+        "list.remove of a metadata part; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_library_view",
+        "<path>.remove",
+        "Textual widget.remove() of the mounted library view; not a filesystem removal",
     ),
     (
         "local_operator/evaluation/session_arm.py::declare_action_server",

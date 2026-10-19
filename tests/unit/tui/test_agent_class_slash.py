@@ -313,8 +313,9 @@ async def test_the_agent_picker_offers_the_class_verb(tmp_path: Path) -> None:
     assert any(row.name == "auditor" for row in rows), rows
     # U4: agent NAMES lead; the reserved verb is present but LAST, so it is
     # never the default Tab completion (never first).
-    assert rows[-1].name == "class" and rows[-1].detail == "subcommand", rows
-    assert "proactive" in rows[-1].description
+    assert [row.name for row in rows[-3:]] == ["class", "new", "edit"], rows
+    assert rows[-3].detail == "subcommand"
+    assert "proactive" in rows[-3].description
     # After the verb the names are offered as ``class <name>`` compounds, which
     # complete to the report form.
     assert compounds and all(row.name.startswith("class ") for row in compounds), compounds

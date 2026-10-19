@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.80.0"
+version = "0.81.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -72,6 +72,10 @@ dependencies = [
     "starlette",
     "uvicorn",
     "python-multipart",
+    # Generation installs (including lop-update) request the bare package, not
+    # [all]. Sound attachments need their decoder there too; an extra-only
+    # decoder silently leaves persisted artifacts without waveform sidecars.
+    "miniaudio>=1.71",
     # The personal tunnel gateway verifies the edge's RSA proof locally;
     # declare this directly rather than relying on the MCP transitive copy.
     "pyjwt[crypto]>=2.10,<3",
@@ -154,11 +158,8 @@ lsp = ["jedi>=0.19"]
 # stdlib html.parser renderer when this extra is absent, so a bare install stays
 # fully functional — the extra only upgrades render quality.
 fetch = ["markdownify"]
-# Waveform peaks for generated audio (the sound-generation feature).
-# miniaudio bundles a compiled decoder but publishes wheels for the supported
-# platforms. The peaks module imports it OPTIONALLY and degrades silently
-# without it — no sidecar, no waveform, no error — so a bare install stays
-# fully functional and the extra only enables the waveform surfaces.
+# Compatibility alias for hosts that already request [audio]. The decoder is
+# now a base dependency: bare generation installs must write sound sidecars too.
 audio = ["miniaudio>=1.71"]
 # `lsp` belongs here for the same reason `fetch` does: jedi is pure Python
 # with no compiled wheel, so it carries none of the Windows sdist-build
@@ -355,6 +356,12 @@ local_operator = [
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
+    # The Library surface's own components: `screens/library.tsx` and
+    # `screens/library-asset.tsx` import them, and the installed source tree
+    # compiles every file under src, so an omitted glob breaks the documented
+    # repair build (the same omission class the fixtures glob above records).
+    "mobile/web/src/components/library/*.tsx",
+    "mobile/web/src/components/library/*.ts",
     "mobile/web/src/lib/*.ts",
     "mobile/web/src/i18n/*.ts",
     # The mandatory build/check/test scanner reads this exact fingerprint state.

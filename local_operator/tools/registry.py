@@ -28,6 +28,7 @@ from local_operator.tools.audio_tool import (
 from local_operator.tools.eval import build_eval_tool
 from local_operator.tools.harness_import_tool import build_harness_import_tool
 from local_operator.tools.image_tool import build_generate_image_tool
+from local_operator.tools.library_tool import build_library_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
 from local_operator.tools.project_tool import (
@@ -118,6 +119,10 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # tables on purpose: appending never shifts a provider-visible array
     # prefix, which is what the prompt cache keys on.
     "sessions": lambda context: builtin.build_sessions_tool(context),
+    # Unconditional: the Library is the user's OWN catalog, and a session that
+    # cannot read it has no way to name what it already produced. Appended at
+    # the END of both tables for the prompt-cache-prefix rule above.
+    "library": lambda _context: build_library_tool(),
     # createIf: rung 3 — the agent-side settle exists only where the queued
     # engine does (`context.withdraw_ask`), so the blocking arm, headless hosts
     # and subagents pay zero schema for it (design ask-nonblocking.md §12).
@@ -228,6 +233,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "project_delete",
     "harness_import",
     "monitor",
+    "library",
     "sessions",
     "ask_withdraw",
     "generate_image",
