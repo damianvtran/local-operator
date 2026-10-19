@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "管理MCP服务器",
+  "cli.mcp_help.list": "列出已配置的MCP服务器（合并所有来源）",
+  "cli.mcp_help.add": "添加MCP服务器（stdio命令或http/sse URL）",
+  "cli.mcp_help.add_name": "服务器名称",
+  "cli.mcp_help.add_command": "启动服务器的Stdio命令",
+  "cli.mcp_help.add_arg": "Stdio命令参数（可重复）",
+  "cli.mcp_help.add_env": "stdio服务器的环境变量KEY=VALUE（可重复）",
+  "cli.mcp_help.add_url": "HTTP/SSE服务器URL（代替--command）",
+  "cli.mcp_help.add_scope": "要写入的配置范围（默认：全局~/.local-operator/mcp.json）",
+  "cli.mcp_help.add_oauth": "为远程HTTP服务器启用OAuth",
+  "cli.mcp_help.remove_server": "从指定配置范围移除MCP服务器",
+  "cli.mcp_help.remove_name": "要移除的服务器名称",
+  "cli.mcp_help.remove_scope": "要从中移除服务器的配置范围（默认：全局）",
+  "cli.mcp_help.login": "认证一个启用OAuth的MCP服务器",
+  "cli.mcp_help.login_name": "要认证的服务器名称",
+  "cli.mcp_help.logout": "移除一个MCP服务器已存储的OAuth凭据",
+  "cli.mcp_help.logout_name": "要退出登录的服务器名称",
+  "cli.mcp_help.reauth": "退出一个OAuth MCP服务器并重新授权",
+  "cli.mcp_help.reauth_name": "要重新认证的服务器名称"
+}

@@ -1,0 +1,17 @@
+{
+  "wire.memory.title": "记忆",
+  "wire.memory.command": "查看、搜索、纠正或遗忘限定范围内的记忆",
+  "wire.memory.description": "有界本地召回与尽力而为的压缩采集；检索出的事实不可信。",
+  "wire.memory.enabled.label": "限定范围的记忆",
+  "wire.memory.enabled.help": "启用有界SQLite记忆库。关闭不会清除已保留的事实。",
+  "wire.memory.capture.label": "压缩采集",
+  "wire.memory.capture.help": "在压缩提交后采集安全定位信息；context-full还会复用已有摘要。明确存储仍是可靠保留目标和决策的途径。",
+  "wire.memory.suggest.label": "召回建议",
+  "wire.memory.suggest.help": "根据当前用户消息建议最多三个不可信标题，使用单独的180-token上限。不发起网络或嵌入请求。",
+  "wire.memory.sync.label": "受信任对等设备记忆同步",
+  "wire.memory.sync.help": "向已配对、在接收端具有admin权限且支持memory-sync-v1的现有对等设备增量共享所选范围。包括会话记忆，但不复制会话记录。",
+  "wire.memory.scopes.label": "要同步的记忆范围",
+  "wire.memory.scopes.help": "仅共享这些命名空间。会话、团队和智能体所有者仍使用精确的注册表/会话ID；支持全部四种范围。",
+  "wire.memory.exclude.label": "排除的记忆对等设备",
+  "wire.memory.exclude.help": "不参与记忆复制的设备ID。这不会更改配对、信任或加入授权。"
+}

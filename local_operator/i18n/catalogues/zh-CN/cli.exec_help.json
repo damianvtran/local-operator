@@ -1,0 +1,22 @@
+{
+  "cli.exec_help.agent_id": "本次执行使用的智能体ID（代替按名称指定--agent）",
+  "cli.exec_help.background": "分离任务：启动带日志文件的后台工作进程并立即退出",
+  "cli.exec_help.clear_goal": "清除恢复的持续目标",
+  "cli.exec_help.command": "字面提示词；指定''-''或在管道输入时省略则读取stdin；循环运行时可选",
+  "cli.exec_help.control": "将审批和问题路由至已连接的监督者（可能等待）。不带此标志时，非TTY审批会拒绝；无论是否指定，均支持发现和实时连接。--yolo仍可显式覆盖审批。",
+  "cli.exec_help.effort": "设置推理强度；根据所选模型验证",
+  "cli.exec_help.goal": "设置字面持续目标。与TUI的/goal不同，这不会同时将文本作为消息发送：需搭配提示词或--loop",
+  "cli.exec_help.json": "每个智能体事件输出一行JSON，而非最终文本",
+  "cli.exec_help.loop": "在可选提示词之后继续迭代N次；需要持续目标",
+  "cli.exec_help.loop_goal": "持续执行并评估此目标直至完成（不设固定迭代次数）",
+  "cli.exec_help.name": "设置持久化的对话名称",
+  "cli.exec_help.output_format": "强制要求助手最终回复的格式。若在--output-retries范围内未产生有效载荷，则运行失败（退出码1）。默认：不强制要求，行为不变。",
+  "cli.exec_help.output_retries": "最终回复失败后的最大重试次数（0-5；默认2）。需要--output-format。",
+  "cli.exec_help.output_schema": "解码后的JSON/YAML/TOML载荷必须满足的JSON Schema文件。对于--output-format markdown：JSON对象'{'''required_sections'': [...]'}'。需要--output-format。",
+  "cli.exec_help.profile": "附加可复用角色/专家（对应/agent；非旧版--agent）",
+  "cli.exec_help.status": "以JSON读取持久化后台任务状态；不启动会话",
+  "cli.exec_help.supervisor_fd": "将本次运行的操作权限写入此继承的描述符，使持有另一端的监督者能批准本次运行挂起的卡片（阶段E）。需要--control；与--background同用时拒绝。仅传描述符编号，权限值不会进入argv、环境变量或文件。",
+  "cli.exec_help.team": "附加已保存的团队及其管理者、成员和简报",
+  "cli.exec_help.tools": "本次运行可访问且仅可访问的工具，以逗号分隔。被排除的工具不可访问，而非仅未获批准。仅在无人可问时，即不带--control的非tty运行中，此声明才视为对所列工具的批准；在终端中或使用--control时，每次write/exec调用仍由审批关卡决定。此构建中不存在的名称不可访问，并会被报告",
+  "cli.exec_help.workstream": "将本次运行发布为操作者请求的长期并行工作流：显示在侧边栏、/resume和手机列表中，记录启动它的会话，并可被跟进和引导。未指定时，智能体启动的运行保持临时状态：处处隐藏且静默。仅改变该行的可见性，不改变审批处理方式（需搭配--control）。不在智能体shell之外标记任何内容"
+}

@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "文件不是允许的音频类型：{mime_type}",
+  "wire.errors.files.heic_conversion": "转换HEIC/HEIF文件失败：{error}",
+  "wire.errors.files.html_type": "文件不是允许的HTML类型：{mime_type}",
+  "wire.errors.files.html_utf8": "HTML文件不是有效的UTF-8文本。",
+  "wire.errors.files.image_type": "文件不是允许的图像类型：{mime_type}",
+  "wire.errors.files.internal_error": "服务器内部错误：{error}",
+  "wire.errors.files.sign_auth": "需要本地访问令牌或桌面bearer令牌。",
+  "wire.errors.files.sign_path": "path不得为空。",
+  "wire.errors.files.sign_route": "route必须为以下之一：{routes}",
+  "wire.errors.files.sign_ttl": "ttl_s必须在1到{maximum}之间。",
+  "wire.errors.files.video_type": "文件不是允许的视频类型：{mime_type}"
+}
