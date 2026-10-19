@@ -2508,6 +2508,101 @@
       },
       "status": "passed",
       "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "Translated all 35 keys against the current English source and locale guide. Actual translator model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota exhaustion. Independent native semantic audit and rendered-width review are pending; no self-approval or locale activation claimed. Slash commands, role/member grammar examples, placeholders and keyboard keys remain literal."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "Translated all 35 keys against the current English source and locale guide. Actual translator model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota exhaustion. Independent native semantic audit and rendered-width review are pending; no self-approval or locale activation claimed. Slash commands, role/member grammar examples, placeholders and keyboard keys remain literal."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "Translated all 35 keys against the current English source and locale guide. Actual translator model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota exhaustion. Independent native semantic audit and rendered-width review are pending; no self-approval or locale activation claimed. Slash commands, role/member grammar examples, placeholders and keyboard keys remain literal."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "Translated all 35 keys against the current English source and locale guide. Actual translator model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota exhaustion. Independent native semantic audit and rendered-width review are pending; no self-approval or locale activation claimed. Slash commands, role/member grammar examples, placeholders and keyboard keys remain literal."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "Translated all 35 keys against the current English source and locale guide. Actual translator model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota exhaustion. Independent native semantic audit and rendered-width review are pending; no self-approval or locale activation claimed. Slash commands, role/member grammar examples, placeholders and keyboard keys remain literal."
     }
   ]
 }
