@@ -14629,7 +14629,7 @@ class Session:
         # that a turn died.
         if notify and kind != "error" and self._run_ended_quiet(event):
             notify = False
-        if notify and kind != "error" and self._aida_cadence_banner_veto(event):
+        if notify and kind != "error" and self._proactive_banner_veto(event):
             notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
         # of her check-in banners is judged HERE, once, beside ``notify``. The
@@ -14736,6 +14736,61 @@ class Session:
         from local_operator.aida import proactive
 
         return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _proactive_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Which engine's check-in veto applies — Aida's or the Librarian's.
+
+        Dispatched on the already-resolved duty flags, so a session pays one
+        attribute read per settle. The two vetoes are deliberate twins: the
+        quiet-day sentinel must silence the Librarian's daily pass exactly as
+        it silences Aida's check-in, and an Aida-only veto was the reported
+        defect (a quiet library day would have raised the completion banner).
+        """
+        if getattr(self, "_aida_duty", False):
+            return self._aida_cadence_banner_veto(event)
+        if getattr(self, "_librarian_duty", False):
+            return self._librarian_cadence_banner_veto(event)
+        return False
+
+    def _librarian_checkin_run(self) -> bool:
+        """Whether THIS run's notifying deliveries are EXCLUSIVELY her passes.
+
+        The Librarian's half of the scope test: hers, wake-delivery-only
+        triggers, every recorded wake id one of her cadence-family rows
+        (``librarian-cadence`` or ``librarian-extra-N``), and no unconsumed user
+        message. Anything else — a user-armed wake, a peer note, a job result,
+        a mixed run — keeps normal notification semantics.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return False
+        if self._has_awaiting_user():
+            return False
+        if set(self._run_triggers) != {WAKE_PROMPT_MESSAGE_TYPE}:
+            return False
+        wake_ids = set(self._run_wake_ids)
+        if not wake_ids:
+            return False
+        from local_operator.librarian import proactive
+
+        return all(proactive.is_cadence_family_row(wake_id) for wake_id in wake_ids)
+
+    def _librarian_cadence_banner_veto(self, event: AgentEndEvent) -> bool:
+        """Whether one of the Librarian's passes must stay SILENT.
+
+        The quiet-day rule, applied to her own rows: an empty reply (nothing
+        was produced) or the exact sentinel normalised by
+        ``librarian.proactive.reply_is_quiet`` vetoes the banner. There is no
+        greeting ledger or banner budget on her side — she is not a personal
+        assistant and must not spend Aida's budget — so nothing else is read.
+        """
+        if not self._librarian_checkin_run():
+            return False
+        from local_operator.librarian import proactive
+
+        reply = self._run_last_assistant_text(event)
+        if not reply:
+            return True
+        return proactive.reply_is_quiet(reply)
 
     def _run_last_assistant_text(self, event: AgentEndEvent) -> str:
         """The run's LAST assistant reply text, or ``""`` when it produced none.

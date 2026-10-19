@@ -183,6 +183,7 @@ export type MessageParams = {
   "wire.errors.desktop.force_requires_confirm_replace": undefined;
   "wire.errors.desktop.librarian_bootstrap_failed": undefined;
   "wire.errors.desktop.librarian_disabled": { "op": string };
+  "wire.errors.desktop.librarian_owner_active": undefined;
   "wire.errors.desktop.library_asset_not_found": undefined;
   "wire.errors.desktop.library_bad_cursor": undefined;
   "wire.errors.desktop.library_bad_filter": { "field": string; "value": string };

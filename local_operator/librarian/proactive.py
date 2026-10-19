@@ -101,16 +101,69 @@ _HOUR_MS = 3_600_000
 #: this old, one catch-up run is owed. Anything shorter is still today's pass.
 CATCH_UP_AFTER_MS = 24 * _HOUR_MS
 
+#: The exact sentence a quiet day answers with. ONE constant, shared by the
+#: cadence prompt, the extra-pass prompt and the settle-time banner veto — the
+#: same contract Aida's ``QUIET_REPLY`` states: a veto matching a spelling the
+#: prompt never asked for is a banner nobody can turn off.
+QUIET_REPLY = "Nothing needs organizing today."
+
+#: Appended to a message that must ask for the sentinel but is not the cadence's
+#: own text (an extra pass, or prose a caller supplied).
+QUIET_CLAUSE = f'When there is nothing to do, reply exactly: "{QUIET_REPLY}"'
+
 #: The delivered message. The seed is the policy; this is the trigger line the
 #: model reads when the cadence fires, so it names the job and the quiet-day
 #: contract in one sentence.
 CADENCE_MESSAGE = (
     "The Librarian's daily library pass is due. Read the library stats and the "
-    "unorganized assets, then organise a bounded batch. Reply with "
-    f"{'Nothing needs organizing today.'!r} when there is nothing to do."
+    "unorganized assets, then organise a bounded batch. "
+    f"{QUIET_CLAUSE}"
 )
 
 DEFAULT_EXTRA_MESSAGE = "The Librarian has an extra library pass to run."
+
+
+def _peel_reply(text: str) -> str:
+    """``text`` with symmetric wrappers, padding and a trailing period removed.
+
+    The normalisation :func:`reply_is_quiet` documents: repeatedly strip
+    whitespace, one trailing period and ONE symmetric wrapper pair until
+    nothing moves, so quotes/backticks/caps around the sentinel still match.
+    Deliberately NO synonym folding: a paraphrase stays a banner, which is the
+    failure direction that gets noticed.
+    """
+    pairs = (("`", "`"), ('"', '"'), ("'", "'"), ("(", ")"), ("[", "]"), ("*", "*"), ("_", "_"))
+    current = str(text or "")
+    for _ in range(8):
+        before = current
+        current = current.strip().rstrip(".").rstrip()
+        for opener, closer in pairs:
+            if len(current) >= 2 and current[0] == opener and current[-1] == closer:
+                current = current[1:-1].strip()
+                break
+        if current == before:
+            break
+    return current
+
+
+def reply_is_quiet(text: str | None) -> bool:
+    """Whether ``text`` IS the sentinel (:data:`QUIET_REPLY`), normalised."""
+    if not text:
+        return False
+    return _peel_reply(str(text)).casefold() == _peel_reply(QUIET_REPLY).casefold()
+
+
+def with_quiet_clause(message: str) -> str:
+    """``message`` guaranteed to ASK for the sentinel when the day is quiet.
+
+    Applied wherever an extra pass's message is finalised. Idempotent: a
+    message already carrying the sentinel is unchanged.
+    """
+    text = message or ""
+    if QUIET_REPLY in text:
+        return text
+    return f"{text} {QUIET_CLAUSE}" if text else QUIET_CLAUSE
+
 
 #: Display-label TEMPLATES for the engine-armed rows on the human receipt
 #: surfaces, keyed by the id the engine writes. Templates, not literals: the
@@ -558,7 +611,7 @@ def reconcile(
             kept.append(
                 WakeSchedule(
                     id=_next_extra_id({row.id for row in kept}),
-                    message=message or DEFAULT_EXTRA_MESSAGE,
+                    message=with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
                     next_due_at=due,
                     every_ms=None,
                     created_at=now,
@@ -752,6 +805,7 @@ async def _drain_tray_external(root: Path, session_id: str, pol: CadencePolicy, 
     landed; a refusal mid-drain leaves the file for the next boot, and the
     duplicate that can come out of a crash is bounded to one pass.
     """
+    from local_operator.wakes import store as wake_store
     from local_operator.wakes.arm import WakeWriteError, arm_wake
 
     tray = state.read_extras(root)
@@ -760,6 +814,22 @@ async def _drain_tray_external(root: Path, session_id: str, pol: CadencePolicy, 
     if pol.max_extra_per_day <= 0:
         logger.info("librarian: extra passes are disabled; leaving the tray")
         return
+    entry = wake_store.read_entry(root, session_id) or {}
+    rows = [row for row in entry.get("schedules") or () if isinstance(row, Mapping)]
+    existing = {str(row.get("id") or "") for row in rows}
+    # THE SAME SPACING FLOOR THE IN-SESSION PATH APPLIES. Without it this drain
+    # armed extras minutes from the cadence (and minutes apart from each other),
+    # which is exactly the nagging the 720-minute default exists to prevent.
+    cadence_due = next(
+        (
+            int(row["next_due_at"])
+            for row in rows
+            if row.get("id") == CADENCE_ID and type(row.get("next_due_at")) is int
+        ),
+        _cadence_due([], pol, now),
+    )
+    gap_ms = pol.min_gap_minutes * 60_000
+    armed_dues: list[int] = []
     ledger, armed_today = _ledger_today(root, now)
     taken = 0
     for request in tray:
@@ -770,11 +840,33 @@ async def _drain_tray_external(root: Path, session_id: str, pol: CadencePolicy, 
             logger.info("librarian: %s", refusal)
             continue
         assert due is not None
+        too_close = (
+            any(
+                abs(int(row.get("next_due_at") or 0) - due) < gap_ms
+                for row in rows
+                if str(row.get("id") or "").startswith(ROW_PREFIX)
+                and type(row.get("next_due_at")) is int
+            )
+            or any(abs(other - due) < gap_ms for other in armed_dues)
+            or abs(cadence_due - due) < gap_ms
+        )
+        if too_close:
+            logger.info(
+                "librarian: extra pass refused: within the %d-minute spacing floor",
+                pol.min_gap_minutes,
+            )
+            continue
+        wake_id = _next_extra_id(existing)
         try:
             await arm_wake(
                 root,
                 session_id,
-                {"message": message or DEFAULT_EXTRA_MESSAGE, "at": _iso_due(due), "notify": True},
+                {
+                    "message": with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
+                    "at": _iso_due(due),
+                    "notify": True,
+                },
+                wake_id=wake_id,
                 now_ms=now,
             )
         except WakeWriteError as exc:
@@ -785,6 +877,8 @@ async def _drain_tray_external(root: Path, session_id: str, pol: CadencePolicy, 
         except Exception:  # noqa: BLE001 — the tray is retried next boot
             logger.warning("librarian: could not arm an extra pass", exc_info=True)
             return
+        existing.add(wake_id)
+        armed_dues.append(due)
         taken += 1
     if taken:
         try:

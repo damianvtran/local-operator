@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -115,3 +117,93 @@ async def test_two_concurrent_ensures_mint_one_session(isolated_root: Path) -> N
     sessions = [p for p in (isolated_root / "sessions").iterdir() if p.is_dir()]
     assert len(sessions) == 1
     assert {first, second} & {sessions[0].name}
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_first_boot_keeps_both_assistants_pinned(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measured defect: both bootstraps pin, one pin survives.
+
+    The barrier releases both threads together and the injected delay sits
+    between the pin index's read and its replace — the exact window the lock
+    closes. On the unlocked store this test fails deterministically (both read
+    ``[]``, the later replace wins); with the lock the peer waits and then
+    appends to what the first wrote.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    import local_operator.tui.sidebar_pins as pins
+    from local_operator import aida
+
+    barrier = threading.Barrier(2)
+    original_set = pins.set_pin
+    original_read = pins.read_pins
+
+    def synchronized_set(
+        config_dir: Path, session_id: str, pinned: bool, *, source: str = pins.SOURCE_USER
+    ) -> bool:
+        barrier.wait(timeout=10)
+        return original_set(config_dir, session_id, pinned, source=source)
+
+    def slow_read(config_dir: Path) -> list[str]:
+        time.sleep(0.05)
+        return original_read(config_dir)
+
+    monkeypatch.setattr(pins, "set_pin", synchronized_set)
+    monkeypatch.setattr(pins, "read_pins", slow_read)
+
+    aida_id, librarian_id = await asyncio.gather(
+        aida.ensure_session(isolated_root), bootstrap.ensure_session(isolated_root)
+    )
+    assert aida_id and librarian_id and aida_id != librarian_id
+    assert set(pins.read_pins(isolated_root)) == {aida_id, librarian_id}
+
+
+@pytest.mark.asyncio
+async def test_a_later_boot_restores_a_missing_pin(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second half of the reported bug: a lost pin was never re-asserted.
+
+    The ensure used to pin only in its create branch, so a pin file that lost
+    her id while her session survived stayed wrong forever. Reproducing the
+    end state (Aida pinned, Librarian unpinned) and booting again must put her
+    back without minting a new session.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    import local_operator.tui.sidebar_pins as pins
+    from local_operator import aida
+
+    aida_id = await aida.ensure_session(isolated_root)
+    librarian_id = await bootstrap.ensure_session(isolated_root)
+    # Simulate the RACE-LOST state, not a human unpin: the low-level writer
+    # leaves no deliberate-unpin marker, which is exactly the shape the bug
+    # produced.
+    pins._write_pins(isolated_root, [aida_id])
+    assert pins.read_pins(isolated_root) == [aida_id]
+
+    assert await bootstrap.ensure_session(isolated_root) == librarian_id
+    assert set(pins.read_pins(isolated_root)) == {aida_id, librarian_id}
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_unpin_survives_the_next_boot(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reassert must repair a lost pin, never overrule the person.
+
+    A desktop/TUI unpin is a human write and records intent; the next boot must
+    leave the row off (QA Q1's "respecting deliberate user unpins").
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    import local_operator.tui.sidebar_pins as pins
+
+    librarian_id = await bootstrap.ensure_session(isolated_root)
+    assert pins.set_pin(isolated_root, librarian_id, False) is False
+    assert librarian_id in pins.explicitly_unpinned(isolated_root)
+
+    assert await bootstrap.ensure_session(isolated_root) == librarian_id
+    assert librarian_id not in pins.read_pins(isolated_root)
+    # A human re-pin clears the intent and sticks.
+    assert pins.set_pin(isolated_root, librarian_id, True) is True
+    assert librarian_id not in pins.explicitly_unpinned(isolated_root)

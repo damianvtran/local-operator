@@ -165,6 +165,28 @@ async def test_get_reports_the_nested_receipt_and_its_flat_mirrors(
 
 
 @pytest.mark.asyncio
+async def test_run_under_a_live_owner_is_a_typed_refusal(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real owner path: ``arm.py`` refuses because a runtime holds the
+    session, so nothing is scheduled — and the route must say so instead of
+    painting a 200 success for a no-op."""
+    from local_operator.wakes import arm
+    from local_operator.wakes.arm import WakeWriteError
+
+    def owned(*_args: object, **_kwargs: object) -> None:
+        raise WakeWriteError("a runtime owns this session", status=503, code="wake_owner_busy")
+
+    monkeypatch.setattr(arm, "_refuse_if_owned", owned)
+    async with client as http:
+        opened = await http.post("/v1/desktop/librarian", json={"op": "open"})
+        assert opened.status_code == 200
+        ran = await http.post("/v1/desktop/librarian", json={"op": "run"})
+    assert ran.status_code == 409
+    assert ran.json()["detail"]["code"] == "librarian_owner_active"
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_op_is_a_422(client) -> None:
     async with client as http:
         response = await http.post("/v1/desktop/librarian", json={"op": "organize"})

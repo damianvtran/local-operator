@@ -161,6 +161,10 @@ def librarian_disabled(*, op: str) -> Msg:
     return Msg("wire.errors.desktop.librarian_disabled", {"op": op})
 
 
+def librarian_owner_active() -> Msg:
+    return Msg("wire.errors.desktop.librarian_owner_active", {})
+
+
 def library_asset_not_found() -> Msg:
     return Msg("wire.errors.desktop.library_asset_not_found", {})
 

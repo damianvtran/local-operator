@@ -79,3 +79,26 @@ def test_the_packaged_seed_resolves_without_an_install() -> None:
     assert profile is not None
     assert profile.name == "librarian"
     assert "Nothing needs organizing today." in profile.instructions
+
+
+def test_the_shipped_locale_set_was_not_pruned() -> None:
+    """The Librarian slice must not un-ship the five translated locales.
+
+    Adding keys to ``wire.settings`` changes its en hash; a stale ledger entry
+    then un-ships every locale that carries the namespace (the reviewer caught
+    exactly that on #2627: shipped.json became ``["en"]`` and the language
+    picker lost five options). This is the regression test the ledger update
+    exists to keep green.
+    """
+    from local_operator.i18n import resolve
+
+    shipped = json.loads(
+        (Path(__file__).resolve().parents[3] / "local_operator/i18n/data/shipped.json").read_text(
+            encoding="utf-8"
+        )
+    )["locales"]
+    assert set(shipped) >= {"en", "fr", "es", "ru", "vi", "hi"}
+    assert {"en", "fr", "es", "ru", "vi", "hi"} <= {
+        value for value, _ in resolve.language_options()
+    }
+    assert resolve.resolve_language("fr") == "fr"

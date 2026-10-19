@@ -18,14 +18,19 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+import local_operator.tui.sidebar_pins as pins_module
 from local_operator.tui.sidebar_pins import (
     PINS_FILE,
     PINS_LIMIT,
+    SOURCE_BOOTSTRAP,
     _write_pins,
+    explicitly_unpinned,
     read_pins,
     set_pin,
     toggle_pin,
@@ -319,3 +324,76 @@ def test_a_failing_set_pin_never_raises(tmp_path: Path) -> None:
         assert read_pins(config) == []
     finally:
         config.chmod(0o700)
+
+
+# --- the cross-process lock: two writers, one index --------------------------
+#
+# The measured defect (QA on #2627): Aida's and the Librarian's boot ensures run
+# together on a fresh install, both read an empty file, and the later replace
+# discards the earlier pin. The injected delay below sits BETWEEN the read and
+# the replace, which is exactly the window the lock closes — the same test fails
+# deterministically on the unlocked implementation (both threads sleep, both read
+# [], the second replace wins) and passes on this one (the peer waits, then reads
+# what the winner wrote).
+
+
+def test_concurrent_set_pins_keep_every_id(tmp_path: Path, monkeypatch) -> None:
+    ids = ["a" * 12, "b" * 12]
+    for session_id in ids:
+        _session(tmp_path, session_id)
+
+    barrier = threading.Barrier(2)
+    original_set = pins_module.set_pin
+    original_read = pins_module.read_pins
+
+    def synchronized_set(config_dir: Path, session_id: str, pinned: bool) -> bool:
+        barrier.wait(timeout=10)
+        return original_set(config_dir, session_id, pinned)
+
+    def slow_read(config_dir: Path) -> list[str]:
+        time.sleep(0.05)
+        return original_read(config_dir)
+
+    monkeypatch.setattr(pins_module, "set_pin", synchronized_set)
+    monkeypatch.setattr(pins_module, "read_pins", slow_read)
+
+    results: dict[str, bool] = {}
+
+    def worker(session_id: str) -> None:
+        results[session_id] = pins_module.set_pin(tmp_path, session_id, True)
+
+    threads = [threading.Thread(target=worker, args=(session_id,)) for session_id in ids]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert not any(thread.is_alive() for thread in threads), "a writer deadlocked"
+    assert results == {session_id: True for session_id in ids}
+    assert set(read_pins(tmp_path)) == set(ids)
+
+
+def test_a_human_unpin_is_remembered_and_a_repin_forgets_it(tmp_path: Path) -> None:
+    _session(tmp_path, "a" * 12)
+    assert set_pin(tmp_path, "a" * 12, True) is True
+    assert set_pin(tmp_path, "a" * 12, False) is False
+    assert explicitly_unpinned(tmp_path) == {"a" * 12}
+    assert set_pin(tmp_path, "a" * 12, True) is True
+    assert explicitly_unpinned(tmp_path) == set()
+
+
+def test_a_bootstrap_reassert_neither_creates_nor_clears_intent(tmp_path: Path) -> None:
+    """The boot path must be able to repair a LOST pin without claiming intent.
+
+    A bootstrap pin over an id with no marker writes the pin; a bootstrap pin
+    over an id the person unpinned still respects the marker.
+    """
+    _session(tmp_path, "a" * 12)
+    _session(tmp_path, "b" * 12)
+    assert set_pin(tmp_path, "a" * 12, True, source=SOURCE_BOOTSTRAP) is True
+    assert explicitly_unpinned(tmp_path) == set()
+
+    assert set_pin(tmp_path, "b" * 12, False) is False
+    assert explicitly_unpinned(tmp_path) == {"b" * 12}
+    assert set_pin(tmp_path, "b" * 12, True, source=SOURCE_BOOTSTRAP) is True
+    assert explicitly_unpinned(tmp_path) == {"b" * 12}

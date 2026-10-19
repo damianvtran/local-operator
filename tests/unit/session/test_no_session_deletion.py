@@ -2695,6 +2695,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "list.remove on the IN-MEMORY schedule list when it exceeds the cap; no path",
     ),
+    # The sidebar's deliberate-unpin ledger: a FILE beside the pin index under
+    # the config root. Emptying the set removes that file; the replace is the
+    # same tmp-file->file atomic write its sibling ``_write_pins`` is allowed.
+    (
+        "local_operator/tui/sidebar_pins.py::_write_unpinned",
+        "<path>.unlink",
+        "removes <config>/sidebar-pins.unpinned.json when empty, and its failed mkstemp FILE",
+        2,
+    ),
+    (
+        "local_operator/tui/sidebar_pins.py::_write_unpinned",
+        "os.replace",
+        "tmp FILE -> <config>/sidebar-pins.unpinned.json FILE; config-root, never sessions/",
+    ),
     # The Library packages (backend core) write only under <config>/cache/library:
     # the derived index's atomic replace and a thumbnail cache temp file. Neither
     # builds a path from a session id or a caller-supplied directory.
