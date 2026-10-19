@@ -9334,10 +9334,15 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
         elif not row["refs"]:
             row["note"] = "no referenced credentials"
         elif not key_rows and not row["skipped"]:
-            # Nothing was granted because there is nobody to grant to — a server
-            # no active member holds (HTTP) or a network with no eligible device
-            # member (stdio). Saying "no grant needed" here would hide a gap.
-            row["note"] = "no eligible member holds this server yet"
+            # Nothing was granted because there is nobody to grant to. WITH a
+            # network that is a holder/eligibility gap; WITHOUT one it is not a
+            # member question at all, and "yet" would send the operator looking
+            # for a share that cannot exist.
+            row["note"] = (
+                "no eligible member holds this server yet"
+                if records
+                else "not in a network; nothing to repair"
+            )
         else:
             row["note"] = ""
         rows.append(row)

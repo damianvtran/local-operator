@@ -2021,10 +2021,31 @@ def mcp_credential_rows(
         if not isinstance(server, Mapping):
             continue
         transport = str(server.get("transport") or "")
-        if transport not in ("http", "sse"):
-            name = _bounded(server.get("name") or "", 120)
-            if not name:
-                continue
+        url = _bounded(server.get("url") or "", 300)
+        name = _bounded(server.get("name") or "", 120) or url
+        if not name:
+            continue
+        literals = [
+            row
+            for row in server.get("literal_keys") or []
+            if isinstance(row, Mapping) and row.get("has_value")
+        ]
+        # AN HTTP/SSE SERVER WHOSE CREDENTIAL IS A LITERAL IS NOT A LOGIN CASE.
+        # The motivating static-header shape (slack's Authorization) has no auth
+        # block and no login row; sending it to "sign in here first" is a repair
+        # dead end when the operator already holds the value. Dispatch it through
+        # the same literal-aware row as stdio. A server with an auth block or an
+        # existing login keeps the login copy: literal handling must not hide a
+        # separate OAuth failure.
+        literal_only = bool(literals) and not server.get("refs")
+        if (
+            transport not in ("http", "sse")
+            or (
+                literal_only
+                and server.get("has_row") is not True
+                and not server.get("auth_declared")
+            )
+        ):
             row = _mcp_ref_row(
                 member,
                 name=name,
@@ -2035,8 +2056,6 @@ def mcp_credential_rows(
             if row is not None:
                 rows.append(row)
             continue
-        url = _bounded(server.get("url") or "", 300)
-        name = _bounded(server.get("name") or "", 120) or url
         if not url:
             continue
         row = _mcp_credential_row(
@@ -2064,15 +2083,16 @@ def _mcp_ref_row(
     viewer: Viewer,
     peer_label: str,
 ) -> dict[str, Any] | None:
-    """A stdio server's row: can the PEER resolve the names its config declares?
+    """A non-login server's row: can the PEER resolve the names its config declares?
 
-    Three cases, in the order the operator can act on them: no references but a
-    literal binding (a credential that can NEVER travel until it is adopted — the
-    pre-fix state, now named instead of silently absent); no references and no
-    literal (no question to answer, so no vacuous ``ok`` row); references, whose
-    ``set`` state is three-valued (``None`` = the peer's store could not be read)
-    and where anything but a definite ``True`` is reported as not resolved, the
-    same closed direction the rest of this module takes.
+    Covers stdio and the HTTP/SSE literal-only shape. Three cases, in the order
+    the operator can act on them: no references but a literal binding (a
+    credential that can NEVER travel until it is adopted — the pre-fix state, now
+    named instead of silently absent); no references and no literal (no question
+    to answer, so no vacuous ``ok`` row); references, whose ``set`` state is
+    three-valued (``None`` = the peer's store could not be read) and where
+    anything but a definite ``True`` is reported as not resolved, the same closed
+    direction the rest of this module takes.
     """
     refs = [
         ref
@@ -2101,7 +2121,10 @@ def _mcp_ref_row(
                 f"{name} on {peer_label} still holds its credentials as literal "
                 f"values ({', '.join(bindings)}); they never travel over the mesh"
             ),
-            remedies=[f"run lop network mcp credentials --adopt on {peer_label}"],
+            remedies=[
+                f"run lop network mcp credentials --adopt on {peer_label}, then "
+                f"lop network mcp credentials --repair on {peer_label} to deliver it to members"
+            ],
             source=SOURCE_PEER,
             observed={"server": name, "literal_keys": bindings},
         )
