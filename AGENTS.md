@@ -8,6 +8,38 @@ each round see `docs/VERIFICATION.md`.
 For bounded allocation, costly-evidence preflight and review convergence, read
 `guide://delivery` (packaged at `local_operator/guides/delivery/GUIDE.md`).
 
+## Internationalization is mandatory — read this before adding copy
+
+**All user-facing copy is keyed.** Never hardcode user-facing English in
+code. Technical identifiers, commands, flags, paths, developer log lines, and
+model-facing prompts stay English by design — those are the only legitimate
+exceptions. The string ratchet records file-level categories in
+`i18n/allowlist.toml`, and one-off sites carry an inline
+`# i18n: ignore <reason>`; an unreasoned exemption is not an exemption.
+
+**Every new or changed key must be translated into every language in
+[`i18n/languages.json`](i18n/languages.json)** — the machine-readable manifest
+of supported languages, including languages added later. A feature is not done
+until it is localized; "English first, translate later" is a missing feature,
+not a follow-up. Adding a language means adding it to the manifest, its
+`i18n/style-guides/<locale>.md`, and its audited `i18n/ledger.json` rows.
+Removing one is a product decision, never a code cleanup.
+
+**Translations are idiomatic, never literal.** An LLM translator produces them
+from `i18n/glossary.md` and the locale's style guide, then an **independent**
+auditor (never the same agent) passes them before the ledger row ships.
+Placeholders, ICU syntax and plural arms are preserved exactly; RTL locales
+follow the direction rules in their style guide.
+
+The coverage gate (`tests/unit/i18n/test_language_manifest.py`) fails on any
+missing `(locale, namespace)` pair not listed in
+`i18n/coverage-allowance.json`. That allowance is **shrink-only**: translate a
+pair, remove it; add a pair only with a reason.
+
+HOWTO: [`docs/I18N.md`](docs/I18N.md). Contract:
+[`docs/design/i18n.md`](docs/design/i18n.md). `local_operator/i18n/data/shipped.json`
+is GENERATED from ledger completeness — **never hand-edit it**.
+
 ## Environment
 
 ```sh
@@ -3509,14 +3541,6 @@ against a hang rather than a stall, that is the file to read.
   failure that motivated the code, not what the line does. Match that density;
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
-
-## Localized product copy
-
-For message extraction, generated key functions, locale/audit eligibility and
-backend-owned language settings, read [the i18n contributor HOWTO](docs/I18N.md)
-and `guide://i18n` before editing. The contract remains
-[docs/design/i18n.md](docs/design/i18n.md); its rollout plan is not completion.
-Keep technical/model-facing docs English and key rendered product copy.
 
 ## Adding a configuration key
 

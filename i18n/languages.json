@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "note": "The single list of languages the product ships or intends to ship. Agents read this to know every locale a new or changed key must be translated into. tests/unit/i18n/test_language_manifest.py fails when a language here is missing an English key without a shrink-only i18n/coverage-allowance.json entry. `native` is the language's own name in its own script, `english` is the English name, `dir` is its text direction, and `status` is `source` for the English source or `supported` for a target locale.",
+  "languages": [
+    {
+      "code": "en",
+      "native": "English",
+      "english": "English",
+      "dir": "ltr",
+      "status": "source"
+    },
+    {
+      "code": "fr",
+      "native": "Français",
+      "english": "French",
+      "dir": "ltr",
+      "status": "supported"
+    },
+    {
+      "code": "es",
+      "native": "Español",
+      "english": "Spanish",
+      "dir": "ltr",
+      "status": "supported"
+    },
+    {
+      "code": "zh-CN",
+      "native": "简体中文",
+      "english": "Chinese (Simplified)",
+      "dir": "ltr",
+      "status": "supported"
+    },
+    {
+      "code": "ru",
+      "native": "Русский",
+      "english": "Russian",
+      "dir": "ltr",
+      "status": "supported"
+    },
+    {
+      "code": "vi",
+      "native": "Tiếng Việt",
+      "english": "Vietnamese",
+      "dir": "ltr",
+      "status": "supported"
+    },
+    {
+      "code": "ur",
+      "native": "اردو",
+      "english": "Urdu",
+      "dir": "rtl",
+      "status": "supported"
+    },
+    {
+      "code": "hi",
+      "native": "हिन्दी",
+      "english": "Hindi",
+      "dir": "ltr",
+      "status": "supported"
+    }
+  ]
+}

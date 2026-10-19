@@ -1,0 +1,2156 @@
+{
+  "schema": 1,
+  "note": "Shrink-only coverage allowance. Each entry is a (locale, namespace) pair where the locale does not yet carry every English key. tests/unit/i18n/test_language_manifest.py fails on any missing pair NOT listed here and on any listed pair that has become complete, so this file can only shrink. Every entry needs a reason; do not add a pair to silence new copy.",
+  "pairs": [
+    {
+      "locale": "fr",
+      "namespace": "mobile.setup",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.account_policy",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.library",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.login",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.session",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.shell",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.analytics",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.app",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.hub_links",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.import",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.library",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.notices",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.projects",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.small",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.usage",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.aida_cadence",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.console",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.agents",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.auth",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.desktop",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.files",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.media",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.exec",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.host_speed",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.memory",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.account_policy",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.slash.library",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.tunnel_setup",
+      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.agents_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.aida_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.config_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.credential_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_runtime",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_worker_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.global_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_shared_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.install_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.login_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.login_status_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.logout_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.mcp_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.memory_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.mobile_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.model_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.monitor_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.qwencloud_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.refresh_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.resume_click_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.send_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.serve_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.services_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.stop_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.teams_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.update_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.wake_help",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "mobile.setup",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.account_policy",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.library",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.login",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.shell",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.analytics",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.app",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.hub_links",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.import",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.library",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.notices",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.projects",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.small",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.usage",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.aida_cadence",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.console",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.agents",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.auth",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.files",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.media",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.host_speed",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.memory",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.account_policy",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash.library",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.tunnel_setup",
+      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.agents_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.aida_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.config_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.credential_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_runtime",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_worker_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.global_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_shared_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.install_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.login_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.login_status_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.logout_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mcp_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.memory_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mobile_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.model_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.monitor_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.qwencloud_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.refresh_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.resume_click_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.send_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.serve_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.sessions_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.stop_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.teams_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.update_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.wake_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.setup",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.account_policy",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.library",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.login",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.session",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.shell",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.analytics",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.app",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.authoring",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.hub_links",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.import",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.library",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.notices",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects_edit",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.review",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.schedule",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.small",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.status",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.team_authoring",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.usage",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.welcome",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.aida_cadence",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.console",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.agents",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.auth",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.files",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.media",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.settings",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.exec",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.host_speed",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.memory",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.account_policy",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash.library",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.tunnel_setup",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.agents_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.aida_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.config_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.credential_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_runtime",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_worker_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.global_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_shared_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.install_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.login_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.login_status_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.logout_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.mcp_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.memory_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.mobile_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.model_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.monitor_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.qwencloud_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.refresh_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.resume_click_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.send_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.services_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.sessions_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.stop_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.teams_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.update_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.wake_help",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "mobile.setup",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.account_policy",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.library",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.login",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.shell",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.analytics",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.app",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.hub_links",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.import",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.library",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.notices",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.projects",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.small",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.usage",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.aida_cadence",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.console",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.agents",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.auth",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.desktop",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.files",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.media",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.exec",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.host_speed",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.memory",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.account_policy",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.slash.library",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.tunnel_setup",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.agents_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.aida_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.browser",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.browser_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.config_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.credential_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.exec_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.exec_runtime",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.exec_worker_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.global_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_shared_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.install_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.login_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.login_status_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.logout_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.mcp_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.memory_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.mobile_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.model_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.monitor_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.qwencloud_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.refresh_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.resume_click_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.send_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.serve_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.services_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.sessions_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.stop_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.teams_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.update_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.wake_help",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "mobile.setup",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.account_policy",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.library",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.login",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.session",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.shell",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.analytics",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.app",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.hub_links",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.import",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.library",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.notices",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.projects",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.small",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.usage",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.aida_cadence",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.console",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.agents",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.auth",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.desktop",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.files",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.media",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.exec",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.host_speed",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.memory",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.account_policy",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.slash.library",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.tunnel_setup",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.agents_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.aida_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.config_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.credential_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.exec_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.exec_runtime",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.exec_worker_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.global_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_shared_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.install_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.login_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.login_status_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.logout_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.mcp_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.memory_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.mobile_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.model_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.monitor_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.qwencloud_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.refresh_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.resume_click_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.send_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.serve_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.services_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.sessions_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.stop_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.teams_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.update_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.wake_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "mobile.setup",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.account_policy",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.library",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.login",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.session",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.analytics",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.app",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.authoring",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.hub_links",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.import",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.library",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.notices",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.projects",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.projects_edit",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.review",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.schedule",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.small",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.status",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.team_authoring",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.transcript",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.usage",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.welcome",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.aida_cadence",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.console",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.agents",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.auth",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.desktop",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.files",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.media",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.settings",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.exec",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.host_speed",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.memory",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.account_policy",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.slash",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.slash.library",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.tunnel_setup",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.agents_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.aida_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.config_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.credential_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_runtime",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_worker_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.global_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_shared_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.install_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.login_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.login_status_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.logout_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.mcp_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.memory_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.mobile_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.model_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.monitor_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.qwencloud_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.refresh_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.resume_click_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.send_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.serve_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.services_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.sessions_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.stop_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.teams_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.update_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.wake_help",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "mobile.setup",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.account_policy",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.library",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.login",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.shell",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.analytics",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.app",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.hub_links",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.import",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.library",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.notices",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.projects",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.small",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.usage",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.aida_cadence",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.console",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.agents",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.auth",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.desktop",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.files",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.media",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.sdk_spec",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.sdk_startup",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.host_speed",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.memory",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.account_policy",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.hub_defaults",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.slash.library",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.tunnel_setup",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md)."
+    }
+  ]
+}
