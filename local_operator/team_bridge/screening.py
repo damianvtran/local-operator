@@ -60,8 +60,8 @@ from local_operator.team_bridge.client import (
 )
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import (
-    SCREENING_CATEGORIES,
     DELIVERY_STATES,
+    SCREENING_CATEGORIES,
     OwnerSnapshot,
     ScreeningReceipt,
 )
