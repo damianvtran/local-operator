@@ -2163,12 +2163,11 @@ class DesktopFeed:
         jobs_running: int | None = None
         subagents_running: int | None = None
         subagents_queued: int | None = None
-        if cached is not None:
-            # Mirror the list's one-tick not-answering diagnostic on a first
-            # stale verdict. Keep no work claim from a dead owner; this reader
-            # still must not perform the sweep itself (reap=False).
+        if cached is not None and cached[1] != "stale":
+            # Match the list: a vanished pid is cold, not the live-but-silent
+            # wedged diagnostic. This reader never performs the sweep itself.
             record, state = cached
-            if state in {"wedged", "stale"}:
+            if state == "wedged":
                 live_state = "wedged"
             elif record.busy:
                 live_state = "busy"
@@ -2183,10 +2182,6 @@ class DesktopFeed:
             jobs_running = getattr(record, "jobs_running", None)
             subagents_running = getattr(record, "subagents_running", None)
             subagents_queued = getattr(record, "subagents_queued", None)
-            if state == "stale":
-                waiting_on = 0
-                jobs_running = subagents_running = subagents_queued = None
-                leaving = ""
             # The age from the same owner the list asks, and without the zombie
             # probe for the same reason ``decorate_rows`` gives: the verdict has
             # already been reached, so a ``ps`` fork here would buy nothing. It
