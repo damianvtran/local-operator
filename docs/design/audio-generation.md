@@ -129,17 +129,24 @@ clamped 0..1. Peaks are computed **once, at artifact creation**, by
 the same content-addressed store the bytes live in — never decoded in a
 render loop, and never carried in `AttachmentContent`.
 
-The dependency is an optional extra (`local-operator[audio]`): a host without
-it writes no sidecar and every consumer degrades silently (no waveform state),
-never an error. A successfully decoded silent clip is 240 zeros — silence is a
-real waveform; `None` means "uncomputable here", and the two are distinct.
+The decoder is a **base runtime dependency**, so bare installed generations
+write sidecars too; `local-operator[audio]` remains a compatibility alias.
+The guarded import preserves audio if an older/damaged install lacks the codec.
+A successfully decoded silent clip is 240 zeros — silence is a real waveform;
+`None` means "uncomputable here", and the two are distinct.
 
 The waveform route `GET /v1/desktop/sessions/{session_id}/attachments/{digest}/waveform`
 (+ its child twin) returns the raw `{version: 1, bars: 240, peaks: [...]}`
 JSON, mirroring the byte route family's gates exactly: digest shape as the
 traversal gate, the session existence check (and the peer-row 409), `nosniff`
-+ `no-store`. A digest with no sidecar is an ordinary 404 — the surface paints
-its no-waveform state.
++ `no-store`. A missing legacy sidecar gets bounded server-side recovery off
+the event loop: 8 MiB input cap, one child decoder at a time, a 10-second decode
+deadline and at most 10 seconds waiting for the recovery lock. Successful repairs
+persist the sidecar; a 256-entry cache memoises both successes and failures.
+Cache eviction or process restart permits another attempt (including after a
+repaired sidecar was manually deleted). No renderer decodes audio. Artifacts
+that cannot be repaired within these limits retain an ordinary 404/no-waveform
+state rather than fabricated silence.
 
 ## 6. Cancellation honesty (all paths)
 
