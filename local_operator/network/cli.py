@@ -7611,7 +7611,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     from local_operator.network import relay as relay_mod
 
     supervision = relay_mod.supervision_state()
-    if supervision["platform"] != "none":
+    # A redirected or unreadable HOME cannot ask this host's manager anything.
+    # The row is OMITTED rather than reported as "not configured": a sandbox is
+    # not evidence that the real home's relay will fail to return after boot,
+    # and a degraded verdict there would send the operator to a repair that has
+    # nothing to repair.
+    if supervision["platform"] != "none" and supervision.get("addressable", False):
         persistent = bool(supervision["persistent"])
         checks.append(
             {

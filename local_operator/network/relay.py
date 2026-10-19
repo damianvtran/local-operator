@@ -912,6 +912,12 @@ def peer_link_state(
     """
     if link is not None:
         return "reachable"
+    if reason.startswith(HANDSHAKE_NOT_ATTEMPTED):
+        # THE BUDGET EXPIRED AFTER THE SOCKET ANSWERED, before the handshake ran.
+        # That is "we did not ask", not a verdict about the address: the address
+        # demonstrably answered. Reporting `address_unreachable` here would send
+        # the operator to the route for a clock they own.
+        return "not_attempted"
     connected = any(attempt.connected for attempt in attempts)
     # A socket can answer just as our listing budget expires. That is evidence
     # of a dial, not evidence that the peer rejected a handshake never started.
@@ -919,7 +925,7 @@ def peer_link_state(
     # link, returns the explicit budget-not-attempted stage, or runs dial's
     # handshake and gets a refusal. A later network's metadata must not erase
     # that completed attempt, even when its reason becomes `no_endpoint`.
-    if connected and not reason.startswith(HANDSHAKE_NOT_ATTEMPTED):
+    if connected:
         return "handshake_refused"
     if not connected and any(
         attempt.detail == f"{CONNECT_FAILED_PREFIX}ConnectionRefusedError" for attempt in attempts
@@ -13779,10 +13785,22 @@ def _service_port() -> int:
 
 def _launchd_boot_persistent() -> bool:
     """Only a readable RunAtLoad plist proves boot activation, not its filename."""
+    from xml.parsers.expat import ExpatError
+
     try:
         with plist_path().open("rb") as plist:
             return plistlib.load(plist).get("RunAtLoad") is True
-    except (OSError, ValueError, TypeError, AttributeError, plistlib.InvalidFileException):
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        plistlib.InvalidFileException,
+        # A truncated XML plist raises ExpatError out of plistlib on Linux CI's
+        # expat and is not a ValueError subclass there; the verdict is the same
+        # (unproven) but the exception must not escape the diagnostic.
+        ExpatError,
+    ):
         return False
 
 
@@ -14510,7 +14528,14 @@ def _service_action_launchd(action: str) -> dict[str, Any]:
     else:
         result = _launchctl("kickstart", "-k", f"{_domain()}/{LABEL}")
     ok = result.returncode == 0
-    return {"ok": ok, "error": "" if ok else result.stderr.strip()[:300]}
+    return {
+        "ok": ok,
+        "error": "" if ok else result.stderr.strip()[:300],
+        # A plist that exists but lacks RunAtLoad (or was hand-edited) is a
+        # successful kickstart with no boot promise. `_cmd_service` reads this
+        # to print the same durability warning the systemd arm gets.
+        "persistent": _launchd_boot_persistent(),
+    }
 
 
 def _systemd_enablement_present() -> bool:

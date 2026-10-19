@@ -1315,6 +1315,19 @@ def test_launchd_persistence_follows_the_installed_run_at_load_plist(
     assert state["linger"] is None
 
 
+def test_a_truncated_plist_is_unproven_not_an_exception(monkeypatch, tmp_path) -> None:
+    """Malformed XML leaves the boot claim false rather than escaping the doctor.
+
+    ``plistlib`` raises ``ExpatError`` on a truncated document, and that class is
+    not a ``ValueError`` on every expat build; the diagnostic must answer the
+    conservative verdict for the same reason an unreadable file does.
+    """
+    plist = tmp_path / "relay.plist"
+    plist.write_bytes(b"<plist><dict><key>RunAtLoad</key>")
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    assert relay._launchd_boot_persistent() is False
+
+
 def test_start_enables_a_disabled_unit_once_but_restart_does_not(linux_host, monkeypatch):
     """Start repairs boot enablement without extra calls on update restarts."""
     unit = _unit(linux_host)

@@ -981,7 +981,7 @@ def test_peer_table_preserves_every_declared_endpoint_attempt(monkeypatch, tmp_p
         (
             relay.handshake_not_attempted_reason("a:1"),
             [relay.CandidateAttempt("a:1", True, "ok")],
-            "address_unreachable",
+            "not_attempted",
         ),
         ("no_endpoint", [relay.CandidateAttempt("a:1", True, "ok")], "handshake_refused"),
         (
