@@ -189,7 +189,7 @@ def library_tag_category(*, category: str) -> Msg:
     return Msg("wire.errors.desktop.library_tag_category", {"category": category})
 
 
-def library_tag_limit(*, max: str) -> Msg:
+def library_tag_limit(*, max: int | float) -> Msg:
     return Msg("wire.errors.desktop.library_tag_limit", {"max": max})
 
 

@@ -43,7 +43,7 @@
   "wire.errors.desktop.library_metadata_unavailable": "The Library's metadata store is unavailable; nothing was changed.",
   "wire.errors.desktop.library_not_an_image": "This asset has no thumbnail.",
   "wire.errors.desktop.library_tag_category": "{category} is not a Library tag category.",
-  "wire.errors.desktop.library_tag_limit": "An asset may carry at most {max} tags.",
+  "wire.errors.desktop.library_tag_limit": "An asset may carry at most {max, number} tags.",
   "wire.errors.desktop.library_tag_name": "Tag names are 1-24 characters: {name}.",
   "wire.errors.desktop.library_tag_unknown": "That tag is not in the Library.",
   "wire.errors.desktop.masked_credential_form": "Enter credentials in the masked credential form, not command text",

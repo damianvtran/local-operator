@@ -190,7 +190,7 @@ export type MessageParams = {
   "wire.errors.desktop.library_metadata_unavailable": undefined;
   "wire.errors.desktop.library_not_an_image": undefined;
   "wire.errors.desktop.library_tag_category": { "category": string };
-  "wire.errors.desktop.library_tag_limit": { "max": string };
+  "wire.errors.desktop.library_tag_limit": { "max": number };
   "wire.errors.desktop.library_tag_name": { "name": string };
   "wire.errors.desktop.library_tag_unknown": undefined;
   "wire.errors.desktop.masked_credential_form": undefined;
