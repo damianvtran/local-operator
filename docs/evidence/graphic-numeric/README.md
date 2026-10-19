@@ -17,7 +17,10 @@ transcript. No stylesheet, frame size or label-color change is part of this fix.
 ## Validation order
 
 `split_component()` and `data_json()` remain lossless: validation also calls both.
-Only `assemble_document()` normalises a rendered copy of dataset rows. To support the
+Only `assemble_document()` normalises a rendered copy of chart-only dataset rows.
+A literal `LO.table(...)` call takes precedence: tables (including mixed table/chart
+components) retain every stored cell spelling, because tables have no unit option.
+Non-list malformed stored rows also pass through unchanged. To support the
 prompt's plain numbers **and** legacy currency-formatted components, the validator's
 numeric reader uses the same conservative normaliser on component and evidence cells.
 The 2×3 provenance matrix covers evidence `$0.15` / `0.15` and component `$0.15` /
@@ -55,6 +58,41 @@ All pytest commands used a fresh scratch HOME/config, stripped inherited environ
 Actual implementation model: `openai/gpt-6.1-sol`, a quota fallback from
 `anthropic/claude-sonnet-5-5`. Independent review/QA/design and CI remain merge gates.
 
+## Round-1 legacy-rendering decisions
+
+- Tables preserve `$0.15` and `45%` exactly as stored; new table/served-byte and shipped
+  prelude tests pin this. For mixed table/chart components, preservation wins over coercion.
+- Chart **value** labels still lose explicit currency symbols and trailing zeroes:
+  `$0.60` becomes `0.6`; `45%` becomes `45`. The caller's `unit` carries the symbol;
+  without a unit option, the bare label has no symbol. This is accepted chart-only repair
+  behavior, not a claim of byte-identical value-label typography.
+- Chart **label** columns are still normalised: `"1,234"` becomes numeric `1234` and
+  string years `"2020", "2021", "2025"` become numbers. `LO.line` then uses value spacing
+  instead of the old index spacing. This legacy-rendering consequence is explicit; the
+  current repair does not infer which columns are categories from arbitrary component JS.
+- Null cells again paint nothing. Only non-numeric strings receive gap labels; these
+  labels intentionally ignore `values:false` (missingness must remain explained).
+- `(1,234.50)` stays a labelled gap. `$-12.50` and `£-3.25` stay strings, while `-$12.50`
+  coerces to −12.5. This conservative sign-order asymmetry is safe: no sign is guessed.
+- Bar gaps are centred in their series band, with separate series positions in both
+  orientations. All-string line columns now show the strings; null stays unlabelled.
+- The optional all-gap rejection remains unimplemented; no measurements are invented.
+
+Round-1 remediation's prelude is **v5**, **10,133 B raw / 4,607 B gzip**. The fixed cap
+is unchanged; **1 B gzip** remains. The measured trim sequence is recorded in BUILD.md.
+The initial six new regression cases failed on the reviewed head before any production
+edit. Final affected document/prelude/validator/fixture tests: **105 passed in 4.92s**.
+Actual desktop route tests (table preservation + normal document): **2 passed, 15
+deselected in 1.77s**; the table returns HTTP 200, unchanged data strings, and exactly the
+assembler bytes. Scoped format/lint/type checks pass (pyright: 0 errors / 0 warnings).
+
+The original before/after/gap frames were re-captured at v5: all three are byte-identical
+to the committed frames. Additional [table](table.png) and [all-string line](line-gaps.png)
+frames were captured and visually inspected. The desktop browser host stopped answering
+before an additional multi-series vertical screenshot could be taken; both orientations'
+per-series coordinates are verified by the shipped-prelude geometry test, not claimed as
+independently photographed. No replacement browser engine was launched.
+
 ## Coupled UI regeneration (not performed here)
 
 The UI checkout's current HEAD predates these files; they exist on its `origin/main`.
@@ -62,7 +100,7 @@ The manager must use an up-to-date **UI worktree**, not edit its shared checkout
 Refresh exactly:
 
 - `src/renderer/src/features/chat/canonical/supplement-document-fixtures.ts`
-  (populated/error constants and provenance header, now PRELUDE_VERSION 4).
+  (populated/error constants and provenance header, now PRELUDE_VERSION 5).
 - `src/renderer/src/features/chat/canonical/supplement-closeout.generated.html`.
 
 From this core worktree at the reviewed head, with `UI_ROOT` set to the manager's UI
@@ -87,7 +125,7 @@ for name in ('populated', 'error'):
     assert count == 1, constant
 head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
 text, count = re.subn(r' \* PROVENANCE:.*?(?= \* `populated`)',
-    f' * PROVENANCE: core {head}, PRELUDE_VERSION 4.\n'
+    f' * PROVENANCE: core {head}, PRELUDE_VERSION 5.\n'
     ' * Regenerate from core tests/fixtures/supplements/components/{populated,error}.html\n'
     ' * using supplements.document.assemble_stored_component; see core numeric repair evidence.\n *\n',
     text, flags=re.S)

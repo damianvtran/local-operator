@@ -69,7 +69,8 @@ from typing import Any, Final, Mapping
 #: ``tests/fixtures/supplements/documents/``) name this number as their regeneration trigger.
 #: 4 — numeric-only chart scales: legacy formatted cells are normalised at assembly,
 #: while unknown values remain labelled gaps instead of poisoning every SVG coordinate.
-PRELUDE_VERSION: Final = 4
+#: 5 — preserve silent null gaps; centre explicit string gaps within each series band.
+PRELUDE_VERSION: Final = 5
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (
@@ -147,12 +148,23 @@ def numeric_cell(value: Any) -> Any:
     return number if Decimal(str(number)) == decimal else value
 
 
-def _plot_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
+def _plot_data(data: Mapping[str, Any] | None, body: str) -> dict[str, Any]:
     # split_component is ALSO used by provenance validation: keep it lossless. Convert
     # only the rendered copy, after validation, never stored bytes or dataset metadata.
+    # Tables have no unit option: converting their cells would erase explicit currency
+    # and percent text. Prefer preserving text even in a mixed table/chart component;
+    # helpers still treat its unknown chart values as gaps rather than inventing values.
+    if re.search(r"\bLO\.table\s*\(", body) or not re.search(r"\bLO\.(?:bar|line)\s*\(", body):
+        return dict(data or {})
     return {
         key: (
-            {**dataset, "rows": [[numeric_cell(cell) for cell in row] for row in dataset["rows"]]}
+            {
+                **dataset,
+                "rows": [
+                    [numeric_cell(cell) for cell in row] if isinstance(row, list) else row
+                    for row in dataset["rows"]
+                ],
+            }
             if isinstance(dataset, dict) and isinstance(dataset.get("rows"), list)
             else dataset
         )
@@ -247,7 +259,7 @@ def assemble_document(body: str, data: Mapping[str, Any] | None = None) -> str:
             '<script type="application/json" id="',
             DATA_ELEMENT_ID,
             '">',
-            data_json(_plot_data(data)),
+            data_json(_plot_data(data, body)),
             "</script>\n<script>",
             prelude_js(),
             "</script>\n",
