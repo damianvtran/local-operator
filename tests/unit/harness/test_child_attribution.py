@@ -1213,8 +1213,26 @@ async def test_resume_first_request_carries_recovery_brief_and_prior_messages(is
         provider.ending = "complete"
         new_id, error = parent.subagent_comms.resume(job_id, "Continue and commit.")
         assert error is None and new_id is not None
-        await wait_until(lambda: len(provider.requests) > request_count)
-        request = provider.requests[request_count]
+
+        def resumed_child_requests():
+            # The failure delivery can also wake the parent on this shared
+            # provider. Identify the resumed CHILD by its own user instruction,
+            # not whichever request happens to race into the list first.
+            return [
+                request
+                for request in provider.requests[request_count:]
+                if any(
+                    isinstance(message, Message)
+                    and message.role == "user"
+                    and "Continue and commit." in message.text
+                    for message in request.messages
+                )
+            ]
+
+        await wait_until(lambda: bool(resumed_child_requests()))
+        requests = resumed_child_requests()
+        assert requests
+        request = requests[0]
         texts = "\n".join(m.text for m in request.messages if isinstance(m, Message))
         assert "[resume context — the previous attempt ended:" in texts
         assert ("explicitly cancelled" if ending == "hang" else "the child run failed") in texts
