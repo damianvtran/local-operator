@@ -639,7 +639,9 @@ async def download_agent_from_radient(
     Download (pull) an agent from the Radient agents marketplace by agent ID.
     """
     try:
-        from local_operator.providers.radient_credentials import configured_radient_base_url
+        from local_operator.providers.radient_credentials import (
+            configured_radient_base_url,
+        )
 
         # Pull and subsequent checks must address the same configured origin;
         # otherwise an immutable link cannot match source resolution or sync.
