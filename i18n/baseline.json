@@ -80,7 +80,9 @@
     "local_operator/incidents.py",
     "local_operator/session/session.py",
     "local_operator/tui/agent_authoring.py",
-    "local_operator/tui/widgets/agent_form.py"
+    "local_operator/tui/widgets/agent_form.py",
+    "local_operator/tui/team_authoring.py",
+    "local_operator/tui/widgets/team_form.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,

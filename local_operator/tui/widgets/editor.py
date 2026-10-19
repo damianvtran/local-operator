@@ -2887,8 +2887,8 @@ class Editor(TextArea):
         # agent named `class` with `/agent =class …`: the leading `=` keeps the
         # first token from matching either reserved word.)
         reserved_first_words: dict[str, frozenset[str]] = {
-            "team": frozenset({"chart"}),
-            "teams": frozenset({"chart"}),
+            "team": frozenset({"chart", "new", "edit"}),
+            "teams": frozenset({"chart", "new", "edit"}),
             "agent": frozenset({"class"}),
             "agents": frozenset({"class"}),
         }

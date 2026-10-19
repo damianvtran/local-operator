@@ -2270,6 +2270,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual AgentFormPage.remove unmounts the page; no filesystem path",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_team_form",
+        "<path>.remove",
+        "Textual TeamFormPage.remove unmounts the page; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_review_view",
         "<path>.remove",
         "Textual ReviewView.remove unmounts the page; no filesystem path",
