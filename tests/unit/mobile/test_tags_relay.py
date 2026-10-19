@@ -474,9 +474,7 @@ def test_a_live_entry_without_a_directory_is_not_admitted(monkeypatch) -> None:
     The tag store prunes no orphans (unlike ``read_pins``), so admitting an id
     with no ``sessions/<id>/`` directory stored an assignment no surface lists.
     """
-    monkeypatch.setattr(
-        "local_operator.mobile.daemon._entry_for_session", lambda *args: object()
-    )
+    monkeypatch.setattr("local_operator.mobile.daemon._entry_for_session", lambda *args: object())
     review = _catalogue("Review")[0]
     orphan = "eeee99990000"
     client = _login()
@@ -563,7 +561,7 @@ def test_the_scan_tick_wakes_the_stream(monkeypatch) -> None:
     daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
     daemon._attention_bootstrapped = True
     monkeypatch.setattr(attention.AttentionStore, "revision", lambda self: "stable")
-    daemon._attention_revision = "stable"
+    setattr(daemon, "_attention_revision", "stable")
 
     # The first tick seeds the published marker; no subscriber exists yet.
     asyncio.run(daemon._scan_once())

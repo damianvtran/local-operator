@@ -798,9 +798,7 @@ class SessionTable:
         #: (both shapes are tuples), so the first read always builds.
         self._tags_token: tuple[Any, ...] | None = None
 
-    def tags_snapshot(
-        self, marker: tuple[Any, ...] | None = None
-    ) -> dict[str, dict[str, Any]]:
+    def tags_snapshot(self, marker: tuple[Any, ...] | None = None) -> dict[str, dict[str, Any]]:
         """The tag projection, rebuilt only when the store's marker moved.
 
         BLOCKING WORK: one marker read on every call, plus ONE categories read
