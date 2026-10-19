@@ -14,7 +14,7 @@ from local_operator import cli
 from local_operator.agents import AgentRegistry
 from local_operator.hub_sync import provenance as prov
 from local_operator.teams import TeamRegistry
-from tests.unit.hub_sync.test_service import BASE, Hub, _pull_agent
+from tests.unit.hub_sync.test_service import BASE, Hub, _make_legacy, _pull_agent
 
 
 @pytest.fixture()
@@ -260,32 +260,34 @@ def test_hub_links_command_lists_a_local_link(rig, capsys) -> None:
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["capability"] == "hub_links:1"
-    # A legacy link is under `unresolved` until its source is confirmed.
+    # A pull records the origin it was served under, so the link is CONFIRMED:
+    # it is listed with its link id and is not an unresolved row.
+    assert len(payload["links"]) == 1 and payload["unresolved"] == []
+    assert payload["links"][0]["hub_id"] == "h1"
+    assert payload["links"][0]["link_id"]
+
+
+def test_hub_links_command_still_lists_a_legacy_row_as_unresolved(rig, capsys) -> None:
+    """A row pulled BEFORE the fix carries no origin, and says so honestly."""
+    root, hub, agents = rig
+    row = _pull_agent(agents, hub, root)
+    _make_legacy(root, "agent", row.id)
+
+    rc = cli.hub_links_command(argparse.Namespace(kind=None, json=True), root)
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
     assert payload["links"] == [] and len(payload["unresolved"]) == 1
     assert payload["unresolved"][0]["hub_id"] == "h1"
 
 
 def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) -> None:
     root, hub, agents = rig
-    _pull_agent(agents, hub, root)
+    row = _pull_agent(agents, hub, root)
 
-    # Resolve the legacy link to a confirmed identity so it has a policy revision.
-    from local_operator.config import ConfigManager
-    from local_operator.hub_sync import service as svc
-
-    cm = ConfigManager(root)
-    ctx = svc.HubSyncContext(
-        config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None, credential="ok"
-    )
-    record = svc.resolve_source(
-        ctx,
-        kind="agent",
-        name=agents.list_agents()[0].name,
-        hub_source="https://api.radienthq.com/v1",
-        visibility="public",
-        tenant_id=None,
-    )
-    assert record.identity is not None
+    # The pull CONFIRMS the link now: it records the origin it was served
+    # under, so the link already has the identity a policy is keyed by.
+    record = prov.read_baseline(root, "agent", row.id)
+    assert record is not None and record.identity is not None
     link_id = record.identity.link_id
 
     rc = cli.hub_link_set_command(

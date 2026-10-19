@@ -50,7 +50,9 @@ from local_operator.hub_sync.identity import (
     Kind,
     LinkError,
     LinkIdentity,
+    LinkOrigin,
     Visibility,
+    link_origin,
 )
 from local_operator.hub_sync.merge import (
     FieldInput,
@@ -351,6 +353,99 @@ def _seed_receipt_if_agreed(
     return True
 
 
+def record_publish_origin(
+    config_dir: Any,
+    kind: Kind,
+    local_id: str,
+    *,
+    hub_id: str,
+    origin: LinkOrigin | None,
+) -> bool:
+    """Attach the origin an ACCEPTED publication proved.
+
+    A publication is the strongest proof of origin there is: the user named the
+    destination and the hub accepted the row. The SCOPE comes from the TARGET
+    the user chose, never from the accepted document -- a publicly published
+    row carries its publisher's ``tenant_id`` (measured on the live hub on
+    2026-10-19), so a scope read from the document would label a public
+    publication as an organization link and skip the public egress grant in
+    ``_eligibility``.
+
+    A scope that conflicts with the record is REFUSED (``origin-conflict``),
+    never silently relinked: the record's own tenant has to be the one the
+    target names, and the record's hub id has to be the row that was
+    published. A record that already carries an identity is left alone.
+
+    ``False`` is not a failure: the publication stands, and the link honestly
+    stays without an origin.
+    """
+
+    if origin is None or not hub_id:
+        return False
+    record = prov.read_baseline(config_dir, kind, local_id)
+    if record is None:
+        return False
+    if record.hub_id != hub_id or record.tenant_id != origin.tenant_id:
+        logger.warning(
+            "the published scope for %s %s does not match the linked row; leaving it untouched",
+            kind,
+            local_id,
+        )
+        return False
+    identity = prov.link_identity(kind, local_id, hub_id, origin=origin)
+    if identity is None:
+        return False
+    if record.identity is not None:
+        if record.identity.link_id != identity.link_id:
+            logger.warning(
+                "the published scope for %s %s conflicts with its confirmed origin; "
+                "leaving it untouched",
+                kind,
+                local_id,
+            )
+        return False
+    try:
+        prov.write_baseline(config_dir, replace(record, identity=identity))
+    except (prov.BaselineError, OSError, ValueError):
+        logger.warning(
+            "could not record the published origin for %s %s; the link stays unresolved",
+            kind,
+            local_id,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def published_hub_id(kind: Kind, result: Mapping[str, Any]) -> str | None:
+    """The hub id an accepted publication created or updated.
+
+    The hub's own answer: the publication result names the row it wrote
+    (``agent_id`` for an agent, ``team.id`` for a team), and the accepted
+    document repeats it. ``None`` when the result names neither -- the caller
+    then records the row without an origin rather than guessing an id.
+    """
+
+    if not isinstance(result, Mapping):
+        return None
+    if kind == "team":
+        team = result.get("team")
+        if isinstance(team, Mapping):
+            value = str(team.get("id") or "").strip()
+            if value:
+                return value
+    else:
+        value = str(result.get("agent_id") or "").strip()
+        if value:
+            return value
+    accepted = result.get("accepted_document")
+    if isinstance(accepted, Mapping):
+        value = str(accepted.get("id") or "").strip()
+        if value:
+            return value
+    return None
+
+
 def seed_receipt_after_publish(
     config_dir: Any,
     kind: Kind,
@@ -359,6 +454,8 @@ def seed_receipt_after_publish(
     accepted: Mapping[str, Any],
     local_fields: Mapping[str, Any],
     revision: str | None,
+    origin: LinkOrigin | None = None,
+    hub_id: str | None = None,
 ) -> bool:
     """Seed A/P after an ACCEPTED manual publish/republish (parent ruling (A)b).
 
@@ -366,8 +463,15 @@ def seed_receipt_after_publish(
     that was published and P the accepted document. Nothing client-side is
     invented: without a revision (an older server) nothing is seeded and the link
     stays honestly ``no-receipt``. The inbound baseline B is untouched.
+
+    The ORIGIN the acceptance proved is recorded as well -- the base and the
+    scope the user chose -- so a published row is a CONFIRMED link instead of
+    one the inventory reports as unresolved. It is recorded independently of the
+    receipt: a server that answers no ETag still proved where the row went.
     """
 
+    if origin is not None and hub_id:
+        record_publish_origin(config_dir, kind, local_id, hub_id=hub_id, origin=origin)
     if not revision:
         return False
     from dataclasses import replace as dc_replace
@@ -391,6 +495,9 @@ def _adopt_if_equal(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
     if c.verdict != "up-to-date" or c.base is not None or c.local is None:
         return
     record = prov.make_record(c.kind, c.local_id, c.hub_id, c.tenant_id, c.local, "adopt")
+    identity = _carried_identity(ctx, c)
+    if identity is not None:
+        record = replace(record, identity=identity)
     try:
         prov.write_baseline(ctx.config_dir, record)
     except (prov.BaselineError, OSError):
@@ -531,6 +638,15 @@ def check_items(
         )
     for c in out:
         _adopt_if_equal(ctx, c)
+    # THE ORIGIN REPAIR: a baseline written before links carried an origin has
+    # no identity, and the check that just fetched the row is the proof of where
+    # it came from. It runs after the adopts (which can mint the record the
+    # repair then confirms) and before the store fold, so the inventory the
+    # caller reads already carries the confirmed link.
+    source = prov.canonical_hub_source(ctx.config_manager)
+    if source:
+        for c in out:
+            attach_served_origin(ctx, c, source=source)
     if record:
         live = None
         if names is None and only_ids is None and set(kinds) == {"agent", "team"}:
@@ -540,6 +656,54 @@ def check_items(
 
 
 # -- merge -------------------------------------------------------------------------------
+
+
+def attach_served_origin(ctx: HubSyncContext, c: chk.ItemCheck, *, source: str | None) -> bool:
+    """Attach the origin a hub-served row actually came from (the repair).
+
+    A baseline written before links carried an origin has no identity, and an
+    identity-less row is a dead end: the inventory lists it as "source
+    unresolved" and the desktop draws a "?" badge for a row this machine
+    pulled from a source the operator trusts. The HUB is the proof: a check
+    that FETCHED the row knows which base served it, and the client it used
+    knows under which scope.
+
+    Guards -- every one of them a REFUSAL, never a relink:
+
+    * only a record that has NO identity (one attachment per row);
+    * only a row the hub ACTUALLY served (an unavailable check proves
+      nothing, so a row the hub no longer serves stays unresolved);
+    * only when the serving base is the CONFIGURED one (a row answered by
+      some other destination says nothing about this hub);
+    * the RECORD's own scope decides the visibility -- an organization record
+      keeps its tenant, a public record names none -- never the document's
+      ``tenant_id``, which a PUBLIC row carries as its publisher's.
+    """
+
+    if not source or c.verdict == "unavailable" or not c.served_by:
+        return False
+    if c.served_by != source:
+        return False
+    record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    if record is None or record.identity is not None:
+        return False
+    if record.hub_id != c.hub_id:
+        return False
+    origin = link_origin(source, "org" if record.tenant_id else "public", record.tenant_id)
+    identity = prov.link_identity(c.kind, c.local_id, record.hub_id, origin=origin)
+    if identity is None:
+        return False
+    try:
+        prov.write_baseline(ctx.config_dir, replace(record, identity=identity))
+    except (prov.BaselineError, OSError, ValueError):
+        logger.warning(
+            "could not attach the hub origin to %s %s; the link stays unresolved",
+            c.kind,
+            c.local_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _specs(kind: str) -> list[tuple[str, str, int | None, int | None]]:
@@ -840,6 +1004,23 @@ def _write_team(ctx: HubSyncContext, c: chk.ItemCheck, report: ItemMergeReport) 
     ctx.teams().update_team(c.local_id, fields, precondition=precondition)
 
 
+def _carried_identity(ctx: HubSyncContext, c: chk.ItemCheck) -> LinkIdentity | None:
+    """The identity a baseline rewrite has to carry forward.
+
+    A rewrite that dropped it would turn a CONFIRMED link back into an
+    identity-less row: the links inventory would list it as "source
+    unresolved" again and the "?" badge would come back for a row the
+    operator already confirmed. The record on disk is the authority -- the
+    same shape the skill merge carries forward.
+    """
+
+    try:
+        current = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    except (prov.BaselineError, OSError):
+        return None
+    return current.identity if current is not None else None
+
+
 def _advance_baseline(ctx: HubSyncContext, c: chk.ItemCheck, recorded_by: str) -> None:
     """B := the remote text just integrated (see ``merge`` docstring).
 
@@ -854,6 +1035,9 @@ def _advance_baseline(ctx: HubSyncContext, c: chk.ItemCheck, recorded_by: str) -
     record = prov.make_record(c.kind, c.local_id, c.hub_id, c.tenant_id, c.remote, recorded_by)
     if c.remote_revision:
         record = replace(record, remote_revision=c.remote_revision)
+    identity = _carried_identity(ctx, c)
+    if identity is not None:
+        record = replace(record, identity=identity)
     prov.write_baseline(ctx.config_dir, record)
     _mark_integrated(ctx, c, integrated=True)
 

@@ -1183,8 +1183,19 @@ async def publish_agent_to_radient(
         # Best-effort by design: a seeding failure must never fail the publish
         # (the link simply stays `no-receipt` and says so).
         try:
-            from local_operator.hub_sync.service import seed_receipt_after_publish
+            from local_operator.hub_sync.identity import link_origin
+            from local_operator.hub_sync.provenance import serving_base
+            from local_operator.hub_sync.service import (
+                published_hub_id,
+                seed_receipt_after_publish,
+            )
 
+            # The SCOPE is the TARGET the caller chose (the query params), never
+            # the accepted document: a publicly published row carries its
+            # publisher's ``tenant_id``, and reading the scope from the document
+            # would label a public publication as an organization link and skip
+            # the public egress grant.
+            org_tenant = str(target.get("tenant_id") or "") or None
             seed_receipt_after_publish(
                 config_manager.config_dir,
                 "agent",
@@ -1195,6 +1206,12 @@ async def publish_agent_to_radient(
                     "description": str(document.get("description") or ""),
                 },
                 revision=str(result.get("revision") or "") or None,
+                origin=link_origin(
+                    serving_base(radient_client, config_manager.config_dir) or "",
+                    "org" if org_tenant else "public",
+                    org_tenant,
+                ),
+                hub_id=published_hub_id("agent", result),
             )
         except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
             logger.debug("could not seed the outbound receipt after a publish", exc_info=True)
@@ -1335,8 +1352,19 @@ async def republish_agent_to_radient(
         # Best-effort by design: a seeding failure must never fail the publish
         # (the link simply stays `no-receipt` and says so).
         try:
-            from local_operator.hub_sync.service import seed_receipt_after_publish
+            from local_operator.hub_sync.identity import link_origin
+            from local_operator.hub_sync.provenance import serving_base
+            from local_operator.hub_sync.service import (
+                published_hub_id,
+                seed_receipt_after_publish,
+            )
 
+            # The SCOPE is the TARGET the caller chose (the query params), never
+            # the accepted document: a publicly published row carries its
+            # publisher's ``tenant_id``, and reading the scope from the document
+            # would label a public publication as an organization link and skip
+            # the public egress grant.
+            org_tenant = str(target.get("tenant_id") or "") or None
             seed_receipt_after_publish(
                 config_manager.config_dir,
                 "agent",
@@ -1347,6 +1375,12 @@ async def republish_agent_to_radient(
                     "description": str(document.get("description") or ""),
                 },
                 revision=str(result.get("revision") or "") or None,
+                origin=link_origin(
+                    serving_base(radient_client, config_manager.config_dir) or "",
+                    "org" if org_tenant else "public",
+                    org_tenant,
+                ),
+                hub_id=published_hub_id("agent", result),
             )
         except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
             logger.debug("could not seed the outbound receipt after a publish", exc_info=True)
@@ -1616,8 +1650,16 @@ async def publish_team_to_radient(
         # canonical fields are the A side. Best-effort: never fails the publish.
         try:
             from local_operator.hub_sync import provenance as _prov
-            from local_operator.hub_sync.service import seed_receipt_after_publish
+            from local_operator.hub_sync.identity import link_origin
+            from local_operator.hub_sync.service import (
+                published_hub_id,
+                seed_receipt_after_publish,
+            )
 
+            # Teams publish into an organization in this route, so the SCOPE is
+            # the target the caller named -- never the accepted document's
+            # ``tenant_id``, which a publicly published row carries as its
+            # publisher's.
             seed_receipt_after_publish(
                 config_manager.config_dir,
                 "team",
@@ -1631,6 +1673,12 @@ async def publish_team_to_radient(
                     project=str(getattr(team, "project", "") or ""),
                 ),
                 revision=str(result.get("revision") or "") or None,
+                origin=link_origin(
+                    _prov.serving_base(radient_client, config_manager.config_dir) or "",
+                    "org",
+                    str(tenant_id),
+                ),
+                hub_id=published_hub_id("team", result),
             )
         except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
             logger.debug("could not seed the outbound receipt after a team publish", exc_info=True)
@@ -1749,14 +1797,30 @@ async def pull_team_from_radient(
         # Link the row to its hub document and record what was pulled, so the update
         # runner and `teams sync` can three-way merge it later. Best-effort inside
         # ``record_team_pull``: the pull already succeeded and must stay successful.
-        from local_operator.hub_sync.provenance import record_team_pull
+        #
+        # The ORIGIN is recorded with it: the ARM that served the row decides the
+        # scope (a document naming an owning organization was served as that
+        # organization's row; a document with no owner was served by the public
+        # catalogue), and the base the client addressed is the source the link
+        # is scoped to -- the base the check reports as ``served_by`` and the one
+        # the integration and push gates compare the link's source against. The
+        # document's own ``tenant_id`` is the PUBLISHER's on a public row, so the
+        # scope is never read from it.
+        from local_operator.hub_sync.identity import link_origin
+        from local_operator.hub_sync.provenance import record_team_pull, serving_base
 
+        origin = link_origin(
+            serving_base(radient_client, config_manager.config_dir) or "",
+            "org" if owner else "public",
+            owner or None,
+        )
         linked = await asyncio.to_thread(
             lambda: record_team_pull(
                 team_registry.config_dir,
                 team_registry.get_team(outcome.team.id),
                 document,
-                tenant_id=owner or tenant_id or "",
+                tenant_id=owner or "",
+                origin=origin,
             )
         )
 

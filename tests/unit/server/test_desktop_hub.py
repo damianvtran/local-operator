@@ -16,7 +16,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
 from local_operator.server.routes import capabilities, desktop_hub, desktop_sessions
-from tests.unit.hub_sync.test_service import BASE, Hub, _pull_agent
+from tests.unit.hub_sync.test_service import BASE, Hub, _make_legacy, _pull_agent
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,6 +47,10 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("local_operator.hub_sync.service.build_clients", fake_clients)
     app = FastAPI()
     app.state.config_manager = ConfigManager(root)
+    # The rig's hub IS this machine's configured hub: the source-resolution
+    # route approves the CONFIGURED base, so a rig that answered from another
+    # one could not confirm the origin a pull recorded.
+    app.state.config_manager.set_config_value("radient_base_url", hub.base_url)
     app.state.env_config = EnvConfig()
     app.include_router(desktop_hub.router)
     app.include_router(desktop_sessions.router)
@@ -272,8 +276,23 @@ async def test_links_inventory_lists_a_healthy_link_with_capability(api):
 
     payload = (await client.get("/v1/desktop/hub/links")).json()["result"]
     assert payload["capability"] == "hub_links:1"
-    # A LEGACY link (no confirmed identity) is listed under `unresolved`, not in
-    # `links`, so a client offers resolve instead of acting on a guessed origin.
+    # A pull records the origin it was served under, so the link is CONFIRMED
+    # and is listed with its link id -- not an unresolved row.
+    assert payload["unresolved"] == []
+    assert len(payload["links"]) == 1
+    row = payload["links"][0]
+    assert row["kind"] == "agent" and row["hub_id"] == "h1"
+    assert row["link_id"] and row["visibility"] == "public"
+
+
+async def test_links_inventory_lists_a_legacy_row_as_unresolved(api):
+    """A row pulled BEFORE the fix carries no origin, and is listed as unresolved."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    row = _pull_agent(agents, hub, root)
+    _make_legacy(root, "agent", row.id)
+
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]
     assert payload["links"] == []
     assert len(payload["unresolved"]) == 1
     row = payload["unresolved"][0]
@@ -287,7 +306,7 @@ async def test_link_policy_patch_is_revision_checked(api):
     agents = AgentRegistry(root)
     _pull_agent(agents, hub, root)
 
-    link_id = await _resolved_link_id(client, root)
+    link_id = await _resolved_link_id(client, root, hub.base_url)
 
     stale = await client.patch(
         f"/v1/desktop/hub/links/{link_id}",
@@ -312,7 +331,7 @@ async def test_link_policy_patch_refuses_enabling_auto_push_without_eligibility(
     client, root, hub = api
     agents = AgentRegistry(root)
     _pull_agent(agents, hub, root)
-    link_id = await _resolved_link_id(client, root)
+    link_id = await _resolved_link_id(client, root, hub.base_url)
     payload = next(
         row
         for row in (await client.get("/v1/desktop/hub/links")).json()["result"]["links"]
@@ -335,15 +354,20 @@ async def test_link_policy_patch_404s_an_unknown_link(api):
     assert response.status_code == 404
 
 
-async def _resolved_link_id(client: Any, root: Path) -> str:
-    """Resolve the pulled agent's legacy link to a confirmed identity, return its id."""
+async def _resolved_link_id(client: Any, root: Path, hub_source: str) -> str:
+    """Resolve the pulled agent's link to a confirmed identity, return its id.
+
+    The source named is the CONFIGURED one (the route approves nothing else),
+    which is the hub the pull was served by -- so the resolution confirms the
+    origin the pull already recorded instead of pointing the link elsewhere.
+    """
     resolved = await client.post(
         "/v1/desktop/hub/updates/apply",
         json=mutation(
             kind="agent",
             name="coder",
             resolve_source=True,
-            hub_source="https://api.radienthq.com/v1",
+            hub_source=hub_source,
             visibility="public",
         ),
     )
