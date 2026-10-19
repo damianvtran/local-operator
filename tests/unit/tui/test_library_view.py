@@ -31,6 +31,7 @@ from local_operator.session.frontend_state import (
     _slash_capabilities,
 )
 from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
+from local_operator.tui import librarian_control
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import library_view as library_view_mod
 from local_operator.tui.widgets.library_view import LibraryView
@@ -818,8 +819,13 @@ async def test_space_previews_a_real_image_and_falls_back_for_an_unsupported_one
 
 
 @pytest.mark.asyncio
-async def test_the_librarian_hint_degrades_to_a_sentence(calls) -> None:
+async def test_the_librarian_hint_degrades_to_a_sentence(calls, monkeypatch) -> None:
     from tests.unit.tui.test_slash_echo import _notice_texts
+
+    # The Librarian package ships in this build now; the degradation sentence is
+    # still a designed state for builds without it, so force the bridge's own
+    # absence seam rather than deleting sys.modules (which would re-import it).
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 34)) as pilot:
