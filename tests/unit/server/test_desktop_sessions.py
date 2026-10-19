@@ -10004,6 +10004,7 @@ def test_real_mp3_waveform_http_writes_and_serves_sidecar(tmp_path, monkeypatch,
         artifact = cache_media(raw, content_type="audio/mpeg")
         assert artifact is not None
         digest = artifact.attachment
+        assert digest is not None
         assert (
             store.get_peaks(digest) is not None
         ), "new sound must persist production-decoded peaks"
