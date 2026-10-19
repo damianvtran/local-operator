@@ -14,6 +14,7 @@ import pytest
 from local_operator.harness.types import Message, TextContent
 from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, guard
 from local_operator.memory_capture import (
+    ATTRIBUTION_STARTED_KEY,
     capture_detail,
     extract,
     finish,
@@ -917,7 +918,7 @@ def test_the_write_skips_a_row_it_refuses_and_counts_it(store):
     persist(store, "belt-marker", _scan_rows(39) + [_refused_row()], "ok")
     assert watermark(store, "belt-marker") == ("ok", 39)
     assert _capture_row(store, "belt-marker") == {
-        "reason": "refused-row",
+        "reason": "write-refused",
         "refused": 1,
         "skipped": 0,
     }
@@ -933,7 +934,7 @@ async def test_one_unwritable_row_cannot_zero_the_whole_capture(store):
 
     terminal = await finish(store, "one-bad-row", asyncio.create_task(scan()), "")
     assert (terminal, watermark(store, "one-bad-row")) == ("ok", ("ok", 39))
-    assert _reason(store, "one-bad-row") == "refused-row"
+    assert _reason(store, "one-bad-row") == "write-refused"
 
 
 def _fake_scan_clock(monkeypatch, step):
@@ -1072,6 +1073,7 @@ async def test_a_pass_whose_every_candidate_is_refused_is_a_failure(store):
     assert terminal == "failed"
     assert watermark(store, "all-refused") == ("failed", 0)
     assert _detail(store, "all-refused").refused == 1
+    assert _detail(store, "all-refused").reason == "write-refused"
     assert "did not complete" in hint(store, "all-refused")
 
 
@@ -1080,28 +1082,144 @@ def test_admission_skips_are_counted_distinctly_from_write_refusals(store):
     rows = extract(f"/docs/{HEX} ~/docs/proof.md")
     assert rows.skipped == 1
     assert [row["body"] for row in rows] == ["~/docs/proof.md"]
-    assert persist(store, "admission-marker", rows, "ok") == ("ok", "refused-row")
+    assert persist(store, "admission-marker", rows, "ok") == ("ok", "admission-skip")
     assert watermark(store, "admission-marker") == ("ok", 1)
     assert _capture_row(store, "admission-marker") == {
-        "reason": "refused-row",
+        "reason": "admission-skip",
         "refused": 0,
         "skipped": 1,
     }
-    assert "withheld" in hint(store, "admission-marker")
+    assert "declined by the admission guard" in hint(store, "admission-marker")
 
 
-def test_a_pass_whose_every_candidate_is_refused_at_admission_is_a_failure(store):
-    """An admission-only total loss is still a total loss."""
+def test_a_pass_whose_every_candidate_is_declined_at_admission_is_not_a_failure(store):
+    """An admission-only total loss is a benign DECLINE, distinct from a stage fault.
+
+    Nothing the store should have taken was lost: every candidate was noise the
+    admission guard refused before the store saw it. Recording ``failed`` here made a
+    quiet pass indistinguishable from a timeout or a store error at the status column.
+    """
     rows = extract(f"/docs/{HEX}")
     assert list(rows) == [] and rows.skipped == 1
-    assert persist(store, "admission-empty", rows, "ok") == ("failed", "refused-row")
-    assert watermark(store, "admission-empty") == ("failed", 0)
+    assert persist(store, "admission-empty", rows, "ok") == ("declined", "admission-skip")
+    assert watermark(store, "admission-empty") == ("declined", 0)
+    assert "declined" in hint(store, "admission-empty")
+    assert "did not complete" not in hint(store, "admission-empty")
 
 
 def test_a_non_mapping_row_costs_one_candidate_not_the_pass(store):
     """NIT 1: the belt's contract holds for a malformed row, not just ``MemoryError``."""
     malformed: Any = ["not-a-mapping"]  # the shape a future producer bug would emit
     terminal = persist(store, "malformed-row", malformed, "ok")
-    assert terminal == ("failed", "refused-row")
+    assert terminal == ("failed", "write-refused")
     assert watermark(store, "malformed-row") == ("failed", 0)
     assert _detail(store, "malformed-row").refused == 1
+
+
+def test_both_guards_are_counted_and_the_write_belt_is_named(store):
+    """BOTH GUARDS: the literal names the write belt; ``meta`` keeps both counts.
+
+    The write belt is the later, stricter guard, and its refusal is the one an
+    operator investigating a lost candidate needs named; the admission count stays
+    visible beside it rather than being folded into the literal.
+    """
+    rows = extract(f"/docs/{HEX} ~/docs/proof.md")
+    assert rows.skipped == 1
+    terminal = persist(
+        store, "both-guards", list(rows) + [_refused_row()], "ok", skipped=rows.skipped
+    )
+    assert terminal == ("ok", "write-refused")
+    assert _capture_row(store, "both-guards") == {
+        "reason": "write-refused",
+        "refused": 1,
+        "skipped": 1,
+    }
+
+
+def _meta_value(store, key):
+    with store.connection() as db:
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+
+def test_the_cohort_marker_starts_at_the_first_attributed_capture(store):
+    """The split is dated in ``meta`` so reporting can age rows honestly.
+
+    Rows written before this stamp carry the verdict-shaped literal (or none at all)
+    and cannot be reclassified by guard; the stamp is the boundary between the two
+    cohorts, written once and never moved.
+    """
+    assert _meta_value(store, ATTRIBUTION_STARTED_KEY) is None
+    persist(store, "cohort-one", extract("/src/cohort.py"), "ok")
+    first = _meta_value(store, ATTRIBUTION_STARTED_KEY)
+    assert first is not None
+    assert isinstance(json.loads(first)["at"], float)
+    persist(store, "cohort-two", extract("/src/cohort2.py"), "ok")
+    assert _meta_value(store, ATTRIBUTION_STARTED_KEY) == first, "first write wins"
+
+
+def test_a_legacy_verdict_literal_is_unclassifiable_and_never_rewritten(store):
+    """NO BACKFILL: a pre-split record keeps its bytes and yields no guard cause.
+
+    ``refused-row`` named no guard, so reading it as either new literal would invent
+    a cause the writer never recorded. The raw record is left exactly as written.
+    """
+    legacy = json.dumps({"reason": "refused-row", "refused": 0, "skipped": 18})
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO meta VALUES (?,?)",
+            (f"capture.{store.identity.session_id}.legacy-marker", legacy),
+        )
+        db.execute(
+            "INSERT INTO captures(session,compaction,status,n) VALUES (?,?,?,?)",
+            (store.identity.session_id, "legacy-marker", "failed", 0),
+        )
+        db.commit()
+    detail = _detail(store, "legacy-marker")
+    assert detail.reason is None
+    assert (detail.status, detail.n, detail.refused, detail.skipped) == ("failed", 0, 0, 18)
+    assert _capture_row(store, "legacy-marker") == {
+        "reason": "refused-row",
+        "refused": 0,
+        "skipped": 18,
+    }
+
+
+#: The four shapes whose reason/status mapping is contractual. ``admission-skip`` and
+#: ``write-refused`` are different guards; only the latter is a total loss when every
+#: candidate lands there. ``quota`` and ``timeout`` are stage faults and stay ``failed``
+#: when nothing was captured. The write refusal is the shape no live record produced
+#: (``refused`` summed to zero across all 48), so it is proven here, not assumed.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape,reason,status",
+    [
+        ("admission-skip", "admission-skip", "declined"),
+        ("write-refused", "write-refused", "failed"),
+        ("quota", "quota", "failed"),
+        ("timeout", "timeout", "failed"),
+    ],
+)
+async def test_the_four_attribution_shapes_map_to_exact_literal_and_status(
+    store, monkeypatch, shape, reason, status
+):
+    if shape == "admission-skip":
+        terminal = persist(store, shape, extract(f"/docs/{HEX}"), "ok")
+    elif shape == "write-refused":
+        terminal = persist(store, shape, [_refused_row()], "ok")
+    elif shape == "quota":
+
+        def refuse(db, scope, owner, *, relief=False):
+            raise MemoryError("Memory quota reached (synthetic).")
+
+        monkeypatch.setattr(store, "_quota", refuse)
+
+        async def scan():
+            return _scan_rows(1)
+
+        terminal = (await finish(store, shape, asyncio.create_task(scan()), ""), "quota")
+    else:
+        terminal = persist(store, shape, [], "ok", None, "timeout")
+    assert terminal == (status, reason)
+    detail = _detail(store, shape)
+    assert (detail.status, detail.reason) == (status, reason)
