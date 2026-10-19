@@ -71,7 +71,10 @@ from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
-from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
+from local_operator.memory_capture import (
+    LOCATORS_DEFAULT_ENABLED,
+    MEMORY_DEFAULT_ENABLED,
+)
 from local_operator.model.effort import (
     EFFORT_ORDER,
     FALLBACK_EFFORTS,
@@ -1622,6 +1625,23 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=MEMORY_DEFAULT_ENABLED,
         gated_by="memory.enabled",
+    ),
+    Setting(
+        # The KEY is three segments because it names the behaviour the operator
+        # turns on (`memory.capture` + locators); the PATH is flat beside
+        # `capture` because that key is a BOOL and cannot also hold a mapping.
+        # Default OFF: locators are supporting detail of a knowledge fact, never
+        # facts of their own, and the old standalone sweep is what filled 70.9%
+        # of the measured store with debris. Turning it on restores the context
+        # arm without a code change; existing rows are never migrated.
+        key="memory.capture.locators",
+        path=("memory", "capture_locators"),
+        section="memory",
+        label=_t(_mm.capture_locators_label()),
+        help=_t(_mm.capture_locators_help()),
+        kind=Kind.BOOL,
+        default=LOCATORS_DEFAULT_ENABLED,
+        gated_by="memory.capture",
     ),
     Setting(
         key="memory.suggest",
