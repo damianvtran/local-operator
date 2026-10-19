@@ -1012,6 +1012,12 @@ class ConversationSendIn(_Strict):
     agent_label: str | None = Field(default=None, max_length=64)
 
 
+class ConversationJoinIn(_Strict):
+    #: The organization the join targets. Required for a caller with more than one
+    #: eligible membership; the server answers ``invalid_request`` without it.
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+
 class ConversationReadIn(_Strict):
     tenant_id: str | None = Field(default=None, max_length=128)
     seq: int | None = Field(default=None, ge=0)
@@ -1308,6 +1314,7 @@ async def conversation_consent(
 async def conversation_join(
     conversation_id: str,
     request: Request,
+    body: ConversationJoinIn | None = None,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Accept an invitation, or self-join a tenant-visible channel."""
@@ -1315,7 +1322,11 @@ async def conversation_join(
     _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.conversation_join(conversation_id)))
+    return reply(
+        await _conversation_reply(
+            client.conversation_join(conversation_id, tenant_id=body.tenant_id if body else None)
+        )
+    )
 
 
 @router.post(
