@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import pytest
 
@@ -846,3 +847,127 @@ async def test_provider_available_is_true_when_a_leg_can_serve(manager, install_
     subject, legs = service(manager, install_legs, radient={"credential": True})
     assert await subject.provider_available() is True
     assert legs["radient"].calls == []
+
+
+# ---------------------------------------------------------------------------
+# Routing trace: a fallback is named on the outcome and the spend row
+# ---------------------------------------------------------------------------
+
+
+async def test_a_fallback_names_the_skipped_leg_on_the_outcome_and_the_row(
+    holder_root, install_legs
+) -> None:
+    """The measured defect: OpenRouter answered and nothing said Radient was skipped.
+
+    The placement row is real (the head owns Radient and lends it here), the stub
+    Radient leg reports no credential — the state the node was in — and the
+    decision must carry both the skipped leg and the reason, on the
+    ``Recommendation`` and on the channel-ledger row.
+    """
+    subject = ClassificationService(config_dir=holder_root, settings=settings())
+    behaviours = install_legs(
+        radient={"credential": False, "note_posts": True},
+        typesafe={"credential": True, "note_posts": True},
+    )
+    rows = []
+    subject.bind_spend_sink(rows.append)
+
+    outcome = await subject.recommend_resources(request())
+
+    assert behaviours["radient"].credential_calls == 1
+    assert outcome.vendor == "typesafe"
+    assert (outcome.fallback_from, outcome.fallback_reason) == ("radient", "borrow_unavailable")
+    assert len(rows) == 1
+    assert rows[0].detail.startswith("fallback from radient: borrow_unavailable")
+    assert subject.routing_note == (
+        "radient could not be borrowed on this device (borrow_unavailable); using typesafe"
+    )
+
+
+async def test_a_first_leg_decision_keeps_the_empty_fallback_shape(manager, install_legs) -> None:
+    """No skip means no note: the outcome and the row keep their pre-slice shape."""
+    subject, behaviours = service(
+        manager,
+        install_legs,
+        radient={"credential": True, "note_posts": True},
+        typesafe={"credential": False, "note_posts": True},
+        openrouter={"credential": False, "note_posts": True},
+    )
+    rows = []
+    subject.bind_spend_sink(rows.append)
+
+    outcome = await subject.recommend_resources(request())
+
+    assert behaviours["radient"].calls
+    assert outcome.vendor == "radient"
+    assert (outcome.fallback_from, outcome.fallback_reason) == ("", "")
+    assert subject.routing_note == ""
+    assert len(rows) == 1 and rows[0].detail == ""
+
+
+async def test_a_zero_peer_session_never_constructs_the_borrow_store(
+    bare_manager, monkeypatch
+) -> None:
+    """The hot path on a device with nothing lent to it pays no mesh construction."""
+    from local_operator.network.credentials import store as mesh_store
+
+    def explode(*args, **kwargs):
+        raise AssertionError("a zero-peer device must not construct a mesh store")
+
+    monkeypatch.setattr(mesh_store, "build_auth_store", explode)
+
+    subject = ClassificationService(config_dir=bare_manager, settings=settings())
+
+    outcome = await subject.recommend_resources(request())
+
+    assert outcome.skipped == "no-vendor"
+    assert subject.routing_note == ""
+
+
+async def test_a_slow_borrow_does_not_exhaust_the_classification_deadline(
+    holder_root, install_legs, monkeypatch
+) -> None:
+    """F1 regression: a 2 s borrow must be cut off, not turn the answer into a timeout.
+
+    Before the borrow had its own ceiling, the real Radient leg's credential probe
+    ran inside the 1.5 s per-call budget: a slow owner consumed it, ``_attempt``
+    returned ``skipped='timeout'`` and ``_legs`` stayed uncached, so every later
+    message repeated the same dead wait instead of falling through.
+    """
+    from local_operator.network.credentials import store as mesh_store
+
+    class _SlowStore:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def get_api_key(self, provider, session_id=None, *, read_only=False, **kwargs):
+            await asyncio.sleep(2.0)
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    stores = []
+
+    def build(*args, **kwargs):
+        store = _SlowStore()
+        stores.append(store)
+        return store
+
+    monkeypatch.setattr(mesh_store, "build_auth_store", build)
+    # Radient stays the REAL leg, so its credential probe takes the patched,
+    # slow store; typesafe is a stub that answers.
+    install_legs(typesafe={"credential": True, "note_posts": True})
+    subject = ClassificationService(config_dir=holder_root, settings=settings())
+    rows = []
+    subject.bind_spend_sink(rows.append)
+
+    started = time.monotonic()
+    outcome = await subject.recommend_resources(request())
+    elapsed = time.monotonic() - started
+
+    assert outcome.skipped is None, "a bounded borrow must read as a skip, not a timeout"
+    assert outcome.vendor == "typesafe"
+    assert elapsed < subject.timeout_s
+    assert stores and stores[0].closed
+    assert rows and rows[0].detail.startswith("fallback from radient: borrow_unavailable")

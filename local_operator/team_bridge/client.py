@@ -65,7 +65,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 import httpx
 
@@ -1452,9 +1452,21 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         limit: int | None = None,
         before: str | None = None,
+        cursor: str | None = None,
+        scope: Literal["account"] | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """One page of the caller's conversations, newest activity first."""
+        """One page of the caller's conversations, newest activity first.
+
+        ``scope="account"`` asks for the merged page across every organization
+        the signed-in account is an ACTIVE member of. The server derives that set
+        from the memberships (and applies eligibility per org), which is why no
+        tenant id rides beside it: a caller-supplied tenant list would be a
+        second authorization input and is never accepted. The merged page's
+        position is the single opaque ``cursor``; ``before`` belongs to the
+        tenant page. Writes deliberately have no scope parameter at all — each
+        one names exactly one tenant.
+        """
 
         params: dict[str, Any] = {}
         if tenant_id:
@@ -1463,6 +1475,10 @@ class TeamBridgeClient:
             params["limit"] = int(limit)
         if before:
             params["before"] = before
+        if cursor:
+            params["cursor"] = cursor
+        if scope:
+            params["scope"] = scope
         return await self._send(
             "GET", "/messaging/conversations", params=params or None, access=access
         )
@@ -1695,12 +1711,26 @@ class TeamBridgeClient:
         )
 
     async def unread(
-        self, *, tenant_id: str | None = None, access: OAuthAccess | None = None
+        self,
+        *,
+        tenant_id: str | None = None,
+        scope: Literal["account"] | None = None,
+        access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """The ONE badge read: per-conversation counts + an unmuted total."""
+        """The ONE badge read: per-conversation counts + an unmuted total.
 
-        params = {"tenant_id": tenant_id} if tenant_id else None
-        return await self._send("GET", "/messaging/unread", params=params, access=access)
+        ``scope="account"`` returns the account-wide aggregate
+        (``{total, organizations: [...]}``) in one authorized read instead of N
+        per-org calls. As with :meth:`conversations`, the organization set is
+        server-derived, so a tenant id is never sent beside the account scope.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if scope:
+            params["scope"] = scope
+        return await self._send("GET", "/messaging/unread", params=params or None, access=access)
 
 
 def _require_body_within(body: Mapping[str, Any], cap: int) -> None:

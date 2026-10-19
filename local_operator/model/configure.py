@@ -1900,6 +1900,68 @@ def _catalogue_credential(
     return _oauth_listing_token(provider, base=base)
 
 
+#: How long the synchronous listing bridge waits for its borrow thread. The
+#: borrow itself is bounded well below classification's budget; this adds thread
+#: startup and store teardown, and caps the caller's wait so a stuck daemon thread
+#: cannot freeze the event loop it was created to protect.
+_LISTING_BORROW_JOIN_S = 1.5
+
+
+def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
+    """A listing credential this device may BORROW from a mesh owner, or ``""``.
+
+    THE MODEL PICKER'S HALF OF THE MESH CREDENTIAL RUNG. ``_oauth_listing_token``
+    reads the local store only, so a provider login that exists on the head of a
+    mesh leaves a node unable to list that provider's models — the same measured
+    gap classification had (``docs/design/mesh-mcp-credentials.md`` §7). The
+    borrow helper is the one mechanism: it returns an access token, never copies a
+    refresh token, and is a no-op unless local placement says this device is a
+    holder.
+
+    Best-effort and silent: every failure is ``""``, no value is printed, logged
+    or persisted here, and the caller falls back to its unchanged "no listing"
+    shape.
+
+    WHY A THREAD IN THE RUNNING-LOOP CASE: this function is synchronous (the
+    catalogue/diagnostics callers are), while the borrow is async by contract.
+    ``asyncio.run`` handles the ordinary path; inside a live event loop (the TUI
+    can reach a listing call from a handler) it cannot nest, so the borrow runs in
+    one short-lived thread with its own loop. The listing path already blocks on
+    provider HTTP, so this adds no new blocking pattern.
+    """
+    try:
+        from local_operator.network.credentials.placement import placement_for_store
+
+        # Zero-peer devices pay nothing: no store, no client, no socket, exactly
+        # the pre-slice path.
+        if placement_for_store(base) is None:
+            return ""
+        from local_operator.network.credentials import borrowed_provider_key
+        from local_operator.providers.registry import credential_provider_id
+
+        storage = credential_provider_id(provider)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(borrowed_provider_key(storage, base)) or ""
+
+        outcome: list[str] = []
+
+        def _run() -> None:
+            try:
+                outcome.append(asyncio.run(borrowed_provider_key(storage, base)) or "")
+            except BaseException:  # noqa: BLE001 — a listing token is never worth a raise
+                outcome.append("")
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=_LISTING_BORROW_JOIN_S)
+        return outcome[0] if outcome else ""
+    except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
+        logger.debug("could not borrow a %s token for the listing: %s", provider, exc)
+        return ""
+
+
 def _oauth_listing_token(
     provider: str, *, base: Path | None = None
 ) -> tuple[str, bool, str | None]:
@@ -1957,6 +2019,15 @@ def _oauth_listing_token(
                 )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
+    borrowed = _borrowed_listing_token(provider, base=base)
+    if borrowed:
+        # The borrow returns a VALUE only (its contract is ``str | None``), so the
+        # credential KIND is unknown here. Reporting a plain key is the
+        # conservative reading: send it down the key wire, and a token that needed
+        # the OAuth wire costs one 401 that falls back to the bundled registry —
+        # exactly what "no listing" did before this rung existed. The provider
+        # this path was measured for (Radient) does not branch on the flag.
+        return borrowed, False, None
     return "", False, None
 
 
