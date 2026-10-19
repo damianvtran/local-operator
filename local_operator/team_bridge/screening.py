@@ -60,6 +60,7 @@ from local_operator.team_bridge.client import (
 )
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import (
+    SCREENING_CATEGORIES,
     DELIVERY_STATES,
     OwnerSnapshot,
     ScreeningReceipt,
@@ -77,24 +78,8 @@ __all__ = [
     "validate_envelope",
 ]
 
-#: The closed category enum (frozen §8). Bounce receipts carry ONLY these,
-#: de-duplicated; a bounce without one unambiguous known token holds.
-SCREENING_CATEGORIES = (
-    "prompt_injection",
-    "social_engineering",
-    "harassment",
-    "malicious_link",
-    "spam",
-    # §3.3 scope/prying classes (bridge-screen-v2). A bounce in one of these
-    # classes is a refusal for the same reason an abusive message is: the
-    # bridge exists for in-flight work in the shared organization, and a
-    # request for personal information, unrelated work or new work is
-    # outside it. The names are closed and copied into the audit row; no
-    # message text rides with them.
-    "personal_info_request",
-    "out_of_scope_work",
-    "new_work_request",
-)
+#: The closed category enum (frozen §8) is imported from :mod:`....types`, so the
+#: persisted-proof validator uses the same vocabulary.
 
 #: The closed hold-code set. Every non-admission is ONE of these; none of
 #: them ever carries model/vendor prose.

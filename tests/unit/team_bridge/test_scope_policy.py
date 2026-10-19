@@ -37,6 +37,8 @@ from local_operator.team_bridge.store import (
     OwnerSnapshot,
     Store,
     StoreRefused,
+    receipt_authority,
+    state_db_path,
 )
 from local_operator.team_bridge.tool import BridgeRuntime, build_bridge_tool
 from tests.unit.team_bridge.test_screening import Policy, Runner, _item, _run, _setup
@@ -340,3 +342,53 @@ def test_the_status_law_accepts_a_served_v2_selector(tmp_path: Path) -> None:
     with pytest.raises(StoreRefused) as caught:
         _normalize_accepted_status(payload, owner, store)
     assert caught.value.code == "policy_stale"
+
+
+@pytest.mark.parametrize(
+    "category",
+    ["personal_info_request", "out_of_scope_work", "new_work_request"],
+)
+def test_a_scope_reject_is_durable_and_replays_without_rebilling(
+    tmp_path: Path, category: str
+) -> None:
+    """C1 regression: the store's persisted-proof validator must accept the same
+    closed vocabulary the screener emits. A fresh scope bounce is written, then
+    replayed from cache with a FRESH runner — the replay must be the same
+    content-free reject, with zero provider calls, not a policy_stale hold."""
+
+    store, owner = _setup(tmp_path)
+    item = _item(PERSONAL)
+    first_runner = _bounce(category)
+    first = _run(owner, tmp_path, first_runner, item=item, policy=_v2_policy())
+    assert first.disposition == "bounce"
+    assert first.receipt is not None and first.receipt.categories == (category,)
+
+    replay_runner = _bounce(category)
+    replay = _run(owner, tmp_path, replay_runner, item=item, policy=_v2_policy())
+    assert replay.disposition == "bounce"
+    assert replay.receipt is not None and replay.receipt.categories == (category,)
+    assert replay_runner.calls == [], "the cached reject replayed; no second provider call"
+
+    # The read-side authority check accepts the same persisted receipt. It
+    # validates the STORED categories text, so read the raw row (receipt_authority
+    # is the pure validator both consume and the read proof call).
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(state_db_path(tmp_path))
+    conn.row_factory = _sqlite3.Row
+    try:
+        stored = conn.execute(
+            "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+            "categories, envelope_digest, admission_revision, policy_epoch, "
+            "creator_generation FROM screening_receipts WHERE message_id = ?",
+            (item["message"]["id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert stored is not None
+    policy = store.current_screening_policy(owner)
+    assert policy is not None
+    decoded, code, note = receipt_authority(owner, policy, dict(stored))
+    assert decoded is not None, (code, note)
+    assert tuple(_json.loads(stored["categories"])) == (category,)
