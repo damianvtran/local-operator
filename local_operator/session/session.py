@@ -18456,9 +18456,11 @@ class Session:
             # of them here would report a layer that did not decide.
             "role_inherit"
             if resolution.role_pins_inherit
-            else "team"
-            if resolution.decided_by_team
-            else "effort" if effort else "role" if resolution.selector is not None else "parent"
+            else (
+                "team"
+                if resolution.decided_by_team
+                else "effort" if effort else "role" if resolution.selector is not None else "parent"
+            )
         )
 
         def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:

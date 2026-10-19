@@ -27840,15 +27840,15 @@ def _not_applied_note(entry: Mapping[str, Any]) -> str:
         return ""
     passed: list[str] = []
     if entry.get("effort"):
-        passed.append(f"effort={entry['effort']!r}")
+        passed.append(f"effort={entry['effort']!r}")  # i18n: ignore model-facing tool output
     if entry.get("model_pick"):
-        passed.append(f"model={entry['model_pick']!r}")
+        passed.append(f"model={entry['model_pick']!r}")  # i18n: ignore model-facing tool output
     if not passed:
         return ""
     verb = "was" if len(passed) == 1 else "were"
     return (
-        f" [the {' and '.join(passed)} you passed {verb} NOT applied: this role "
-        "pins the launching session's model]"
+        f" [the {' and '.join(passed)} you passed {verb} NOT applied: "
+        "this role pins the launching session's model]"
     )
 
 

@@ -396,8 +396,8 @@ def setup_inherit_pinned(tmp_path, monkeypatch, *, choice="model"):
     the one a teammate who pulls the role actually gets — not a row written by
     hand for the occasion.
     """
-    from local_operator.agents import AgentRegistry
     from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     write_model_choice_config(tmp_path / "config", {"hi": "deepseek/deepseek-chat"}, choice=choice)

@@ -188,8 +188,9 @@ class AgentProfile:
     model than the session it is checking.
 
     **The one exception is the INHERIT SENTINEL, and it is not a tier.**
-    ``effort`` may carry ``default`` (:data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL`),
-    which says "always run on the LAUNCHING SESSION's model" rather than naming
+    ``effort`` may carry ``default`` (the inherit sentinel,
+    :data:`~local_operator.harness.subagent.INHERIT_TIER_SENTINEL`), which says
+    "always run on the LAUNCHING SESSION's model" rather than naming
     a tier. It is absolute: a delegating model's tier argument, its explicit
     model pick, and a roster slot's tier all lose to it, because every one of
     those is reachable by a delegating model and a pin they could move would
