@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import json
+
 from local_operator.library import index
 from local_operator.session.attachments import cache_media
 
-from ._fixtures import OTHER, SESSION, config_root, image_rows, png, session, user_row, write_rows
+from ._fixtures import (
+    CHILD,
+    OTHER,
+    SESSION,
+    config_root,
+    image_rows,
+    png,
+    session,
+    user_row,
+    write_rows,
+)
 
 
 def test_assets_dedupe_across_sessions_and_keep_occurrences(tmp_path, monkeypatch) -> None:
@@ -92,3 +104,46 @@ def test_unreadable_journal_does_not_blank_other_sessions(tmp_path, monkeypatch)
     catalog = index.build_catalog(root, budget_s=None)
     assert catalog.state == "ready"
     assert len(catalog.assets) == 1
+
+
+def test_a_child_append_is_seen_without_deleting_the_cache(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    parent = session(root, SESSION, write_rows("p1", 1, tmp_path / "parent.txt"))
+    child = session(root, CHILD, write_rows("c1", 2, tmp_path / "child-one.txt"))
+    (child / "origin.json").write_text(json.dumps({"origin": "subagent"}))
+    (parent / "subagent-roster.v1.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 1,
+                "jobs": [],
+                "accounting": {},
+                "records": [
+                    {
+                        "job_id": "j1",
+                        "label": "scout",
+                        "agent_role": "scout",
+                        "depth": 1,
+                        "session_dir": str(child),
+                    }
+                ],
+            }
+        )
+    )
+    first = index.build_catalog(root, budget_s=None)
+    assert {asset.derived_name for asset in first.assets} == {"parent.txt", "child-one.txt"}
+    assert index.index_path(root).is_file()
+
+    append = write_rows("c2", 5, tmp_path / "child-two.txt")
+    with (child / "transcript.jsonl").open("ab") as handle:
+        handle.write(
+            "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in append).encode()
+        )
+    second = index.build_catalog(root, budget_s=None)
+    assert {asset.derived_name for asset in second.assets} == {
+        "parent.txt",
+        "child-one.txt",
+        "child-two.txt",
+    }
+    assert second.revision != first.revision
+    assert index.index_path(root).is_file(), "the incremental path must not force a rebuild"

@@ -107,6 +107,12 @@ def _bool(value: Any) -> bool:
     return bool(value)
 
 
+#: Effective-field precedence, strongest last. A write may only replace a
+#: field whose current source ranks no higher; ``derived`` is refreshable by
+#: anyone, and a user value is never overwritten by an agent or the Librarian.
+_SOURCE_RANK: Final = {"derived": 0, "agent": 1, "librarian": 2, "user": 3}
+
+
 class MetadataStore:
     """The authoritative metadata store. Construct per config root, cheap.
 
@@ -161,6 +167,9 @@ class MetadataStore:
                 return True
             try:
                 connection.executescript(_SCHEMA)
+                connection.execute(
+                    "INSERT OR IGNORE INTO state(key, value) VALUES('metadata_revision', '0')"
+                )
                 row = connection.execute(
                     "SELECT value FROM state WHERE key = 'schema_version'"
                 ).fetchone()
@@ -179,6 +188,10 @@ class MetadataStore:
                     # A newer local-operator wrote this store. Guessing at its
                     # columns is how a downgrade corrupts data; answer empty.
                     return False
+                # The revision bootstrap above opens an implicit transaction
+                # even when it inserts nothing; leaving it open makes the next
+                # BEGIN IMMEDIATE fail as "transaction within a transaction".
+                connection.commit()
                 self._ready = True
                 return True
             except MetadataUnavailable:
@@ -212,6 +225,36 @@ class MetadataStore:
             raise
         except sqlite3.Error as error:
             raise MetadataUnavailable(str(error)) from error
+
+    # -- metadata revision ---------------------------------------------------
+
+    @staticmethod
+    def _bump_revision(connection: sqlite3.Connection) -> None:
+        """Advance the revision that a list cursor binds to.
+
+        A cursor is ordered by EFFECTIVE name/description, so a metadata write
+        can move a row across a page boundary without any journal changing. The
+        catalog revision alone cannot see that; this counter rides the same
+        revision value the list returns, and a cursor minted before the write
+        therefore restarts with ``cursor_reset`` instead of duplicating or
+        skipping a row.
+        """
+        connection.execute(
+            "UPDATE state SET value = CAST(value AS INTEGER) + 1 "
+            "WHERE key = 'metadata_revision'"
+        )
+
+    def metadata_revision(self) -> int:
+        with self._read() as connection:
+            if connection is None:
+                return 0
+            row = connection.execute(
+                "SELECT value FROM state WHERE key = 'metadata_revision'"
+            ).fetchone()
+            try:
+                return int(row["value"]) if row is not None else 0
+            except (TypeError, ValueError):
+                return 0
 
     # -- assets --------------------------------------------------------------
 
@@ -274,22 +317,31 @@ class MetadataStore:
                             stamp,
                         ),
                     )
+                    if derived_name is not None or derived_description is not None:
+                        self._bump_revision(connection)
                 else:
-                    if derived_name is not None and row["name_source"] in (None, "derived"):
+                    if (
+                        derived_name is not None
+                        and row["name_source"] in (None, "derived")
+                        and row["name"] != derived_name
+                    ):
                         connection.execute(
                             "UPDATE assets SET name = ?, name_source = 'derived', updated_at = ? "
                             "WHERE asset_id = ?",
                             (derived_name, stamp, asset_id),
                         )
-                    if derived_description is not None and row["description_source"] in (
-                        None,
-                        "derived",
+                        self._bump_revision(connection)
+                    if (
+                        derived_description is not None
+                        and row["description_source"] in (None, "derived")
+                        and row["description"] != derived_description
                     ):
                         connection.execute(
                             "UPDATE assets SET description = ?, description_source = 'derived', "
                             "updated_at = ? WHERE asset_id = ?",
                             (derived_description, stamp, asset_id),
                         )
+                        self._bump_revision(connection)
         except MetadataUnavailable:
             raise
 
@@ -315,7 +367,8 @@ class MetadataStore:
             with self._write() as connection:
                 for asset_id, key, name in rows:
                     existing = connection.execute(
-                        "SELECT name_source, description_source FROM assets WHERE asset_id = ?",
+                        "SELECT name, name_source, description_source FROM assets "
+                        "WHERE asset_id = ?",
                         (asset_id,),
                     ).fetchone()
                     if existing is None:
@@ -324,12 +377,19 @@ class MetadataStore:
                             "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
                             (asset_id, key, name, "derived" if name else None, stamp, stamp),
                         )
-                    elif name is not None and existing["name_source"] in (None, "derived"):
+                        if name is not None:
+                            self._bump_revision(connection)
+                    elif (
+                        name is not None
+                        and existing["name_source"] in (None, "derived")
+                        and existing["name"] != name
+                    ):
                         connection.execute(
                             "UPDATE assets SET name = ?, name_source = 'derived', updated_at = ? "
                             "WHERE asset_id = ?",
                             (name, stamp, asset_id),
                         )
+                        self._bump_revision(connection)
         except MetadataUnavailable:
             # The index is the only caller; an unavailable store leaves the rows
             # derived at projection time. Never fail a list because of it.
@@ -416,18 +476,27 @@ class MetadataStore:
                 ).fetchone()
                 if before is None:
                     return None
+                # ``locked`` protects a row from every non-user writer, not
+                # only the Librarian: an ordinary agent is the other unattended
+                # caller, and the design's rule is about the asset, not the role.
                 if (
-                    actor == "librarian"
+                    actor != "user"
                     and before["locked"]
                     and not set(fields) <= {"locked", "archived"}
                 ):
                     raise TagRefused("asset_locked")
                 assignments: list[str] = []
                 values: list[Any] = []
+                write_rank = _SOURCE_RANK.get(provenance, 0)
                 for field, value in fields.items():
                     if field == "name":
                         if not isinstance(value, str) or not value.strip():
                             raise TagRefused("name_required")
+                        current_rank = _SOURCE_RANK.get(
+                            before["name_source"] or "derived", 0
+                        )
+                        if before["name"] is not None and write_rank < current_rank:
+                            continue
                         assignments.append("name = ?")
                         values.append(value.strip()[:300])
                         assignments.append("name_source = ?")
@@ -435,6 +504,11 @@ class MetadataStore:
                     elif field == "description":
                         if value is not None and not isinstance(value, str):
                             raise TagRefused("description_invalid")
+                        current_rank = _SOURCE_RANK.get(
+                            before["description_source"] or "derived", 0
+                        )
+                        if before["description"] is not None and write_rank < current_rank:
+                            continue
                         assignments.append("description = ?")
                         values.append((value or "").strip()[:4000] or None)
                         assignments.append("description_source = ?")
@@ -453,6 +527,7 @@ class MetadataStore:
                         values.append(value)
                 if not assignments:
                     return self._asset_row(before)
+                self._bump_revision(connection)
                 assignments.append("updated_at = ?")
                 values.append(stamp)
                 values.append(asset_id)
@@ -535,6 +610,7 @@ class MetadataStore:
                 ).fetchone()
                 if existing is not None:
                     return self._tag_row(existing) or {}
+                self._bump_revision(connection)
                 connection.execute(
                     "INSERT INTO tags(id, name, category, created_by, created_at, updated_at) "
                     "VALUES(?, ?, ?, ?, ?, ?)",
@@ -562,6 +638,7 @@ class MetadataStore:
                 ).fetchone()
                 if other is not None:
                     raise TagRefused("tag_exists", tag_name)
+                self._bump_revision(connection)
                 connection.execute(
                     "UPDATE tags SET name = ?, updated_at = ? WHERE id = ?",
                     (tag_name, _now(), tag_id),
@@ -581,6 +658,7 @@ class MetadataStore:
                 row = connection.execute("SELECT id FROM tags WHERE id = ?", (tag_id,)).fetchone()
                 if row is None:
                     return False
+                self._bump_revision(connection)
                 connection.execute("DELETE FROM asset_tags WHERE tag_id = ?", (tag_id,))
                 connection.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
                 for state_row in connection.execute(
@@ -606,12 +684,14 @@ class MetadataStore:
                 target = connection.execute("SELECT * FROM tags WHERE id = ?", (into,)).fetchone()
                 if source is None or target is None:
                     raise TagRefused("tag_not_found")
+                self._bump_revision(connection)
                 connection.execute(
                     "INSERT OR IGNORE INTO asset_tags(asset_id, tag_id, source, confidence, "
                     "created_at) SELECT asset_id, ?, source, confidence, created_at "
                     "FROM asset_tags WHERE tag_id = ?",
                     (into, tag_id),
                 )
+                self._bump_revision(connection)
                 connection.execute("DELETE FROM asset_tags WHERE tag_id = ?", (tag_id,))
                 connection.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
                 for state_row in connection.execute(
@@ -698,10 +778,12 @@ class MetadataStore:
         try:
             with self._write() as connection:
                 asset = connection.execute(
-                    "SELECT asset_id FROM assets WHERE asset_id = ?", (asset_id,)
+                    "SELECT asset_id, locked FROM assets WHERE asset_id = ?", (asset_id,)
                 ).fetchone()
                 if asset is None:
                     raise TagRefused("asset_not_found")
+                if actor != "user" and asset["locked"]:
+                    raise TagRefused("asset_locked")
                 if unique:
                     placeholders = ",".join("?" for _ in unique)
                     known = {
@@ -713,6 +795,7 @@ class MetadataStore:
                     missing = [tag_id for tag_id in unique if tag_id not in known]
                     if missing:
                         raise TagRefused("tag_not_found", ",".join(missing[:3]))
+                self._bump_revision(connection)
                 connection.execute("DELETE FROM asset_tags WHERE asset_id = ?", (asset_id,))
                 connection.executemany(
                     "INSERT INTO asset_tags(asset_id, tag_id, source, confidence, created_at) "

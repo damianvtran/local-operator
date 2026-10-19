@@ -195,3 +195,81 @@ async def test_capability_is_advertised(api) -> None:
     response = await client.get("/v1/capabilities")
     assert response.status_code == 200
     assert response.json()["result"]["features"]["library"] == 1
+
+
+async def test_patch_bad_fields_are_422_not_500(api) -> None:
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+
+    for body in (
+        {"organized": "garbage"},
+        {"name": None},
+    ):
+        response = await client.patch(
+            f"/v1/desktop/library/assets/{text_id}", json=body
+        )
+        assert response.status_code == 422, (body, response.status_code, response.text)
+        detail = response.json()["detail"]
+        assert detail["code"] == "library_bad_filter"
+        assert detail["params"]["field"] in {"organized", "name", "body"}
+
+
+async def test_patch_works_before_and_after_a_listing(api) -> None:
+    client, root = api
+    text_id, _image_id, _digest = seed(root)
+
+    # Never listed: the asset exists only in the derived catalog.
+    first = await client.patch(
+        f"/v1/desktop/library/assets/{text_id}", json={"name": "First edit"}
+    )
+    assert first.status_code == 200 and first.json()["result"]["name"] == "First edit"
+    await client.get("/v1/desktop/library/assets")
+    second = await client.patch(
+        f"/v1/desktop/library/assets/{text_id}", json={"name": "Second edit"}
+    )
+    assert second.status_code == 200 and second.json()["result"]["name"] == "Second edit"
+
+
+async def test_a_metadata_edit_does_not_duplicate_or_skip_a_page(api) -> None:
+    client, root = api
+    rows: list = []
+    names = ("alpha.txt", "bravo.txt", "charlie.txt", "delta.txt")
+    for number, name in enumerate(names):
+        path = root.parent / name
+        path.write_text(name)
+        rows += write_rows(f"w{number}", number + 1, path)
+    session(root, SESSION, rows)
+
+    first = await client.get(
+        "/v1/desktop/library/assets", params={"sort": "name", "order": "asc", "limit": 2}
+    )
+    page = first.json()["result"]
+    assert [row["name"] for row in page["rows"]] == ["alpha.txt", "bravo.txt"]
+    cursor = page["next_cursor"]
+    assert cursor
+
+    target = page["rows"][0]["id"]
+    patched = await client.patch(
+        f"/v1/desktop/library/assets/{target}", json={"name": "zulu.txt"}
+    )
+    assert patched.status_code == 200
+
+    second = await client.get(
+        "/v1/desktop/library/assets",
+        params={"sort": "name", "order": "asc", "limit": 10, "cursor": cursor},
+    )
+    assert second.status_code == 200
+    result = second.json()["result"]
+    # The edit moved the row across the page boundary. Either the old cursor
+    # continues correctly or it resets; it may never silently skip/duplicate.
+    if result["cursor_reset"]:
+        assert [row["name"] for row in result["rows"]] == [
+            "bravo.txt",
+            "charlie.txt",
+            "delta.txt",
+            "zulu.txt",
+        ]
+    else:
+        seen = [row["id"] for row in result["rows"]]
+        assert len(seen) == len(set(seen))
+        assert target not in seen, "the moved row must not be repeated"

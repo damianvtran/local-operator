@@ -9,6 +9,7 @@ from typing import Any
 
 SESSION = "abcdef123456"
 OTHER = "fedcba654321"
+CHILD = "0123456789ab"
 
 
 def strip_env(monkeypatch) -> None:
