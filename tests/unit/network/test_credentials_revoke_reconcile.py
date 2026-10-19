@@ -22,7 +22,8 @@ from pathlib import Path
 
 from local_operator.network import relay, store, types, wire
 from local_operator.network.credentials import client as client_mod
-from local_operator.network.credentials import mcp_state, placement as placement_mod
+from local_operator.network.credentials import mcp_state
+from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.types import (
     CredentialRef,
     Grant,

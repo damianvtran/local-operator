@@ -9286,9 +9286,10 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             # (``server_has_stored_grant``) would silently withhold the share and
             # leave the holder with no diagnosis. A registration-only or emptied
             # row is neither, so it still produces no share.
-            if server_has_stored_grant(url, auth_store) or McpTokenStorage(
-                url, auth_store
-            ).grant_is_dead():
+            if (
+                server_has_stored_grant(url, auth_store)
+                or McpTokenStorage(url, auth_store).grant_is_dead()
+            ):
                 oauth_keys[name] = credential_key_for_mcp(url)
     except Exception:  # noqa: BLE001 — no grant check means no oauth keys this run
         oauth_keys = {}
@@ -9586,8 +9587,8 @@ def _member_repair_receipt(
     # a different process from the relay that wrote them.
     entries: dict[str, tuple[str, Any]] = {}
     try:
-        from local_operator.network import store as network_store
         from local_operator.network import identity as identity_mod
+        from local_operator.network import store as network_store
 
         identity = identity_mod.load()
         for record in network_store.list_networks(root):
@@ -9649,9 +9650,7 @@ def _member_repair_receipt(
                 receipt["pulled"].append({"key": key, "ok": False, "code": exc.code})
                 continue
             except Exception as exc:  # noqa: BLE001 — one key never aborts the rest
-                receipt["pulled"].append(
-                    {"key": key, "ok": False, "code": _refusal_code(exc)}
-                )
+                receipt["pulled"].append({"key": key, "ok": False, "code": _refusal_code(exc)})
                 continue
             receipt["pulled"].append(
                 {

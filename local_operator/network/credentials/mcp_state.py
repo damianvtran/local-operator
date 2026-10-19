@@ -41,8 +41,8 @@ from local_operator.network.credentials.placement import (
     _assert_no_material,
     _config_root,
     _cross_process_lock,
-    credentials_root,
     _ensure_private_dir,
+    credentials_root,
 )
 
 #: The file the evidence lives in, beside ``placement.json`` and
@@ -69,9 +69,7 @@ FILE_MODE = 0o600
 #: ``unauthorized``  the server refused the bearer we presented (a 401);
 #: ``unavailable``   the owner could not be reached;
 #: ``synced``        the last thing we know is that it worked.
-STATES: frozenset[str] = frozenset(
-    {"expired", "revoked", "unauthorized", "unavailable", "synced"}
-)
+STATES: frozenset[str] = frozenset({"expired", "revoked", "unauthorized", "unavailable", "synced"})
 
 #: Broker code -> evidence state. The mapping lives HERE rather than at each
 #: caller so the client, the sync engine and the CLI cannot disagree about what
@@ -196,9 +194,7 @@ def forget_device(network_id: str, device: str, *, root: Path | None = None) -> 
     try:
         entries = load(network_id, root)
         kept = {
-            key: row
-            for key, row in entries.items()
-            if str(row.get("owner_device") or "") != device
+            key: row for key, row in entries.items() if str(row.get("owner_device") or "") != device
         }
         if len(kept) == len(entries):
             return
