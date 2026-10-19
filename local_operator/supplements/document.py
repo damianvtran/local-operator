@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from functools import cache
 from importlib import resources
 from typing import Any, Final, Mapping
@@ -66,7 +67,9 @@ from typing import Any, Final, Mapping
 #: (local-operator-mobile PR #83). Bumped for the same reason as 2, and because the desktop
 #: UI's frozen story documents (its ``supplement-document-fixtures.ts``, copied verbatim from
 #: ``tests/fixtures/supplements/documents/``) name this number as their regeneration trigger.
-PRELUDE_VERSION: Final = 3
+#: 4 — numeric-only chart scales: legacy formatted cells are normalised at assembly,
+#: while unknown values remain labelled gaps instead of poisoning every SVG coordinate.
+PRELUDE_VERSION: Final = 4
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (
@@ -115,6 +118,46 @@ def prelude_js() -> str:
 
 def _read_prelude(name: str) -> str:
     return (resources.files(_PRELUDE_PACKAGE) / "prelude" / name).read_text(encoding="utf-8")
+
+
+# Only an explicit decimal, optionally currency-prefixed OR percent-suffixed. Grouping
+# must be thousands; suffix magnitudes, locale guesses and leading-zero identifiers stay
+# strings. Percent is NOT divided by 100: the chart unit carries the display symbol.
+_NUMERIC_CELL: Final = re.compile(
+    r"(?P<sign>[+-]?)(?P<currency>[$€£¥]?)(?P<number>"
+    r"(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}(?:,[0-9]{3})+)(?:\.[0-9]+)?)"
+    r"(?P<percent>%?)"
+)
+
+
+def numeric_cell(value: Any) -> Any:
+    """Normalise explicit numeric formatting without guessing units or magnitude."""
+    if not isinstance(value, str):
+        return value
+    match = _NUMERIC_CELL.fullmatch(value.strip())
+    if match is None or (match["currency"] and match["percent"]):
+        return value
+    token = match["sign"] + match["number"].replace(",", "")
+    decimal = Decimal(token)
+    # JavaScript cannot represent larger integers exactly. Nor may a long fractional
+    # spelling silently round or underflow: keep it a gap if its decimal meaning changes.
+    if abs(decimal) > 2**53 - 1:
+        return value
+    number = float(token) if "." in token else int(token)
+    return number if Decimal(str(number)) == decimal else value
+
+
+def _plot_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
+    # split_component is ALSO used by provenance validation: keep it lossless. Convert
+    # only the rendered copy, after validation, never stored bytes or dataset metadata.
+    return {
+        key: (
+            {**dataset, "rows": [[numeric_cell(cell) for cell in row] for row in dataset["rows"]]}
+            if isinstance(dataset, dict) and isinstance(dataset.get("rows"), list)
+            else dataset
+        )
+        for key, dataset in (data or {}).items()
+    }
 
 
 def data_json(data: Mapping[str, Any] | None) -> str:
@@ -204,7 +247,7 @@ def assemble_document(body: str, data: Mapping[str, Any] | None = None) -> str:
             '<script type="application/json" id="',
             DATA_ELEMENT_ID,
             '">',
-            data_json(data),
+            data_json(_plot_data(data)),
             "</script>\n<script>",
             prelude_js(),
             "</script>\n",

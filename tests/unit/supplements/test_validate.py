@@ -480,8 +480,8 @@ def test_the_prompt_is_the_memos_appendix_a_fence_character_for_character() -> N
 def test_the_prompt_is_within_five_percent_of_the_measured_token_count() -> None:
     tiktoken = pytest.importorskip("tiktoken", reason="the token budget is measured with tiktoken")
     counted = len(tiktoken.get_encoding("o200k_base").encode(GENERATOR_SYSTEM_PROMPT))
-    # The memo's figure (re-measured for the body-only amendment, 2026-10-10).
-    assert abs(counted - 1140) <= 0.05 * 1140, counted
+    # The memo's figure (re-measured for the numeric-format amendment, 2026-10-19).
+    assert abs(counted - 1250) <= 0.05 * 1250, counted
 
 
 def test_a_steer_instruction_is_flat_and_bounded() -> None:
@@ -789,3 +789,29 @@ def test_an_unprovable_tag_parse_leaves_the_swallowed_number_scannable() -> None
     result = validate_output(unterminated, EVIDENCE)
     assert not result.components, "an unterminated quote was accepted"
     assert any("7000" in error for error in result.repair_errors), result.repair_errors
+
+
+@pytest.mark.parametrize("evidence_value", ["$0.15", "0.15"])
+@pytest.mark.parametrize("component_value", ["$0.15", "0.15", 0.15])
+def test_formatted_and_plain_prices_share_numeric_provenance(evidence_value, component_value):
+    """Neither direction may lose provenance when the prompt emits plain numbers."""
+    evidence = (
+        Dataset(
+            title="Prices",
+            source="prices.csv",
+            columns=("name", "price"),
+            rows=(("Input", evidence_value),),
+            n_rows=1,
+            numeric_columns=("price",),
+        ),
+    )
+    output = component(
+        json.dumps({"d1": {"columns": ["name", "price"], "rows": [["Input", component_value]]}}),
+        '<div id="c"></div><script>LO.bar(document.getElementById("c"),"d1",'
+        '{x:"name",y:"price"})</script>',
+        source="prices.csv",
+    )
+    result = validate_output(output, evidence)
+    assert len(result.components) == 1, result.rejected
+    invented = output.replace("0.15", "0.16")
+    assert not validate_output(invented, evidence).components

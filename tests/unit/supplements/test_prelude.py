@@ -48,12 +48,15 @@ GZIP_CAP = 4608
 #:
 #: PRELUDE_VERSION 3: the ROOT element paints `--lo-canvas`, so a live theme flip keeps the
 #: surface's token instead of the UA canvas. CSS 2,008 -> 2,056 B, gzip 4,562 -> 4,573 B; JS
-#: untouched at 8,047 B. 35 B gzip of headroom against the 4,608 B cap is what is left.
+#: untouched at 8,047 B. This left 35 B gzip of headroom against the 4,608 B cap.
+#:
+#: PRELUDE_VERSION 4: finite-only scales and labelled bar gaps. JS 8,170 B, pair
+#: 10,226 B raw / 4,602 B gzip; 6 B gzip remains under the unchanged cap.
 PINNED_CSS_BYTES = 2056
-PINNED_JS_BYTES = 8047
-PINNED_GZIP_BYTES = 4573
-PINNED_DIGEST = "8cf8b4902dbadbe8fbc0421d953796febbd79ad16673a8e8f5e2402e5d42f05e"
-PINNED_VERSION = 3
+PINNED_JS_BYTES = 8170
+PINNED_GZIP_BYTES = 4602
+PINNED_DIGEST = "f0100057db2a92ec20312263c966b274d17ce8ded2bc4413321726cea0762a5b"
+PINNED_VERSION = 4
 
 
 @pytest.fixture
@@ -465,3 +468,41 @@ def test_the_component_draws_no_title_anywhere(tmp_path: Path) -> None:
     # wrap, never a title line before it.
     figure = next(n for n in nodes if n["tag"] == "figure")
     assert figure["text"] == ""
+
+
+@needs_node
+@pytest.mark.parametrize("values", [["$0.15", "$0.60", "$0.015"], [0.15, "N/A", 0.60]])
+def test_assembled_prices_have_finite_bar_geometry(values: list[Any], tmp_path: Path) -> None:
+    """Execute the shipped script with the exact data bytes a document serves."""
+    source = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": list(zip(["Input", "Output", "Cached"], values)),
+        }
+    }
+    html = document.assemble_document("", source)
+    match = re.search(r'<script type="application/json" id="lo-data">(.*?)</script>', html)
+    assert match is not None
+    out = _run(
+        {
+            "data": json.loads(match[1]),
+            "steps": [
+                {
+                    "draw": (
+                        "LO.bar(document.getElementById('c'),'d1',"
+                        "{x:'name',y:'price',horizontal:true})"
+                    )
+                }
+            ],
+        },
+        tmp_path,
+    )
+    bars = [n for n in out["nodes"] if n["tag"] == "rect"]
+    assert len(bars) == (2 if "N/A" in values else 3)
+    for bar in bars:
+        for attr in ("x", "y", "width", "height"):
+            assert float(bar["attrs"][attr]) >= 0
+    assert all("NaN" not in str(n) for n in out["nodes"])
+    assert any(n["cls"] == "grid" for n in out["nodes"])
+    if "N/A" in values:
+        assert any(n["text"] == "N/A" for n in out["nodes"])
