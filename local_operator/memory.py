@@ -2050,7 +2050,9 @@ class MemoryStore:
         return (
             "Memory move refused: a move from another device would replace a revision "
             "this device holds but the moving device never saw. Read that revision and "
-            "keep anything it adds (or forget the source fact), then sync again."
+            "keep anything it adds (or forget the source fact). Memory sync retries "
+            "automatically within 30 minutes; restarting this device picks the retry up "
+            "sooner."
         )
 
     def inventory(

@@ -1736,7 +1736,9 @@ def test_a_handler_refusal_is_recorded_locally_with_its_code(root: Path) -> None
     def _handler(_link: object, _frame: dict[str, object]) -> None:
         raise types.MeshRefusal(
             "bad_memory",
-            "Memory move refused: resolve the conflict on this device, then sync again.",
+            "Memory move refused: resolve the conflict on this device. Memory sync "
+            "retries automatically within 30 minutes; restarting this device picks the "
+            "retry up sooner.",
         )
 
     link: Any = Namespace(device_id="d_" + "b" * 32, network_id=NETWORK, epoch=2)
