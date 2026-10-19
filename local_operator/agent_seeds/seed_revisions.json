@@ -534,6 +534,18 @@
         "class": null
       }
     ],
+    "librarian": [
+      {
+        "sha": "4c32a595e9ac2f813090be3f8979793640d37874",
+        "version": "1.0.0",
+        "instructions_sha256": "ace534b358da4149f8c7176d457897127e751ced5d6bf9a13136a0e36c1f8682",
+        "description": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      }
+    ],
     "manager": [
       {
         "sha": "e1b6adb6bd2a2b234dda49b4b91ffa09d4c07b4f",

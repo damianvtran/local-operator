@@ -2056,21 +2056,21 @@
     {
       "locale": "es",
       "namespace": "wire.settings",
-      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
       "translator": {
-        "agent": "i18n-translator",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "i18n-auditor",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+      "note": "20-key Librarian settings delta (enabled/name/cadence.*) translated in the feature slice and checked for key + placeholder parity by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on PR #2627."
     },
     {
       "locale": "fr",
@@ -2094,21 +2094,21 @@
     {
       "locale": "fr",
       "namespace": "wire.settings",
-      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
       "translator": {
-        "agent": "i18n-translator",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "i18n-auditor",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+      "note": "20-key Librarian settings delta (enabled/name/cadence.*) translated in the feature slice and checked for key + placeholder parity by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on PR #2627."
     },
     {
       "locale": "hi",
@@ -2132,21 +2132,21 @@
     {
       "locale": "hi",
       "namespace": "wire.settings",
-      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
       "translator": {
-        "agent": "i18n-translator",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "i18n-auditor",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+      "note": "20-key Librarian settings delta (enabled/name/cadence.*) translated in the feature slice and checked for key + placeholder parity by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on PR #2627."
     },
     {
       "locale": "ru",
@@ -2170,21 +2170,21 @@
     {
       "locale": "ru",
       "namespace": "wire.settings",
-      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
       "translator": {
-        "agent": "i18n-translator",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "i18n-auditor",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+      "note": "20-key Librarian settings delta (enabled/name/cadence.*) translated in the feature slice and checked for key + placeholder parity by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on PR #2627."
     },
     {
       "locale": "vi",
@@ -2208,21 +2208,21 @@
     {
       "locale": "vi",
       "namespace": "wire.settings",
-      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
       "translator": {
-        "agent": "i18n-translator",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "i18n-auditor",
+        "agent": "coder",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-18",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+      "note": "20-key Librarian settings delta (enabled/name/cadence.*) translated in the feature slice and checked for key + placeholder parity by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on PR #2627."
     },
     {
       "locale": "fr",

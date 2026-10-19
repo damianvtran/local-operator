@@ -153,6 +153,18 @@ def force_requires_confirm_replace() -> Msg:
     return Msg("wire.errors.desktop.force_requires_confirm_replace", {})
 
 
+def librarian_bootstrap_failed() -> Msg:
+    return Msg("wire.errors.desktop.librarian_bootstrap_failed", {})
+
+
+def librarian_disabled(*, op: str) -> Msg:
+    return Msg("wire.errors.desktop.librarian_disabled", {"op": op})
+
+
+def librarian_owner_active() -> Msg:
+    return Msg("wire.errors.desktop.librarian_owner_active", {})
+
+
 def library_asset_not_found() -> Msg:
     return Msg("wire.errors.desktop.library_asset_not_found", {})
 
