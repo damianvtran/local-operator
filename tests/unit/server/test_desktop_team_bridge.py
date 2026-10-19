@@ -342,6 +342,9 @@ class FakeClient:
 
     behavior: dict[str, Any] = {}
     instances: list["FakeClient"] = []
+    #: Every scripted method reach lands here; the route guards are asserted to
+    #: refuse BEFORE this counter moves.
+    calls: int = 0
     #: The committed hub of the fixtures below. A REAL client always names its
     #: destination, and the read path refuses one that cannot (the shared
     #: destination guard), so a double that omitted this would exercise the
@@ -353,6 +356,7 @@ class FakeClient:
         FakeClient.instances.append(self)
 
     def _answer(self, name: str) -> Any:
+        FakeClient.calls += 1
         value = FakeClient.behavior.get(name, {})
         if isinstance(value, Exception):
             raise value
@@ -2415,7 +2419,11 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
         ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
-        ("post", "/v1/desktop/team-bridge/conversations/nope/members", {"members": []}),
+        (
+            "post",
+            "/v1/desktop/team-bridge/conversations/nope/members",
+            [{"account_id": "acc_b", "display_label": "Bea"}],
+        ),
         ("post", "/v1/desktop/team-bridge/conversations/nope/join", {}),
         ("post", "/v1/desktop/team-bridge/conversations/nope/leave", {}),
         ("post", "/v1/desktop/team-bridge/conversations/nope/read", {"seq": 1}),
@@ -2425,6 +2433,7 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
             {"verdict": "allow", "body_hash": "x"},
         ),
     )
+    calls_before = FakeClient.calls
     for method, path, payload in cases:
         response = (
             await client.get(path)
@@ -2432,6 +2441,15 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
             else await client.post(path, json=payload)
         )
         assert response.status_code == 422, (path, response.text)
+    # None of the guards admitted a transport call.
+    assert FakeClient.calls == calls_before
+
+
+def test_account_grammar_matches_the_reader():
+    from local_operator.server.routes.desktop_team_bridge import _ACCOUNT_ID
+    from local_operator.team_bridge.read_context import ACCOUNT_ID_PATTERN
+
+    assert _ACCOUNT_ID.pattern == ACCOUNT_ID_PATTERN
 
 
 async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
@@ -2446,10 +2464,15 @@ async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
         "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/x%3Ftenant_id%3Devil"
     )
     assert response.status_code == 422, response.text
+    # The message id itself is a path segment: a value outside the minted
+    # grammar must be refused before the transport builds anything.
     response = await client.get(
-        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abc12345/body"
-        "?endpoint_id=x%3Ftenant_id%3Devil"
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/nope/body"
     )
-    # endpoint_id is a query parameter the client forwards as a parameter, not
-    # interpolated into the path; the encoded value is a value, not URL syntax.
-    assert response.status_code in (200, 422), response.text
+    assert response.status_code == 422, response.text
+    # Consent names an account in the path; `..` must not reshape it.
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/%2E%2E/consent",
+        json={"decision": "accept", "consent_version": "bridge_consent_v1"},
+    )
+    assert response.status_code == 422, response.text
