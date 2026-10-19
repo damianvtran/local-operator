@@ -25,6 +25,7 @@ from local_operator.tui.attachments import open_path_quietly
 from local_operator.tui.file_viewer import (
     Document, Identity, ViewerError, lexer_for, read_document_async,
 )
+from local_operator.tui.widgets.move_picker import _truncate_head
 
 
 _t = tr("tui.viewer")
@@ -37,9 +38,20 @@ class FileViewerDismissed(Message):
 class FileViewer(Vertical, can_focus=True):
     DEFAULT_CSS = """
     FileViewer { height: 1fr; width: 1fr; padding: 0 1; }
-    FileViewer > .viewer-header { height: auto; max-height: 3; color: $text; text-style: bold; }
-    FileViewer > .viewer-status { height: auto; max-height: 3; color: $warning; }
-    FileViewer > .viewer-body { height: 1fr; width: 1fr; overflow: auto auto; }
+    FileViewer > .viewer-header { height: auto; max-height: 3; color: $text; }
+    FileViewer > .viewer-status { height: auto; max-height: 3; color: $lo-warning; }
+    FileViewer > .viewer-body {
+        height: 1fr; width: 1fr; overflow: auto auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-background: $lo-bg;
+        scrollbar-background-hover: $lo-bg;
+        scrollbar-background-active: $lo-bg;
+        scrollbar-color: $lo-edge;
+        scrollbar-color-hover: $lo-dim;
+        scrollbar-color-active: $lo-muted;
+        scrollbar-corner-color: $lo-bg;
+    }
     FileViewer .viewer-content { height: auto; width: 1fr; }
     FileViewer > .viewer-legend { height: auto; color: $text-muted; }
     """
@@ -107,15 +119,32 @@ class FileViewer(Vertical, can_focus=True):
         self.expected = None
         if first_read:
             self.wrapped = document.kind != "code"
-        kinds = {"code": msg.kind_code, "markdown": msg.kind_markdown, "text": msg.kind_text}
-        self.query_one(".viewer-header", Static).update(
-            _t(msg.header(path=str(document.path), kind=_t(kinds[document.kind]()),
-                          size=str(document.size)))
-        )
+        self._paint_header()
         self.query_one(".viewer-status", Static).update(
             _t(msg.truncated()) if document.truncated else ""
         )
         self._paint_document()
+
+    def on_resize(self) -> None:
+        if self.document is not None:
+            self._paint_header()
+
+    def _paint_header(self) -> None:
+        doc = self.document
+        if doc is None:
+            return
+        kinds = {"code": msg.kind_code, "markdown": msg.kind_markdown, "text": msg.kind_text}
+        kind = _t(kinds[doc.kind]())
+        width = max(1, self.content_size.width)
+        metadata = _t(msg.header(path="", kind=kind, size=str(doc.size)))
+        # A cap on the *whole* path silently hides the leaf and metadata. Give
+        # the parent one explicitly elided row, then reserve kind/size before
+        # shortening the filename. Copy-path still carries the complete path.
+        leaf = _truncate_head(doc.path.name, max(1, width - cell_len(metadata)))
+        heading = Text(_truncate_head(str(doc.path.parent), width))
+        heading.append("\n")
+        heading.append(_t(msg.header(path=leaf, kind=kind, size=str(doc.size))), style="bold")
+        self.query_one(".viewer-header", Static).update(heading)
 
     def _paint_document(self) -> None:
         doc = self.document
@@ -185,13 +214,13 @@ class FileViewer(Vertical, can_focus=True):
     async def _open_external(self) -> None:
         # Recheck even after a successful preview: a path may have changed while
         # the reader was inspecting it. The OS is never given shell text.
-        from local_operator.tui.link_targets import file_affordance
-        import os
-        from urllib.parse import unquote, urlparse
+        from local_operator.tui.link_targets import (
+            file_affordance, file_affordance_spelling, file_uri_to_path,
+        )
 
-        spelling = os.path.relpath(self.raw, self.cwd) if Path(self.raw).is_absolute() else self.raw
+        spelling = file_affordance_spelling(self.raw, cwd=self.cwd)
         uri = file_affordance(spelling, cwd=self.cwd)
-        ok = uri is not None and await open_path_quietly(unquote(urlparse(uri).path))
+        ok = uri is not None and await open_path_quietly(file_uri_to_path(uri))
         self.query_one(".viewer-status", Static).update(
             _t(msg.open_failed()) if not ok
             else _t(msg.truncated()) if self.document and self.document.truncated else ""

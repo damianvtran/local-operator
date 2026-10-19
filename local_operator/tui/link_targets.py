@@ -71,12 +71,15 @@ Three rules, each stated once:
 
 from __future__ import annotations
 
+import nturl2path
 import os
 import re
 import stat as stat_mod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 #: What a URL begins with, in ONE literal: the guard that decides what may
 #: reach the browser and the finder that decides what is offered are then the
@@ -438,6 +441,46 @@ def file_affordance(
         return resolved.as_uri()
     except (OSError, ValueError):
         return None
+
+
+def file_affordance_spelling(raw: str, *, cwd: Path) -> str:
+    """Express an absolute viewer argument in the affordance's existing dialect.
+
+    On Windows cwd and home can live on different drives (or a UNC home).
+    relpath cannot cross that seam; only the already-permitted home spelling
+    is a valid fallback. An empty result is a refusal, not another root.
+    """
+    if not Path(raw).is_absolute():
+        return raw
+    try:
+        return os.path.relpath(raw, cwd)
+    except ValueError:
+        try:
+            return "~/" + Path(raw).relative_to(Path.home()).as_posix()
+        except ValueError:
+            return ""
+
+
+def file_uri_to_path(uri: str, *, windows: bool | None = None) -> str:
+    """Decode a vouched-for file URI using the host's filename conventions.
+
+    Python 3.12 has no Path.from_uri. Unquoting urlparse.path loses Windows
+    drives and UNC authorities; let the stdlib's platform decoder handle both.
+    The override exists for portable mechanism tests, not filesystem authority:
+    callers must still revalidate through file_affordance before using a path.
+    """
+    parts = urlsplit(uri)
+    if parts.scheme != "file" or parts.query or parts.fragment:
+        raise ValueError("not a local file URI")
+    use_windows = os.name == "nt" if windows is None else windows
+    if use_windows:
+        # Hand the UNC to the stdlib as a URL *path* with empty authority.
+        # Its //localhost authority rule otherwise loses a real UNC host;
+        # four slashes preserve every share, including localhost, on 3.12.
+        encoded = f"////{parts.netloc}{parts.path}" if parts.netloc else parts.path
+        return nturl2path.url2pathname(encoded)
+    authority = f"//{parts.netloc}" if parts.netloc.casefold() not in ("", "localhost") else ""
+    return url2pathname(authority + parts.path)
 
 
 def _under(path: Path, root: Path) -> bool:

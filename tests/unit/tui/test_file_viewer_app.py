@@ -13,6 +13,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.file_viewer import file_identity
 from local_operator.tui.widgets.file_viewer import FileViewer
 from local_operator.tui.widgets.supplement_block import SupplementBlock
+from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -117,9 +118,16 @@ async def test_callout_click_routes_supported_and_unsupported(tmp_path, monkeypa
                 if block.link_at(x, y) == path.as_uri()]
         assert hits, "the real compositor did not paint the file hyperlink"
         revealed = AsyncMock()
+        browser = AsyncMock()
         monkeypatch.setattr(app, "_reveal_file", revealed)
+        monkeypatch.setattr(app, "_open_link", browser)
         await pilot.click(block, offset=hits[0])
         await pilot.pause()
+        # Textual also dispatches inherited on_click handlers on this widget;
+        # stopping bubbling alone did not keep file URIs out of the browser.
+        browser.assert_not_awaited()
+        assert not any("only http and https" in notice.text()
+                       for notice in app.query(NoticeBlock))
         if preview:
             page = await settled(pilot, app)
             assert page.document is not None and page.document.kind == "markdown"
@@ -232,6 +240,77 @@ async def test_refusals_remain_visible_on_wrap_key(tmp_path, monkeypatch, name, 
         assert message in before
         await pilot.press("w")
         assert str(page.query_one(".viewer-status", Static).render()) == before
+
+
+@pytest.mark.asyncio
+async def test_long_path_header_keeps_leaf_metadata_and_footer_at_narrow_width(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    deep = tmp_path / ("long-parent-" * 8) / ("another-folder-" * 6)
+    deep.mkdir(parents=True)
+    path = deep / "important.py"
+    path.write_text("print('correct file')")
+    app = make_app(tmp_path)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await boot(pilot, app)
+        app._run_slash_command(f"/view {path}")
+        page = await settled(pilot, app)
+        for size in ((60, 24), (100, 30)):
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+            header = page.query_one(".viewer-header", Static)
+            rendered = str(header.render())
+            assert "important.py" in rendered and "code" in rendered
+            assert f"{path.stat().st_size} B" in rendered and "…" in rendered
+            assert header.region.height == 2
+            legend = page.query_one(".viewer-legend", Static)
+            for key in ("↑↓←→", "PgUp/PgDn", "Home/End"):
+                assert key in str(legend.render())
+            assert legend.region.height <= 3
+            assert legend.region.bottom <= size[1]
+            assert app.screen.virtual_size == app.screen.size
+
+
+@pytest.mark.asyncio
+async def test_warning_scrollbars_and_locale_hints_use_product_contracts(tmp_path, monkeypatch):
+    from local_operator.i18n.text import active_locale, set_active_locale
+    from local_operator.tui import theme
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    app = make_app(tmp_path)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await boot(pilot, app)
+        app._run_slash_command("/view missing.txt")
+        page = await settled(pilot, app)
+        for name in ("dark", "light", "high-contrast-light"):
+            app._apply_theme(name)
+            await pilot.pause()
+            tokens = theme.theme_spec(name).tokens
+            status = page.query_one(".viewer-status", Static)
+            body = page.query_one(".viewer-body", ScrollableContainer)
+            assert status.styles.color.hex.casefold() == tokens["warning"].casefold()
+            assert body.styles.scrollbar_background.hex.casefold() == tokens["bg"].casefold()
+            assert body.styles.scrollbar_color.hex.casefold() == tokens["edge"].casefold()
+            assert body.styles.scrollbar_corner_color.hex.casefold() == tokens["bg"].casefold()
+            assert body.styles.scrollbar_size_vertical == body.styles.scrollbar_size_horizontal == 1
+        # These are separate user visits, not two programmatic opens in one
+        # callback while Textual is still detaching the prior same-ID page.
+        app._close_file_viewer()
+        await pilot.pause()
+        try:
+            for locale in ("en", "es", "fr", "hi", "ru", "vi"):
+                set_active_locale(locale)
+                assert active_locale() == locale
+                app._run_slash_command("/view missing.txt")
+                page = await settled(pilot, app)
+                legend = page.query_one(".viewer-legend", Static)
+                assert "Home/End" in str(legend.render())
+                assert legend.region.height <= 3 and legend.region.bottom <= 24
+                app._close_file_viewer()
+                await pilot.pause()
+        finally:
+            set_active_locale("en")
 
 
 @pytest.mark.asyncio

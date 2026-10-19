@@ -3,7 +3,7 @@
   "tui.viewer.description": "Xem tệp văn bản cục bộ",
   "tui.viewer.usage": "Cách dùng: /view <path>",
   "tui.viewer.loading": "đang đọc…",
-  "tui.viewer.legend": "w ngắt dòng · r tải lại · y sao chép đường dẫn · o mở bằng ứng dụng ngoài · esc đóng",
+  "tui.viewer.legend": "↑↓←→ · PgUp/PgDn · Home/End\nw ngắt dòng · r tải lại · y sao chép đường dẫn · o mở bằng ứng dụng ngoài · esc đóng",
   "tui.viewer.truncated": "Bản xem trước bị cắt ngắn — giới hạn: 1 MiB / 20.000 dòng",
   "tui.viewer.unreadable": "Không thể đọc tệp này — không tìm thấy tệp, không đọc được hoặc nằm ngoài các thư mục gốc được phép",
   "tui.viewer.unsupported": "Loại tệp này không có bản xem trước tích hợp — hãy mở bằng ứng dụng ngoài",

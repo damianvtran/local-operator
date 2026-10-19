@@ -14,9 +14,9 @@ import stat
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
-
-from local_operator.tui.link_targets import file_affordance
+from local_operator.tui.link_targets import (
+    file_affordance, file_affordance_spelling, file_uri_to_path,
+)
 
 MAX_BYTES = 1024 * 1024
 MAX_LINES = 20_000
@@ -73,11 +73,11 @@ def _read_steps(
 ) -> Generator[None, None, Document]:
     # Absolute /view arguments are converted to the affordance's session-relative
     # spelling, not trusted through a separate absolute-path bypass.
-    spelling = os.path.relpath(raw, cwd) if Path(raw).is_absolute() else raw
+    spelling = file_affordance_spelling(raw, cwd=cwd)
     uri = file_affordance(spelling, cwd=cwd)
     if uri is None:
         raise ViewerError("unreadable")
-    path = Path(unquote(urlparse(uri).path))
+    path = Path(file_uri_to_path(uri))
     kind = viewer_kind(path)
     if kind is None:
         raise ViewerError("unsupported")
@@ -85,9 +85,13 @@ def _read_steps(
         before = file_identity(path)
         if expected is not None and expected != before:
             raise ViewerError("changed")
-        # O_NOFOLLOW closes the final-component replacement race after the
-        # affordance resolved it. fstat also catches a changed parent/symlink.
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        # These optional POSIX safeguards must not disable the Windows reader.
+        # Where absent, descriptor identity/type and the post-read affordance
+        # check remain authoritative. O_BINARY avoids Windows newline rewriting
+        # so the byte/line bounds and UTF-8 decode see the actual source bytes.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
         with os.fdopen(fd, "rb") as source:
             info = os.fstat(source.fileno())
             if not stat.S_ISREG(info.st_mode):

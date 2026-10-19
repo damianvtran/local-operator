@@ -53,6 +53,8 @@ def test_refuses_non_regular_files_before_open(tmp_path: Path, monkeypatch) -> N
     import os
     from local_operator.tui import file_viewer
 
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("named FIFO creation is unavailable on this platform")
     os.mkfifo(tmp_path / "pipe.txt")
     (tmp_path / "dir.txt").mkdir()
     opened = []
@@ -138,6 +140,59 @@ def test_unreadable_and_unsupported_refusals(tmp_path: Path, monkeypatch) -> Non
         patch.setattr(os, "open", denied)
         with pytest.raises(ViewerError, match="unreadable"):
             read_document("private.txt", cwd=tmp_path)
+
+
+@pytest.mark.parametrize("filename", [
+    r"C:\Users\Test\report with spaces # 20%.txt",
+    r"\\server\share\folder name\report # %20.txt",
+    r"\\localhost\share\report.txt",
+])
+def test_windows_uri_roundtrip_uses_drive_and_unc_authority(filename: str) -> None:
+    from pathlib import PureWindowsPath
+    from local_operator.tui.link_targets import file_uri_to_path
+
+    original = PureWindowsPath(filename)
+    decoded = PureWindowsPath(file_uri_to_path(original.as_uri(), windows=True))
+    assert decoded == original and decoded.is_absolute()
+    assert decoded.drive == original.drive
+
+
+def test_native_uri_roundtrip_decodes_once(tmp_path: Path) -> None:
+    from local_operator.tui.link_targets import file_uri_to_path
+
+    original = tmp_path / "source # literal %20.txt"
+    assert Path(file_uri_to_path(original.as_uri())) == original
+    original.write_text("the percent sequence is a filename, not another escape")
+    assert read_document(str(original), cwd=tmp_path).path == original
+
+
+def test_absolute_home_path_has_a_cross_drive_safe_spelling(tmp_path, monkeypatch) -> None:
+    import os
+    from local_operator.tui.link_targets import file_affordance_spelling
+
+    home = tmp_path / "home"
+    home.mkdir()
+    original = home / "allowed.txt"
+    original.write_text("allowed on another drive")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    with monkeypatch.context() as patch:
+        def cross_drive(*args):
+            raise ValueError("different drives")
+        patch.setattr(os.path, "relpath", cross_drive)
+        assert file_affordance_spelling(str(original), cwd=tmp_path) == "~/allowed.txt"
+        assert read_document(str(original), cwd=tmp_path).text == "allowed on another drive"
+        assert file_affordance_spelling(str(tmp_path / "outside.txt"), cwd=home) == ""
+
+
+def test_reader_works_without_optional_posix_open_flags(tmp_path: Path, monkeypatch) -> None:
+    import os
+
+    (tmp_path / "portable.txt").write_text("portable\r\nUTF-8: café")
+    with monkeypatch.context() as patch:
+        patch.delattr(os, "O_NOFOLLOW", raising=False)
+        patch.delattr(os, "O_NONBLOCK", raising=False)
+        document = read_document("portable.txt", cwd=tmp_path)
+        assert document.text == "portable\r\nUTF-8: café"
 
 
 @pytest.mark.asyncio

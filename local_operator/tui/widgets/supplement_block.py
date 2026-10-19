@@ -48,7 +48,7 @@ from local_operator.supplements.contract import reader_disposition
 from local_operator.terminals import is_hyperlinked
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.link_targets import file_affordance
+from local_operator.tui.link_targets import file_affordance, file_uri_to_path
 from local_operator.tui.widgets.transcript import (
     SPINE_INDENT,
     TranscriptBlock,
@@ -325,11 +325,10 @@ class SupplementBlock(TranscriptBlock):
 
     def _remember_file(self, uri: str, raw: str) -> None:
         from pathlib import Path
-        from urllib.parse import unquote, urlparse
         from local_operator.tui.file_viewer import file_identity
 
         try:
-            identity = file_identity(Path(unquote(urlparse(uri).path)))
+            identity = file_identity(Path(file_uri_to_path(uri)))
         except OSError:
             return
         self._painted_links[uri] = raw

@@ -59537,9 +59537,9 @@ class OperatorApp(App[None]):
             # moved root): refuse rather than reveal what was never vouched for.
             notice("that file changed since it was listed", "warning")
             return
-        from urllib.parse import unquote, urlparse
+        from local_operator.tui.link_targets import file_uri_to_path
 
-        path = unquote(urlparse(checked).path)
+        path = file_uri_to_path(checked)
         from pathlib import Path
         from local_operator.tui.file_viewer import file_identity, viewer_kind
 

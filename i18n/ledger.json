@@ -2721,97 +2721,97 @@
     {
       "locale": "es",
       "namespace": "tui.viewer",
-      "source_sha256": "25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
       "translator": {
         "agent": "independent translation subagent (task fd31363d4a28)",
         "model": "openai/gpt-6.1-sol",
         "date": "2026-10-19"
       },
       "auditor": {
-        "agent": "independent audit subagent (task f6d9e259a63a)",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
         "date": "2026-10-19",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Manager-relayed independent audit PASS: 19/19 ordered keys, placeholders and literal bindings preserved; no T-findings. Actual models fell back from Sonnet due quota. Candidate SHA-256 16811bfcb83ea683d0c0586be2cbc017caa2fdadc2caf66cb18f0e905ff12a47."
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 c3358107c5f3c32427c32fb8f7e74c2942536c2337d9ceee5aa895d1fbc6b9e5."
     },
     {
       "locale": "fr",
       "namespace": "tui.viewer",
-      "source_sha256": "25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
       "translator": {
         "agent": "independent translation subagent (task fd31363d4a28)",
         "model": "openai/gpt-6.1-sol",
         "date": "2026-10-19"
       },
       "auditor": {
-        "agent": "independent audit subagent (task f6d9e259a63a)",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
         "date": "2026-10-19",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Manager-relayed independent audit PASS: 19/19 ordered keys, placeholders and literal bindings preserved; no T-findings. Actual models fell back from Sonnet due quota. Candidate SHA-256 22b20683d3247ea96a1bf9ffdfcc0d840587c94a8950435d96ee41fcf3d6bf41."
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 ae375ec632d100d2c4c1ddeee9d4c3474a2066e3621171d74996f06af271ed41."
     },
     {
       "locale": "hi",
       "namespace": "tui.viewer",
-      "source_sha256": "25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
       "translator": {
         "agent": "independent translation subagent (task fd31363d4a28)",
         "model": "openai/gpt-6.1-sol",
         "date": "2026-10-19"
       },
       "auditor": {
-        "agent": "independent audit subagent (task f6d9e259a63a)",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
         "date": "2026-10-19",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Manager-relayed independent audit PASS: 19/19 ordered keys, placeholders and literal bindings preserved; no T-findings. Actual models fell back from Sonnet due quota. Candidate SHA-256 94d0641c36688118c6bc29c96f6b98a4e419ff250271940ccc529d6a9a0ae358."
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 9f9f412e75864d2d23d9799a4fe9f5becb12ecb3f8657a2f1d0928a24aa4822d."
     },
     {
       "locale": "ru",
       "namespace": "tui.viewer",
-      "source_sha256": "25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
       "translator": {
         "agent": "independent translation subagent (task fd31363d4a28)",
         "model": "openai/gpt-6.1-sol",
         "date": "2026-10-19"
       },
       "auditor": {
-        "agent": "independent audit subagent (task f6d9e259a63a)",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
         "date": "2026-10-19",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Manager-relayed independent audit PASS: 19/19 ordered keys, placeholders and literal bindings preserved; no T-findings. Actual models fell back from Sonnet due quota. Candidate SHA-256 5c1baefc5a6db8ead8dffd5e3dae3e2b47a086b6f2b03463d24e3f5e1a91c87a."
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 84c92994710f6585bb1aa961b14247baa67177e2a6a84a5aeabad420274fcd12."
     },
     {
       "locale": "vi",
       "namespace": "tui.viewer",
-      "source_sha256": "25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
       "translator": {
         "agent": "independent translation subagent (task fd31363d4a28)",
         "model": "openai/gpt-6.1-sol",
         "date": "2026-10-19"
       },
       "auditor": {
-        "agent": "independent audit subagent (task f6d9e259a63a)",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
         "date": "2026-10-19",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Manager-relayed independent audit PASS: 19/19 ordered keys, placeholders and literal bindings preserved; no T-findings. Actual models fell back from Sonnet due quota. Candidate SHA-256 a1068396992db65ca4cbe07ecbea11315b25cbd7563036f0b3a071a535059118."
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 beda64bf3d9d3877805e43a24e2d20502fca08d1164096e4fe7a0c8a7ed77700."
     }
   ]
 }
