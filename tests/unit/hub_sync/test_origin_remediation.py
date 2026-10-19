@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr
 
+from local_operator.agents import AgentRegistry
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync.check import ItemCheck, check_hub_teams
 from local_operator.hub_sync.identity import link_origin
+from local_operator.providers.auth_store import AuthStore
 from tests.unit.hub_sync.test_link_origin import SOURCE, TENANT, _ctx, _team
 
 
@@ -38,6 +41,8 @@ def test_first_publication_records_accepted_ancestor(tmp_path, tenant):
         hub_id="hub-1",
     )
     record = prov.read_baseline(ctx.config_dir, "team", "local-1")
+    assert record is not None
+    assert record.outbound is not None
     assert record.recorded_by == "publish" and record.fields == accepted
     assert record.outbound.local_fields == local
     snapshot = svc.links_snapshot(ctx)
@@ -130,15 +135,18 @@ async def test_desktop_team_scope_comes_from_caller(tmp_path, monkeypatch, decla
         route, "_org_radient_credentials", AsyncMock(return_value=(SecretStr("synthetic"), SOURCE))
     )
     monkeypatch.setattr(route, "RadientClient", lambda **kw: client)
-    await route.pull_team_from_radient(
-        team_id=document["id"],
-        tenant_id=declared,
-        config_manager=ctx.config_manager,
-        provider_auth_store=None,
-    )
+    with closing(AuthStore(tmp_path / "auth.db")) as auth_store:
+        await route.pull_team_from_radient(
+            team_id=document["id"],
+            tenant_id=declared,
+            config_manager=ctx.config_manager,
+            provider_auth_store=auth_store,
+        )
     team = TeamRegistry(tmp_path).list_teams()[0]
     record = prov.read_baseline(tmp_path, "team", team.id)
+    assert record is not None
     if declared:
+        assert record.identity is not None
         assert record.identity.visibility == "org" and record.tenant_id == declared
     else:
         assert record.identity is None and not record.scope_known
@@ -171,23 +179,25 @@ async def test_desktop_agent_download_uses_configured_base(tmp_path, monkeypatch
         lambda **kw: observed.append(kw["base_url"]) or SimpleNamespace(**kw),
     )
     agent = SimpleNamespace(model_dump=lambda: {"id": "local-1"})
-    registry = SimpleNamespace(
-        download_agent_from_radient=lambda *a, **kw: SimpleNamespace(
-            agent=agent, renamed_from=None, model_notice=None
+    registry = AgentRegistry(tmp_path)
+    monkeypatch.setattr(
+        registry,
+        "download_agent_from_radient",
+        lambda *a, **kw: SimpleNamespace(agent=agent, renamed_from=None, model_notice=None),
+    )
+    with closing(AuthStore(tmp_path / "auth.db")) as auth_store:
+        await route.download_agent_from_radient(
+            agent_id="hub-1",
+            agent_registry=registry,
+            env_config=EnvConfig(),
+            provider_auth_store=auth_store,
+            config_manager=ctx.config_manager,
         )
-    )
-    await route.download_agent_from_radient(
-        agent_id="hub-1",
-        agent_registry=registry,
-        env_config=EnvConfig(),
-        provider_auth_store=None,
-        config_manager=ctx.config_manager,
-    )
     assert observed == [base]
     pulled = LinkIdentity("agent", "local-1", observed[0], "public", None, "hub-1")
-    resolved = LinkIdentity(
-        "agent", "local-1", prov.canonical_hub_source(ctx.config_manager), "public", None, "hub-1"
-    )
+    configured_source = prov.canonical_hub_source(ctx.config_manager)
+    assert configured_source is not None
+    resolved = LinkIdentity("agent", "local-1", configured_source, "public", None, "hub-1")
     assert pulled.link_id == resolved.link_id
     print(
         f"R3 desktop agent: route_base={observed[0]} "
@@ -212,7 +222,7 @@ def test_public_team_check_uses_optional_auth(tmp_path):
     requests_seen = []
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
         def do_GET(self):
