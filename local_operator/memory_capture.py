@@ -140,17 +140,35 @@ _CONTEXT_LOCATORS = 8
 #: A word, after locators are removed, is what distinguishes a decision/goal line
 #: from a bare path. Unicode letters in ANY script: `[^\W\d_]` is a letter (not a
 #: digit or underscore), so CJK/Cyrillic/Greek knowledge is not silently English-only
-#: (QA Q8). Two characters because scripts such as CJK have one-character words.
+#: (QA Q8). The floor is TWO: one loose character is not prose, while a two-letter
+#: word is a word, and real CJK/Greek/Cyrillic words run longer than that.
 _WORD = re.compile(r"[^\W\d_]{2,}")
 #: Locator shapes that `_LOCATOR` deliberately does NOT own (that grammar is pinned
 #: byte-identical to ``compaction/mine.py``): Windows drive paths, UNC shares, bare
-#: domains and `mailto:`. They are context like every other locator, so they must not
-#: make a locator-only bullet look substantive (QA m1). Admission-only pattern.
+#: hosts and `mailto:`. They are context like every other locator, so they must not
+#: make a locator-only bullet look substantive (QA m1). Admission-only pattern; the
+#: case-insensitive flag is what makes `MAILTO:`/`MailTo:` the same scheme.
 _ADJACENT_LOCATOR = re.compile(
     r"\b[A-Za-z]:[\\/][^\s<>\"']{1,400}"
     r"|\\\\[^\s<>\"']{1,400}"
     r"|(?<![\w@.-])mailto:[^\s<>\"']{0,400}"
-    r"|(?<![\w@.-])(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?![\w.-])"
+    r"|(?<![\w@.-])(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?"
+    r"|(?<![\w@.-])[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s<>\"']*",
+    re.IGNORECASE,
+)
+#: The WHOLE candidate is one locator. A token rule cannot see a Windows path with
+#: spaces or a bare host followed by a path, so this full-body predicate is the
+#: shape-complete rule: a candidate is context when it IS a locator, never merely
+#: because a locator appears inside a sentence (QA MINOR 1).
+_LOCATOR_ONLY = re.compile(
+    r"^\s*(?:"
+    r"[A-Za-z]:[\\/][^<>\"'\n]*"
+    r"|\\\\[^<>\"'\n]*"
+    r"|mailto:[^\s<>\"']*"
+    r"|[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s<>\"']*"
+    r"|(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?"
+    r")\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -427,8 +445,9 @@ def _sections(
     A markdown heading that is NOT one of the SIX recognised ones CLOSES the
     region; fenced code is skipped so a `# Key Decisions` line inside a tool
     output or a shell snippet cannot invent a section. The walk is lazy and
-    checks the shared deadline every 512 lines, so a line-heavy 2 MB input is
-    bounded by TIME, not only by the work it happens to find (QA n2).
+    checks the shared deadline every SCAN_WINDOW (4096) lines, so a line-heavy
+    2 MB input is bounded by TIME, not only by the work it happens to find
+    (QA n2).
     """
     sections: list[_Section] = []
     current: _Section | None = None
@@ -476,11 +495,14 @@ def _substantive(body: str) -> bool:
     This is the admission rule that makes a transcript of URLs and paths yield
     ZERO facts: `- ~/tools/x/proof.md` is a locator with no memory around it,
     while `- Store evidence at ~/tools/x/proof.md` is a decision whose path is
-    supporting detail. Locator grammar is removed first, then the adjacent shapes
-    `_LOCATOR` deliberately does not own (Windows/UNC, bare domains, mailto) —
-    they are context too (QA m1). A candidate with nothing left is COUNTED at
-    admission, never silently dropped as an `ok`/0 pass (QA Q8).
+    supporting detail. A candidate that IS one locator shape — Windows path with
+    spaces, UNC share, bare host with a path, any URI scheme in any case — is
+    refused whole; otherwise the inline grammar is removed and what remains must
+    contain a word. A candidate with nothing left is COUNTED at admission, never
+    silently dropped as an `ok`/0 pass (QA Q8).
     """
+    if _LOCATOR_ONLY.match(body):
+        return False
     remaining = _LOCATOR.sub(" ", body)
     remaining = _ADJACENT_LOCATOR.sub(" ", remaining)
     return bool(_WORD.search(remaining))
@@ -729,9 +751,10 @@ def _attach_context(
 def extract(text: str, summary: str = "", *, locators: bool = False) -> CaptureRows:
     """CPU-only bounded scan; returns values, never opens a store or writes state.
 
-    KNOWLEDGE FIRST. The semantic heading sections (``Goal``/``Key Decisions``/
-    ``Progress``/``Critical Context``) are the primary source of facts, from the
-    compaction summary and from the transcript itself. The transcript's summary
+    KNOWLEDGE FIRST. The semantic heading sections (``Goal``/``Constraints``/
+    ``Key Decisions``/``Progress``/``Next Steps``/``Critical Context``) are the
+    primary source of facts, from the compaction summary and from the transcript
+    itself. The transcript's summary
     is parsed FIRST so its curated wording wins a de-duplication tie against the
     same sentence in raw history. A locator is never a fact: it may only ride as
     `— context: …` on a section fact, and only when ``locators`` is true. This is

@@ -207,15 +207,35 @@ def test_a_section_with_no_judgeable_prose_is_counted_not_silent_ok_zero(store):
     "body",
     [
         r"C:\Users\damian\file.txt",
+        r"C:\Program Files\Common Files\proof.txt",
+        r"C:\Users\First Last\file.txt",
         r"\\server\share\file.txt",
         "www.example.com",
+        "www.example.com/path",
         "mailto:ops@example.com",
+        "MAILTO:ops@example.com",
     ],
 )
 def test_adjacent_locator_shapes_are_context_not_facts(body):
-    """m1: Windows/UNC paths, bare domains and mailto are locator shapes too."""
+    """MINOR 1: a candidate that IS a locator shape is context, not a fact."""
     rows = extract("## Progress\n- " + body)
     assert list(rows) == [] and rows.skipped == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "We deploy at example.com/docs every Friday.",
+        r"We deploy from C:\Program Files\app every Friday.",
+        "Use the docs at https://example.invalid/runbook when shipping.",
+    ],
+)
+def test_a_decision_that_mentions_a_locator_is_still_knowledge(body):
+    """The control for MINOR 1: the fix must not delete knowledge that names a path."""
+    rows = extract("## Key Decisions\n- " + body)
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == ["decision"]
+    assert rows.skipped == 0
 
 
 def test_all_six_prompt_sections_are_recognised():
@@ -243,7 +263,7 @@ def test_all_six_prompt_sections_are_recognised():
 
 
 def test_the_prompt_exclusion_and_heading_vocabulary_are_pinned_to_the_template():
-    """m3: a template edit must fail a test, not silently disable the exclusion."""
+    """m3/MINOR 2: the pin is EQUALITY, so a new prompt section cannot pass unseen."""
     from local_operator.compaction.api import _load_instruction_template
     from local_operator.memory_capture import _HEADING_TAGS, _PROMPT_SIGNATURE
 
@@ -252,9 +272,18 @@ def test_the_prompt_exclusion_and_heading_vocabulary_are_pinned_to_the_template(
     mandated = {
         line[3:].strip().lower() for line in template.splitlines() if line.startswith("## ")
     }
-    assert set(_HEADING_TAGS) <= mandated, sorted(set(_HEADING_TAGS) - mandated)
-    for name in ("constraints", "next steps"):
-        assert name in mandated
+    # The two headings that are prompt machinery, not summary sections the model
+    # is asked to fill. Kept explicit so a new scaffolding heading is a red test.
+    scaffolding = {
+        "previous summary (fold into the sections above, then drop this section)",
+        "conversation to summarize",
+    }
+    assert mandated - scaffolding == set(_HEADING_TAGS), sorted(
+        (mandated - scaffolding) ^ set(_HEADING_TAGS)
+    )
+    assert mandated - set(_HEADING_TAGS) == scaffolding, sorted(
+        (mandated - set(_HEADING_TAGS)) - scaffolding
+    )
 
 
 def test_carry_rows_never_overshoots_the_context_body_cap():
