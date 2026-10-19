@@ -544,6 +544,7 @@ async def get_settings(
 
 @router.put("/v1/desktop/team-bridge/settings", response_model=CRUDResponse[Any])
 async def put_settings(
+    request: Request,
     body: TeamBridgeSettingsPut,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
@@ -555,6 +556,7 @@ async def put_settings(
     next PUT fail the same way.
     """
 
+    _refuse_write_scope(request)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -623,11 +625,13 @@ async def get_allowlist(
 
 @router.put("/v1/desktop/team-bridge/allowlist", response_model=CRUDResponse[Any])
 async def put_allowlist(
+    request: Request,
     body: TeamBridgeAllowlistPut,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """The bounded replace-set write (§6.1/§9). ``entries`` is whole-policy."""
 
+    _refuse_write_scope(request)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -1023,17 +1027,69 @@ async def _conversation_reply(awaitable: Any) -> Any:
         _raise_bridge(exc)
 
 
+#: The desktop's ONE accepted multi-organization scope for the two reads. The
+#: organization set is SERVER-DERIVED from the signed-in account's active
+#: memberships, and eligibility is applied per org by the same resolver the pair
+#: lane uses; the renderer therefore never supplies a tenant list (the design
+#: note's tenant-isolation invariant) and never gets to name a second scope.
+ACCOUNT_SCOPE = "account"
+
+
+def _refuse_write_scope(request: Request) -> None:
+    """Writes never take a scope: each names exactly ONE tenant.
+
+    An account-wide read is an aggregate over memberships; a write cannot be
+    aggregated, because the server would have to guess which organization the
+    send/read/join was meant to land in. That is the "communicate only in the
+    expected space" invariant, so ``scope`` is refused here before any I/O. The
+    check is the same closed-table pattern the reads use, over an empty accepted
+    set: it names ONLY ``scope``, so a write keeps whatever other query names its
+    own route already accepts (``endpoint_id`` on admit) without this becoming a
+    second table.
+    """
+
+    if "scope" in request.query_params:
+        _raise_read("invalid_request")
+
+
 @router.get("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
 async def list_conversations(
     request: Request,
     tenant_id: str | None = Query(default=None),
     limit: str | None = Query(default=None),
     before: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """One page of the signed-in account's conversations, newest activity first."""
+    """One page, tenant-scoped or (with ``scope=account``) merged across orgs.
 
-    if set(request.query_params) - {"tenant_id", "limit", "before"}:
+    The account page is ordered by activity across the caller's organizations and
+    carries each row's own ``tenant_id``; conversations are never merged into one
+    row. Its position is the single opaque ``cursor`` the server mints, so a
+    per-tenant ``before`` or a ``tenant_id`` beside it would name a conflicting
+    scope and is refused here rather than being resolved by the server.
+    """
+
+    if set(request.query_params) - {
+        "tenant_id",
+        "limit",
+        "before",
+        "cursor",
+        "scope",
+    }:
+        _raise_read("invalid_request")
+    account_wide = scope == ACCOUNT_SCOPE
+    if scope is not None and not account_wide:
+        _raise_read("invalid_request")
+    if account_wide:
+        # ``after`` is not a name of this read at all, so the closed table above
+        # refuses it on every page; these two are the page-specific conflicts.
+        if tenant_id is not None or before is not None:
+            _raise_read("invalid_request")
+    elif cursor is not None:
+        # The merged page pages on ``cursor``; a tenant page pages on ``before``.
+        # Accepting both would leave it to the server which one wins.
         _raise_read("invalid_request")
     parsed_limit: int | None = None
     if limit is not None:
@@ -1043,18 +1099,26 @@ async def list_conversations(
             _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     payload = await _conversation_reply(
-        client.conversations(tenant_id=tenant_id, limit=parsed_limit, before=before)
+        client.conversations(
+            tenant_id=tenant_id,
+            limit=parsed_limit,
+            before=before,
+            cursor=cursor,
+            scope=scope,
+        )
     )
     return reply(payload)
 
 
 @router.post("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
 async def create_conversation(
+    request: Request,
     body: ConversationCreateIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Create (or find, for a dm) a conversation. The payload is the wire shape."""
 
+    _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     payload = {
         key: value
@@ -1093,10 +1157,12 @@ async def get_conversation(
 )
 async def conversation_archive(
     conversation_id: str,
+    request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Archive (read-only for every member)."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(client.conversation_lifecycle(conversation_id, "archive"))
@@ -1109,10 +1175,12 @@ async def conversation_archive(
 )
 async def conversation_unarchive(
     conversation_id: str,
+    request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Unarchive (owner only, server-enforced)."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(client.conversation_lifecycle(conversation_id, "unarchive"))
@@ -1125,12 +1193,14 @@ async def conversation_unarchive(
 )
 async def add_conversation_members(
     conversation_id: str,
+    request: Request,
     members: list[ConversationMemberIn],
     tenant_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Invite members. Humans are invited; agents stay invited until their owner consents."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     payload = [member.model_dump(exclude_none=True) for member in members]
@@ -1148,11 +1218,13 @@ async def add_conversation_members(
 async def remove_conversation_member(
     conversation_id: str,
     account_id: str,
+    request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Remove a human member (owner only; the server owns succession)."""
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1167,12 +1239,14 @@ async def remove_conversation_member(
 async def conversation_consent(
     conversation_id: str,
     account_id: str,
+    request: Request,
     body: ConversationConsentIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Record an agent owner's participation decision (the agent only then becomes active)."""
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1194,10 +1268,12 @@ async def conversation_consent(
 )
 async def conversation_join(
     conversation_id: str,
+    request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Accept an invitation, or self-join a tenant-visible channel."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(await _conversation_reply(client.conversation_join(conversation_id)))
@@ -1209,10 +1285,12 @@ async def conversation_join(
 )
 async def conversation_leave(
     conversation_id: str,
+    request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Leave. Leaving is the leave/re-add boundary: re-entry needs a fresh invite."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(await _conversation_reply(client.conversation_leave(conversation_id)))
@@ -1286,11 +1364,13 @@ async def conversation_history(
 )
 async def send_conversation_message(
     conversation_id: str,
+    request: Request,
     body: ConversationSendIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Append one message. The body is returned to the renderer and never stored here."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1338,6 +1418,7 @@ async def conversation_message_body(
 async def conversation_admit(
     conversation_id: str,
     message_id: str,
+    request: Request,
     body: ConversationAdmitIn,
     endpoint_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
@@ -1345,6 +1426,7 @@ async def conversation_admit(
     """Record the harness's screening verdict. A reject is terminal on the server."""
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1367,11 +1449,13 @@ async def conversation_admit(
 )
 async def conversation_read(
     conversation_id: str,
+    request: Request,
     body: ConversationReadIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Advance the read cursor and/or mute; the answer is the post-state."""
     _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1385,10 +1469,26 @@ async def conversation_read(
 
 @router.get("/v1/desktop/team-bridge/unread", response_model=CRUDResponse[Any])
 async def conversation_unread(
+    request: Request,
     tenant_id: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """The ONE badge read: per-conversation counts plus the unmuted total."""
+    """The ONE badge read: per-conversation counts plus the unmuted total.
 
+    With ``scope=account`` the server iterates the caller's active memberships
+    and answers ``{total, organizations: [...]}`` in the same one authorized
+    read, so the badge never fans out into N per-org calls. A ``tenant_id``
+    beside it is refused: the aggregate's organization set is the server's to
+    derive, not the renderer's.
+    """
+
+    if set(request.query_params) - {"tenant_id", "scope"}:
+        _raise_read("invalid_request")
+    account_wide = scope == ACCOUNT_SCOPE
+    if scope is not None and not account_wide:
+        _raise_read("invalid_request")
+    if account_wide and tenant_id is not None:
+        _raise_read("invalid_request")
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.unread(tenant_id=tenant_id)))
+    return reply(await _conversation_reply(client.unread(tenant_id=tenant_id, scope=scope)))

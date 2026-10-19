@@ -444,12 +444,16 @@ class FakeClient:
         tenant_id: str | None = None,
         limit: int | None = None,
         before: str | None = None,
+        cursor: str | None = None,
+        scope: str | None = None,
         access: Any = None,
     ) -> dict[str, Any]:
         FakeClient.behavior["last_conversations_kwargs"] = {
             "tenant_id": tenant_id,
             "limit": limit,
             "before": before,
+            "cursor": cursor,
+            "scope": scope,
         }
         return self._answer("conversations")
 
@@ -588,8 +592,11 @@ class FakeClient:
         FakeClient.behavior["last_read"] = (conversation_id, seq, muted, tenant_id)
         return self._answer("conversation_read")
 
-    async def unread(self, *, tenant_id=None, access=None):
-        FakeClient.behavior["last_unread_kwargs"] = {"tenant_id": tenant_id}
+    async def unread(self, *, tenant_id=None, scope=None, access=None):
+        FakeClient.behavior["last_unread_kwargs"] = {
+            "tenant_id": tenant_id,
+            "scope": scope,
+        }
         return self._answer("unread")
 
 
@@ -2306,7 +2313,84 @@ async def test_conversation_list_forwards_tenant_and_paging(api):
         "tenant_id": "tnt_1",
         "limit": 20,
         "before": "2026-10-18T00:00:00Z",
+        "cursor": None,
+        "scope": None,
     }
+
+
+async def test_conversation_list_forwards_the_account_scope_and_cursor(api):
+    """The merged page: one server-derived scope, one opaque position."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [
+            {"id": "bcv_1", "kind": "dm", "tenant_id": "tnt_1"},
+            {"id": "bcv_2", "kind": "group", "tenant_id": "tnt_2"},
+        ],
+        "cursor": "bcur_next",
+        "has_more": True,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?scope=account&limit=20&cursor=bcur_abc"
+    )
+    assert response.status_code == 200, response.text
+    # Each row still belongs to exactly ONE org: the account page groups by the
+    # row's tenant_id and never merges conversations across orgs.
+    assert [row["tenant_id"] for row in response.json()["result"]["conversations"]] == [
+        "tnt_1",
+        "tnt_2",
+    ]
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": None,
+        "limit": 20,
+        "before": None,
+        "cursor": "bcur_abc",
+        "scope": "account",
+    }
+
+
+async def test_conversation_list_refuses_a_tenant_or_a_before_beside_the_account_scope(api):
+    """The aggregate's org set is the server's; a second position is a conflict."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations?scope=account&tenant_id=tnt_1"),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations?scope=account&before=2026-10-18T00:00:00Z"
+        ),
+        # ``after`` is not a name of this read at all; the closed table refuses
+        # it on every page.
+        await client.get("/v1/desktop/team-bridge/conversations?scope=account&after=x"),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before, "a refused query reached the transport"
+
+
+async def test_conversation_list_refuses_a_cursor_on_a_tenant_page(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&cursor=bcur_abc"
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_reads_refuse_an_unknown_scope(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations?scope=tenant"),
+        await client.get("/v1/desktop/team-bridge/unread?scope=organisation"),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
 
 
 async def test_conversation_create_forwards_the_strict_body(api):
@@ -2376,7 +2460,91 @@ async def test_unread_is_one_badge_read(api):
     response = await client.get("/v1/desktop/team-bridge/unread?tenant_id=tnt_1")
     assert response.status_code == 200
     assert response.json()["result"]["total"] == 3
-    assert FakeClient.behavior["last_unread_kwargs"] == {"tenant_id": "tnt_1"}
+    assert FakeClient.behavior["last_unread_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "scope": None,
+    }
+
+
+async def test_unread_forwards_the_account_scope(api):
+    """One authorized read for the badge, with a per-org breakdown."""
+
+    client, _root, _d = api
+    FakeClient.behavior["unread"] = {
+        "total": 7,
+        "organizations": [
+            {"tenant_id": "tnt_1", "tenant_name": "One", "unread": 5, "eligible": True},
+            {"tenant_id": "tnt_2", "tenant_name": "Two", "unread": 2, "eligible": False},
+        ],
+    }
+    response = await client.get("/v1/desktop/team-bridge/unread?scope=account")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["total"] == 7
+    assert FakeClient.behavior["last_unread_kwargs"] == {
+        "tenant_id": None,
+        "scope": "account",
+    }
+
+
+async def test_unread_refuses_a_tenant_beside_the_account_scope(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.get("/v1/desktop/team-bridge/unread?scope=account&tenant_id=tnt_1")
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_every_desktop_write_refuses_a_scope(api):
+    """A write names exactly one tenant; ``scope`` is refused before any I/O."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    base = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+    writes = (
+        (
+            "put",
+            "/v1/desktop/team-bridge/settings?scope=account",
+            {"state": "active", "expected_account_id": "acc_a"},
+        ),
+        (
+            "put",
+            "/v1/desktop/team-bridge/allowlist?scope=account",
+            {"entries": [], "expected_account_id": "acc_a"},
+        ),
+        ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
+        ("post", f"{base}/archive?scope=account", None),
+        ("post", f"{base}/unarchive?scope=account", None),
+        (
+            "post",
+            f"{base}/members?scope=account",
+            [{"account_id": "acc_b", "display_label": "Bea"}],
+        ),
+        ("delete", f"{base}/members/acc_b?scope=account", None),
+        (
+            "post",
+            f"{base}/members/acc_b/consent?scope=account",
+            {"decision": "accept", "consent_version": "v1"},
+        ),
+        ("post", f"{base}/join?scope=account", None),
+        ("post", f"{base}/leave?scope=account", None),
+        (
+            "post",
+            f"{base}/messages?scope=account",
+            {"client_ref": "ref-1", "body": "hello"},
+        ),
+        (
+            "post",
+            f"{base}/messages/bmsg_1/admit?scope=account",
+            {"verdict": "allow", "body_hash": "hash-1"},
+        ),
+        ("post", f"{base}/read?scope=account", {"seq": 1}),
+    )
+    for method, path, payload in writes:
+        response = await client.request(method, path, json=payload)
+        assert response.status_code == 422, (path, response.text)
+        assert response.json()["detail"]["code"] == "invalid_request", path
+    assert FakeClient.calls == calls_before, "a refused write reached the transport"
 
 
 async def test_conversation_history_forwards_parsed_cursors(api):
