@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -119,8 +123,10 @@ def test_delegating_jobs(running: int, queued: int, jobs: int, expected: str) ->
     row = SessionRow(
         SID, 0, "test", jobs_running=jobs, subagents_running=running, subagents_queued=queued
     )
-    assert row.delegating == (running, queued, jobs)
-    assert delegating_label(*row.delegating) == expected
+    counts = row.delegating
+    assert counts is not None
+    assert counts == (running, queued, jobs)
+    assert delegating_label(*counts) == expected
     assert CatalogEntry(row).status_code == "delegating"
     assert CatalogEntry(row).status == expected
 
@@ -297,7 +303,7 @@ async def test_wait_hook_clears_every_park_exit(
         updates.append(event.details["waiting_on"])
         entered.set()
 
-    task = asyncio.create_task(
+    task = asyncio.ensure_future(
         execute_wait(
             "synthetic",
             {"job_id": [job_id, job_id], "wait_ms": 25 if exit_kind == "timeout" else 5000},
@@ -312,6 +318,7 @@ async def test_wait_hook_clears_every_park_exit(
         if exit_kind == "settled":
             release.set()
         elif exit_kind == "abort":
+            assert signal is not None
             signal.abort("synthetic abort")
             task.cancel()
         elif exit_kind in {"cancel", "steer"}:
@@ -327,6 +334,7 @@ async def test_wait_hook_clears_every_park_exit(
             if exit_kind == "disappeared":
                 assert "disappeared" in result.text
             elif exit_kind == "steer":
+                assert result.details is not None
                 assert result.details["interrupted_by"] == "cancelled"
         assert notes == [1, 0]
         assert updates == [1, 0]
@@ -363,7 +371,7 @@ async def test_real_park_publishes_waiting_record_catalogue_and_info(tmp_path: P
         handle._publish_busy()
         entered.set()
 
-    task = asyncio.create_task(
+    task = asyncio.ensure_future(
         execute_wait("synthetic", {"job_id": job_id, "wait_ms": 5000}, None, update, context)
     )
     try:
@@ -444,15 +452,162 @@ async def test_heartbeat_floor_uses_same_presence_probes(
 
 
 @pytest.mark.parametrize("state", ["live", "wedged", "stale"])
-def test_feed_row_matches_catalogue_pending_and_presence(state: str) -> None:
+def test_feed_row_matches_catalogue_pending_and_presence(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from local_operator.server.utils.desktop_feed import DesktopFeed
 
     feed = object.__new__(DesktopFeed)
-    feed._user_session = lambda _: True
+    monkeypatch.setattr(feed, "_user_session", lambda _: True)
     feed._records = {SID: (record(pending="approval", waiting_on=2, jobs_running=3), state)}
     feed._wake_index = {}
     feed._monitor_index = {}
     row = feed._row_for(SID)
+    assert row is not None
+    assert row.live_state == ("wedged" if state in {"wedged", "stale"} else "attached")
     assert row.pending == ("approval" if state == "live" else None)
     assert row.waiting_on == (0 if state == "stale" else 2)
     assert row.jobs_running == (None if state == "stale" else 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observer", ["context", "update", "both"])
+@pytest.mark.parametrize("fail_when", ["entry", "clear"])
+@pytest.mark.parametrize("outcome", ["normal", "timeout", "abort", "cancel", "settled"])
+async def test_wait_observer_failures_preserve_base_outcome(
+    observer: str, fail_when: str, outcome: str
+) -> None:
+    """Compare healthy and failing observers, including an already settled job.
+
+    Each observer fails independently; both must still receive entry and clear.
+    The abort cases cancel a real parked tool after setting its abort signal,
+    so a failure in finally cannot quietly replace CancelledError with a result.
+    """
+
+    async def probe(failing: bool) -> tuple[Any, list[int], list[int]]:
+        manager = AsyncJobManager()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        notes: list[int] = []
+        updates: list[int] = []
+
+        async def runner(job_id, signal, progress):  # noqa: ANN001, ANN202
+            await release.wait()
+            return "synthetic work settled"
+
+        job_id = manager.register("bash", "observer failure control", runner)
+        if outcome == "settled":
+            release.set()
+            await manager.settled_event(job_id).wait()
+        signal = AbortSignal() if outcome == "abort" else None
+
+        def note(count: int) -> None:
+            notes.append(count)
+            if (
+                failing
+                and observer in {"context", "both"}
+                and ((count > 0) == (fail_when == "entry"))
+            ):
+                raise RuntimeError("synthetic context observer failure")
+
+        def update(event: Any) -> None:
+            count = event.details["waiting_on"]
+            updates.append(count)
+            entered.set()
+            if (
+                failing
+                and observer in {"update", "both"}
+                and ((count > 0) == (fail_when == "entry"))
+            ):
+                raise RuntimeError("synthetic update observer failure")
+
+        context = ToolContext(jobs=manager, note_waiting=note)
+        task = asyncio.ensure_future(
+            execute_wait(
+                "synthetic",
+                {"job_id": job_id, "wait_ms": 10 if outcome == "timeout" else 5000},
+                signal,
+                update,
+                context,
+            )
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            if outcome in {"normal", "settled"}:
+                release.set()
+            elif outcome in {"abort", "cancel"}:
+                if signal is not None:
+                    signal.abort("synthetic abort")
+                task.cancel()
+            if outcome in {"abort", "cancel"}:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                result: Any = "CancelledError"
+            else:
+                completed = await task
+                details = dict(completed.details or {})
+                details.pop("job_id", None)
+                result = (completed.text.replace(job_id, "JOB"), completed.is_error, details)
+            return result, notes, updates
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await manager.dispose()
+
+    base = await probe(False)
+    broken = await probe(True)
+    assert broken == base
+    assert broken[1:] == ([1, 0], [1, 0])
+
+
+def test_stale_registry_record_cannot_shadow_relay_stored_fallback(tmp_path: Path) -> None:
+    """Exercise the FIRST real reaping scan, not a post-reap empty registry."""
+    from local_operator.network import relay
+    from local_operator.session.cleanup import mark_store
+    from local_operator.session.peer_rows import _live_state
+
+    server = relay.RelayServer(
+        root=tmp_path, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    directory = tmp_path / "sessions" / SID
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    mark_store(directory.parent)
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=5)
+    registry.publish(
+        replace(record(busy=True, waiting_on=2, jobs_running=3, pending="approval"), pid=child.pid),
+        root=tmp_path,
+    )
+    emitted = next(row for row in server.local_session_rows() if row["session_id"] == SID)
+    assert emitted["state"] == "stored"
+    assert emitted.get("waiting_on", 0) == 0
+    assert emitted.get("jobs_running") is None
+    assert emitted.get("pending") is None
+    assert emitted["busy"] is False
+    assert registry.scan(tmp_path) == [], "the first scan actually reaped the dead record"
+    peer = PeerRow.from_json(emitted, device_id="d_synthetic")
+    cold = SessionRow(SID, 0, "synthetic", live_state=_live_state(peer))
+    assert CatalogEntry(cold).status == "Recent"
+    # A mixed-version peer may still emit the old stale shape. Its cached busy
+    # bit must become a not-answering diagnostic, never a working claim.
+    peer = PeerRow.from_json({"state": "stale", "busy": True}, device_id="d_synthetic")
+    assert _live_state(peer) == "wedged"
+
+
+def test_local_first_reaping_scan_keeps_only_not_answering_diagnostic(tmp_path: Path) -> None:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=5)
+    registry.publish(
+        replace(record(busy=True, waiting_on=2, jobs_running=3, pending="approval"), pid=child.pid),
+        root=tmp_path,
+    )
+    row = decorate_rows(tmp_path, [SessionRow(SID, 0, "synthetic")])[0]
+    assert row.live_state == "wedged"
+    assert row.pending is None
+    assert row.waiting_on == 0
+    assert row.jobs_running is None
+    assert CatalogEntry(row).status_code == "wedged"
+    assert registry.scan(tmp_path) == []

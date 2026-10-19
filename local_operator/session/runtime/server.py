@@ -3737,10 +3737,17 @@ class RuntimeServer:
                 # is the honest answer and not a zero.
                 waiting = getattr(self._handle, "waiting_on", None)
                 if callable(waiting):
-                    self.set_waiting(waiting())
+                    reported_wait = waiting()
+                    if isinstance(reported_wait, int) and not isinstance(reported_wait, bool):
+                        self.set_waiting(reported_wait)
                 jobs = getattr(self._handle, "job_counts", None)
                 if callable(jobs):
-                    self.set_jobs(jobs())
+                    reported_jobs = jobs()
+                    self.set_jobs(
+                        reported_jobs
+                        if isinstance(reported_jobs, int) and not isinstance(reported_jobs, bool)
+                        else None
+                    )
                 counts = getattr(self._handle, "subagent_counts", None)
                 if callable(counts):
                     # Shape-checked rather than unpacked blind: the probe is

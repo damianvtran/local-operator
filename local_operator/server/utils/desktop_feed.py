@@ -2163,15 +2163,12 @@ class DesktopFeed:
         jobs_running: int | None = None
         subagents_running: int | None = None
         subagents_queued: int | None = None
-        if cached is not None and cached[1] != "stale":
-            # ``stale`` IS TREATED AS NO RECORD, and that is not a shortcut: the
-            # pid is gone, so nothing the record says about work in progress is
-            # true any more. ``decorate_rows`` takes the same rule (review round
-            # 1, MINOR 1), so the list and the frame agree even in the poll that
-            # performs the sweep that moves the record aside — and this feed must
-            # never be that sweep (``reap=False``).
+        if cached is not None:
+            # Mirror the list's one-tick not-answering diagnostic on a first
+            # stale verdict. Keep no work claim from a dead owner; this reader
+            # still must not perform the sweep itself (reap=False).
             record, state = cached
-            if state == "wedged":
+            if state in {"wedged", "stale"}:
                 live_state = "wedged"
             elif record.busy:
                 live_state = "busy"
@@ -2186,6 +2183,10 @@ class DesktopFeed:
             jobs_running = getattr(record, "jobs_running", None)
             subagents_running = getattr(record, "subagents_running", None)
             subagents_queued = getattr(record, "subagents_queued", None)
+            if state == "stale":
+                waiting_on = 0
+                jobs_running = subagents_running = subagents_queued = None
+                leaving = ""
             # The age from the same owner the list asks, and without the zombie
             # probe for the same reason ``decorate_rows`` gives: the verdict has
             # already been reached, so a ``ps`` fork here would buy nothing. It

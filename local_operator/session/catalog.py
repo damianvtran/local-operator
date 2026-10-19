@@ -58,7 +58,8 @@ WEDGED_STATUS = "Not answering · process alive"
 #: and the one that must decide the page's membership with no client present.
 #:
 #: ``approval`` and ``answer`` are parked gates, ``busy`` and ``wedged`` are live
-#: runtimes, and ``delegating`` is work running one layer down. Deliberately NOT
+#: runtimes, ``waiting`` is a foreground wait, and ``delegating`` is work running
+#: one layer down. Deliberately NOT
 #: ``idle``/``attached`` (a resident terminal is not work in progress, and both
 #: are tier 5) and not the stored outcomes ``interrupted``/``scheduled``/``dormant``.
 RUNNING_STATUS_CODES: frozenset[str] = frozenset(
@@ -1224,20 +1225,10 @@ def decorate_rows(
     live: dict[str, tuple[Any, str]] = {}
     for record, state in scanned:
         session_id = getattr(record, "session_id", "")
-        # A ``stale`` VERDICT IS NO RECORD (review round 1, MINOR 1). The pid is
-        # gone, so nothing the record says about work in progress is true any
-        # more — which is the rule the desktop feed already applies
-        # (``DesktopFeed._row_for``) and the reason a dead record's row must not
-        # read as busy/attached. Without this the two surfaces disagreed for
-        # exactly the poll that reaps the record, and they disagreed on the
-        # feed's OWN verdict: the list painted the corpse's ``busy`` while the
-        # frame said ``complete``, and because both writers read the same
-        # revision counter the client's strictly-greater guard kept the list's
-        # wrong value until the next 30 s poll. Taking the rule at BOTH readers
-        # removes the divergence rather than documenting it, and the sweep this
-        # function's own ``scan`` performs is unaffected: the record is still
-        # moved aside, and the row simply stops describing it.
-        if session_id and state != "stale":
+        # Keep the first reaping scan's stale record for one diagnostic tick.
+        # Decoration below maps it to not-answering and clears work claims, so
+        # this cannot resurrect a vanished owner's last busy/gate/wait state.
+        if session_id:
             live[session_id] = (record, state)
 
     if include_live:
@@ -1340,7 +1331,10 @@ def decorate_rows(
             # fact about its RECORD and not a diagnosis of its process: a long
             # turn on an in-process runtime produces it while the session is
             # working. The tooltip says exactly that, with the age beside it.
-            if state == "wedged":
+            if state in {"wedged", "stale"}:
+                # A first reaping scan can still hand us the dead owner's last
+                # record. Preserve the diagnostic row, but never its busy claim:
+                # a vanished owner is not answering, not still executing work.
                 live_state = "wedged"
             else:
                 # The flags decide, through the ONE home for that reading: the peer
@@ -1378,6 +1372,12 @@ def decorate_rows(
             jobs_running = getattr(record, "jobs_running", None)
             subagents_running = getattr(record, "subagents_running", None)
             subagents_queued = getattr(record, "subagents_queued", None)
+            if state == "stale":
+                # Dead-owner counts are not observations. A wedged LIVE pid
+                # intentionally keeps its diagnostic snapshot; a stale pid does not.
+                waiting_on = 0
+                jobs_running = subagents_running = subagents_queued = None
+                leaving = ""
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
         monitor_entry = monitor_index.get(row.id) or {}

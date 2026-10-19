@@ -27911,10 +27911,21 @@ async def execute_wait(
         # serving event path, so publishing the snapshot there makes a parked
         # wait visible now, not only after the next heartbeat. Both carry the
         # canonical deduplicated id count, never the caller's aliases.
+        # Presence is advisory: neither observer may replace a settled result,
+        # timeout or cancellation while finally clears the parked count. Isolate
+        # them independently so a broken host callback still permits the update
+        # observer to see the transition. BaseException (notably CancelledError)
+        # deliberately remains outside these ordinary observer-failure guards.
         if context is not None and context.note_waiting is not None:
-            context.note_waiting(count)
+            try:
+                context.note_waiting(count)
+            except Exception:  # noqa: BLE001 — presence must not change wait semantics
+                logger.debug("could not record wait presence", exc_info=True)
         if on_update is not None:
-            on_update(AgentToolUpdate(details={"waiting_on": count}))
+            try:
+                on_update(AgentToolUpdate(details={"waiting_on": count}))
+            except Exception:  # noqa: BLE001 — a failed observer must not mask cancellation
+                logger.debug("could not emit wait presence", exc_info=True)
 
     async def _park() -> ToolResult:
         def _settled() -> Any:
