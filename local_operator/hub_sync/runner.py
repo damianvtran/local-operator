@@ -344,12 +344,22 @@ class HubSyncRunner:
         return report
 
     def _link_policies(self, links: Sequence[Link]) -> dict[str, Any]:
-        """Per-link policy for the links that carry a confirmed identity.
+        """The EXPLICIT per-link policy of the links that carry a confirmed identity.
 
         Read FRESH off disk, not the manager's boot snapshot, so a TUI/CLI/daemon
-        policy edit is seen next tick; explicit
-        per-link values win and a link with no stored policy falls back to its kind's
-        creation default. Local work only.
+        policy edit is seen next tick. Local work only.
+
+        ONLY an explicitly stored policy is reported here. The kind-wide
+        creation default (``hub.auto_update.<kind>``) is a WRITE switch: it
+        decides whether an update is APPLIED, not whether the hub is read at
+        all, and the tick's apply gate consults it through ``settings``. A link
+        with no stored policy therefore stays in the check cadence exactly as a
+        legacy link does -- "manual mode keeps checking and records what is
+        available without writing it" -- while an explicitly stored both-OFF
+        policy still does no periodic work. Reading the creation default as a
+        subscribe default would let a WRITE switch stop the READ, and a pull
+        that records an origin (which makes every pulled row an identified
+        link) would then silently stop the runner from checking it.
         """
         from local_operator.hub_sync import policies as pol
 
@@ -396,9 +406,11 @@ class HubSyncRunner:
             if not link.link_id:
                 continue
             try:
-                out[link.link_id] = pol.link_policy_for(values, link.link_id, link.kind)
+                stored = pol.stored_link_policy(values, link.link_id)
             except Exception:  # noqa: BLE001
                 continue
+            if stored is not None:
+                out[link.link_id] = stored
         return out
 
     def _pick(
