@@ -760,7 +760,7 @@ def test_shard_partition_is_deterministic(job: str) -> None:
     run twice or not at all; if it varied between runs, a shard failure would
     be unreproducible. Determinism comes from sorting on (-weight, path) and
     breaking load ties on the lowest shard index. The e2e tree has a second
-    reason to require it: the same `--total 3` runs on both OS legs, so a
+    reason to require it: the same `--total` runs on both OS legs, so a
     partition that varied would have macOS and ubuntu running DIFFERENT slices
     of the same commit, and no leg's pass would mean the whole tree passed.
     """

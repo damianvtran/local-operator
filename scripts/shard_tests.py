@@ -3,7 +3,7 @@
 Usage:
     python scripts/shard_tests.py --shard I --total N [--out shard_tests.txt]
     python scripts/shard_tests.py --report          # all shards, projected totals
-    python scripts/shard_tests.py --tree e2e --shard I --total 3 --out e2e_tests.txt
+    python scripts/shard_tests.py --tree e2e --shard I --total 2 --out e2e_tests.txt
 
 Two trees are sharded today -- ``unit`` (the default) and ``e2e`` -- and the
 only thing that differs between them is which files to collect and which

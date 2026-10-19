@@ -482,7 +482,8 @@ jobs:
     strategy:
       fail-fast: false
       # ONE AT A TIME, on 2026-10-19. These three legs are cheap (a wheel
-      # install and a server start, ~3 min each) and they are NOT on any
+      # install and a server start, MEASURED at 44-52 s each in run
+      # 39316047502 and 44 s locally) and they are NOT on any
       # critical path, so running them three at a time bought nothing and
       # cost three pending jobs per run. Under a saturated account-wide pool a
       # PENDING job is the expensive kind: it is what a release gate's jobs
@@ -1310,8 +1311,13 @@ jobs:
     # (the split from CI-measured timings): legs of 414/412/401 s on ubuntu and
     # 442/441/400 s on macOS, i.e. ~7.5 min per leg including install, against a
     # unit shard whose job wall is ~12-15 min. So the e2e job is NO LONGER the
-    # critical path at three shards, and two shards (~11 min per leg) would also
-    # finish first. Three buys earlier freeze-guard feedback on a tree that only
+    # critical path at three shards, and two shards would also finish first:
+    # on the 2026-10-19 tree the heaviest two-way leg projects 1165.8350s
+    # (19.4 min) against the unit shard's 1805.1008s (30.1 min), so the
+    # freeze guard still lands first. (The "~11 min per leg" figure quoted
+    # below was measured on the 2026-07-30 tree, when the e2e tree was half
+    # this size; the leg grew with it.) Three buys earlier freeze-guard
+    # feedback on a tree that only
     # grows, and costs two more jobs per run: this matrix takes a pull request
     # from 17 jobs to 21, against the ~20-job account-wide budget the `test`
     # job's comment names, on main from 20 to 24. That is a deliberate trade,
