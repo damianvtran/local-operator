@@ -107,7 +107,9 @@ def _origin_ask(
     return str(outcome["details"]["ask_id"])
 
 
-def _relay(watch: AskQueue, origin_ask: str, *, origin: str = ORIGIN, note: str = "") -> dict:
+def _relay(
+    watch: AskQueue, origin_ask: str, *, origin: str = ORIGIN, note: str = ""
+) -> dict[str, Any]:
     return watch.enqueue_relay(f"{origin}/{origin_ask}", note=note)
 
 

@@ -986,7 +986,9 @@ def test_is_lapsed_names_timed_out_only():
 # ---------------------------------------------------------------------------
 
 
-def _relayed(ask_id: str = "a-r", *, at: int = 1_000_000, origin: str = "s-other") -> dict:
+def _relayed(
+    ask_id: str = "a-r", *, at: int = 1_000_000, origin: str = "s-other"
+) -> dict[str, Any]:
     return {
         "v": store.EVENT_SCHEMA,
         "kind": store.EVENT_RELAYED,
