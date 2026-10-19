@@ -129,7 +129,7 @@ def _tag_refusal(error: TagRefused) -> HTTPException:
     if error.code == "tag_limit":
         return HTTPException(
             422,
-            _wd.library_tag_limit(max=MAX_TAGS_PER_ASSET).envelope(code="library_tag_limit"),
+            _wd.library_tag_limit(max=str(MAX_TAGS_PER_ASSET)).envelope(code="library_tag_limit"),
         )
     if error.code == "bad_category":
         return HTTPException(

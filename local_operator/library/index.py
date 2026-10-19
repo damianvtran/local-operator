@@ -592,7 +592,8 @@ def build_catalog(
     home = home or str(Path.home())
     path = index_path(config)
     payload = _load(path)
-    cached_sessions = payload.get("sessions") if isinstance(payload.get("sessions"), dict) else {}
+    raw_sessions = payload.get("sessions")
+    cached_sessions: dict[str, Any] = raw_sessions if isinstance(raw_sessions, dict) else {}
     sessions: dict[str, Any] = {}
     visible = _visible_sessions(config)
     total = len(visible)
@@ -625,7 +626,7 @@ def build_catalog(
                     if _sig_matches(child.get("sig"), _signature(child_dir)):
                         continue
                     remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-                    if deadline is not None and remaining <= 0:
+                    if deadline is not None and remaining is not None and remaining <= 0:
                         building = True
                         entry_complete = False
                         continue
@@ -656,7 +657,7 @@ def build_catalog(
                 building = True
             continue
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        if deadline is not None and remaining <= 0:
+        if deadline is not None and remaining is not None and remaining <= 0:
             building = True
             if isinstance(cached, dict):
                 # Keep serving the last published rows while the budget is exhausted;

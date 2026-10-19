@@ -31,12 +31,14 @@ def test_schema_and_asset_provenance(tmp_path) -> None:
     assert updated and updated["name_source"] == "librarian"
     # A later derived refresh must not overwrite the librarian's field.
     s.ensure_asset(A, "p:/tmp/a.png", derived_name="renamed-on-disk.png")
-    assert s.asset(A)["name"] == "Cat"
+    row = s.asset(A)
+    assert row is not None and row["name"] == "Cat"
 
     user = s.update_fields(A, {"name": "My cat"}, actor="user")
-    assert user["name_source"] == "user"
+    assert user is not None and user["name_source"] == "user"
     s.ensure_asset(A, "p:/tmp/a.png", derived_name="again.png")
-    assert s.asset(A)["name"] == "My cat"
+    row = s.asset(A)
+    assert row is not None and row["name"] == "My cat"
     edits = s.edits(A)
     assert len(edits) == 2 and edits[0]["actor"] == "user"
 
@@ -84,7 +86,8 @@ def test_conventions_chat_and_edit_history(tmp_path) -> None:
     assert s.conventions()[0]["body"] == "Sentence case"
 
     s.set_chat(A, "abcdef123456")
-    assert s.chat(A)["session_id"] == "abcdef123456"
+    chat = s.chat(A)
+    assert chat is not None and chat["session_id"] == "abcdef123456"
     assert s.clear_chat(A) is True
     assert s.chat(A) is None
 

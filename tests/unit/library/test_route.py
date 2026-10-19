@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -228,7 +229,7 @@ async def test_patch_works_before_and_after_a_listing(api) -> None:
 
 async def test_a_metadata_edit_does_not_duplicate_or_skip_a_page(api) -> None:
     client, root = api
-    rows: list = []
+    rows: list[dict[str, Any]] = []
     names = ("alpha.txt", "bravo.txt", "charlie.txt", "delta.txt")
     for number, name in enumerate(names):
         path = root.parent / name

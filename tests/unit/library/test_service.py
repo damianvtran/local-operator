@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from local_operator.library import service
 from local_operator.library.metadata import MetadataStore
@@ -8,12 +9,12 @@ from local_operator.library.metadata import MetadataStore
 from ._fixtures import SESSION, config_root, session, user_row, write_rows
 
 
-def listing(root: Path, query: service.Query) -> dict:
+def listing(root: Path, query: service.Query) -> dict[str, Any]:
     """A test asks for a COMPLETE answer; the 1.5 s cold budget is a route concern."""
     return service.list_assets(root, query, budget_s=None)
 
 
-def build(root: Path, rows: list) -> None:
+def build(root: Path, rows: list[dict[str, Any]]) -> None:
     session(root, SESSION, rows)
 
 
@@ -66,7 +67,7 @@ def test_filters_sort_and_session_id_list(tmp_path, monkeypatch) -> None:
 
 def test_cursor_pages_and_resets_on_a_moved_revision(tmp_path, monkeypatch) -> None:
     root = config_root(monkeypatch, tmp_path)
-    rows: list = []
+    rows: list[dict[str, Any]] = []
     for index in range(4):
         path = tmp_path / f"f{index}.txt"
         path.write_text("x")
@@ -127,8 +128,10 @@ def test_chat_link_verifies_the_session_and_clears_a_dead_one(tmp_path, monkeypa
 
     chat_session = session(root, "111111111111")
     service.set_chat_link(root, asset_id, "111111111111")
-    assert service.chat_link(root, asset_id)["session_id"] == "111111111111"
-    assert service.get_asset(root, asset_id)["chat"]["session_id"] == "111111111111"
+    chat = service.chat_link(root, asset_id)
+    assert chat is not None and chat["session_id"] == "111111111111"
+    detail = service.get_asset(root, asset_id)
+    assert detail["chat"] is not None and detail["chat"]["session_id"] == "111111111111"
 
     # A deleted conversation clears the stale link on the next read.
     for child in sorted(chat_session.rglob("*"), reverse=True):
@@ -169,8 +172,10 @@ def test_user_fields_survive_agent_writes_and_locked_rows(monkeypatch) -> None:
     row = service.get_asset(root, asset_id)
     assert (row["name"], row["description"]) == ("Mine", "My words")
     store = MetadataStore(root)
-    assert store.asset(asset_id)["name_source"] == "user"
-    assert store.asset(asset_id)["description_source"] == "user"
+    stored = store.asset(asset_id)
+    assert stored is not None
+    assert stored["name_source"] == "user"
+    assert stored["description_source"] == "user"
 
     # The tags path carries actor/provenance too, and must not touch the
     # effective name/description while replacing assignments.
