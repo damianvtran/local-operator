@@ -3668,6 +3668,15 @@ class Session:
         self._skill_resolver = chain_tool_docs(
             skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
         )
+        # Every ``skill://`` read declares its skill NAME as a display identifier
+        # (LOH-28), so a long hyphenated name is not masked and registered
+        # session-wide. Wrapped HERE, over the chain, because this attribute is
+        # the one resolver every read of the session goes through.
+        from local_operator.skills.api import registering_skill_resolver
+
+        self._skill_resolver = registering_skill_resolver(
+            self._skill_resolver, getattr(self._variables, "register_identifier", None)
+        )
         self._request_approval = request_approval
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the

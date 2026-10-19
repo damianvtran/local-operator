@@ -108,6 +108,7 @@ from local_operator.tools.builtin import (
     _validation_error,
     _with_advertised_effort,
     effort_validation_context,
+    note_identifiers,
     spill_truncate,
 )
 
@@ -555,6 +556,10 @@ def _registered_profiles(registry: Any) -> list[AgentProfile]:
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:
     registry = _registry(context)
     installed = _registered_profiles(registry) if registry is not None else []
+    # Identifier fields: each role's name and display label are names the
+    # caller passes to task(agent=...); redaction must not apply to either.
+    for profile in installed:
+        note_identifiers(context, profile.name, profile.label)
     installed_names = {profile.name.lower() for profile in installed}
     lines = [_profile_line(profile, installed=True) for profile in installed]
     specialists: list[Any] = []
@@ -571,6 +576,8 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
         for profile in (load_seed(name) for name in list_seeds())
         if profile is not None and profile.name.lower() not in installed_names
     ]
+    for profile in starters:
+        note_identifiers(context, profile.name, profile.label)
     body = ""
     if lines:
         body += "registered roles:\n" + "\n".join(lines)
@@ -579,6 +586,7 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             body += "\n\n"
         specialist_lines = []
         for agent in specialists:
+            note_identifiers(context, agent.name, getattr(agent, "label", ""))
             summary = (agent.description or "").strip() or "(no description)"
             specialist_lines.append(f"- {agent.name} [specialist]: {summary}")
         body += "registered specialists:\n" + "\n".join(specialist_lines)
@@ -605,6 +613,9 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         except Exception:  # noqa: BLE001
             specialist = None
         if specialist is not None and is_specialist(specialist):
+            # Identifier fields: the specialist's name and label are the name
+            # a caller launches and lists, not a credential.
+            note_identifiers(context, specialist.name, getattr(specialist, "label", ""))
             instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
             body = (
                 f"{specialist.name} — registered specialist\n"
@@ -622,6 +633,9 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             f"no role or specialist named {name!r} (try op='list')",
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
+    # Identifier fields: the role name and its display label head the body; a
+    # mask would hide the name the caller delegates to.
+    note_identifiers(context, profile.name, profile.label)
     header = [
         f"{profile.name} — {origin}",
         f"when to use: {profile.when_to_use or profile.description or '(unstated)'}",
@@ -756,6 +770,11 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
     ]
     if not candidates:
         return _text(tool_call_id, "agent", "no roles available to search.")
+
+    # Identifier fields: each candidate's role name and display label are what
+    # search exists to hand back; redaction must not apply to either.
+    for profile in candidates:
+        note_identifiers(context, profile.name, profile.label)
 
     rows = [
         Skill(

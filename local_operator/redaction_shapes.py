@@ -1665,7 +1665,11 @@ _WORD_SHAPED_VALUE = re.compile(r"[a-z][a-z0-9_]*_[a-z0-9_]*")
 #: many, which is the second half of the R1-1 exclusion.
 _WORD_SHAPED_MAX_DIGITS = 2
 
-#: And how long it may be. Names are short; opaque secrets are not.
+#: And how long it may be, for the UNDERSCORE join only. Names are short; opaque
+#: secrets are not. The hyphen join deliberately does NOT carry this bound (see
+#: :func:`_is_readable_hyphen_phrase`): a lowercase hyphen-separated phrase is a
+#: name by structure at any length, and the 32-character test was refusing long
+#: project keys, which then masked and were registered session-wide.
 _WORD_SHAPED_MAX_LEN = 32
 
 #: The same declared class on its OTHER join: lowercase words joined by hyphens,
@@ -1678,7 +1682,16 @@ _WORD_SHAPED_MAX_LEN = 32
 #: that position. The anchors mirror :data:`_WORD_SHAPED_VALUE` deliberately —
 #: a lowercase letter first (``2fa-backup-codes`` keeps its mask), the same
 #: alphabet — so the two joins cannot drift into two classes.
-_WORD_SHAPED_VALUE_HYPHEN = re.compile(r"[a-z][a-z0-9-]*-[a-z0-9-]*")
+#:
+#: LENGTH-FREE BY STRUCTURE, and that is the point of the grammar rather than a
+#: spelling convenience: ``[a-z][a-z0-9]*`` then one or more ``-[a-z0-9]+``
+#: segments admits no empty segment and no trailing hyphen, so the shape itself
+#: says "word phrase" at every length. A length cap cannot: the LOH-28 project
+#: key was the same class as a short flag key, and refusing it only because it
+#: was long made it mask, register session-wide, and then grade any title
+#: sharing a six-character window as EXPOSED. Strong names still mask this
+#: class; the honest boundary is the name beside it, not the value's size.
+_WORD_SHAPED_VALUE_HYPHEN = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+")
 
 
 def _is_readable_hyphen_phrase(value: str) -> bool:
@@ -1698,10 +1711,18 @@ def _is_readable_hyphen_phrase(value: str) -> bool:
     R1-2), and those values are the vendor rule's to handle. The refusal reuses
     the vendor rule's OWN pattern rather than a retyped prefix list, so the two
     cannot drift about what a prefix is.
+
+    NO LENGTH BOUND, deliberately (LOH-28). The class is structural: the
+    grammar (:data:`_WORD_SHAPED_VALUE_HYPHEN`) admits only lowercase word
+    segments, so an opaque token cannot satisfy it by getting longer, and a
+    long project key is as much a name as a short flag key. The 32-character
+    test this used to carry masked the incident's project key, registered it
+    session-wide, and a later title sharing a six-character window with the
+    slug graded the hit EXPOSED and filed a credential incident. The
+    UNDERSCORE arm keeps its 32 for now (a separate, narrower change).
     """
     return (
         _VENDOR_PATTERN.search(value) is None
-        and len(value) <= _WORD_SHAPED_MAX_LEN
         and sum(char.isdigit() for char in value) <= _WORD_SHAPED_MAX_DIGITS
         and _WORD_SHAPED_VALUE_HYPHEN.fullmatch(value) is not None
     )

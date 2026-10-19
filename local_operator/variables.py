@@ -330,6 +330,13 @@ class VariableStore:
         # scrubbing must never make it readable or injectable, which is why
         # this is a separate set rather than another entry in `_credentials`.
         self._redactions: set[str] = set()
+        # DISPLAY identifiers a render site has explicitly exempted from both
+        # redaction passes (LOH-28). Per instance, like ``_redactions``: a
+        # process-wide set would release one session's project keys in every
+        # other session. Never a credential namespace — see
+        # :meth:`register_identifier`.
+        self._identifiers: set[str] = set()
+        self._identifier_cap_logged = False
 
     # -- sources -----------------------------------------------------------
     def _project_file(self) -> dict[str, str]:
@@ -471,6 +478,137 @@ class VariableStore:
         """
         return [*self._credentials.values(), *self._redactions]
 
+    #: How many DISPLAY identifiers one session may exempt (§3, LOH-28). A bound
+    #: rather than a budget: every identifier costs a containment scan on every
+    #: later result, and an unbounded set would make that cost grow with the
+    #: session's age. On reaching it, new declarations are refused and logged
+    #: once; redaction of those values simply keeps its prior answer.
+    MAX_IDENTIFIER_REGISTRATIONS = 128
+
+    #: The longest identifier a render site may declare. Not a secrecy bound:
+    #: identifiers longer than any rendered name or key cannot be one, and the
+    #: protection pass would pay for scanning them on every result.
+    MAX_IDENTIFIER_CHARS = 512
+
+    def register_identifier(self, value: str) -> bool:
+        """Exempt a DISPLAY identifier from redaction for the rest of the session.
+
+        WHY AN EXPLICIT SET RATHER THAN A WIDER SHAPE CLASS: a project key, a
+        session title or a skill name is chosen to be READ, and no spelling
+        test can tell one from a passphrase — under the weak name ``key`` the
+        weak-name release already reads a short kebab phrase, but a long one
+        used to mask and be registered session-wide, so every later occurrence
+        (a title sharing a six-character window, a lookup by key) was either
+        deleted from the transcript or graded EXPOSED. The render site KNOWS the
+        value is an identifier; the table never can. So the site declares it.
+
+        Returns whether it was newly added. A refusal (empty, over-long,
+        framing characters) is not an error: the value keeps whatever redaction
+        it had, which is the safe direction.
+
+        The refusals are FRAMING SAFETY, not secrecy: a newline, carriage
+        return, NUL or Unicode private-use character cannot be part of a
+        rendered identifier, and the protection protocol uses private-use
+        characters as placeholders — accepting one would let an identifier
+        collide with the placeholder alphabet.
+        """
+        trimmed = value.strip()
+        if not trimmed or len(trimmed) > self.MAX_IDENTIFIER_CHARS:
+            return False
+        if any(char in trimmed for char in ("\n", "\r", "\x00")):
+            return False
+        if any(0xE000 <= ord(char) <= 0xF8FF for char in trimmed):
+            return False
+        if trimmed in self._identifiers:
+            return False
+        if len(self._identifiers) >= self.MAX_IDENTIFIER_REGISTRATIONS:
+            if not self._identifier_cap_logged:
+                self._identifier_cap_logged = True
+                logger.warning(
+                    "identifier registration cap reached (%d values); new display "
+                    "identifiers keep their ordinary redaction",
+                    self.MAX_IDENTIFIER_REGISTRATIONS,
+                )
+            return False
+        self._identifiers.add(trimmed)
+        return True
+
+    def identifier_values(self) -> list[str]:
+        """The declared display identifiers, for tests and diagnostics.
+
+        NEVER fed to the scrubbers: the whole point of the set is that these
+        values are protected FROM them. Kept as a read-only view so a caller can
+        assert what was declared without reaching into ``_identifiers``.
+        """
+        return list(self._identifiers)
+
+    def _protect_identifiers(self, text: str) -> tuple[str, dict[str, str]]:
+        """Replace declared identifiers with PUA placeholders before redaction.
+
+        WHY BEFORE, not after: a mask is all-or-none. Once the shape pass has
+        swallowed a value into ``[redacted]`` its bytes are gone, so an
+        after-the-fact allow-list could not restore them. Hiding the identifier
+        from the matcher is the only way a long key inside a line a STRONG name
+        owns (``token: loh28-identifier-redaction``) stays readable.
+
+        THE INVARIANT GUARD: an identifier that has a containment relation with
+        a known secret in EITHER direction is skipped whole (not partially),
+        because protecting it would split the secret's bytes and leave a
+        readable fragment of the credential in the model's context. The
+        residual is the unavoidable one and is stated here rather than implied:
+        an identifier that is ITSELF an unknown credential shape is released by
+        explicit declaration — the render site is the authority for what it
+        renders — and only known-secret overlap keeps that from splitting a
+        secret the session already holds.
+
+        Values shorter than four characters are skipped: a shorter value cannot
+        satisfy any shape rule's floor (the matched value must be at least four
+        characters), so protecting it buys nothing and replacing it would rewrite
+        ordinary prose.
+        """
+        if not self._identifiers or not text:
+            return text, {}
+        secrets = self.redaction_values()
+        # Longest first: when one declared identifier contains another, the long
+        # one owns the bytes and the short one can still protect its standalone
+        # occurrences afterwards.
+        mine = sorted(self._identifiers, key=len, reverse=True)
+        used: set[str] = set(text)
+        for identifier in mine:
+            used.update(identifier)
+        placeholders: dict[str, str] = {}
+        protected = text
+        next_code = 0xE000
+        for identifier in mine:
+            if len(identifier) < 4 or identifier not in protected:
+                continue
+            if any(identifier in secret or secret in identifier for secret in secrets):
+                continue
+            while next_code <= 0xF8FF and chr(next_code) in used:
+                next_code += 1
+            if next_code > 0xF8FF:
+                break
+            placeholder = chr(next_code)
+            next_code += 1
+            used.add(placeholder)
+            protected = protected.replace(identifier, placeholder)
+            placeholders[placeholder] = identifier
+        return protected, placeholders
+
+    def _restore_identifiers(self, text: str, placeholders: Mapping[str, str]) -> str:
+        """Put surviving identifiers back; a swallowed placeholder stays masked.
+
+        All-or-none is enforced by the placeholder itself: if the shape pass
+        masked the run that carried it, the placeholder is no longer in
+        ``text`` and its identifier is never restored — a partial restore inside
+        a mask is impossible because the masked bytes are gone. This is the
+        direction the invariant wants: a mask stays all-of-the-credential, and
+        an identifier is released only when nothing masked it.
+        """
+        for placeholder, identifier in placeholders.items():
+            text = text.replace(placeholder, identifier)
+        return text
+
     def unregister_redaction(self, value: str) -> bool:
         """Stop scrubbing a §6 registration; returns whether anything was dropped.
 
@@ -520,6 +658,11 @@ class VariableStore:
         :meth:`_register_shape_hits` — so the same secret is contained for the
         rest of the session even in a later form the table does not know.
 
+        Declared DISPLAY identifiers (:meth:`register_identifier`) are protected
+        BEFORE both passes and restored AFTER them, so a render site can keep a
+        project key, session title or skill name readable without widening any
+        shape rule globally.
+
         WHAT THIS STILL DOES NOT GUARANTEE: an opaque value with none of the
         table's spellings around it (a bare tenant id, a pasted fragment, a
         secret whose name the table does not recognise) passes through. That
@@ -553,15 +696,22 @@ class VariableStore:
         outside this tree that offers only the labels-only view keeps whatever
         behaviour it has — ``tools/builtin._redact_tool_text`` reads that view as
         the ESCALATED case, and says why in place.
+
+        Declared identifiers ride through untouched: they are replaced by
+        private-use placeholders before either pass and restored after both, so
+        the shape table never sees them and a mask that swallows one keeps the
+        whole run masked (see :meth:`_protect_identifiers`).
         """
+        protected, placeholders = self._protect_identifiers(text)
         values = self.redaction_values()
-        scrubbed, hits = scrub_secrets_with_hits(text, values)
+        scrubbed, hits = scrub_secrets_with_hits(protected, values)
         if hits:
             self._register_shape_hits(hits)
         # The original shape judgement must run FIRST: a short known value can
         # occur inside an unknown credential, and pre-masking it would break the
         # shape that contains the rest. Decode only the surviving published copy.
         scrubbed = scrub_known_json_string_values(scrubbed, self.redaction_values())
+        scrubbed = self._restore_identifiers(scrubbed, placeholders)
         if not hits:
             return scrubbed, ShapeReport()
         # Containment takes EVERY hit (above, unconditionally); the REPORT takes
