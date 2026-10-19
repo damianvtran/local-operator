@@ -616,42 +616,45 @@ class VariableStore:
         if IDENTIFIER_SPAN_OPEN not in text:
             return text, {}
         known_secrets = self.redaction_values()
-        secret_intervals: list[tuple[int, int]] = []
-        for secret in known_secrets:
-            if not secret:
-                continue
-            found = text.find(secret)
-            while found != -1:
-                secret_intervals.append((found, found + len(secret)))
-                found = text.find(secret, found + 1)
         prefix = IDENTIFIER_SPAN_OPEN + self._span_token + ":"
         # PASS 1: find own spans and build the LOGICAL text (span contents
         # inlined). Secret overlap must be measured here, not on the raw text:
         # a marker prefix between ``vorn-`` and ``kell-tarn`` hides the secret
         # from ``str.find`` even though the renderer printed it as one value.
+        #
+        # SEGMENTS, not characters: ``find(OPEN)`` walks span to span and each
+        # raw run between markers is appended once. The first cut built a
+        # 3-tuple per character (1 MB -> 21 s and 93 MB, 4 MB -> 70 s and
+        # 376 MB); the structure is O(spans) pieces now.
         pieces: list[tuple[str, str, int]] = []
         unmarked_parts: list[str] = []
         regions: list[tuple[int, int]] = []
         logical_len = 0
         index = 0
         length = len(text)
-        while index < length:
-            char = text[index]
-            if char != IDENTIFIER_SPAN_OPEN:
-                pieces.append(("raw", char, -1))
-                unmarked_parts.append(char)
-                logical_len += 1
-                index += 1
-                continue
-            if not text.startswith(prefix, index):
-                consumed = 1 + self._truncated_prefix_bytes(text, index)
+        while True:
+            start = text.find(IDENTIFIER_SPAN_OPEN, index)
+            if start < 0:
+                if index < length:
+                    segment = text[index:]
+                    pieces.append(("raw", segment, -1))
+                    unmarked_parts.append(segment)
+                    logical_len += len(segment)
+                break
+            if start > index:
+                segment = text[index:start]
+                pieces.append(("raw", segment, -1))
+                unmarked_parts.append(segment)
+                logical_len += len(segment)
+            if not text.startswith(prefix, start):
+                consumed = 1 + self._truncated_prefix_bytes(text, start)
                 neutral = _IDENTIFIER_NEUTRAL * consumed
                 pieces.append(("raw", neutral, -1))
                 unmarked_parts.append(neutral)
                 logical_len += consumed
-                index += consumed
+                index = start + consumed
                 continue
-            content_start = index + len(prefix)
+            content_start = start + len(prefix)
             close = text.find(IDENTIFIER_SPAN_CLOSE, content_start)
             if close < 0:
                 neutral = _IDENTIFIER_NEUTRAL * len(prefix)
@@ -693,12 +696,7 @@ class VariableStore:
         cursor = _IDENTIFIER_PLACEHOLDER_FIRST + secrets.randbelow(_IDENTIFIER_PLACEHOLDER_SPAN)
         for kind, value, span_index in pieces:
             if kind == "raw":
-                parts.append(
-                    "".join(
-                        _IDENTIFIER_NEUTRAL if _is_identifier_control(char) else char
-                        for char in value
-                    )
-                )
+                parts.append(_neutralize_identifier_chars(value))
                 continue
             content = _neutralize_identifier_chars(value)
             if overlapping[span_index]:
@@ -743,32 +741,80 @@ class VariableStore:
         neutralized and its token is treated as ordinary text, never as an
         authority.
         """
+        return self.strip_identifier_spans_with_ranges(text)[0]
+
+    def strip_identifier_spans_with_ranges(
+        self, text: str
+    ) -> tuple[str, list[tuple[int, int, int]]]:
+        """``(plain, [(line, start, end), ...])`` for a persisted copy.
+
+        Ranges are how a spill read-back re-protects an identifier WITHOUT a
+        marker or token on disk: the sidecar keeps only integer positions in
+        the plain text, and the reading store mints its own span around those
+        substrings before the read result is redacted (LOH-28 R3-2). Line is
+        1-based; start/end are character offsets within that line. A span that
+        crosses a newline yields one range per line, because read-back serves
+        whole lines.
+        """
         if not text:
-            return text
+            return text, []
         prefix = IDENTIFIER_SPAN_OPEN + self._span_token + ":"
         parts: list[str] = []
+        ranges: list[tuple[int, int, int]] = []
+        line = 1
+        column = 0
+
+        def advance(value: str) -> None:
+            nonlocal line, column
+            newlines = value.count("\n")
+            if newlines:
+                line += newlines
+                column = len(value) - value.rfind("\n") - 1
+            else:
+                column += len(value)
+
+        def append_raw(value: str) -> None:
+            neutral = _neutralize_identifier_chars(value)
+            parts.append(neutral)
+            advance(neutral)
+
+        def append_span(content: str) -> None:
+            nonlocal line, column
+            parts.append(content)
+            segments = content.split("\n")
+            for position, segment in enumerate(segments):
+                if segment:
+                    ranges.append((line, column, column + len(segment)))
+                if position + 1 < len(segments):
+                    line += 1
+                    column = 0
+                else:
+                    column += len(segment)
+
         index = 0
         length = len(text)
-        while index < length:
-            char = text[index]
-            if char != IDENTIFIER_SPAN_OPEN:
-                parts.append(_IDENTIFIER_NEUTRAL if _is_identifier_control(char) else char)
-                index += 1
+        while True:
+            start = text.find(IDENTIFIER_SPAN_OPEN, index)
+            if start < 0:
+                if index < length:
+                    append_raw(text[index:])
+                break
+            if start > index:
+                append_raw(text[index:start])
+            if not text.startswith(prefix, start):
+                consumed = 1 + self._truncated_prefix_bytes(text, start)
+                append_raw(_IDENTIFIER_NEUTRAL * consumed)
+                index = start + consumed
                 continue
-            if not text.startswith(prefix, index):
-                consumed = 1 + self._truncated_prefix_bytes(text, index)
-                parts.append(_IDENTIFIER_NEUTRAL * consumed)
-                index += consumed
-                continue
-            content_start = index + len(prefix)
+            content_start = start + len(prefix)
             close = text.find(IDENTIFIER_SPAN_CLOSE, content_start)
             if close < 0:
-                parts.append(_IDENTIFIER_NEUTRAL * len(prefix))
+                append_raw(_IDENTIFIER_NEUTRAL * len(prefix))
                 index = content_start
                 continue
-            parts.append(text[content_start:close])
+            append_span(text[content_start:close])
             index = close + 1
-        return "".join(parts)
+        return "".join(parts), ranges
 
     def unregister_redaction(self, value: str) -> bool:
         """Stop scrubbing a §6 registration; returns whether anything was dropped.

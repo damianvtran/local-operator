@@ -14,12 +14,24 @@ Both directions are the gate: the incident's long slug must survive at its
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.harness.types import ToolContext
+from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.types import (
+    ChatRequest,
+    LoopConfig,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    ToolContext,
+    ToolExecutionEndEvent,
+)
 from local_operator.projects import ProjectEdit, ProjectRegistry
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from local_operator.tools.agent_tool import execute_agent
@@ -27,9 +39,12 @@ from local_operator.tools.builtin import (
     _redact_tool_text,
     _session_row_brief,
     _sessions_info_body,
+    execute_read,
     identifier_text,
 )
 from local_operator.tools.project_tool import execute_project
+from local_operator.tools.registry import create_tools
+from local_operator.tools.spill import get_store
 from local_operator.tools.team_tool import execute_team, execute_team_delete
 from local_operator.variables import (
     IDENTIFIER_SPAN_CLOSE,
@@ -664,3 +679,192 @@ async def test_project_update_and_refresh_receipts_mark_the_name(tmp_path) -> No
         assert report.labels == ()
         assert report.reached_model is False
         _assert_no_marker_text(scrubbed)
+
+
+# --- rounds 3: live events, spill ranges, truncation, performance ----------
+
+
+MODEL = ModelSpec(provider="test", model_id="m")
+
+
+class _ProjectShowStream:
+    """One ``project show`` call, then a plain stop."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: object):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            turn = [
+                StreamToolCallDelta(
+                    index=0,
+                    id="c1",
+                    name="project",
+                    argument_delta='{"op": "show", "name": "' + self.name + '"}',
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ]
+        else:
+            turn = [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
+
+        async def gen():
+            for event in turn:
+                yield event
+
+        return gen()
+
+
+@pytest.mark.asyncio
+async def test_a_live_tool_event_never_carries_the_span_token(tmp_path) -> None:
+    """R3-1: the event is read by the UI/API before the model copy is redacted."""
+    store = VariableStore(cwd=".")
+    registry = ProjectRegistry(tmp_path / "config")
+    tool_context = ToolContext(cwd=".", session_id="s1", project_registry=registry, variables=store)
+    await execute_project(
+        "tc",
+        {"op": "create", "name": SLUG, "title": "Live event probe"},
+        None,
+        None,
+        tool_context,
+    )
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_ProjectShowStream(SLUG),
+        redact_tool_result=store.redact,
+    )
+    context = LoopContext(
+        system_blocks=["sys"],
+        tools=create_tools(tool_context),
+        tool_context=tool_context,
+    )
+    ends: list[ToolExecutionEndEvent] = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        if isinstance(event, ToolExecutionEndEvent):
+            ends.append(event)
+    assert ends
+    pieces: list[str] = []
+    for item in ends[0].result.content:
+        value = getattr(item, "text", None)
+        if isinstance(value, str):
+            pieces.append(value)
+    text = "\n".join(pieces)
+    assert store._span_token not in text
+    _assert_no_marker_text(text)
+    assert SLUG in text
+
+
+@pytest.mark.asyncio
+async def test_a_spill_read_back_re_marks_identifiers(tmp_path) -> None:
+    """R3-2: the sidecar keeps ranges, never markers, and read-back restores the key."""
+    store = VariableStore(cwd=".")
+    registry = ProjectRegistry(tmp_path / "config")
+    context = ToolContext(cwd=".", project_registry=registry, variables=store)
+    credential = "token: " + HEX_32
+    await execute_project(
+        "tc",
+        {
+            "op": "create",
+            "name": SLUG,
+            "title": "Spill probe",
+            "description": ("d" * 1880) + "\n" + credential,
+        },
+        None,
+        None,
+        context,
+    )
+    for index in range(20):
+        await execute_project(
+            "tc",
+            {"op": "update", "name": SLUG, "progress": f"step {index} " + "p" * 940},
+            None,
+            None,
+            context,
+        )
+    shown = await execute_project("tc", {"op": "show", "name": SLUG}, None, None, context)
+    assert shown.details and "spill" in shown.details
+    handle = shown.details["spill"]["handle"]
+    digest = handle.split("spill://", 1)[1]
+
+    import json
+
+    spill_store = get_store()
+    on_disk = spill_store._content_path(digest).read_text(encoding="utf-8")
+    sidecar = json.loads(spill_store._meta_path(digest).read_text(encoding="utf-8"))
+    assert SLUG in on_disk
+    assert IDENTIFIER_SPAN_OPEN not in on_disk and IDENTIFIER_SPAN_CLOSE not in on_disk
+    assert store._span_token not in on_disk and store._span_token not in str(sidecar)
+    assert _has_private_use(on_disk) is False
+    assert sidecar["identifier_spans"]
+
+    read = await execute_read("tc", {"path": handle}, None, None, context)
+    assert IDENTIFIER_SPAN_OPEN in read.text
+    scrubbed, report = store.redact_with_report(read.text)
+    assert SLUG in scrubbed
+    assert HEX_32 not in scrubbed
+    assert report.labels == ("credential-assignment",)
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+    assert "\ufffd" not in scrubbed
+
+
+@pytest.mark.asyncio
+async def test_project_list_truncation_keeps_the_key_whole(tmp_path) -> None:
+    """Q3-1: the key span is never cut by the row cap, even after a long title."""
+    store = VariableStore(cwd=".")
+    registry = ProjectRegistry(tmp_path / "config")
+    context = ToolContext(cwd=".", project_registry=registry, variables=store)
+    await execute_project(
+        "tc",
+        {
+            "op": "create",
+            "name": SLUG,
+            # Wide cells: 80 CJK characters are 160 visual cells, so the key
+            # span starts beyond the row cap and must still be kept.
+            "title": "键" * 80,
+        },
+        None,
+        None,
+        context,
+    )
+    listed = await execute_project("tc", {"op": "list"}, None, None, context)
+    assert IDENTIFIER_SPAN_OPEN in listed.text
+    scrubbed, report = store.redact_with_report(listed.text)
+    assert SLUG in scrubbed
+    assert "\ufffd" not in scrubbed
+    assert report.labels == ()
+    assert report.reached_model is False
+    _assert_no_marker_text(scrubbed)
+
+
+def test_span_aware_truncation_never_cuts_a_span(store: VariableStore) -> None:
+    from local_operator.projects import truncate_row
+
+    title = store.identifier_span("x" * 40)
+    key = store.identifier_span(SLUG)
+    clipped = truncate_row("- " + title + " (" + key + ") then trailing prose", cap=60)
+    assert title in clipped and key in clipped
+    assert clipped.count(IDENTIFIER_SPAN_OPEN) == clipped.count(IDENTIFIER_SPAN_CLOSE)
+
+
+def test_extractor_scales_to_megabyte_text(store: VariableStore) -> None:
+    """R3-3: one piece per segment/span, not one 3-tuple per character."""
+    for megabytes, ceiling in ((1, 4.0), (4, 8.0)):
+        unit = ("x" * 1024 + "\n") * (megabytes * 1024 + 1)
+        text = unit[: megabytes * 1024 * 1024]
+        chunks: list[str] = []
+        step = 64 * 1024
+        spans = 0
+        for offset in range(0, len(text), step):
+            chunks.append(text[offset : offset + step])
+            if offset % (256 * 1024) == 0:
+                chunks.append(store.identifier_span(SLUG))
+                spans += 1
+        marked = "".join(chunks)
+        started = time.process_time()
+        _protected, extracted = store._extract_identifier_spans(marked)
+        elapsed = time.process_time() - started
+        assert len(extracted) == spans
+        assert elapsed < ceiling, f"{megabytes}MB took {elapsed:.1f}s"
