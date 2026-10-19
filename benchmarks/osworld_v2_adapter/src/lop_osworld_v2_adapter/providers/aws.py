@@ -112,6 +112,10 @@ _READY_PATH = "/terminal"
 # directly, so a pipeline arrives as an explicit ``bash -c`` -- the same shape
 # upstream's own SetupController posts (setup.py:418).
 _EXECUTE_PATH = "/execute"
+# Bound recovery within one statement: earlier guest input must never be replayed.
+_EXECUTE_ATTEMPTS = 3
+_EXECUTE_RETRY_DELAY_S = 0.25
+_EXECUTE_READINESS_TIMEOUT_S = 2.0
 
 # Where the episode's guest-preparation evidence is written, inside the
 # episode-owned cache root the adapter mints in ``reset_start``. It sits there
@@ -1506,35 +1510,49 @@ class AwsProvider:
                 # A lost response can already have typed text, so reuse our
                 # single-shot transport, preserving the controller's input patch.
                 script = env.controller.pkgs_prefix.format(command=statement)
-                try:
-                    from local_operator.computer_input import python_source_argv
+                from local_operator.computer_input import python_source_argv
 
-                    result = self._run_guest_command(
-                        python_source_argv(script), timeout=GUEST_COMMAND_TIMEOUT_S
-                    )
-                except Exception as error:
-                    # Neither transport exceptions nor guest stderr are safe to
-                    # expose: they may echo the command, credentials or UI text.
-                    # What IS safe, and what the flat "outcome is unknown" used
-                    # to hide, is WHETHER THE REQUEST WAS SENT: a connection that
-                    # was never established sent no byte, so the batch certainly
-                    # did not apply (``guest_loss``). Anything else stays
-                    # ambiguous and fail-closed. There is deliberately NO retry
-                    # on a ``not_sent`` verdict: the preserved loss refused every
-                    # request for the rest of the episode, so a retry could only
-                    # lengthen the dead time (see ``guest_loss``).
-                    verdict = guest_loss.classify_transport_failure(
-                        error, origin=self._guest_origin()
-                    )
-                    # Before anything can terminate the guest: the control server
-                    # is the thing that died, EC2 is still answering.
-                    self._capture_guest_console(
-                        guest_loss.STAGE_EXECUTE, f"execute-{verdict.delivery}"
-                    )
-                    raise GuestExecutionError(
-                        guest_loss.describe_failed_action(index, verdict),
-                        delivery=verdict.delivery,
-                    ) from None
+                command = python_source_argv(script)
+                ready: bool | None = None
+                for attempt in range(1, _EXECUTE_ATTEMPTS + 1):
+                    try:
+                        result = self._run_guest_command(command, timeout=GUEST_COMMAND_TIMEOUT_S)
+                        break
+                    except Exception as error:
+                        # Only positive connect-phase evidence permits another
+                        # attempt. A lost response may already have typed text.
+                        verdict = guest_loss.classify_transport_failure(
+                            error, origin=self._guest_origin()
+                        )
+                        if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
+                            if ready is None:
+                                ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
+                            if ready and attempt < _EXECUTE_ATTEMPTS:
+                                # Values only: exception text can leak the command
+                                # or credentials. Attempt names the upcoming send.
+                                logger.warning(
+                                    "guest transport retry attempt=%d delivery=%s "
+                                    "error_class=%s readiness_passed=%s",
+                                    attempt + 1,
+                                    verdict.delivery,
+                                    type(error).__name__,
+                                    ready,
+                                )
+                                self._sleep(_EXECUTE_RETRY_DELAY_S)
+                                continue
+                        # Capture only on terminal failure, before termination;
+                        # a recovered refusal is not a lost-guest incident.
+                        self._capture_guest_console(
+                            guest_loss.STAGE_EXECUTE, f"execute-{verdict.delivery}"
+                        )
+                        message = guest_loss.describe_failed_action(index, verdict)
+                        if ready is False:
+                            message += "; guest down: readiness check failed; no transport retry"
+                        raise GuestExecutionError(message, delivery=verdict.delivery) from None
+                else:
+                    # The last failed attempt raises above; falling through
+                    # would mean the configured budget allowed no initial send.
+                    raise AssertionError("guest execution requires at least one attempt")
                 if result.returncode != 0:
                     raise GuestExecutionError(
                         f"guest action {index + 1} failed "
@@ -1580,21 +1598,18 @@ class AwsProvider:
         it names the guest's address.
         """
 
+        return await asyncio.to_thread(self._probe_control_server, timeout)
+
+    def _probe_control_server(self, timeout: float) -> bool:
+        """Shared read-only probe for the worker thread and async RPC path."""
+
         origin = self._guest_origin()
         if origin is None:
             return False
-
-        def request() -> int:
-            return int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout))
-
         try:
-            return await asyncio.to_thread(request) == 200
+            return int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout)) == 200
         except Exception:
-            # Every way the transport can describe a guest that is not
-            # answering, collapsed in one place. The exception text can echo
-            # the URL or the guest's state, so it is discarded; the caller
-            # re-raises the ORIGINAL ambiguous failure, so this path adds no
-            # diagnostic of its own.
+            # Discard exception text: it may contain guest addresses or state.
             return False
 
     async def evaluate(self) -> Any:

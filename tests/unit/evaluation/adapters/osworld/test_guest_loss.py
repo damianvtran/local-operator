@@ -579,22 +579,23 @@ async def test_a_refused_guest_is_reported_not_sent_and_the_batch_is_not_replaye
 ) -> None:
     """The 043 case end to end on the provider: one attempt, a ``not_sent`` receipt.
 
-    No retry was added for a connect-phase failure (see ``guest_loss``): with
-    the control server gone a second attempt cannot succeed, so the assertion
-    is that exactly ONE request was attempted and the second statement of the
-    batch never was.
+    The readiness probe confirms the control server is gone, so exactly ONE
+    request is attempted and the second statement of the batch never runs.
     """
 
     monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
     transport = _CountingTransport()
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path, post=transport)
+        provider._clients.http_get = aws_mod.build_clients(CREDS, REGION).http_get
         stubs.ec2 = _NoConsoleEc2()
         provider._clients.ec2 = stubs.ec2
         with pytest.raises(GuestExecutionError) as raised:
             await provider.execute(["first()", "second()"])
 
     assert transport.calls == 1
+    assert "guest down: readiness check failed" in str(raised.value)
+    assert stubs.slept == []
     error = raised.value
     assert error.delivery == guest_loss.DELIVERY_NOT_SENT
     message = str(error)
@@ -689,12 +690,150 @@ async def test_an_ambiguous_failure_is_never_replayed(
         server.close()
 
     assert transport.calls == 1, "an ambiguous batch must be attempted exactly once"
+    assert stubs.http_calls == [], "ambiguous delivery must not enter readiness/retry recovery"
+    assert stubs.slept == []
     assert len(server.received) == 1
     assert raised.value.delivery == guest_loss.DELIVERY_AMBIGUOUS
     message = str(raised.value)
     assert "outcome is unknown; batch not retried" in message
     assert "delivery=ambiguous" in message
     assert "not sent" not in message
+
+
+@pytest.mark.asyncio
+async def test_refused_connect_recovers_with_one_delivered_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A real refused socket, then real readiness and POST; no paid guest needed."""
+
+    port = _closed_port()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", port)
+    received: list[dict[str, Any]] = []
+
+    class Handler(_OkHandler):
+        def do_GET(self) -> None:
+            assert self.path == aws_mod._READY_PATH
+            self.send_response(200)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            received.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = json.dumps({"returncode": 0, "output": "", "error": ""}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server: ThreadingHTTPServer | None = None
+    thread: threading.Thread | None = None
+    transport = _CountingTransport()
+    real_get = aws_mod.build_clients(CREDS, REGION).http_get
+    probes: list[str] = []
+
+    def recovering_get(url: str, timeout: float) -> int:
+        nonlocal server, thread
+        probes.append(url)
+        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return real_get(url, timeout)
+
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path, post=transport)
+            provider._clients.http_get = recovering_get
+            await provider.execute(["first()"])
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert transport.calls == 2
+    assert len(received) == 1
+    assert len(probes) == 1
+    assert stubs.slept == [aws_mod._EXECUTE_RETRY_DELAY_S, provider._action_delay_s]
+    assert (
+        "attempt=2 delivery=not_sent error_class=ConnectionError readiness_passed=True"
+        in caplog.text
+    )
+    assert provider._console_stages_done == set()
+
+
+@pytest.mark.asyncio
+async def test_three_refused_connects_exhaust_only_the_current_statement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An answering readiness endpoint cannot authorize more than three sends."""
+
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
+    transport = _CountingTransport()
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path, post=transport)
+        provider._clients.ec2 = _NoConsoleEc2()
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()", "second()"])
+
+    assert transport.calls == 3
+    assert len(stubs.http_calls) == 1
+    assert stubs.http_timeouts == [aws_mod._EXECUTE_READINESS_TIMEOUT_S]
+    assert stubs.slept == [aws_mod._EXECUTE_RETRY_DELAY_S] * 2
+    assert raised.value.delivery == guest_loss.DELIVERY_NOT_SENT
+    assert str(raised.value) == guest_loss.describe_failed_action(
+        0, guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "refused")
+    )
+    assert (
+        "attempt=2 delivery=not_sent error_class=ConnectionError readiness_passed=True"
+        in caplog.text
+    )
+    assert (
+        "attempt=3 delivery=not_sent error_class=ConnectionError readiness_passed=True"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_preserves_earlier_progress_and_stops_on_ambiguous_delivery(
+    tmp_path: Path,
+) -> None:
+    """Recovery resumes at the failing statement, never at the batch boundary."""
+
+    origin = "http://127.0.0.1:5000"
+    reason = u3.NewConnectionError(None, "refused")  # type: ignore[arg-type]
+    refusal = requests.ConnectionError(
+        u3.MaxRetryError(None, "/execute", reason),  # type: ignore[arg-type]
+        request=requests.Request("POST", origin + "/execute").prepare(),
+    )
+    for ambiguous in (False, True):
+        attempts: list[str] = []
+        applied: list[str] = []
+
+        def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            command = base64.b64decode("".join(payload["command"][3:])).decode("utf-8")
+            attempts.append(command)
+            if "second()" in command and attempts.count(command) == 1:
+                raise refusal
+            applied.append(command)
+            if ambiguous and "second()" in command:
+                raise requests.ReadTimeout("response lost")
+            return {"returncode": 0, "output": "", "error": ""}
+
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path, post=post)
+            provider._clients.ec2 = _NoConsoleEc2()
+            if ambiguous:
+                with pytest.raises(GuestExecutionError) as raised:
+                    await provider.execute(["first()", "second()", "third()"])
+                assert raised.value.delivery == guest_loss.DELIVERY_AMBIGUOUS
+                assert "outcome is unknown; batch not retried" in str(raised.value)
+            else:
+                await provider.execute(["first()", "second()", "third()"])
+        assert sum("first()" in command for command in applied) == 1
+        assert sum("second()" in command for command in applied) == 1
+        assert sum("second()" in command for command in attempts) == 2
+        assert sum("third()" in command for command in applied) == (0 if ambiguous else 1)
+        assert len(stubs.http_calls) == 1
 
 
 @pytest.mark.asyncio
