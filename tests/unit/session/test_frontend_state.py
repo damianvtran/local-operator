@@ -2277,25 +2277,79 @@ def test_a_restored_frame_names_the_model_the_session_will_run() -> None:
         )
     # The field's own type, not the live object: ``model_copy`` does not
     # validate, and a raw ``ModelSpec`` in a ``FrontendModelSpec`` slot is the
-    # kind of drift only a serializing path notices.
-    assert isinstance(selected, FrontendModelSpec)
+    # kind of drift only a serializing path notices. Both slots go through the
+    # one helper, so both are asserted (review round 1, N2).
+    for spec in (selected, effective):
+        assert isinstance(spec, FrontendModelSpec)
 
     # ``effective_model or selected``: a host with no separate effective spec
-    # publishes the selected one, exactly as the live refresh does.
+    # publishes the selected one, exactly as the live refresh does. Compared
+    # against the SAME store's other slot, not against a second store's: two
+    # stores could agree by coincidence under a nondeterministic projection
+    # (review round 1, N3).
     bare = SimpleNamespace(session_id="s1", _transcript=_CheckpointTranscript(stored), model=live)
-    assert FrontendStateStore.from_checkpoint(bare).state.effective_model == (
-        FrontendStateStore.from_checkpoint(bare).state.selected_model
-    )
+    bare_state = FrontendStateStore.from_checkpoint(bare).state
+    assert bare_state.effective_model == bare_state.selected_model
 
 
 def test_a_restored_frame_keeps_the_checkpoints_context_reading() -> None:
-    """The projection is the MODEL fields only — the boundary of this change.
+    """A SAME-model restore keeps the reading — and the model field is the fix's.
 
-    The state-level ``context_window`` is the window the checkpoint's
-    ``context_tokens`` were measured against, and the restore's own rules for it
-    (``attached.py``'s cold pair) read the raw row, not this store. So a live
-    spec with a different window must not move it, and neither may the spend or
-    the receipt pair.
+    This test asserts BOTH halves of the change (review round 1, N1). The FIX
+    half is ``selected_model``: it must move to the live spec, and that is the
+    assertion that fails on ``main``.
+
+    The BOUNDARY half is the state-level pair. ``context_window`` /
+    ``context_tokens`` are the reading the CONVERSATION was measured at, so a
+    live spec that resolved a different window for the SAME model (here
+    200_000 against the row's 1_000_000) must not retroactively re-measure
+    them — and neither may the spend or the receipt. The gate is model
+    IDENTITY, not a window mismatch: a restore onto a different ``(provider,
+    model_id)`` drops the reading instead
+    (``test_a_cross_model_restore_does_not_carry_the_old_models_reading``).
+    """
+    stored = _state(context_tokens=402_000, context_window=1_000_000, cumulative_parent_cost=1.25)
+    live = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.6-sol",
+        context_window=200_000,
+        reasoning_effort="low",
+    )
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(stored),
+        model=live,
+        effective_model=live,
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.selected_model is not None
+    # The fix: the spec is the live one, window and all.
+    assert restored.selected_model.context_window == 200_000
+    # The boundary: the reading the tokens were measured against is untouched.
+    assert restored.context_window == 1_000_000
+    assert restored.context_tokens == 402_000
+    assert restored.context_is_estimate is False
+    assert restored.cumulative_parent_cost == 1.25
+    assert restored.last_usage == stored.last_usage
+
+
+def test_a_cross_model_restore_does_not_carry_the_old_models_reading() -> None:
+    """A reading taken on another model is not convertible, so it is DROPPED.
+
+    The frame names the model about to run, and its state-level window divides
+    the context meter on the mobile surface (``spend-context.ts``). Carrying the
+    checkpoint's ``context_tokens`` and window beside a spec naming a DIFFERENT
+    model published a frame whose two halves described different models — the
+    pairing ``attached.py``'s cold viewer already refuses
+    (review round 1, M1 = QA round 1, Q2).
+
+    So the numerator and its estimate flag go unset (the band's ``—``, the
+    meter's ``no-reading``), and the window is the LIVE spec's own — the field
+    ``refresh_from_session`` publishes, which is what makes the first frame and
+    every later frame agree. The money is a fact about the conversation rather
+    than about the model, so it stays.
     """
     stored = _state(context_tokens=402_000, context_window=1_000_000, cumulative_parent_cost=1.25)
     live = ModelSpec(
@@ -2315,9 +2369,9 @@ def test_a_restored_frame_keeps_the_checkpoints_context_reading() -> None:
 
     assert restored.selected_model is not None
     assert restored.selected_model.context_window == 200_000
-    assert restored.context_window == 1_000_000
-    assert restored.context_tokens == 402_000
-    assert restored.context_is_estimate is False
+    assert restored.context_tokens is None
+    assert restored.context_is_estimate is None
+    assert restored.context_window == 200_000
     assert restored.cumulative_parent_cost == 1.25
     assert restored.last_usage == stored.last_usage
 

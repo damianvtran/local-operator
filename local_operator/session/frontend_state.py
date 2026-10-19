@@ -933,7 +933,39 @@ def _restored_model_field(value: Any) -> Any:
     return value
 
 
-def _live_model_updates(session: Any) -> dict[str, Any]:
+def _reading_pair(
+    configured: FrontendModelSpec | None, stored: FrontendModelSpec | None
+) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+    """The two specs a restored context reading is only meaningful between, or ``None``.
+
+    A token count is interpretable only against the window it was measured
+    against, so a reading may cross a restore only while BOTH sides name the
+    same model: the stored ``context_tokens`` were measured on the stored
+    spec's model, and the window about to divide them is the configured
+    spec's. Two different models have no honest conversion between them — the
+    user switched models since the checkpoint was written — so the reading is
+    DROPPED rather than recomputed.
+
+    ONE RULE, TWO CONSUMERS, IN TWO MODULES. ``attached.AttachedSession._restored_pair``
+    asks it for the COLD viewer (may this process adopt the checkpoint's
+    numerator and denominator?), and ``_live_model_updates`` asks it for the
+    first frame a restarted OWNER publishes (may it carry the checkpoint's
+    reading under a spec that names another model?). Those were two spellings
+    of the same comparison, and they drifted in exactly the way a duplicated
+    rule does: the viewer refused a cross-model reading while the owner's first
+    frame kept one (review round 1, M1 = QA round 1, Q2). A third consumer must
+    call this rather than restate the comparison.
+    """
+    if configured is None or stored is None:
+        return None
+    if configured.provider != stored.provider or configured.model_id != stored.model_id:
+        return None
+    return configured, stored
+
+
+def _live_model_updates(
+    session: Any, checkpoint_model: FrontendModelSpec | None = None
+) -> dict[str, Any]:
     """The model pair a restored checkpoint must NOT be allowed to keep.
 
     A checkpoint is written at a turn end, so its ``selected_model`` /
@@ -954,15 +986,40 @@ def _live_model_updates(session: Any) -> dict[str, Any]:
     An empty dict for a host that exposes no model at all: a reduced facade and
     a test double have none, and there the checkpoint's spec is still the only
     answer available (the fallback the ``cwd`` fixup documents).
+
+    THE CONTEXT READING IS THE MODEL'S TOO, and the pair above is what decides
+    it: ``context_tokens`` was measured on the model the row NAMES, so when the
+    restore lands on a different ``(provider, model_id)`` that numerator and its
+    window describe a model that is not about to run. Left in place they made
+    the first frame name one model and divide another model's reading by its
+    window — the ``attached.py`` cold pair refused exactly this pairing while
+    this path published it (review round 1, M1 = QA round 1, Q2). The reading is
+    therefore DROPPED, not converted: no token count is known on the new model,
+    so ``context_tokens`` and its estimate flag go unset (the same honest
+    degradation the band already renders as ``—`` / the mobile meter as
+    ``no-reading``), and the window is the LIVE spec's own — the field
+    ``refresh_from_session`` publishes, so the first frame and every frame after
+    it divide by the same number. A SAME-model restore keeps the checkpoint's
+    pair exactly as it did, because that is the reading the conversation was
+    actually measured at; identity, not a window mismatch, is the gate.
     """
     selected = getattr(session, "model", None)
     if selected is None:
         return {}
     effective = getattr(session, "effective_model", None) or selected
-    return {
+    updates: dict[str, Any] = {
         "selected_model": _restored_model_field(selected),
         "effective_model": _restored_model_field(effective),
     }
+    if _reading_pair(effective, checkpoint_model) is None:
+        updates.update(
+            {
+                "context_tokens": None,
+                "context_is_estimate": None,
+                "context_window": getattr(effective, "context_window", None),
+            }
+        )
+    return updates
 
 
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
@@ -7404,7 +7461,7 @@ class FrontendStateStore:
                 # either, and this pair is the field the rule above was still
                 # missing: the row names the model the previous runtime ran, and
                 # the owner's own spec is the one its requests use.
-                **_live_model_updates(session),
+                **_live_model_updates(session, state.selected_model),
             }
         )
 
