@@ -174,6 +174,7 @@ async def _query_from(
     favorite: bool | None,
     session: str | None,
     session_id: str | None,
+    scope: str,
     sort: str,
     order: str | None,
     limit: int,
@@ -181,6 +182,8 @@ async def _query_from(
 ) -> service.Query:
     if tag_mode not in service.TAG_MODES:
         raise _bad_filter("tag_mode", tag_mode)
+    if scope not in service.SCOPES:
+        raise _bad_filter("scope", scope)
     if sort not in service.SORTS:
         raise _bad_filter("sort", sort)
     if order is not None and order not in service.ORDERS:
@@ -208,6 +211,7 @@ async def _query_from(
             favorite=favorite,
             session=session or None,
             session_ids=session_ids,
+            scope=scope,
             sort=sort,
             order=order,
             limit=limit,
@@ -237,6 +241,7 @@ async def list_library_assets(
     favorite: bool | None = Query(default=None),
     session: str | None = Query(default=None, max_length=12),
     session_id: str | None = Query(default=None, max_length=512),
+    scope: str = Query(default="all", max_length=8),
     sort: str = Query(default="recent"),
     order: str | None = Query(default=None),
     limit: int = Query(default=service.DEFAULT_LIMIT, ge=1, le=service.MAX_LIMIT),
@@ -252,6 +257,11 @@ async def list_library_assets(
     ``cursor`` is the opaque ``next_cursor`` of the previous page; a cursor from
     another query is 422 and one from an older revision restarts at the top with
     ``cursor_reset: true``.
+
+    ``scope=final`` narrows the catalog to what the operator kept — highlighted
+    assets and generated artifacts — before metadata is materialised, so
+    ``total``, ``counts`` and ``tags`` describe that set. The default stays
+    ``all`` for API compatibility; the desktop UI asks for ``final``.
     """
     query = await _query_from(
         q=q,
@@ -266,6 +276,7 @@ async def list_library_assets(
         favorite=favorite,
         session=session,
         session_id=session_id,
+        scope=scope,
         sort=sort,
         order=order,
         limit=limit,

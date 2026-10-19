@@ -53,6 +53,10 @@ MAX_LIMIT: Final = 200
 MAX_QUERY_CHARS: Final = 256
 
 TAG_MODES: Final = ("all", "any")
+#: What the listing is for. ``all`` is the whole catalog; ``final`` is what the
+#: operator actually kept — a highlight or a generated artifact — and excludes
+#: scratch files that were merely mentioned or created in a conversation.
+SCOPES: Final = ("all", "final")
 SESSION_ID_SHAPE: Final = re.compile(r"^[a-f0-9]{12}$")
 
 THUMB_MAX_WIDTH: Final = 480
@@ -101,6 +105,8 @@ class Query:
     #: The same filter as a comma list, for a conversation picker that offers
     #: several at once. ``session`` stays because the frozen design names it.
     session_ids: frozenset[str] = frozenset()
+    #: ``all`` (default, the API contract) or ``final`` (the UI's default view).
+    scope: str = "all"
     sort: str = "recent"
     order: str | None = None
     limit: int = DEFAULT_LIMIT
@@ -125,6 +131,7 @@ class Query:
             "favorite": self.favorite,
             "session": self.session,
             "session_ids": sorted(self.session_ids),
+            "scope": self.scope,
             "sort": self.sort,
             "order": self.effective_order,
         }
@@ -341,7 +348,18 @@ def _counts(assets: list[library_index.Asset]) -> dict[str, dict[str, int]]:
     return counts
 
 
+def _is_final(asset: library_index.Asset) -> bool:
+    """The operator's kept set: a highlight, or an artifact the agent produced.
+
+    Mentioned and merely-created scratch files are excluded from the ``final``
+    scope; ``all`` still indexes and serves them.
+    """
+    return asset.highlighted or asset.origin_group == "generated"
+
+
 def _matches(asset: library_index.Asset, row: dict[str, Any], query: Query) -> bool:
+    if query.scope == "final" and not _is_final(asset):
+        return False
     if query.categories and asset.category not in query.categories:
         return False
     if query.kinds and asset.kind not in query.kinds:
@@ -437,6 +455,21 @@ def empty_listing(state: str = "ready") -> dict[str, Any]:
     }
 
 
+def _scoped_tags(
+    tags: list[dict[str, Any]], tag_map: dict[str, list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    """Tag vocabulary of the scoped asset set, with counts within that scope.
+
+    ``MetadataStore.list_tags`` counts every asset in the store, so a final
+    listing would otherwise advertise tags only scratch assets carry.
+    """
+    used: dict[str, int] = {}
+    for asset_tags in tag_map.values():
+        for tag in asset_tags:
+            used[tag["id"]] = used.get(tag["id"], 0) + 1
+    return [{**tag, "count": used[tag["id"]]} for tag in tags if tag["id"] in used]
+
+
 def list_assets(
     config_dir: str | Path,
     query: Query,
@@ -451,6 +484,11 @@ def list_assets(
     catalog = library_index.build_catalog(config, budget_s=budget_s, home=home)
     store = MetadataStore(config)
     all_assets = catalog.assets
+    if query.scope == "final":
+        # Narrow BEFORE any metadata work: a final listing must not materialise
+        # rows (or count/tag) for scratch files the operator never kept. The
+        # catalog still indexes everything, so scope=all and get_asset work.
+        all_assets = [asset for asset in all_assets if _is_final(asset)]
     # Materialise a row per asset once, in one transaction: metadata writes
     # (tags, chat, edit history) key on ``assets.asset_id``, and a list request
     # is the first place most assets are ever seen. BEFORE the revision is read
@@ -512,10 +550,14 @@ def list_assets(
         "state": catalog.state,
         "revision": revision,
         "total": len(filtered),
-        # Counts are catalog-wide on purpose: the filter rail must not empty
-        # itself while the user is narrowing a search.
+        # Counts are wide within the request's scope on purpose: the filter rail
+        # must not empty itself while the user is narrowing a search.
         "counts": _counts(all_assets),
-        "tags": store.list_tags(),
+        "tags": (
+            _scoped_tags(store.list_tags(), tag_map)
+            if query.scope == "final"
+            else store.list_tags()
+        ),
         "rows": [row for _asset, row in page],
         "next_cursor": _cursor(query, revision, offset + query.limit) if more else None,
         "cursor_reset": reset,
@@ -538,8 +580,15 @@ def get_asset(
         raise AssetNotFound(asset_id)
     config = Path(config_dir)
     home = home or str(Path.home())
-    catalog = library_index.build_catalog(config, home=home)
-    asset = next((item for item in catalog.assets if item.id == asset_id), None)
+    # Read-only lookup: the cached/persisted aggregate is enough, and a get must
+    # not pay a session scan (or an index rewrite) just to name one row.
+    catalog = library_index.catalog_for_read(config)
+    asset = _read_catalog_asset(catalog, asset_id)
+    if asset is None:
+        # Same miss rule as content/thumbnail: a just-indexed asset may not be
+        # in the last index write yet. One bounded refresh, then refuse.
+        catalog = library_index.build_catalog(config, home=home, refresh=True)
+        asset = _read_catalog_asset(catalog, asset_id)
     if asset is None:
         raise AssetNotFound(asset_id)
     store = MetadataStore(config)
@@ -717,11 +766,25 @@ class ContentRef:
     modified_at: float = 0.0
 
 
+def _read_catalog_asset(
+    catalog: library_index.Catalog, asset_id: str
+) -> library_index.Asset | None:
+    return next((item for item in catalog.assets if item.id == asset_id), None)
+
+
 def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
+    """Resolve an id for a content/thumbnail read.
+
+    The cached/persisted aggregate answers the normal path without a scan. A
+    MISS may mean an asset was indexed since the last index write, so refresh
+    once (bounded by the request budget) before refusing — the old behaviour,
+    without putting a scan on every hit.
+    """
     if not identity.is_asset_id(asset_id):
         raise AssetNotFound(asset_id)
-    catalog = library_index.build_catalog(config)
-    asset = next((item for item in catalog.assets if item.id == asset_id), None)
+    asset = _read_catalog_asset(library_index.catalog_for_read(config), asset_id)
+    if asset is None:
+        asset = _read_catalog_asset(library_index.build_catalog(config, refresh=True), asset_id)
     if asset is None:
         raise AssetNotFound(asset_id)
     return asset
@@ -839,6 +902,7 @@ __all__ = [
     "MAX_LIMIT",
     "ORDERS",
     "Query",
+    "SCOPES",
     "SORTS",
     "TAG_MODES",
     "THUMB_MAX_WIDTH",
