@@ -979,3 +979,133 @@ def test_is_lapsed_names_timed_out_only():
         None,
     ):
         assert store.is_lapsed(status) is False, status
+
+
+# ---------------------------------------------------------------------------
+# Relay rows (#2520) and the tolerance that makes them safe to introduce
+# ---------------------------------------------------------------------------
+
+
+def _relayed(ask_id: str = "a-r", *, at: int = 1_000_000, origin: str = "s-other") -> dict:
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_RELAYED,
+        "ask_id": ask_id,
+        "at": at,
+        "relay": {"session_id": origin, "ask_id": "a-1"},
+        "note": "also raised here",
+    }
+
+
+def test_a_relay_row_folds_without_a_queued_event():
+    """The one ask shape with no ``queued`` row: the watcher records a REFERENCE.
+
+    The fold emits the base record and nothing more — the questions, deadline and
+    status are the ORIGIN's and are filled in by the queue's derivation, which is
+    the only reader allowed to open another session's log.
+    """
+    records = store.fold([_relayed()], 1_000_000, session_id="s-watch")
+    assert len(records) == 1
+    record = records[0]
+    assert record["ask_id"] == "a-r"
+    assert record["session_id"] == "s-watch"
+    assert record["relay"] == {"session_id": "s-other", "ask_id": "a-1"}
+    assert record["relay_note"] == "also raised here"
+    assert record["questions"] == []
+    assert record["status"] == store.STATUS_OPEN
+    # No deadline of its own: the origin owns it.
+    assert record["expires_at"] == 0
+    assert record["timeout_s"] == 0
+
+
+def test_a_relay_row_carries_the_watchers_withdrawal_stamp():
+    withdrawn = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_WITHDRAWN,
+        "ask_id": "a-r",
+        "at": 1_000_500,
+        "by": {"surface": "agent"},
+    }
+    records = store.fold([_relayed(), withdrawn], 1_001_000, session_id="s-watch")
+    assert records[0]["relay_withdrawn_at"] == 1_000_500
+
+
+def test_an_old_shaped_log_folds_byte_identically_and_ignores_unknown_kinds():
+    """ADDITIVE, or the introduction would not be safe on a mixed tree.
+
+    Two assertions in one cell because they are one property: an old log (known
+    kinds only) and the same log plus an event kind this reader has never heard
+    of must produce the SAME records, byte for byte — and neither may grow a
+    relay/surfaced key that an older surface would then have to understand.
+    """
+    old_shaped = [_queued(), _answered(at=1_000_100)]
+    unknown = {
+        "v": store.EVENT_SCHEMA,
+        "kind": "a-kind-from-a-later-revision",
+        "ask_id": "a-1",
+        "at": 1_000_050,
+        "whatever": {"nested": True},
+    }
+    baseline = store.fold(old_shaped, 1_000_200, session_id="s1")
+    with_unknown = store.fold([*old_shaped, unknown], 1_000_200, session_id="s1")
+    assert with_unknown == baseline
+    assert json.dumps(with_unknown, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+    assert "relay" not in baseline[0]
+    assert "relay_note" not in baseline[0]
+    assert "surfaced_in" not in baseline[0]
+    # And the WIRE row for an ordinary ask carries none of the relay keys either.
+    row = store.pending_row(baseline[0])
+    assert set(row) == {
+        "ask_id",
+        "created_at",
+        "expires_at",
+        "timeout_s",
+        "urgent",
+        "status",
+        "delivered",
+        "questions",
+        "answers",
+        "answered_by",
+        "answered_at",
+    }
+
+
+def test_a_relay_wire_row_carries_its_provenance_and_nothing_empty():
+    record = store.fold([_relayed()], 1_000_000, session_id="s-watch")[0]
+    row = store.pending_row(record)
+    assert row["relay"] == {"session_id": "s-other", "ask_id": "a-1"}
+    assert row["relay_note"] == "also raised here"
+    # An un-noted relay omits the note rather than carrying an empty string.
+    bare = store.fold([_relayed() | {"note": ""}], 1_000_000, session_id="s-watch")[0]
+    assert "relay_note" not in store.pending_row(bare)
+
+
+def test_surfaced_rows_attach_to_the_origin_record_only():
+    surfaced = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_RELAY_SURFACED,
+        "ask_id": "a-1",
+        "at": 1_000_050,
+        "by": {"session_id": "s-watch", "ask_id": "a-r"},
+        "note": "also raised here",
+    }
+    records = store.fold([_queued(), surfaced], 1_000_100, session_id="s1")
+    assert records[0]["surfaced_in"] == [
+        {
+            "session_id": "s-watch",
+            "ask_id": "a-r",
+            "at": 1_000_050,
+            "note": "also raised here",
+        }
+    ]
+    # The surfaced row is NOT a status event: the origin's own precedence decides.
+    assert records[0]["status"] == store.STATUS_OPEN
+    assert len(records) == 1
+
+
+def test_relay_row_ids_are_their_own_namespace():
+    assert store.relay_row_id("a-1") == "ask-relay-a-1"
+    assert store.relay_row_id("a-1") not in (
+        store.response_row_id("a-1"),
+        store.timeout_row_id("a-1"),
+    )

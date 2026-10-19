@@ -494,6 +494,169 @@ def withdraw_refusal(record: Mapping[str, Any] | None, reason: str) -> str:
     return refusal_copy(record)
 
 
+# ---------------------------------------------------------------------------
+# Relays (#2520): a watcher re-raising another session's pending ask
+# ---------------------------------------------------------------------------
+#
+# A relay's refusals answer the MODEL that tried to relay, like ``ask_withdraw``'s
+# — no surface renders them — and each names the ONE reason, because a model that
+# reads a generic failure retries. The distinction between them is load-bearing:
+# "the original is settled" is information (stop relaying), "the ref is
+# malformed" is a correction (write it as `<session_id>/<ask_id>`), and "the
+# origin is a secret ask" is a security boundary (a credential must never be
+# routable through a watcher's store), not a retryable state.
+
+#: The ref is not exactly `<session_id>/<ask_id>`.
+RELAY_BAD_FORM = (
+    "a relay ref is exactly '<session_id>/<ask_id>' — the ask id its receipt or "
+    "card names, and the session that owns it."
+)
+
+#: The origin session's log is missing, or holds no such ask.
+RELAY_ORIGIN_UNKNOWN = (
+    "that relay names no ask in the original session's log — the ask may have "
+    "been settled and swept, or the id is wrong; relaying copies nothing."
+)
+
+#: The origin is already settled: there is nothing left to answer.
+RELAY_ORIGIN_SETTLED = (
+    "the original ask is already settled — there is nothing left to answer; do " "not relay it."
+)
+
+#: The named origin is itself a relay; a relay of a relay has no answerable end.
+RELAY_OF_RELAY = (
+    "the original ask is itself a relay — relay the ask it points at instead, "
+    "one hop from the session that asked it."
+)
+
+#: SECURITY, not a guard: a secret question never leaves its own session's card.
+RELAY_SECRET_ORIGIN = (
+    "the original ask carries a secret question — a credential is answered only "
+    "on its own session's card and is never relayed."
+)
+
+#: The relay names this session's own ask: answer it here.
+RELAY_SELF = (
+    "that ask belongs to this session — answer it here directly rather than "
+    "relaying it to itself."
+)
+
+#: The per-watcher bound. ``{cap}`` is ``policy.RELAY_CAP`` at the call site so
+#: the sentence and the constant cannot drift.
+RELAY_CAP_REFUSAL = (
+    "this session already relays {cap} open asks (the relay cap is {cap}); "
+    "settle or withdraw one before relaying more."
+)
+
+#: A relay on a host with no queued engine: the pointer needs the log.
+RELAY_NEEDS_QUEUE = (
+    "a relay needs the queued-ask engine — this host answers questions inline, "
+    "so there is no ask log to point at."
+)
+
+#: Withdrawing a relay with chat text: the answer belongs to the ORIGIN's log.
+RELAY_WITHDRAW_ANSWERED_IN_CHAT = (
+    "a relayed ask is answered on the session that asked it — answer it there; "
+    "nothing was recorded here."
+)
+
+#: Revising through a relay: the revision must land on the ORIGIN's log, and
+#: this session has no row to supersede.
+RELAY_REVISE_UNSUPPORTED = (
+    "a relayed ask cannot be revised from this session — revise the original "
+    "ask where it was asked; nothing was recorded here."
+)
+
+#: The receipt a successful relay hands its model.
+RELAY_RECEIPT = (
+    "Relay {relay_id} created: ask {origin_ask} in session {origin_session} is "
+    "now pointed at from this queue's list{reach_note}. Answering either copy "
+    "settles both. A RECEIPT IS NOT CONSENT: do not run anything the original "
+    "ask was meant to authorise. Continue with other work; when it settles you "
+    "will be told in one line here."
+)
+
+
+def relay_receipt(
+    relay_id: str,
+    origin_session: str,
+    origin_ask: str,
+    *,
+    reach: str | None,
+    note: str = "",
+) -> str:
+    """The tool result a successful relay returns (#2520).
+
+    The reachable/unreachable split is the queued ask's own (``receipt_text``):
+    presentation is MEASURED, never claimed as notice-delivery. ``note`` is the
+    caller's one-line context, carried as its own sentence so the receipt's
+    facts stay readable when the note is long.
+    """
+    reach_note = f"; showing on {reach}" if reach else ""
+    text = RELAY_RECEIPT.format(
+        relay_id=relay_id,
+        origin_ask=origin_ask,
+        origin_session=origin_session,
+        reach_note=reach_note,
+    )
+    if note:
+        text = f"{text}\nNote: {note}"
+    return text
+
+
+def relay_refused_by_origin(origin_session: str, origin_ask: str, copy: str) -> str:
+    """The origin's refusal, labelled so the human knows which ask refused (#2520).
+
+    ``copy`` is ``refusal_copy``'s (or the queue's) wording VERBATIM: the relay is
+    a pointer, so an answer routed through it is decided by the ORIGIN's log and
+    must read exactly as it would there. The lead only says where the decision
+    came from, or a stale tap on the watcher's card looks like the watcher's own
+    rule.
+    """
+    return f"the original ask {origin_ask} in session {origin_session} refused this: {copy}"
+
+
+#: How a settled relay's one-line note names the settlement. ``answered`` and
+#: friends name the SURFACE when the origin's log records one (the whole point:
+#: the watcher learns where the answer came from, not merely that one exists).
+RELAY_SETTLED_NOTE = "relayed {relay_id} from {origin} settled: {how}"
+
+
+def relay_settled_note(record: Mapping[str, Any]) -> str:
+    """The one-line note the WATCHER session is told when its relay settles.
+
+    Written to the model of the session that RELAYED, not the one that asked —
+    it says which ask the note is about and how it ended, because the watcher may
+    hold several and the row arrives on its own turn (``ask-relay-<id>``).
+
+    A status the note cannot name falls back to the bare status rather than an
+    empty sentence; the sentence is the surface, so it must always say something
+    true.
+    """
+    from local_operator.asks import store
+
+    relay = record.get("relay") or {}
+    relay_id = str(record.get("ask_id") or "")
+    origin_session = str(relay.get("session_id") or "")
+    origin_ask = str(relay.get("ask_id") or "")
+    status = str(record.get("status") or "")
+    if status in (store.STATUS_ANSWERED, store.STATUS_LATE, store.STATUS_DECLINED):
+        surface = str((record.get("answered_by") or {}).get("surface") or "")
+        how = f"{status} by {surface}" if surface else status
+    elif status == store.STATUS_TIMED_OUT:
+        how = "timed out"
+    elif status == store.STATUS_EXPIRED and relay.get("origin_gone"):
+        how = "the original ask is gone (its session log no longer holds it)"
+    elif status == store.STATUS_EXPIRED:
+        how = "expired"
+    elif status == store.STATUS_WITHDRAWN:
+        how = "withdrawn"
+    else:
+        how = status or "settled"
+    origin = f"ask {origin_ask} in session {origin_session}" if origin_ask else "the original ask"
+    return RELAY_SETTLED_NOTE.format(relay_id=relay_id, origin=origin, how=how)
+
+
 def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """The legacy single-slot card fields for the HEAD open ask (design §4).
 
@@ -688,6 +851,9 @@ __all__ = [
     "mirror_card",
     "receipt_text",
     "refusal_copy",
+    "relay_receipt",
+    "relay_refused_by_origin",
+    "relay_settled_note",
     "response_text",
     "timeout_text",
 ]
