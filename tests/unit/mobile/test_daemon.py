@@ -302,9 +302,14 @@ def test_http_gate_and_login_flow() -> None:
     # tree; the capability is how the phone knows to offer the destination.
     # NOT an exact key set: capabilities are additive (the Librarian will add
     # its own key), so a new key must not fail this relay's contract test.
-    for key in ("features", "i18n", "stt", "library"):
+    for key in ("features", "i18n", "stt", "library", "session_tags"):
         assert key in capabilities
     assert capabilities["library"] == 1
+    # The relay capability says these routes exist in THIS build; it is a
+    # sibling of, and not a substitute for, the core feature flag (asserted
+    # as the untouched build fact it is).
+    assert capabilities["session_tags"] == {"available": True}
+    assert capabilities["features"].get("session_tags") == 1
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]

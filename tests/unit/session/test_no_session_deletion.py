@@ -466,6 +466,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Cleanup of that same sibling mkstemp REGULAR FILE after failure; "
         "never a session or transcript.",
     ),
+    (
+        "local_operator/session/session_tags.py::_bump_revision",
+        "<path>.unlink",
+        "Removes the fixed-basename <config>/tags/revision marker after both marker "
+        "writes fail, so readers fall back to the stats fingerprint; the path is never "
+        "a session directory or transcript.",
+    ),
     # -- the archive index: the pins store's row, for the pins store's reasons --
     # One file at the config root with a FIXED basename (`archived-sessions.json`
     # plus a pid-named sibling while it is written). No session id, no caller
