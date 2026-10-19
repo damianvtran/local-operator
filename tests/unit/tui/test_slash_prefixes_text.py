@@ -111,6 +111,8 @@ PREFIXES_TEXT_POLICY = {
     # A DIRECTORY, not a prompt or a value from a list: `/move ~/x` names where
     # the session works, and the desktop refuses hand-typed arguments here.
     "move": False,
+    # The TUI-only viewer owns a filesystem path, never a prefixed model prompt.
+    "view": False,
     # A LABEL, not a value from a list: the desktop opens a form for it.
     "rename": False,
     # A toggle with an optional on/off/status word — but the word is a plain
@@ -304,6 +306,9 @@ ARGUMENT_SHAPE_POLICY = {
     # executes the path directly, spaces included.
     "rename": ArgumentShape.ANY,
     "move": ArgumentShape.ANY,
+    # Paths may contain spaces: ANY is the registry's whole-path shape, not
+    # WORD. The TUI-only /view row does not publish a desktop destination.
+    "view": ArgumentShape.ANY,
     # --- none: text after the word is PROSE -----------------------------------
     # The page or panel IS the receipt and takes no argument at all; these open a
     # surface rather than consuming text, so a sentence after them is a message.

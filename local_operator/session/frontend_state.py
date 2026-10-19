@@ -976,6 +976,9 @@ _FRONTEND_LOCAL_SLASHES = {
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
+    # Preview reads the invoking machine's filesystem and paints this TUI.
+    # It must not bind or route to an authoritative runtime on another host.
+    "view",
     # The same three facts as `/copy` above, one step further out: the transcript
     # it reads is painted by this frontend, the picker is painted by this
     # frontend, and the BROWSER is on the machine the user is sitting at. Routed

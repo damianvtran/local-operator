@@ -48,6 +48,10 @@ SCHEDULE_COMMAND = "schedule"
 #: below; the exact command count still pins both rows.
 LIBRARY_COMMAND = "library"
 LIBRARIAN_COMMAND = "librarian"
+#: TUI-local file preview copy lives in the fully translated tui.viewer
+#: namespace, like /memory's separate wire.memory namespace. Do not change
+#: audited wire.slash catalogues or ledger hashes to admit this new row.
+VIEW_COMMAND = "view"
 
 PREVIOUS_ENGLISH: dict[str, str] = {
     "help": "List all commands",
@@ -120,12 +124,11 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # The migrated SITES: the registry field the picker, /help, the desktop
     # catalogue and the phone sheet all read. A missing/extra command raises a
     # KeyError here rather than passing silently.
-    # `/memory`, `/import`, `/review`, `/schedule`, `/library` and `/librarian`
-    # are deliberately absent from `wire.slash`: their copy lives in English-only
-    # namespaces so the audited wire.slash hash stays valid, and a missing or
-    # extra command raises a KeyError here either way rather than passing
-    # silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 6 == 58
+    # `/memory`, `/import`, `/review`, `/schedule`, `/library`, `/librarian`
+    # and `/view` are deliberately absent from wire.slash: their copy lives
+    # in separate namespaces (tui.viewer is fully translated), preserving the
+    # audited wire.slash hash. The census still catches an unaccounted row.
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 7 == 59
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,
@@ -134,6 +137,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
             SCHEDULE_COMMAND,
             LIBRARY_COMMAND,
             LIBRARIAN_COMMAND,
+            VIEW_COMMAND,
         ):
             continue
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
@@ -143,6 +147,9 @@ def test_the_catalogue_carries_exactly_the_command_descriptions() -> None:
     # Both directions: no key for a command is missing, and the slice added no
     # key that is not a registry description.
     messages = catalogues.load_catalogue("en", "wire.slash")
+    # This comprehension walks the pinned wire-only table, so /view is already
+    # excluded here; its description belongs to the audited tui.viewer group.
+    assert VIEW_COMMAND not in PREVIOUS_ENGLISH
     expected = {f"wire.slash.{name}": text for name, text in PREVIOUS_ENGLISH.items()}
     assert messages == expected
 
@@ -159,6 +166,7 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
             SCHEDULE_COMMAND,
             LIBRARY_COMMAND,
             LIBRARIAN_COMMAND,
+            VIEW_COMMAND,
         ):
             continue
         function = getattr(wire_slash, command.name)

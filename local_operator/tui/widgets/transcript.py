@@ -934,7 +934,11 @@ class TranscriptBlock(Static):
         the pointer was over.
         """
         url = self.link_at(event.x, event.y)
-        if url is None:
+        # Textual dispatches inherited handlers on the SAME widget even after
+        # a subclass stops bubbling. File callouts have their own affordance
+        # boundary; forwarding them again here invents an HTTP-only warning
+        # after an otherwise successful viewer/Finder action.
+        if url is None or url.casefold().startswith("file:"):
             return
         opener = getattr(self.app, "open_transcript_link", None)
         if opener is None:

@@ -48,7 +48,7 @@ from local_operator.supplements.contract import reader_disposition
 from local_operator.terminals import is_hyperlinked
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.link_targets import file_affordance
+from local_operator.tui.link_targets import file_affordance, file_uri_to_path
 from local_operator.tui.widgets.transcript import (
     SPINE_INDENT,
     TranscriptBlock,
@@ -100,6 +100,7 @@ class SupplementBlock(TranscriptBlock):
         #: the affordance on the same input the paint-time check admitted
         #: (``file_affordance`` refuses a bare absolute path by contract).
         self._painted_links: dict[str, str] = {}
+        self._painted_identities: dict[str, tuple[int, int, int, int]] = {}
         #: The painted line index of the "N more" row (None when absent), for
         #: the click hit test. Line-indexed because every row is truncated to
         #: one line, so widget y maps to a line exactly.
@@ -189,6 +190,7 @@ class SupplementBlock(TranscriptBlock):
         lines: list[Text] = []
         self._more_line = None
         self._painted_links = {}
+        self._painted_identities = {}
         if disposition == "nothing":
             # Nothing renders: a superseded or dismissed row hides the whole
             # block, and the app removes it from the transcript.
@@ -281,7 +283,7 @@ class SupplementBlock(TranscriptBlock):
             text = name or path
             row.append(text, style=link_style)
             if uri:
-                self._painted_links[uri] = raw_path
+                self._remember_file(uri, raw_path)
             if path and path != text:
                 row.append("  ")
                 row.append(path, style=self._path_style(link_style))
@@ -314,12 +316,24 @@ class SupplementBlock(TranscriptBlock):
             row = self._line("", style=None)
             row.append(label, style=link_style)
             if uri:
-                self._painted_links[uri] = raw
+                self._remember_file(uri, raw)
             if shown and shown != label:
                 row.append("  ")
                 row.append(shown, style=self._path_style(link_style))
             rows.append(self._fit(row, body))
         return rows
+
+    def _remember_file(self, uri: str, raw: str) -> None:
+        from pathlib import Path
+
+        from local_operator.tui.file_viewer import file_identity
+
+        try:
+            identity = file_identity(Path(file_uri_to_path(uri)))
+        except OSError:
+            return
+        self._painted_links[uri] = raw
+        self._painted_identities[uri] = identity
 
     def _line(self, text: str, *, style: Style | None) -> Text:
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -459,7 +473,11 @@ class SupplementBlock(TranscriptBlock):
             if url.startswith("file:"):
                 opener = getattr(self.app, "open_transcript_file", None)
                 if opener is not None:
-                    opener(url, source_path=self._painted_links.get(url, ""))
+                    opener(
+                        url,
+                        source_path=self._painted_links.get(url, ""),
+                        expected=self._painted_identities.get(url),
+                    )
                     event.stop()
                 return
             super().on_click(event)
