@@ -2458,6 +2458,60 @@ class MemoryStore:
             "total_tokens": sum(row["tokens"] for row in rows),
         }
 
+    def tagged(self, tag: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Current facts carrying ``tag``, NEWEST CREATED first, bounded by ``limit``.
+
+        A read pure and simple: no write, no index, no second store. It exists
+        because recall ranks by relevance, which is the wrong order for a caller
+        that wants the most recent decisions, and because ``scan`` has no date
+        order at all.
+
+        **This is a RECENCY window, not supersession.** The store records an
+        explicit ``replaces`` edge and accepts a manual ``status`` of
+        ``superseded``, but nothing derives which fact supersedes which — there
+        is no supersession tracking over content — so "current" cannot be
+        computed here. A decision a later one contradicts may still appear; the
+        caller must label the result as "most recently written", never "in
+        force".
+
+        ``expires_at`` in the past and a stored ``expired`` status are excluded,
+        matching :meth:`search`'s freshness rule: carrying a fact the store
+        itself considers dead would be worse than carrying none.
+        """
+        if not isinstance(tag, str) or not tag or len(tag) > 64:
+            raise MemoryError("A memory tag is a short non-empty string.")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise MemoryError("Tagged reads accept 1-100 results.")
+        if not self.path.exists():
+            return []
+        where, values = self._where(None)
+        with self.connection() as db:
+            rows = db.execute(
+                f"SELECT entity_id,scope,fact FROM current WHERE {where} AND EXISTS ("
+                "SELECT 1 FROM json_each(json_extract(current.fact,'$.tags')) AS tag_row "
+                "WHERE tag_row.value=?) "
+                "AND (json_extract(current.fact,'$.expires_at') IS NULL "
+                "OR json_extract(current.fact,'$.expires_at')>?) "
+                "AND json_extract(current.fact,'$.status')<>'expired' "
+                "ORDER BY json_extract(current.fact,'$.created_at') DESC, entity_id DESC "
+                "LIMIT ?",
+                [*values, tag, time.time(), limit],
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            fact = json.loads(row[2])
+            out.append(
+                {
+                    "id": row[0],
+                    "scope": row[1],
+                    "body": fact.get("body", ""),
+                    "tags": list(fact.get("tags") or ()),
+                    "created_at": fact.get("created_at"),
+                    "status": fact.get("status"),
+                }
+            )
+        return out
+
     def search(
         self,
         query: str,

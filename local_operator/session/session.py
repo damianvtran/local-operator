@@ -66,7 +66,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from local_operator.compaction.carry import (
+    is_carried_tier,
+    read_recent_decisions,
+    read_unresolved_asks,
+    render_carried_tier,
+)
 from local_operator.compaction.cutpoint import (
+    CARRIED_TIER_ID_PREFIX,
     ELISION_GENUINE_COUNT_KEY,
     ELISION_INJECTION_COUNT_KEY,
     PRESERVED_TURN_ELISION_ID,
@@ -1776,10 +1783,11 @@ def _payload_count(payload: dict[str, Any], key: str) -> int:
 def _is_persistable_message(message: AgentMessage) -> bool:
     """Whether ``message`` may be written to the transcript as a message entry.
 
-    The compaction elision notice is the one plain ``Message`` that may not.
-    It is synthesized into the live context from counts on the marker payload,
-    and replay synthesizes the same text from the same counts — so journalling
-    it writes a row that lands AFTER ``first_kept_entry_id``, inside the
+    The compaction elision notice and the carried tier are the plain
+    ``Message``s that may not be journalled. Each is synthesized into the live
+    context from the marker payload, and replay synthesizes the same rows from
+    the same payload — so journalling either one writes a row that lands AFTER
+    ``first_kept_entry_id``, inside the
     replayed suffix, and the resumed context then holds it twice. That is
     exactly what shipped in an earlier revision of this fix: live 2 rows vs
     resumed 3, and because the persisted copy carried ``compaction_preserved``
@@ -1813,6 +1821,14 @@ def _is_persistable_message(message: AgentMessage) -> bool:
         ):
             return False
         return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
+    # The carried tier is synthesized on BOTH paths from the marker payload.
+    # Journalling it would put a copy inside the replayed suffix, and the next
+    # resume would re-inject the payload copy too — the exact duplication that
+    # doubled the elision notice (6 -> 7,167). Excluded by id here and dropped
+    # from the kept window at the commit; one guard failing silently is what
+    # produced that defect.
+    if message.id.startswith(CARRIED_TIER_ID_PREFIX):
+        return False
     return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
 
@@ -21153,6 +21169,7 @@ class Session:
             return cut
 
         preserved_key = getattr(compaction_api, "PRESERVED_USER_TURN_KEY", None)
+        carried_key = getattr(compaction_api, "CARRIED_TIER_KEY", None)
         fixed = self._wire_bytes_of(
             compaction_api,
             [
@@ -21163,6 +21180,16 @@ class Session:
                     preserved_key is not None
                     and isinstance(message.provider_payload, dict)
                     and message.provider_payload.get(preserved_key)
+                )
+                # The carried tier is re-synthesized in FRONT of the kept
+                # window, like the marker and preserved turns. It is small
+                # (count-bounded), but counting it here keeps the band's
+                # arithmetic honest rather than leaving a constant-sized
+                # undercount for the 20% margin to absorb.
+                or (
+                    carried_key is not None
+                    and isinstance(message.provider_payload, dict)
+                    and message.provider_payload.get(carried_key)
                 )
             ],
         )
@@ -21912,7 +21939,11 @@ class Session:
         task = asyncio.create_task(
             asyncio.to_thread(
                 extract_messages,
-                plan.llm_history[: plan.cut],
+                # The carried tier is a LIVE-STATE projection, not history.
+                # Summarizing or mining a previous projection can assert an ask
+                # still open after it was answered, and the fresh projection
+                # cannot retract a sentence inside the summary.
+                [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)],
                 locators=enabled["locators"],
             )
         )
@@ -21933,8 +21964,52 @@ class Session:
         """
         self._begin_memory_capture(plan)
         return await self._produce_summary(
-            plan.compaction_api, plan.llm_history[: plan.cut], plan.strategy
+            plan.compaction_api,
+            [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)],
+            plan.strategy,
         )
+
+    def _carried_tier_live_state(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read the carried tier from LIVE state, fresh, for THIS pass.
+
+        **Never accumulated.** Both sources are re-read every pass and nothing
+        is taken from the previous marker, which is what makes an answered ask
+        disappear and stops an expired one from resurrecting. A carried list
+        that grew across passes would be worse than the loss it fixes.
+
+        Asks are bounded by COUNT (``carry.CARRIED_ASKS_LIMIT``) rather than
+        tokens: the verbatim user-turn block is token-capped with oldest-first
+        eviction, so a still-blocked question must not compete there for a slot.
+
+        Memory is read only when the operator has it enabled; a read failure
+        carries nothing and never fails the pass. Every failure is contained
+        here for that reason — this is an enhancement to a pass, not a
+        precondition of one.
+        """
+        asks: list[dict[str, Any]] = []
+        decisions: list[dict[str, Any]] = []
+        if self._session_id:
+            try:
+                from local_operator.asks import store as ask_store
+
+                directory = ask_store.session_dir(self._config_dir, self._session_id)
+                asks = read_unresolved_asks(directory)
+            except Exception:  # noqa: BLE001 - carry nothing, never fail the pass
+                logger.warning("carried asks: read failed; carrying none", exc_info=True)
+        if self._config_dir:
+            try:
+                from local_operator.memory_capture import policy
+                from local_operator.tools.memory_tools import store_for
+
+                if policy(self._config_dir)["enabled"]:
+                    decisions = read_recent_decisions(store_for(self._build_tool_context()))
+            except Exception:  # noqa: BLE001 - carry nothing, never fail the pass
+                logger.warning(
+                    "carried decisions: read failed; carrying none", exc_info=True
+                )
+        return asks, decisions
 
     async def _finish_compaction(
         self,
@@ -21956,7 +22031,9 @@ class Session:
         compaction_api = plan.compaction_api
         try:
             self._begin_memory_capture(plan)
-            to_summarize = plan.llm_history[: plan.cut]
+            to_summarize = [
+                m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)
+            ]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
             # ``llm_history`` went through the capability strip (the summary
             # request must not carry images a text-only model cannot take),
@@ -22102,6 +22179,21 @@ class Session:
                                 for capture in elided_captures
                             ),
                         )
+            # THE CARRIED TIER, LIVE half. Read fresh here, at the commit, not at
+            # plan time: a detached summary can be minutes old, and an ask
+            # answered in between must not ride the marker. The lists are passed
+            # to the transcript below and rendered from them — the SAME renderer
+            # replay uses — so live and resumed contexts agree message for
+            # message.
+            carried_asks, carried_decisions = self._carried_tier_live_state()
+            # A carried row is compaction's own output, re-synthesized every
+            # pass; it is never legitimate kept history. Drop any previous copy
+            # BEFORE the fresh one is seated, or a cut that lands after the old
+            # block would leave two copies, then three — one per pass. The cut
+            # walker already refuses it as a boundary (``is_carried_tier``), so
+            # this is the second of the two guards, not the only one.
+            kept = [message for message in kept if not is_carried_tier(message)]
+            carried_message = render_carried_tier(carried_asks, carried_decisions)
             first_kept_entry_id = kept[0].id
             memory_marker = await self._transcript.append_compaction(
                 summary,
@@ -22117,6 +22209,8 @@ class Session:
                 # numbers rather than re-deriving them from content.
                 preserved_turns_dropped=preserved_turns_dropped,
                 preserved_turns_shed=preserved_turns_shed,
+                carried_asks=carried_asks,
+                carried_decisions=carried_decisions,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
@@ -22203,6 +22297,11 @@ class Session:
                 message = _replayed_user_message([TextContent(text=turn["text"])], turn["id"])
                 message.provider_payload = {compaction_api.PRESERVED_USER_TURN_KEY: True}
                 preserved_messages.append(message)
+            # The carried tier sits AFTER the verbatim turns and BEFORE the kept
+            # window — the same position ``replay_entries`` seats it. Built from
+            # the fresh lists above, never from the previous payload.
+            if carried_message is not None:
+                preserved_messages.append(carried_message)
             # The context becomes the RENDERED history, so a live todo reminder
             # does not survive this — by design, and the reason the plan renders
             # without them (see :meth:`_render_for_compaction`): a reminder
