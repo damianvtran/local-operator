@@ -6200,6 +6200,8 @@ class OperatorApp(App[None]):
         # yield close it the same way, and ``_sync_boot_layout_class`` counts
         # it against the boot layout.
         self._projects_view: Any | None = None
+        self._team_form: Any | None = None
+        self._team_form_focus_restore: Any | None = None
         self._agent_form: Any | None = None
         self._agent_form_focus_restore: Any | None = None
         #: The KEY of a ``/settings`` page write this pane could not loosen — the
@@ -9688,6 +9690,7 @@ class OperatorApp(App[None]):
             self._close_org_chart_view()
             self._close_settings_view()
             self._close_agent_form()
+            self._close_team_form()
             self._close_projects_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
@@ -11336,6 +11339,7 @@ class OperatorApp(App[None]):
             self._close_org_chart_view()
             self._close_settings_view()
             self._close_agent_form()
+            self._close_team_form()
             self._close_projects_view()
         self._set_sidebar_open(not self._session_sidebar.display)
 
@@ -16475,6 +16479,7 @@ class OperatorApp(App[None]):
         # The projects page hides that same region, so it cannot outlive the
         # conversation either.
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         # The aside goes too, and this is the general form of the interrupt
         # case. It is a question ABOUT a conversation that is being replaced,
@@ -20152,55 +20157,41 @@ class OperatorApp(App[None]):
         return rows
 
     def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
-        """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
+        """Names first, followed by chart/new/edit; never default Tab to a verb.
 
-        Two-level, decided by the BUFFER like ``/mcp``'s builder. In the first
-        argument slot the TEAM NAMES come first and the reserved `chart`
-        subcommand row is appended AFTER them. Order matters because it decides
-        the default completion: ``argument_suggestions`` returns rows in list
-        order for an empty query, so a bare ``/team `` + Tab completes the sole
-        (or first) TEAM, never the subcommand. That preserves #250's invariant
-        (Tab fills the sole team and parks the switch/send hint) AND improves
-        collision-safety: the common action on ``/team `` is TALKING to a team,
-        so Tab must never silently open a chart when the user meant to message.
-        The `chart` row is still fully discoverable — it is visible in the list
-        and the normal matcher ranks it to the top the moment the user types
-        ``c``/``ch``/``chart`` (a typed query is scored, not list-ordered).
-
-        Once ``chart `` is in the buffer the second slot re-offers TEAM NAMES as
-        ``chart <name>`` compound rows that FEED the chart — completing one
-        lands the ready-to-run ``/team chart <name>``. The compound-name shape
-        is the same crank ``/mcp login <server>`` uses: the matcher compares
-        against the WHOLE argument, so the rows must carry the leading verb or
-        they would not match once it is typed.
+        Chart and edit have a second name slot with verb-prefixed completions;
+        new has no arguments. Literal reserved names complete with one leading
+        '=' so choosing a team can never accidentally invoke a form or chart.
         """
 
+        from local_operator.i18n.keys import tui_team_authoring as keys
+        from local_operator.i18n.text import tr
         from local_operator.tui.widgets.command_picker import slash_argument
+
+        translate = tr("tui.team_authoring")
 
         argument = slash_argument(editor.text, editor._argument_commands)
         first, space, _rest = (argument or "").partition(" ")
         teams = self._team_choices()
-        # A synthetic `chart` row must not make a real-but-empty registry look
-        # filled: the editor's empty-only catch-up is keyed to `_choices`, so an
-        # empty TeamRegistry keeps retrying cheaply. A reduced adopted session
-        # with no registry still gets the historical chart-only fallback (its
-        # handler explains that no team is attached), while pre-adoption has no
-        # source of truth yet and must remain empty for the adoption refill.
-        if not teams and (self._session is None or self._team_registry() is not None):
+        # Before adoption an empty list must remain refillable. Once adopted,
+        # an empty registry still needs the create verb: this is the operator's
+        # first-team path, not a populated-registry-only management surface.
+        if not teams and self._session is None:
             return []
-        if first.lower() == "chart" and space:
-            # Second slot: `chart <query>` → team names feeding the chart.
+        if first.lower() == "new" and space:
+            return []
+        if first.lower() in {"chart", "edit"} and space:
+            # Second slot: names feed either the chart or installed-team editor.
             return [
                 ArgumentChoice(
-                    f"chart {team.name}",
+                    f"{first.lower()} {team.name}",
                     team.description,
                     detail=team.detail,
                 )
                 for team in teams
             ]
         # First slot: TEAM NAMES first (so bare Tab completes a team, not the
-        # subcommand — #250's invariant + collision-safety), then the `chart`
-        # subcommand row last.
+        # subcommand — #250's invariant + collision-safety), then reserved verbs.
         rows: list[ArgumentChoice] = []
         # U3 — a team whose name collides with the reserved `chart` word cannot
         # be talked to via its plain name from the picker: completing `chart`
@@ -20210,12 +20201,12 @@ class OperatorApp(App[None]):
         # way out at the one surface that creates the collision. Other teams are
         # offered by their plain name unchanged.
         for team in teams:
-            if team.name.casefold() == "chart":
+            if self._team_talk_name(team.name) != team.name:
                 rows.append(
                     ArgumentChoice(
-                        f"={team.name}",
+                        self._team_talk_name(team.name),
                         team.description,
-                        detail=f"talk to team · {team.detail}",
+                        detail=translate(keys.talk_hint(detail=team.detail)),
                     )
                 )
             else:
@@ -20228,6 +20219,16 @@ class OperatorApp(App[None]):
                 "Show a team's org chart",
                 detail="subcommand",
             )
+        )
+        rows.extend(
+            [
+                ArgumentChoice(
+                    "new", translate(keys.new_hint()), detail=translate(keys.subcommand())
+                ),
+                ArgumentChoice(
+                    "edit", translate(keys.edit_hint()), detail=translate(keys.subcommand())
+                ),
+            ]
         )
         return rows
 
@@ -20297,12 +20298,16 @@ class OperatorApp(App[None]):
         the one that exits it. Read off the session, so the hint cannot outlive
         the attachment it describes.
         """
+        from local_operator.i18n.keys import tui_team_authoring as keys
+        from local_operator.i18n.text import tr
+
+        authoring = " · " + tr("tui.team_authoring")(keys.footer())
         session = self._session
         if callable(getattr(session, "attach_team", None)):
             if str(getattr(session, "active_team_name", "") or ""):
-                return "Send: /team <name> <message> · Detach: /team clear"
-            return "Send: /team <name> <message>"
-        return "Chart: /team chart <name>"
+                return "Send: /team <name> <message> · Detach: /team clear" + authoring
+            return "Send: /team <name> <message>" + authoring
+        return tr("tui.team_authoring")(keys.footer())
 
     def _submit_command_prompt(
         self, request: str, attachments: Mapping[int, Marked] | None
@@ -20737,6 +20742,21 @@ class OperatorApp(App[None]):
         pasted before the user typed ``/team ops <request about it>`` reaches
         the manager as pixels rather than a dead ``[Image #N]`` marker.
         """
+        verb, _, rest = arg.partition(" ")
+        if verb.casefold() in {"new", "edit"}:
+            from local_operator.i18n.keys import tui_team_authoring as keys
+            from local_operator.i18n.text import tr
+
+            translate = tr("tui.team_authoring")
+            if verb.casefold() == "new" and rest.strip():
+                self._system_notice(translate(keys.usage_new()), "warning")
+            elif verb.casefold() == "edit" and len(rest.split()) != 1:
+                self._system_notice(translate(keys.usage_edit()), "warning")
+            else:
+                self._open_team_form(
+                    None if verb.casefold() == "new" else rest.strip().removeprefix("=")
+                )
+            return
         session = self._session
         if session is None:
             # U8-2: a DEFINITIVE boot failure must not be reported as "starting".
@@ -20776,7 +20796,7 @@ class OperatorApp(App[None]):
                 self._system_notice(f"could not list teams: {exc}", "warning")
                 return
             if not teams:
-                notice("no teams yet. Ask the agent to create one.")
+                notice("no teams yet. " + self._team_listing_footer())
                 return
             self._append_block(self._team_list_block(teams))
             return
@@ -20891,7 +20911,7 @@ class OperatorApp(App[None]):
                 # the addressing instruction keeps the raw NAME -- it is what
                 # the user types.
                 f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
-                f"Send a request with /team {team.name} <message>." + dropped
+                f"Send a request with /team {self._team_talk_name(team.name)} <message>." + dropped
             )
             return
         # `_submit_prompt` writes the user row (the request is what the
@@ -24213,7 +24233,7 @@ class OperatorApp(App[None]):
         head = arg.partition(" ")[0].strip().casefold()
         if (
             (name == "model" and head == "default")
-            or (name == "team" and head == "chart")
+            or (name == "team" and head in {"chart", "new", "edit"})
             or (name == "agent" and head in {"new", "edit"})
         ):
             return False
@@ -25266,6 +25286,7 @@ class OperatorApp(App[None]):
                 # mode rebuilds the hole (agent review round 1, finding 11).
                 or self._projects_view is not None
                 or self._agent_form is not None
+                or self._team_form is not None
                 or self._key_prompt is not None
             ):
                 return True
@@ -25636,6 +25657,13 @@ class OperatorApp(App[None]):
         already exists for "the user is done with this card": it discards the
         aside and hands back the main-chat draft it borrowed.
         """
+        if self._team_form is not None:
+            self._last_interrupt_at = 0.0
+            if self._exit_hint is not None:
+                self._transcript_view().remove_block(self._exit_hint)
+                self._exit_hint = None
+            self._team_form.action_cancel_request(keep_confirm=True)
+            return
         if self._agent_form is not None:
             # A form draft belongs to its editor, not the conversation's exit
             # ladder. Repeated Ctrl+C must not turn a discard question into an
@@ -25699,6 +25727,7 @@ class OperatorApp(App[None]):
             self._close_org_chart_view()
             self._close_settings_view()
             self._close_agent_form()
+            self._close_team_form()
             self._close_projects_view()
             self._close_aside()
             # Same two lines the draft and barren-click rungs run for the same
@@ -25869,6 +25898,7 @@ class OperatorApp(App[None]):
         # press quit the app: a silent dead end (QA round 1, Q1 / review
         # finding 1).
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
@@ -26083,6 +26113,9 @@ class OperatorApp(App[None]):
         # caret while composing, so the key arrives HERE rather than at the
         # page's own binding, and closing the page instead would throw away a
         # draft the band promises to keep (`esc cancel`).
+        if self._team_form is not None:
+            self._team_form.action_cancel_request()
+            return
         if self._agent_form is not None:
             self._agent_form.action_cancel_request()
             return
@@ -26635,6 +26668,7 @@ class OperatorApp(App[None]):
         self._close_settings_view()
         # The projects page too — the same region, the same reason.
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         # The aside yields for the identical reason, one layer up: the card
         # floats OVER the transcript, so the question would be drawn behind it
@@ -26814,6 +26848,7 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
@@ -29536,6 +29571,7 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         # Same rule for the aside card, and the same sentence: Ctrl+L acts on
         # the CONVERSATION, and the aside is a floating question about it that
@@ -30179,6 +30215,7 @@ class OperatorApp(App[None]):
             and self._org_chart_view is None
             and self._projects_view is None
             and self._agent_form is None
+            and self._team_form is None
             and self._import_view is None
             and self._review_view is None
             and self._schedule_view is None
@@ -36184,6 +36221,7 @@ class OperatorApp(App[None]):
         subagents without going back up a level to do it.
         """
         self._close_agent_form()
+        self._close_team_form()
         comms = getattr(self._session, "_subagent_comms", None)
         node_lookup = getattr(comms, "node", None)
         node = node_lookup(job_id) if callable(node_lookup) else None
@@ -36382,6 +36420,7 @@ class OperatorApp(App[None]):
         # renderer. Import before registry/focus/layout work so a first-use
         # import failure remains observable without leaving a half-entered mode.
         self._close_agent_form()
+        self._close_team_form()
         from local_operator.tui.widgets.org_chart_view import OrgChartView
 
         registry = self._team_registry()
@@ -36510,6 +36549,7 @@ class OperatorApp(App[None]):
         frame is the loading state rather than a blocked app.
         """
         self._close_agent_form()
+        self._close_team_form()
         if self._import_view is not None:
             return
         if self._settings_view is not None:
@@ -36584,6 +36624,7 @@ class OperatorApp(App[None]):
         loading state rather than a blocked app.
         """
         self._close_agent_form()
+        self._close_team_form()
         if self._review_view is not None:
             return
         if self._settings_view is not None:
@@ -36662,6 +36703,7 @@ class OperatorApp(App[None]):
         populated (or empty) list rather than a loading state.
         """
         self._close_agent_form()
+        self._close_team_form()
         if self._schedule_view is not None:
             return
         if self._settings_view is not None:
@@ -36760,8 +36802,11 @@ class OperatorApp(App[None]):
             return
         from local_operator.paths import config_dir
 
-        # One mode at a time: the settings page's close is the single teardown
-        # seam its siblings share, and it now closes this page too.
+        # Authoring pages have their own draft/composer ownership; the shared
+        # settings teardown only owns read-only sibling pages. Reclaim both
+        # forms before the library borrows the same full-page region.
+        self._close_agent_form()
+        self._close_team_form()
         self._close_settings_view()
         self._library_focus_restore = self.focused
         view = LibraryView(config_dir())
@@ -36970,6 +37015,7 @@ class OperatorApp(App[None]):
         I/O — the same split the org chart makes with its resolved tree.
         """
         self._close_agent_form()
+        self._close_team_form()
         if self._settings_view is not None:
             return
         from local_operator.config import ConfigManager
@@ -37223,6 +37269,175 @@ class OperatorApp(App[None]):
         self._close_settings_view()
 
     # -- the projects page (``/project show``) ------------------------------
+    @staticmethod
+    def _team_talk_name(name: str) -> str:
+        """One leading escape protects both reserved verbs and literal '=' names."""
+        return (
+            "=" + name
+            if name.casefold() in {"chart", "new", "edit"} or name.startswith("=")
+            else name
+        )
+
+    def _open_team_form(self, name: str | None = None) -> None:
+        from local_operator.hub_sync.definition import definition_revision
+        from local_operator.i18n.keys import tui_team_authoring as keys
+        from local_operator.i18n.text import tr
+        from local_operator.tui.team_authoring import TeamDraft, member_text
+        from local_operator.tui.widgets.team_form import TeamFormPage
+
+        translate = tr("tui.team_authoring")
+        if self._projects_read_only():
+            self._system_notice(translate(keys.notice_read_only()), "warning")
+            return
+        registry = self._team_registry()
+        if registry is None:
+            self._system_notice(translate(keys.registry_missing()), "warning")
+            return
+        if self._team_form is not None:
+            self._team_form.focus()
+            return
+        initial = None
+        revision = None
+        team_id = None
+        members = ()
+        if name is not None:
+            try:
+                team = registry.get_team_by_name(name)
+            except (ValueError, OSError) as exc:
+                self._system_notice(translate(keys.save_error(reason=str(exc))), "warning")
+                return
+            if team is None:
+                self._system_notice(translate(keys.missing(name=name)), "warning")
+                return
+            team_id = team.id
+            revision = definition_revision("team", team.id, team.model_dump(mode="json"))
+            members = tuple(team.members)
+            initial = TeamDraft(
+                **{
+                    key: (
+                        member_text(team.members)
+                        if key == "members"
+                        else ", ".join(team.aliases) if key == "aliases" else getattr(team, key)
+                    )
+                    for key in TeamDraft.__dataclass_fields__
+                }
+            )
+        self._close_agent_form()
+        self._close_subagent_view()
+        self._close_org_chart_view()
+        self._close_import_view()
+        self._close_review_view()
+        self._close_schedule_view()
+        self._close_projects_view()
+        self._close_settings_view()
+        self._team_form_focus_restore = self.focused
+        page = TeamFormPage(
+            initial,
+            original_members=members,
+            on_submit=lambda plan, draft: self._save_team_form(plan, draft, team_id, revision),
+            on_cancel=self._close_team_form,
+            read_only=self._projects_read_only,
+        )
+        self._team_form = page
+        self._transcript_view().display = False
+        self.screen.mount(page, before=self.query_one("#input-dock"))
+        self.screen.add_class(PROJECTS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_team_form(self) -> bool:
+        page = self._team_form
+        if page is None:
+            return False
+        self._team_form = None
+        page.remove()
+        self.screen.remove_class(PROJECTS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._team_form_focus_restore
+        self._team_form_focus_restore = None
+        if restore is not None and restore.is_attached:
+            restore.focus()
+        else:
+            self._editor().focus()
+        return True
+
+    def _save_team_form(
+        self, plan: Any, draft: Any, team_id: str | None, revision: str | None
+    ) -> None:
+        from local_operator.hub_sync.definition import (
+            DefinitionRevisionMismatch,
+            require_fresh_revision,
+        )
+        from local_operator.i18n.keys import tui_team_authoring as keys
+        from local_operator.i18n.text import tr
+        from local_operator.teams import TeamEditFields
+        from local_operator.types import (
+            TeamRegistryLockTimeout,
+            TeamRegistryRecoveryError,
+        )
+
+        page = self._team_form
+        if page is None or page.refuse_read_only():
+            return
+        translate = tr("tui.team_authoring")
+        registry = self._team_registry()
+        if registry is None:
+            page.receipt(translate(keys.registry_missing()))
+            return
+        try:
+            fields = TeamEditFields(**plan.changes)
+            if team_id is None:
+                registry.create_team(fields)
+            else:
+                registry.update_team(
+                    team_id,
+                    fields,
+                    precondition=lambda current: require_fresh_revision(
+                        "team", current.id, current.model_dump(mode="json"), revision
+                    ),
+                )
+        except DefinitionRevisionMismatch:
+            page.receipt(translate(keys.revision_changed()))
+            return
+        except KeyError:
+            # IDs, not names, identify an edited definition. A peer can delete
+            # it and even reuse its name while this draft stays on screen;
+            # never redirect that stale draft into the replacement row.
+            page.receipt(translate(keys.missing(name=draft.name)))
+            return
+        except (TeamRegistryRecoveryError, TeamRegistryLockTimeout) as exc:
+            # Recovery/lock refusals are durable-store state, not field errors.
+            # Keep the draft available for retry without crashing the key pump.
+            page.receipt(translate(keys.save_error(reason=str(exc))))
+            return
+        except (ValueError, OSError) as exc:
+            # Registry uniqueness is authoritative. Keep its reason visible and
+            # return focus to the implicated field, never discard the draft.
+            reason = str(exc)
+            field = next(
+                (
+                    key
+                    for key in ("instructions", "project", "members", "manager", "label")
+                    if key in reason.casefold()
+                ),
+                (
+                    "aliases"
+                    if "alias" in reason.casefold()
+                    else "name" if team_id is None else "label"
+                ),
+            )
+            page.blocks[field].set_error(translate(keys.save_error(reason=reason)))
+            page.controls[field].focus()
+            page.blocks[field].scroll_visible()
+            page.receipt(translate(keys.save_error(reason=reason)))
+            return
+        self._close_team_form()
+        self._system_notice(translate(keys.saved(name=draft.name)))
+
     def _open_agent_form(self, name: str | None = None) -> None:
         """Profiles use the same full-page mount/restore contract as projects.
 
@@ -37276,6 +37491,7 @@ class OperatorApp(App[None]):
             # second command while the full-page editor owns the keyboard.
             self._agent_form.focus()
             return
+        self._close_team_form()
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_import_view()
@@ -37344,6 +37560,7 @@ class OperatorApp(App[None]):
             page.receipt(translate(keys.save_error(reason=str(exc))))
             return
         self._close_agent_form()
+        self._close_team_form()
         self._system_notice(translate(keys.saved(name=draft.name)))
 
     def _open_projects_view(
@@ -37369,6 +37586,7 @@ class OperatorApp(App[None]):
         repaint costs no registry or filesystem I/O.
         """
         self._close_agent_form()
+        self._close_team_form()
         if self._projects_view is not None:
             if view is not None or associated is not None:
                 import time as _time
@@ -38018,6 +38236,7 @@ class OperatorApp(App[None]):
         # (`on_projects_view_jump_requested`): a mode that hides the transcript
         # must be gone before the conversation it hid comes back.
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         self._resume_session(session_id, self._notice)
 
@@ -40611,6 +40830,11 @@ class OperatorApp(App[None]):
         # Authoring is a frontend-owned page, never a slash sent to an owner
         # on another device. Refuse here before its capability table can route
         # these two words as attach requests (or an older class subcommand).
+        if command == "/team" and arg.partition(" ")[0].casefold() in {"new", "edit"}:
+            if self._projects_read_only():
+                self._open_team_form()
+                return
+            remote_capability = None
         if command == "/agent" and arg.partition(" ")[0].casefold() in {"new", "edit"}:
             if self._projects_read_only():
                 self._open_agent_form()
@@ -40704,7 +40928,11 @@ class OperatorApp(App[None]):
         # session state an attach mutates. Matched case-folded and on the first
         # token only, exactly as ``_cmd_team`` parses it, so ``/team =chart``
         # (talk to a team named ``chart``) still routes.
-        if command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart":
+        if command == "/team" and arg.partition(" ")[0].strip().casefold() in {
+            "chart",
+            "new",
+            "edit",
+        }:
             remote_capability = None
         if self._needs_runtime_first(command, arg):
             # A cold facade has no authoritative capability snapshot yet.
@@ -40862,7 +41090,10 @@ class OperatorApp(App[None]):
             # Same exemption for the ``/team chart`` pullback: charting is a
             # local view, so its deliberate None must not be read as an owner
             # that fails to advertise ``/team``.
-            and not (command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart")
+            and not (
+                command == "/team"
+                and arg.partition(" ")[0].strip().casefold() in {"chart", "new", "edit"}
+            )
             # ...and for the ``/model default`` pullback, which is a local
             # config write rather than an unadvertised command.
             and not (command == "/model" and arg.strip().lower().split(" ")[0] == "default")
@@ -44378,6 +44609,9 @@ class OperatorApp(App[None]):
         # projects create form could therefore never see the chord. Delegating
         # the ONE key to the page keeps every other binding — including ctrl+c
         # — exactly where disarming the app's hotkeys would have moved them.
+        if self._team_form is not None:
+            self._team_form.action_previous_field()
+            return
         if self._agent_form is not None:
             self._agent_form.action_previous_field()
             return
@@ -51956,6 +52190,7 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_agent_form()
+        self._close_team_form()
         self._close_projects_view()
         self._close_aside()
         instructions = None
@@ -54230,7 +54465,7 @@ class OperatorApp(App[None]):
                 # The prose uses the shared display form (D4); the addressing
                 # instruction and the receipt `data` keep the raw NAME.
                 f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
-                f"Send a request with /team {team.name} <message>."
+                f"Send a request with /team {self._team_talk_name(team.name)} <message>."
                 if not request
                 else f"sending to {self._team_display_form(team)}. "
                 f"{team.manager} is coordinating."

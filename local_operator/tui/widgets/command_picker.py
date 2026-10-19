@@ -368,7 +368,7 @@ def _skill_argument_floor(
         # splits on the first of two spaces and reports a terminated name that
         # was never typed; a blank token is an open slot, not a finished name.
         return None
-    if word in ("team", "teams") and first.lower() == "chart":
+    if word in ("team", "teams") and first.lower() in {"chart", "new", "edit"}:
         # `/team chart <name>`'s second slot is another name list, not free
         # text, so the claim stands whole through both levels.
         return None
