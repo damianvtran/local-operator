@@ -5,8 +5,8 @@ the read-only guarantee, and directly for grouping edges that the renderer would
 hide (scope separation, limits, evidence samples).
 """
 
-import hashlib
 import json
+import sqlite3
 
 import pytest
 
@@ -42,9 +42,23 @@ def payload(text, root, identity, session_dir=None):
     return json.loads(out)
 
 
-def store_digest(store):
-    db = store.path
-    return hashlib.sha256(db.read_bytes()).hexdigest() if db.exists() else ""
+def logical_dump(store):
+    """Every durable row. A file hash cannot see a write still living in WAL."""
+    db = sqlite3.connect(store.path)
+    try:
+        ops = db.execute(
+            "SELECT op_id,entity_id,origin,seq,scope,owner,kind,data FROM ops ORDER BY op_id"
+        ).fetchall()
+        current = db.execute(
+            "SELECT entity_id,scope,owner,op_id,fact,tokens FROM current ORDER BY entity_id"
+        ).fetchall()
+        meta = db.execute("SELECT key,value FROM meta ORDER BY key").fetchall()
+        recall = db.execute(
+            "SELECT entity_id,title,tags,body FROM recall ORDER BY entity_id"
+        ).fetchall()
+    finally:
+        db.close()
+    return ops, current, meta, recall
 
 
 def snapshot(store, items):
@@ -110,6 +124,25 @@ def test_near_duplicates_group_with_a_measure_and_what_differs(rig):
     assert "now" in pair["a_only"] + pair["b_only"]
     assert "staging" in pair["shared"] or "host" in pair["shared"]
 
+    # The guide promises shared tokens in the human view; keep the promise real.
+    text, failed = human("consolidate --scope global", root, identity, session_dir)
+    assert not failed and "shared:" in text
+
+
+def test_punctuation_only_titles_do_not_form_a_group(rig):
+    root, identity, session_dir, store = rig
+    # Review round 1 measured a 254-member "identical" group of punctuation-only
+    # titles: their normalised key is empty, and two empty token sets score 1.0.
+    for title in ("...", "!!!", "??"):
+        store.put(
+            "global",
+            {"title": title, "body": "...", "source": {"author": "user"}},
+        )
+
+    preview = payload("consolidate --scope global", root, identity, session_dir)
+
+    assert preview["groups"] == []
+
 
 def test_groups_do_not_cross_scopes(rig):
     root, identity, session_dir, store = rig
@@ -166,7 +199,7 @@ def test_consolidate_is_read_only_end_to_end(rig):
         ),
         store.put("global", {"title": "Dentist appointment", "body": "Thursday at 10"}),
     ]
-    before_digest = store_digest(store)
+    before_rows = logical_dump(store)
     before = snapshot(store, items)
 
     text, failed = human(
@@ -176,7 +209,7 @@ def test_consolidate_is_read_only_end_to_end(rig):
     assert not failed
     assert "Read-only duplicate preview" in text
     assert "Nothing was changed" in text
-    assert store_digest(store) == before_digest
+    assert logical_dump(store) == before_rows
     assert snapshot(store, items) == before
     # The follow-up it names is the existing human verbs, never an implied merge.
     assert "lop memory show" in text and "lop memory forget" in text

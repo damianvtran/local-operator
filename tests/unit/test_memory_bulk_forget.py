@@ -170,17 +170,17 @@ def test_whole_scope_match_is_refused_without_force_then_allowed_with_it(rig):
         prefix="lop memory",
     )
     assert preview["guarded"] is True and preview["total"] == preview["count"] == 2
-    assert "--force" in preview["confirm"]
+    # The preview must not defeat its own guard by pre-filling --force.
+    assert "--force" not in preview["confirm"]
 
-    without_force = " ".join(part for part in preview["confirm"].split() if part != "--force")[
-        len("lop memory ") :
-    ]
-    refused, failed = human(without_force, root, identity, session_dir)
+    refused, failed = human(preview["confirm"][len("lop memory ") :], root, identity, session_dir)
     assert failed
     assert "the whole scope" in refused and "Nothing was forgotten" in refused
     assert statuses(store, matched) == ["active", "active"]
 
-    confirmed, failed = human(preview["confirm"][len("lop memory ") :], root, identity, session_dir)
+    confirmed, failed = human(
+        preview["confirm"][len("lop memory ") :] + " --force", root, identity, session_dir
+    )
     assert not failed and "Forgotten 2 fact(s)" in confirmed
     assert statuses(store, matched) == ["forgotten", "forgotten"]
 
@@ -200,9 +200,8 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
     )
     # 4 of 6 is above half: the guard must refuse without --force.
     assert preview["count"] == 4 and preview["total"] == 6
-    assert preview["guarded"] is True and "--force" in preview["confirm"]
-    without_force = " ".join(p for p in preview["confirm"].split() if p != "--force")
-    refused, failed = human(without_force[len("lop memory ") :], root, identity, session_dir)
+    assert preview["guarded"] is True and "--force" not in preview["confirm"]
+    refused, failed = human(preview["confirm"][len("lop memory ") :], root, identity, session_dir)
     assert failed and "more than 50% of it" in refused
     assert statuses(store, old) == ["active"] * 4
 
@@ -229,6 +228,83 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
     confirmed, failed = human(allowed["confirm"][len("lop memory ") :], root, identity, session_dir)
     assert not failed and "Forgotten 2 fact(s)" in confirmed
     assert statuses(store, old[2:]) == ["forgotten", "forgotten"]
+
+
+def test_preview_refuses_above_the_bulk_cap(rig):
+    root, identity, session_dir, store = rig
+    old = [old_fact(store, f"Old personal note {index}") for index in range(201)]
+    store.put("global", {"title": "Recent note", "body": "Note"})
+
+    text, failed = human("forget --scope global --older-than 30d", root, identity, session_dir)
+
+    # The preview itself must refuse: printing a confirmation the store rejects
+    # (the round-1 MAJOR: 205 matches vs a 200 cap) is never acceptable.
+    assert failed
+    assert "201 fact(s)" in text and "at most 200" in text
+    assert "Narrow the filter" in text and "chunks" in text
+    assert statuses(store, old) == ["active"] * 201
+
+    # Exactly the cap still previews, and its command is runnable.
+    current = store.show("global", old[0]["id"])
+    store.put("global", {}, entity=old[0]["id"], expected_version=current["version"], forget=True)
+    preview = payload(
+        "forget --scope global --older-than 30d",
+        root,
+        identity,
+        session_dir,
+        prefix="lop memory",
+    )
+    assert preview["count"] == 200
+    assert preview["confirm"].startswith("lop memory forget ")
+
+
+def test_preview_prefixes_are_unique_when_ids_share_a_timestamp(rig, monkeypatch):
+    import local_operator.memory as memory
+
+    root, identity, session_dir, store = rig
+    ids = iter(
+        [
+            "0bbbbbbb-1111-7000-8000-000000000001",
+            "0bbbbbbb-1111-7000-8000-0000000000a1",
+            "0bbbbbbb-1111-7000-8000-000000000002",
+            "0bbbbbbb-1111-7000-8000-0000000000b2",
+        ]
+    )
+    monkeypatch.setattr(memory, "_id", lambda: next(ids))
+    first = store.put("global", {"title": "Old note one", "body": "A personal note"})
+    second = store.put("global", {"title": "Old note two", "body": "Another personal note"})
+
+    text, failed = human(
+        "forget --scope global --title-matches '^Old note'",
+        root,
+        identity,
+        session_dir,
+        prefix="lop memory",
+    )
+
+    assert not failed
+    # These ids share their first 35 characters; a fixed 12-character prefix prints
+    # the same token twice and leaves a human unable to act on a line.
+    assert f"global/{first['id']}" in text and f"global/{second['id']}" in text
+
+
+def test_catastrophic_filter_regex_is_refused(rig):
+    root, identity, session_dir, store = rig
+    old_fact(store, "Old personal note")
+
+    text, failed = human(
+        "forget --scope global --title-matches '(a+)+$'", root, identity, session_dir
+    )
+    assert failed
+    assert "unbounded repeat" in text and "refused rather than run" in text
+
+    allowed, failed = human(
+        "forget --scope global --title-matches '^(Old) personal note$'",
+        root,
+        identity,
+        session_dir,
+    )
+    assert not failed and "1 match(es)" in allowed
 
 
 def test_filtered_forget_requires_an_explicit_scope(rig):

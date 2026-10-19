@@ -170,10 +170,13 @@ command is refused. Confirmation is all-or-nothing, and a second run of the same
 command reports zero matches instead of failing. A filter must name its `--scope`
 explicitly (a bulk removal never inherits the scope set, and `--scope global` must be
 chosen on purpose), and it refuses a whole-scope match or more than half the scope
-unless the preview is confirmed with `--force`. `lop memory consolidate [--scope S]
-[--limit N]` is a READ-ONLY lexical duplicate preview: identical titles, or at least
-70% title+body token overlap, grouped transitively with the shared/differing tokens
-shown. It never deletes or merges; review with `show`, merge with `edit`, retire with
+unless the preview is confirmed with `--force` (the preview never prints `--force`
+itself). One confirmed run accepts at most 200 facts; a larger match is refused at
+preview time, so narrow the filter or chunk the cleanup. `lop memory consolidate
+[--scope S] [--limit N]` is a READ-ONLY lexical duplicate preview: identical titles
+that carry real text, or at least 70% title+body token overlap, grouped transitively
+with the similarity measure, the shared tokens and what differs shown (or the
+identical text for an exact pair). It never deletes or merges; review with `show`, merge with `edit`, retire with
 `forget`. No embedding, model call or new dependency is involved.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from local_operator.memory import (
+    MAX_BULK_FORGET,
     SCOPES,
     MemoryError,
     MemoryIdentity,
@@ -330,6 +331,31 @@ def _duration(text: str) -> float:
     return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
 
 
+def _unique_prefixes(ids: list[str]) -> dict[str, str]:
+    """Shortest prefix (from 8 characters) that is unique within ``ids``.
+
+    WHY not a fixed 12: UUIDv7 leads with a millisecond timestamp, so ids minted
+    in the same millisecond share it — review round 1 reproduced two different
+    facts printed as ``01a1523f-6cc``. A preview must let a human act on a line
+    without guessing which fact it names.
+    """
+    values = sorted(set(ids))
+    widths = {value: min(8, len(value)) for value in values}
+    changed = True
+    while changed:
+        changed = False
+        buckets: dict[str, list[str]] = {}
+        for value in values:
+            buckets.setdefault(value[: widths[value]], []).append(value)
+        for bucket in buckets.values():
+            if len(bucket) > 1:
+                for value in bucket:
+                    if widths[value] < len(value):
+                        widths[value] += 1
+                        changed = True
+    return {value: value[: widths[value]] for value in values}
+
+
 def _fingerprint(items: list[dict[str, Any]]) -> str:
     """Short digest of the previewed (id, revision) set.
 
@@ -424,6 +450,15 @@ def _bulk_forget(
     )
     items = selection["items"]
     total = selection["total"]
+    if len(items) > MAX_BULK_FORGET:
+        # The preview must never print a confirmation the store will reject: a
+        # command that cannot run reads as a bug in the store, not a limit.
+        raise MemoryError(
+            f"This filter matches {len(items)} fact(s), but one bulk forget accepts at "
+            f"most {MAX_BULK_FORGET}. Nothing was previewed or forgotten. Narrow the "
+            "filter (for example add --older-than, --tag or --title-matches) and run "
+            "again; a larger cleanup has to be done in chunks."
+        )
     base = {
         **common,
         "scope": args.scope,
@@ -447,10 +482,12 @@ def _bulk_forget(
     fraction = len(items) / total if total else 1.0
     guarded = len(items) == total or fraction > BULK_FORGET_MAX_FRACTION
     if not args.yes:
+        # Deliberately WITHOUT --force: a guard whose own suggested command already
+        # defeats it trains people to paste past the guard. The warning explains
+        # the refusal and the two real remedies instead.
         command = (
             f"{prefix} forget {' '.join(_bulk_flags(args))}{common['context']} --yes"
-            + (" --force" if guarded else "")
-            + f" --expect {fingerprint}"
+            f" --expect {fingerprint}"
         )
         return {
             **base,
@@ -1187,14 +1224,16 @@ def _bulk_preview_text(value: dict[str, Any]) -> str:
     if value["guarded"]:
         lines += _shaped(
             f"Warning: that is the whole scope, or more than {value['threshold']:.0%} of it; "
-            "a filter-based forget refuses this without --force."
+            "confirming without --force is refused. Narrow the filter, or add --force "
+            "deliberately if the whole set is really intended."
         )
+    prefixes = _unique_prefixes([row["id"] for row in value["items"]])
     for row in value["items"][:BULK_PREVIEW_ROWS]:
         # Collapse whitespace: a title is untrusted data and must stay on one line.
         title = " ".join(row["title"].split())
         if len(title) > 64:
             title = title[:63] + "…"
-        lines.append(f"  {row['scope']}/{row['id'][:12]}  {title}  [{row['tokens']} tokens]")
+        lines.append(f"  {row['scope']}/{prefixes[row['id']]}  {title}  [{row['tokens']} tokens]")
     hidden = len(value["items"]) - BULK_PREVIEW_ROWS
     if hidden > 0:
         lines.append(f"  … and {hidden} more (--json lists every row).")
@@ -1239,6 +1278,9 @@ def _consolidate_text(value: dict[str, Any], prefix: str) -> str:
         lines.append("No identical or near-duplicate candidates. Nothing to consolidate.")
         return "\n".join(lines)
     ctx = value.get("context", "")
+    prefixes = _unique_prefixes(
+        [member["id"] for group in value["groups"] for member in group["members"]]
+    )
     for number, group in enumerate(value["groups"], 1):
         kind = "identical" if group["exact"] else "near-duplicate"
         lines.append("")
@@ -1250,7 +1292,8 @@ def _consolidate_text(value: dict[str, Any], prefix: str) -> str:
             if len(title) > 64:
                 title = title[:63] + "…"
             lines.append(
-                f"  {group['scope']}/{member['id'][:12]}  {title}  [{member['tokens']} tokens]"
+                f"  {group['scope']}/{prefixes[member['id']]}  {title}  "
+                f"[{member['tokens']} tokens]"
             )
         for pair in group["pairs"]:
             if pair["exact"]:
@@ -1261,12 +1304,19 @@ def _consolidate_text(value: dict[str, Any], prefix: str) -> str:
                 evidence = f"identical title · combined token overlap {pair['similarity']:.0%}"
             else:
                 evidence = f"{pair['similarity']:.0%} combined title+body token overlap"
+            if not pair["exact"] and pair["shared"]:
+                # The store computes the shared tokens; the human view must show
+                # them too, or "the shared/differing tokens" claim in the guide is
+                # false and a reviewer has to open both facts.
+                evidence += f" · shared: {', '.join(pair['shared'])}"
             if pair["a_only"] or pair["b_only"]:
                 evidence += (
                     f" · only first: {', '.join(pair['a_only']) or '—'}"
                     f" · only second: {', '.join(pair['b_only']) or '—'}"
                 )
-            lines += _shaped(f"  Evidence {pair['a'][:12]} vs {pair['b'][:12]}: {evidence}")
+            lines += _shaped(
+                f"  Evidence {prefixes[pair['a']]} vs {prefixes[pair['b']]}: {evidence}"
+            )
         first, second = group["members"][0], group["members"][1]
         lines.append(f"  Review: {prefix} show {group['scope']}/{first['id']}{ctx}")
         lines.append(
