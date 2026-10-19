@@ -90,6 +90,7 @@ from local_operator.classification.types import (
     DecisionVendorError,
 )
 from local_operator.clients.radient_cost import micro_from_amount
+from local_operator.model_ids import canonical_model_id
 from local_operator.session.channel_spend import (
     BASIS_BILLED,
     COST_SOURCE_NONE,
@@ -188,8 +189,17 @@ def _cost_source(vendor: str) -> str:
     return COST_SOURCE_SERVER if vendor == "radient" else COST_SOURCE_PROVIDER
 
 
-def answered_record(response: DecisionResponse, *, posts: int) -> ChannelSpendRecord:
+def answered_record(
+    response: DecisionResponse, *, posts: int, requested_model: str = ""
+) -> ChannelSpendRecord:
     """The row for a leg that answered: the vendor's own figure, or unknown.
+
+    The row's ``model`` is the CANONICAL billing identity:
+    ``response.cost_model`` (the id the server says it priced the amount from)
+    when stated, else the leg's requested model, else the vendor's echo. The
+    vendor echo itself stays in the free-text ``detail`` when it differs, so a
+    row can still be reconciled against the wire without making that echo a
+    second ledger identity.
 
     ``response.cost_usd is None`` (neither source stated an amount) stays an unknown
     amount — never ``0`` — so the session total is a lower bound rather than a
@@ -209,18 +219,27 @@ def answered_record(response: DecisionResponse, *, posts: int) -> ChannelSpendRe
     amount = micro_from_amount(response.cost_usd)
     if amount is not None and not 0 <= amount <= (1 << 63) - 1:
         amount = None
+    billed_model = canonical_model_id(
+        response.cost_model or requested_model or response.model
+    )
+    # Evidence only: the echo is not the billing identity. ``detail`` is the
+    # record's free-text field (see ChannelSpendRecord) and carries no status
+    # semantics, so a later reconciler can still see that the wire said
+    # ``jev-1.13.0`` while the money was grouped under ``jev-1.13``.
+    detail = f"vendor-model={response.model}" if response.model != billed_model else ""
     return ChannelSpendRecord(
         record_id=new_record_id(CLASSIFICATION_CHANNEL),
         ts_ms=now_ms(),
         channel=CLASSIFICATION_CHANNEL,
         provider=response.vendor,
-        model=response.model,
+        model=billed_model,
         units=posts,
         unit=CALL_UNIT,
         amount_micro=amount,
         billing_basis=response.cost_basis or BASIS_BILLED,
         cost_source=_cost_source(response.vendor) if amount is not None else COST_SOURCE_NONE,
         status=STATUS_OK,
+        detail=detail,
     )
 
 
@@ -250,7 +269,7 @@ def failed_record(
         ts_ms=now_ms(),
         channel=CLASSIFICATION_CHANNEL,
         provider=vendor,
-        model=model,
+        model=canonical_model_id(model),
         units=posts,
         unit=CALL_UNIT,
         amount_micro=None,
@@ -270,7 +289,7 @@ def interrupted_record(vendor: str, model: str, *, posts: int) -> ChannelSpendRe
         ts_ms=now_ms(),
         channel=CLASSIFICATION_CHANNEL,
         provider=vendor,
-        model=model,
+        model=canonical_model_id(model),
         units=posts,
         unit=CALL_UNIT,
         amount_micro=None,

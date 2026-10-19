@@ -64,6 +64,10 @@ from local_operator.session.channel_spend import (
     BASIS_SUBSCRIPTION,
     NOT_TRACKED_MICRO,
     PENDING_OWNER_APPEND_REASON,
+    UNPRICED_CANCELLED_OUTCOME_UNKNOWN,
+    UNPRICED_FAILED_NOT_BILLED,
+    UNPRICED_NOT_STATED,
+    UNPRICED_PARTIAL,
 )
 from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
@@ -1076,7 +1080,16 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
         )
     for row in rows:
         amount = _as_micro(row.get("amount_micro"))
-        money = format_usd(amount) if amount is not None else UNKNOWN_COST_CELL
+        reason = str(row.get("unpriced_reason") or "")
+        if amount is not None:
+            money, dim_money = format_usd(amount), False
+        elif reason == UNPRICED_FAILED_NOT_BILLED:
+            # A failed attempt with no figure is the ledger's documented
+            # presumption of no charge. `no charge` is a positive statement,
+            # so it is NOT dimmed like the `$—` unknown class.
+            money, dim_money = _t(copy.spend_no_charge()), False
+        else:
+            money, dim_money = UNKNOWN_COST_CELL, True
         row_mark = (
             "+"
             if amount is not None and str(row.get("knowledge") or "") in {"partial", "floor"}
@@ -1090,7 +1103,7 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             _channel_row_label(row),
             money,
             mark=row_mark,
-            dim_money=amount is None,
+            dim_money=dim_money,
             notes=tuple(notes),
         )
     _draw_spend_basis(body, published)
@@ -1232,13 +1245,18 @@ def _shorten_name(name: str, room: int) -> str:
 
 
 def _row_note_candidates(row: dict[str, Any]) -> list[str]:
-    """Notes for one row, widest first: basis tag, then units, then each alone.
+    """Notes for one row, widest first: the unpriced reason, else basis then units.
 
-    The tag leads because it is the disclosure the money needs beside it
-    ("this was billed / plan-covered / estimated"); the units follow because
-    they answer "how much of it". Both are refinements, so they may shed whole
-    at narrow widths (design round 1, D1/D6).
+    A specific reason REPLACES the generic not-tracked disclosure, and is the
+    row's only note: appending a basis tag can read as a contradiction on a
+    mixed row (``failed · not billed · billed`` describes the failed attempt and
+    the successful one in the same breath), so the reason is not combined with
+    the basis or unit count. Rows without a reason keep the basis-tag ladder.
     """
+    reason = str(row.get("unpriced_reason") or "")
+    reason_rungs = _reason_rungs(reason)
+    if reason_rungs:
+        return list(reason_rungs)
     rungs = _basis_rungs(
         row.get("basis"), amount_known=_as_micro(row.get("amount_micro")) is not None
     )
@@ -1251,6 +1269,34 @@ def _row_note_candidates(row: dict[str, Any]) -> list[str]:
     if units:
         candidates.append(units)
     return candidates
+
+
+def _reason_rungs(reason: str) -> tuple[str, ...]:
+    """The note ladder for one ``unpriced_reason``, widest first.
+
+    Built at call time rather than module load so the strings resolve through
+    the active locale. Each ladder carries a rung short enough for the
+    canonical 83-cell card's 24-cell note budget, so a specific explanation
+    never sheds WHOLE at the width where the generic tag used to survive
+    (design round 1, D1/D6).
+    """
+    if reason == UNPRICED_FAILED_NOT_BILLED:
+        return (
+            _t(copy.spend_unpriced_failed_wide()),
+            _t(copy.spend_unpriced_failed()),
+            _t(copy.spend_unpriced_failed_short()),
+        )
+    if reason == UNPRICED_CANCELLED_OUTCOME_UNKNOWN:
+        return (
+            _t(copy.spend_unpriced_cancelled_wide()),
+            _t(copy.spend_unpriced_cancelled()),
+            _t(copy.spend_unpriced_cancelled_short()),
+        )
+    if reason == UNPRICED_NOT_STATED:
+        return (_t(copy.spend_unpriced_ok()), _t(copy.spend_unpriced_ok_short()))
+    if reason == UNPRICED_PARTIAL:
+        return (_t(copy.spend_unpriced_partial()), _t(copy.spend_unpriced_partial_short()))
+    return ()
 
 
 #: Per-basis note ladders, widest first: the full spelling, then the narrowest
@@ -1274,6 +1320,8 @@ _TAG_RUNGS: dict[str, tuple[str, ...]] = {
 def _basis_rungs(basis: Any, *, amount_known: bool) -> tuple[str, ...]:
     """The rungs for one row's basis list, widest first (see ``_TAG_RUNGS``)."""
     tags = _basis_tag_list(basis, amount_known=amount_known)
+    if not tags:
+        return ()
     if len(tags) == 1:
         return _TAG_RUNGS.get(tags[0], (tags[0],))
     # A row carrying several bases keeps the joined spelling only: there is no

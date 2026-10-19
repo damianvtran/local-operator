@@ -56,7 +56,8 @@
       ],
       "price_versions": [
         "Radient GET /tools/media/status cost_usd"
-      ]
+      ],
+      "unpriced_reason": "cancelled_outcome_unknown"
     },
     {
       "channel": "search",

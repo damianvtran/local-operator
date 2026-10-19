@@ -814,7 +814,16 @@ class ClassificationService:
             raise
         else:
             if meter.posts:
-                self._emit(lambda: accounting.answered_record(response, posts=meter.posts))
+                self._emit(
+                    lambda: accounting.answered_record(
+                        response,
+                        # The leg model is the fallback when the server stated
+                        # no cost object: the id we ASKED for is the identity
+                        # the row was billed under, not the vendor's echo.
+                        requested_model=accounting.model_of(vendor),
+                        posts=meter.posts,
+                    )
+                )
             return response
         finally:
             accounting.end_attempt(token)

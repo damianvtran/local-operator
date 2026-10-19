@@ -119,5 +119,16 @@
   "tui.small.session_sidebar.lead_focus": "f9 focus",
   "tui.small.session_sidebar.pin_suffix": " · ctrl+k pin",
   "tui.small.session_sidebar.asks_suffix": " · ctrl+f asks",
-  "tui.small.session_sidebar.hide_suffix": " · ctrl+b hide"
+  "tui.small.session_sidebar.hide_suffix": " · ctrl+b hide",
+  "tui.small.spend.no_charge": "no charge",
+  "tui.small.spend.unpriced_failed_wide": "request failed · not billed",
+  "tui.small.spend.unpriced_failed": "failed · not billed",
+  "tui.small.spend.unpriced_failed_short": "not billed",
+  "tui.small.spend.unpriced_cancelled_wide": "response lost · may have been billed",
+  "tui.small.spend.unpriced_cancelled": "response lost · may be billed",
+  "tui.small.spend.unpriced_cancelled_short": "may have been billed",
+  "tui.small.spend.unpriced_ok": "server stated no price",
+  "tui.small.spend.unpriced_ok_short": "no price stated",
+  "tui.small.spend.unpriced_partial": "some requests unpriced",
+  "tui.small.spend.unpriced_partial_short": "some unpriced"
 }

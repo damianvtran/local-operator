@@ -44,6 +44,72 @@
     "tone": "plain, factual",
     "note": "The note appended to a spend row whose channel is the residual 'other' bucket, so the row's money figure is not itemised per channel. 'itemised' is the British spelling used across this panel; keep it. Zero ICU arguments, one line; the row's note budget is applied by the caller. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   },
+  "tui.small.spend.no_charge": {
+    "role": "session-spend money cell",
+    "tone": "plain, factual",
+    "maxCells": 9,
+    "note": "Drawn in the fixed nine-cell money column for a spend row whose every unpriced record is a FAILED attempt, where the ledger's documented presumption is that an unreported failure was not charged. It replaces the `$—` that would read as 'price unknown', and it must never read as a measured zero. Nine cells exactly: the money column is fixed (see _SPEND_MONEY_CELL). Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_wide": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 30,
+    "note": "The widest rung explaining why a failed spend row states no amount: the request failed and the ledger presumes it was not billed. It is chosen only when the table-wide note budget can fit it (30 cells); narrower cards fall to `unpriced_failed`. Zero ICU arguments; the middle dot is literal. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The middle rung for a failed-only spend row (or a row mixing a priced call with a failed attempt): the attempt failed and the ledger presumes it was not billed. It replaces the generic 'price not stated' disclosure; the money cell says 'no charge' when the whole group failed. The middle dot is literal. Zero ICU arguments; the table-wide note budget sheds this whole string rather than cropping it. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The narrow rung of `unpriced_failed`, used when the table's note budget cannot fit the widest spelling. It must still state the billing consequence on its own, without the failure clause. Zero ICU arguments; one short fragment, never a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled_wide": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 38,
+    "note": "The widest rung for a cancelled spend row: the response was lost and the amount may have been billed. Chosen only when the table-wide note budget can fit it (the canonical 83-cell card cannot); narrower cards fall to `unpriced_cancelled` or `unpriced_cancelled_short`. Zero ICU arguments; the middle dot is literal. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 30,
+    "note": "The note for a spend row whose unstated record was CANCELLED mid-request (a timeout, dispose or caller cancel): unlike a refusal, it may already have been billed, so the row keeps `$—` and says so. It replaces the generic 'price not stated' disclosure. The middle dot is literal. Zero ICU arguments; the note budget sheds the whole string rather than cropping it. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The narrow rung of `unpriced_cancelled`, used when the table's note budget cannot fit the wider spelling. It must still state the possible charge on its own. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_ok": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The note for a 200 response that stated no amount: the request was served, so this is not a failure, but the server published no price. It replaces the generic 'price not stated' disclosure and keeps `$—` (never a fabricated zero). Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_ok_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 15,
+    "note": "The narrow rung of `unpriced_ok`, used when the table's note budget cannot fit the wider spelling. It must say the same thing without the actor clause. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_partial": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The note for a spend row that mixes a stated amount with an unstated 200 response: the figure shown is a lower bound. The row keeps its money figure and its `+` mark; this note replaces the generic not-tracked basis tag. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_partial_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 15,
+    "note": "The narrow rung of `unpriced_partial`, used when the table's note budget cannot fit the wider spelling. It must still say some spend has no figure. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
   "tui.small.timing.no_samples": {
     "role": "session timing table cell",
     "tone": "plain, factual",

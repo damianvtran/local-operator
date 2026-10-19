@@ -686,6 +686,11 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "basis",
         "price_versions",
     }
+    # ADDITIVE unpriced reason: present ONLY on a row that carries the condition,
+    # so a priced row above keeps the exact key set every older reader knows.
+    assert [
+        row["unpriced_reason"] for row in fixture["rows"] if "unpriced_reason" in row
+    ] == ["cancelled_outcome_unknown"]
     assert set(fixture["children"]) == {"total_micro", "knowledge"}
     assert set(fixture["by_basis"]) == {
         "billed",
@@ -1519,3 +1524,109 @@ def test_an_audio_row_folds_into_the_published_payload() -> None:
     assert rows["audio"].amount_micro == 80_000
     assert rows["audio"].billing_basis == BASIS_ESTIMATED, "the estimate flag survives the fold"
     assert CHANNEL_LABELS["audio"] == "Generated audio"
+
+
+# -- one decision model, one row: canonical ids and explicit unpriced reasons --
+
+
+def decision_record(
+    record_id: str,
+    *,
+    model: str,
+    amount_micro: int | None,
+    status: str = "ok",
+) -> ChannelSpendRecord:
+    return record(
+        record_id=record_id,
+        channel="classification",
+        provider="radient",
+        model=model,
+        amount_micro=amount_micro,
+        basis=BASIS_BILLED,
+        status=status,
+        units=1,
+        unit="calls",
+    )
+
+
+def test_historical_spellings_of_one_decision_model_are_one_priced_row() -> None:
+    """The defect: a priced ``jev-1.13.0`` row and a failed ``jev-1.13`` attempt.
+
+    Before the canonical key they drew two rows for one model, and the failed
+    one said only "price not stated". They are one row now: the priced amount
+    plus the failed attempt, with an explicit not-billed reason.
+    """
+    rows = [
+        row
+        for row in payload(
+            [
+                decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
+            ]
+        )["rows"]
+        if row["channel"] == "classification"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["model"] == "jev-1.13"
+    assert rows[0]["amount_micro"] == 11
+    assert rows[0]["units"] == 2.0
+    assert rows[0]["unpriced_reason"] == "failed_not_billed"
+
+
+def test_a_dated_vendor_echo_groups_under_the_canonical_id() -> None:
+    rows = [
+        row
+        for row in payload(
+            [
+                decision_record(
+                    "classification:dated", model="typesafe/jev-1.13-20261001", amount_micro=11
+                ),
+                decision_record(
+                    "classification:cancelled", model="typesafe/jev-1.13", amount_micro=None,
+                    status="cancelled",
+                ),
+            ]
+        )["rows"]
+        if row["channel"] == "classification"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["model"] == "jev-1.13"
+    assert rows[0]["unpriced_reason"] == "cancelled_outcome_unknown"
+
+
+def test_a_failed_only_group_states_why_no_amount_is_present() -> None:
+    (row,) = payload(
+        [decision_record("classification:failed", model="jev-1.13.0", amount_micro=None,
+                         status="failed")]
+    )["rows"]
+    assert row["amount_micro"] is None, "unknown, never a fabricated zero"
+    assert row["knowledge"] == "exact", "the failed-unbilled presumption is not missing money"
+    assert row["unpriced_reason"] == "failed_not_billed"
+
+
+def test_a_cancelled_group_says_the_outcome_is_unknown() -> None:
+    (row,) = payload(
+        [decision_record("classification:cancelled", model="jev-1.13.0", amount_micro=None,
+                         status="cancelled")]
+    )["rows"]
+    assert row["unpriced_reason"] == "cancelled_outcome_unknown"
+
+
+def test_an_ok_row_without_an_amount_says_the_server_stated_no_price() -> None:
+    (row,) = payload(
+        [decision_record("classification:ok", model="jev-1.13", amount_micro=None)]
+    )["rows"]
+    assert row["unpriced_reason"] == "not_stated"
+
+
+def test_money_mixed_with_an_unstated_ok_attempt_reads_partial() -> None:
+    (row,) = payload(
+        [
+            decision_record("classification:ok", model="jev-1.13", amount_micro=11),
+            decision_record("classification:parked", model="jev-1.13", amount_micro=None),
+        ]
+    )["rows"]
+    assert row["amount_micro"] == 11
+    assert row["unpriced_reason"] == "partial"
