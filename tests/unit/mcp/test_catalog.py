@@ -1690,3 +1690,47 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
     assert [row["status_basis"] for row in connecting] == ["operation"]
     assert all(row["status_observed_at"] is None for row in connecting)
     assert fixture["operations"][0]["status"] == "running"
+
+
+def test_every_row_carries_the_credential_state_and_reason(distinct: Path) -> None:
+    """The catalog says WHICH problem a non-connected row has, beside ``status``.
+
+    ``status`` keeps its vocabulary (no client breaks); the new pair is the
+    durable per-server answer, and the generic sign-in reason yields to it when
+    there is one — that substitution is the whole point of the pair.
+    """
+    _write_global(
+        {
+            "linear": {
+                "type": "http",
+                "url": "https://linear.example.test/mcp",
+                "auth": {"type": "oauth"},
+            },
+            "notes": {
+                "type": "stdio",
+                "command": COMMAND,
+                "env": {"NOTES_TOKEN": "${NOTES_TOKEN}"},
+            },
+        }
+    )
+
+    rows = {row["name"]: row for row in describe_servers(str(distinct))["servers"]}
+
+    for row in rows.values():
+        assert row["credential_state"], row
+        assert isinstance(row["credential_reason"], str)
+    assert rows["linear"]["status"] == "needs_sign_in"
+    assert rows["linear"]["credential_state"] == "needs_operator_login"
+    assert rows["linear"]["status_reason"] == rows["linear"]["credential_reason"]
+    assert rows["linear"]["status_reason"] != "no grant stored"
+    assert rows["notes"]["credential_state"] == "missing_source"
+    assert "NOTES_TOKEN" in rows["notes"]["credential_reason"]
+
+
+def test_a_connected_row_keeps_its_status_and_reason(distinct: Path) -> None:
+    """Live facts still win: a connected row is not re-worded by the status pass."""
+    add_server("shared", command=COMMAND, scope="global", cwd=distinct)
+    overlay = {"shared": LiveFacts(status="connected", tool_count=4)}
+    (row,) = describe_servers(str(distinct), live=overlay)["servers"]
+    assert row["status"] == "connected"
+    assert row["credential_state"] in ("synced", "unknown", "missing_source")

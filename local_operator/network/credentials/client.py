@@ -41,6 +41,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from local_operator.network.credentials import mcp_state
 from local_operator.network.credentials.messages import render_broker_error
 from local_operator.network.credentials.placement import (
     PlacementDocument,
@@ -154,6 +155,17 @@ class GrantCache:
             if pair[0] == key and grant.access_token == bearer:
                 return pair
         return None
+
+    def keys(self) -> list[str]:
+        """Every key this process is holding a grant for, sorted and de-duplicated.
+
+        The reconcile pass needs the SET OF KEYS to re-check against placement; it
+        never needs the grants themselves, so no accessor returns one. Reading the
+        keys is not serving a bearer — ``get``/``peek`` remain the only readers of
+        a grant, and neither is called here.
+        """
+        with self._lock:
+            return sorted({key for key, _session in self._grants})
 
     def clear(self) -> None:
         with self._lock:
@@ -462,6 +474,7 @@ class MeshCredentialClient:
         from local_operator.network.credentials.effective import note_resolution
 
         note_resolution(self.root, key, error)
+        self._remember_evidence(key, error)
         self._save_state()
 
     def _bounded(self, grant: Grant) -> Grant:
@@ -486,7 +499,41 @@ class MeshCredentialClient:
 
         note_resolution(self.root, key, grant)
         self.state.note_grant(key, grant.grant_id, owner_device=grant.credential_ref.owner_device)
+        # THE DURABLE HALF OF A SUCCESSFUL BORROW. The grant itself lives only in
+        # memory (``GrantCache``), so without this row a restarted session has no
+        # way to say "this server works because <owner> signed in" — it would read
+        # as a server nobody has ever signed in to. Writing ``synced`` also
+        # REPLACES an older ``expired``/``unauthorized``, which is the "clear the
+        # entry on success" half: the failure it described is no longer true.
+        mcp_state.record(
+            self.network_id,
+            key,
+            state="synced",
+            owner_device=grant.credential_ref.owner_device,
+            owner_name=grant.credential_ref.owner_device_name,
+            root=self.root,
+        )
         self._save_state()
+
+    def _remember_evidence(self, key: str, error: BrokerError) -> None:
+        """Record WHY a refusal happened, in the durable, value-free vocabulary.
+
+        A broker code this build does not classify records NOTHING: it overwrote a
+        precise older answer with a vague new one otherwise, and the status surface
+        treats absent evidence as "ask the stores", which is honest.
+        """
+        state = mcp_state.state_for_code(error.code)
+        if not state:
+            return
+        mcp_state.record(
+            self.network_id,
+            key,
+            state=state,
+            code=error.code,
+            owner_device=error.owner_device or self.owner_of(key),
+            owner_name=error.owner_device_name or self.owner_label(key),
+            root=self.root,
+        )
 
     def _save_state(self) -> None:
         try:
@@ -796,8 +843,13 @@ class MeshCredentialClient:
             return {"kind": "error", "code": "owner_offline", "key": key}
         return detail
 
-    def pull_placement(self) -> dict[str, Any]:
+    def pull_placement(self, only_device: str = "") -> dict[str, Any]:
         """Ask every other active member for its placement document, and merge.
+
+        ``only_device`` narrows the fan-out to ONE member, for the cadence path:
+        a member that holds keys owned by one peer needs that peer's document to
+        converge, and asking every member on every tick would put a per-member
+        round trip on a 15 s floor. The full sweep stays the explicit verb.
 
         WHY EVERY MEMBER RATHER THAN THE KNOWN OWNERS: a share done for a key this
         device has never heard of leaves no entry here to name the owner, so
@@ -819,16 +871,38 @@ class MeshCredentialClient:
         been wired into any session that was running while it landed.
         """
         if self.placement is None or not self.network_id:
-            return {"kind": "ack", "key": "", "changed": [], "owners": 0, "newly_borrowable": []}
+            # A MISSING DOCUMENT IS ITSELF A LOSS (design §4: access ends at
+            # reconcile, not at token expiry). The device may have been removed from
+            # the network while this process was running; the grants in memory must
+            # not outlive that, so the same reconcile runs here before answering.
+            revoked = self.revoke_local_grants()
+            missing: dict[str, Any] = {
+                "kind": "ack",
+                "key": "",
+                "changed": [],
+                "owners": 0,
+                "newly_borrowable": [],
+            }
+            if revoked:
+                missing["revoked"] = revoked
+            return missing
         from local_operator.network.types import MeshRefusal
 
         before_borrowable = set(self._borrowable_now())
+        # THE KEYS THAT COULD LOSE ACCESS ON THIS PULL, captured BEFORE the merge:
+        # reading the placement property after a change CLEARS every cached grant
+        # (the withdrawal rule), and a cleared cache can no longer name what was
+        # withdrawn. These names are what the evidence document records.
+        held_before = self.grants.keys()
         changed: list[str] = []
         #: ``{device, reason}`` for every member whose document was NOT merged, so a
         #: skipped member is named in the reply rather than silently missing.
         skipped: list[dict[str, str]] = []
         asked = 0
-        for device in self._other_active_members():
+        members = self._other_active_members()
+        if only_device:
+            members = [device for device in members if device == only_device]
+        for device in members:
             asked += 1
             reply = self._ask_owner_directly(
                 device,
@@ -880,11 +954,13 @@ class MeshCredentialClient:
                     # under the lock and only after parsing, so nothing was written.
                     skipped.append({"device": device, "reason": "malformed_document"})
                     continue
+        revoked = self.revoke_local_grants(held_before)
         after_borrowable = self._borrowable_now()
         result: dict[str, Any] = {
             "kind": "ack",
             "key": "",
             "changed": sorted(set(changed)),
+            "revoked": revoked,
             "owners": asked,
             "newly_borrowable": sorted(
                 key
@@ -911,6 +987,75 @@ class MeshCredentialClient:
             for key, entry in document.entries.items()
             if entry.owner_device != self.self_device and entry.is_holder(self.self_device)
         }
+
+    def revoke_local_grants(self, keys: list[str] | None = None) -> list[str]:
+        """Drop every cached grant this device may no longer hold. Returns the keys.
+
+        TWO REASONS A GRANT DIES HERE, and both are reconcile facts rather than
+        token facts (design §4):
+
+        * **This device is no longer a holder** for the key — the owner revoked the
+          share, the entry moved to another owner, or the placement document is
+          gone. ``should_borrow`` is the same predicate every request checks, so
+          this cannot disagree with what a fresh borrow would answer.
+        * **This device is no longer a live member** of the network — removed, or
+          the record itself is gone. The handshake would refuse on the next
+          contact anyway; dropping now ends access at reconcile instead of leaving
+          the bearer usable until its TTL.
+
+        THE EVIDENCE IS THE OTHER HALF. A dropped grant with no record reads to
+        ``/mcp`` as "never signed in", which sends the operator looking for a
+        sign-in that used to work. ``revoked`` says what happened and asks for a
+        new share, which is the only remedy that can work.
+
+        ``keys`` is the caller's pre-merge snapshot: reading ``self.placement`` after
+        a changed document clears the cache as a side effect, so the names to
+        reconcile must be captured before that read. ``None`` means "whatever the
+        cache holds now".
+        """
+        candidates = list(self.grants.keys()) if keys is None else list(dict.fromkeys(keys))
+        if not candidates:
+            return []
+        membership_gone = not self._self_membership_active()
+        dropped: list[str] = []
+        for key in candidates:
+            if not membership_gone and self.should_borrow(key):
+                continue
+            owner = self.owner_of(key)
+            owner_name = self.owner_label(key)
+            self.grants.drop(key)
+            mcp_state.record(
+                self.network_id,
+                key,
+                state="revoked",
+                code="member_not_active" if membership_gone else "not_a_holder",
+                owner_device=owner,
+                owner_name=owner_name,
+                root=self.root,
+            )
+            dropped.append(key)
+        return dropped
+
+    def _self_membership_active(self) -> bool:
+        """Whether this device is still a live member of its network.
+
+        No record, an unreadable store, a missing self row or an inactive one all
+        answer ``False``: the question is permission to keep using a bearer, and
+        every failure mode of the proof must fail closed.
+        """
+        if not self.network_id:
+            return True
+        try:
+            from local_operator.network import store
+
+            for record in store.list_networks(self.root):
+                if record.network_id != self.network_id:
+                    continue
+                member = record.self_member()
+                return bool(member is not None and member.active)
+            return False
+        except Exception:  # noqa: BLE001 — a store we cannot read proves nothing
+            return False
 
     def _other_active_members(self) -> list[str]:
         try:

@@ -162,6 +162,24 @@ class _LocalOps:
             return {"kind": "ack", "key": key, "revoked": 0}
         return {"kind": "ack", "key": key, "revoked": broker.revoke_outstanding(key, holder)}
 
+    def sync_pull(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Pull ONE copy from its owner now, and report a value-free outcome.
+
+        The member half of ``--repair`` (design §4): placement says this device may
+        copy the key, and the copy has either not arrived or is stale. The answer is
+        ``{ok, state, code}`` — the sync engine's own bounded vocabulary, because
+        the CLI prints it and ``--json`` must never carry a value.
+        """
+        from local_operator.network.credentials.sync import sync_for_relay
+
+        key = str(frame.get("credential_key") or "")
+        if not key:
+            return {"ok": False, "state": "unknown", "code": "missing_key"}
+        engine = sync_for_relay(self._server)
+        if engine is None:
+            return {"ok": False, "state": "unknown", "code": "no_relay"}
+        return engine.pull_now(key)
+
     def placement(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Pull the placement document from each owner this device knows of.
 
@@ -221,6 +239,7 @@ def install(server: RelayServer) -> None:
             "credential_report": ops.report,
             "credential_placement": ops.placement,
             "credential_revoke": ops.revoke,
+            "credential_sync_pull": ops.sync_pull,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},
     )

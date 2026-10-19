@@ -9304,6 +9304,12 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
                             }
                         )
 
+    # THE MEMBER HALF (design §4). Run in addition to the owner pass: a device
+    # can hold shares from a peer and share its own keys at the same time, and
+    # each server is decided per KEY by ``_held_by_peer`` — a server this device
+    # owns never enters the member path.
+    member = _member_repair_receipt(root, servers) if bool(getattr(args, "repair", False)) else {}
+    states = _credential_states(root)
     rows: list[dict[str, Any]] = []
     for server in servers:
         name = str(server.get("name") or "")
@@ -9315,6 +9321,7 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             for (server_name, key), devices in sorted(grants.items())
             if server_name == name
         ]
+        status = states.get(name) or {}
         row: dict[str, Any] = {
             "server": name,
             "transport": str(server.get("transport") or ""),
@@ -9324,7 +9331,12 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             "skipped": _dedupe_skip_rows(
                 [row for row in skipped_rows if row.get("server") == name]
             ),
+            # The SAME status the page renders (design §5); names and states only.
+            "state": str(status.get("state") or "unknown"),
+            "reason": str(status.get("reason") or ""),
         }
+        if name in member:
+            row["member"] = member[name]
         if shape == "oauth" and not key_rows and not row["skipped"]:
             # The note describes the mcp:<url> path only. An OAuth-shaped server
             # that ALSO declares env/header refs received real copies — or had
@@ -9355,6 +9367,166 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
     return _emit(args, payload, lines)
 
 
+def _credential_states(root: Path) -> dict[str, dict[str, Any]]:
+    """The per-server status rows for this device, from ONE read-only pass.
+
+    The same function ``/mcp`` and the catalog use, so the CLI cannot describe a
+    server differently from the page the operator is looking at. Merely printing
+    status must never be the reason a repair fails, hence the swallow.
+    """
+    try:
+        from local_operator.mcp.credential_status import server_states
+
+        # ``root`` as the cwd: this verb repairs the USER-SCOPE document
+        # (``readiness.mcp_servers_fact`` reads exactly that file), and the rows
+        # it prints must describe the same servers. A project-scope server is
+        # cwd-dependent and is not what this command shares or repairs.
+        return server_states(str(root), base=root)
+    except Exception:  # noqa: BLE001 — a status read is not part of the repair
+        return {}
+
+
+def _member_repair_receipt(
+    root: Path, servers: Sequence[Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """The MEMBER half of ``--repair``: pull placement, copies, and one grant.
+
+    Why this is not the owner loop: on a member the missing thing is not a share
+    to grant but a share that has not ARRIVED (design §4). Each step is bounded
+    and run ONCE per key; a revoked or missing placement is reported, never
+    retried, because the only remedy is on the owner's side.
+
+    Nothing here touches a value: ``credential_sync_pull`` writes the copy inside
+    the relay process and answers ``{ok, state, code}``, and ``credential_grant``
+    answers a grant detail (or a refusal) that is never printed.
+    """
+    from local_operator.mcp.credentials import credential_source
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.placement import PlacementDocument
+    from local_operator.network.credentials.types import (
+        credential_key_for_mcp,
+        credential_key_for_secret,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    out: dict[str, dict[str, Any]] = {}
+
+    def _refusal_code(exc: BaseException) -> str:
+        return str(getattr(exc, "code", "") or exc.__class__.__name__)
+
+    # 1. PLACEMENT FIRST. Without this the rest reads a document from whenever the
+    #    device last pulled, so a share that just landed would be invisible.
+    placement_error = ""
+    try:
+        _relay_answer("credential_placement", timeout=_listing_timeout())
+    except Exception as exc:  # noqa: BLE001 — reported per server, never fatal
+        placement_error = _refusal_code(exc)
+
+    # Read the merged documents back LOCALLY: the pull wrote files, and the CLI is
+    # a different process from the relay that wrote them.
+    entries: dict[str, tuple[str, Any]] = {}
+    try:
+        from local_operator.network import store as network_store
+        from local_operator.network import identity as identity_mod
+
+        identity = identity_mod.load()
+        for record in network_store.list_networks(root):
+            document = PlacementDocument.load(
+                record.network_id, root, self_device=str(record.self_device_id or "")
+            )
+            for key, entry in document.entries.items():
+                entries.setdefault(key, (record.network_id, entry))
+        self_device = str(getattr(identity, "device_id", "") or "")
+    except Exception:  # noqa: BLE001 — no placement means "nothing to pull"
+        self_device = ""
+
+    def _held_by_peer(key: str) -> tuple[str, Any] | None:
+        found = entries.get(key)
+        if found is None:
+            return None
+        _network_id, entry = found
+        owner = str(getattr(entry, "owner_device", "") or "")
+        if not owner or owner == self_device:
+            return None
+        try:
+            if not entry.is_holder(self_device):
+                return None
+        except Exception:  # noqa: BLE001 — a malformed entry is not permission
+            return None
+        return found
+
+    for server in servers:
+        name = str(server.get("name") or "")
+        if not name:
+            continue
+        receipt: dict[str, Any] = {"pulled": [], "grant": {}, "error": placement_error}
+        url = str(server.get("url") or "")
+        oauth_key = credential_key_for_mcp(url) if url else ""
+        # A server this device OWNS has nothing to pull; the owner path above
+        # already handled it. The entry check below is what decides that.
+
+        # 2. REFERENCE COPIES, only for a key the local store does NOT hold and a
+        #    PEER owns. ``credential_source`` is the same read-only answer the
+        #    status rows use.
+        for ref in server.get("refs") or []:
+            if not isinstance(ref, Mapping):
+                continue
+            ref_id = str(ref.get("id") or "")
+            if not ref_id or credential_source(ref_id, root) == "encrypted":
+                continue
+            key = credential_key_for_secret(ref_id)
+            if _held_by_peer(key) is None:
+                continue
+            try:
+                detail = _relay_answer("credential_sync_pull", timeout=30.0, credential_key=key)
+            except MeshRefusal as exc:
+                receipt["pulled"].append({"key": key, "ok": False, "code": exc.code})
+                continue
+            except Exception as exc:  # noqa: BLE001 — one key never aborts the rest
+                receipt["pulled"].append(
+                    {"key": key, "ok": False, "code": _refusal_code(exc)}
+                )
+                continue
+            receipt["pulled"].append(
+                {
+                    "key": key,
+                    "ok": bool(detail.get("ok")),
+                    "state": str(detail.get("state") or ""),
+                    "code": str(detail.get("code") or ""),
+                }
+            )
+
+        # 3. ONE GRANT, to validate an OAuth share and (on success) clear the
+        #    refusal evidence the failure had recorded. ``serve_grant`` records
+        #    its own refusal/success evidence in the relay process; this call
+        #    exists so a member can prove the borrow works without an agent turn.
+        if oauth_key:
+            found = _held_by_peer(oauth_key)
+            if found is not None:
+                network_id, _entry = found
+                try:
+                    detail = _relay_answer(
+                        "credential_grant",
+                        timeout=60.0,
+                        credential_key=oauth_key,
+                        provider="mcp-oauth",
+                    )
+                except MeshRefusal as exc:
+                    receipt["grant"] = {"ok": False, "code": exc.code}
+                except Exception as exc:  # noqa: BLE001 — reported, not raised
+                    receipt["grant"] = {"ok": False, "code": _refusal_code(exc)}
+                else:
+                    ok = str(detail.get("kind") or "") == "grant"
+                    receipt["grant"] = {
+                        "ok": ok,
+                        "code": "" if ok else str(detail.get("code") or "refused"),
+                    }
+                    if ok:
+                        mcp_state.clear(network_id, oauth_key, root=root)
+        out[name] = receipt
+    return out
+
+
 def _dedupe_skip_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """One row per (key, device, reason): the same server may be repaired in more
     than one network, and a duplicated line would read as two separate refusals."""
@@ -9374,19 +9546,31 @@ def _dedupe_skip_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def _render_mcp_credential_row(row: Mapping[str, Any]) -> str:
-    """One bounded human line per server; names and counts only."""
+    """One bounded human line per server; names and counts only.
+
+    The status tail is the SAME state/reason the page shows. ``synced`` with no
+    reason is the ordinary case and prints nothing, so an owner-side row reads
+    exactly as it did before this half existed.
+    """
     name = str(row.get("server") or "")
     transport = str(row.get("transport") or "")
     shape = str(row.get("shape") or "none")
     note = str(row.get("note") or "")
     grants = [item for item in row.get("grants") or [] if isinstance(item, Mapping)]
+    state = str(row.get("state") or "")
+    reason = str(row.get("reason") or "")
+    tail = ""
+    if reason:
+        tail = f"; {state}: {reason}" if state and state != "synced" else f"; {reason}"
+    elif state and state != "synced":
+        tail = f"; {state}"
     if note:
-        return f"{name} ({transport}, {shape}): {note}"
+        return f"{name} ({transport}, {shape}): {note}{tail}"
     skipped = len([item for item in row.get("skipped") or [] if isinstance(item, Mapping)])
     if not grants:
-        return f"{name} ({transport}, {shape}): no grant; {skipped} skipped"
+        return f"{name} ({transport}, {shape}): no grant; {skipped} skipped{tail}"
     granted = ", ".join(f"{item.get('key')} to {item.get('count')}" for item in grants)
-    return f"{name} ({transport}, {shape}): granted {granted}; {skipped} skipped"
+    return f"{name} ({transport}, {shape}): granted {granted}; {skipped} skipped{tail}"
 
 
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
