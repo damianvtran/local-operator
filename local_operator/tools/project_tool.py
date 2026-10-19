@@ -320,7 +320,9 @@ def _field_lines(
         for milestone in project.milestones:
             state = milestone_status(milestone)
             target = milestone.target_date or "—"
-            lines.append(f"  - {milestone.name} [{state}] target {target}")
+            lines.append(
+                f"  - {identifier_text(context, milestone.name)} " f"[{state}] target {target}"
+            )
     else:
         lines.append("milestones: (none)")
     return lines
@@ -482,7 +484,11 @@ async def _op_show(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list')",
+        )
     lines = _field_lines(
         project,
         history_tail=history_tail,
@@ -596,7 +602,10 @@ async def _op_update(
         return _error(tool_call_id, "project", str(exc))
     if project is None:
         return _error(
-            tool_call_id, "project", f"no project named {name!r} to update (try op='list')."
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} to update "
+            "(try op='list').",
         )
     if (
         "milestones" in params.model_fields_set
@@ -640,7 +649,8 @@ async def _op_update(
         return _text(
             tool_call_id,
             "project",
-            f"project {updated.name!r} already held those values — nothing written.",
+            f"project {identifier_text(context, repr(updated.name))} already held those "
+            "values — nothing written.",
         )
     # The receipt must NAME a deliberate replace wherever the call made one — a
     # bare "updated project" is exactly the sentence that hid the wipe this
@@ -677,8 +687,8 @@ async def _op_update(
         return _text(
             tool_call_id,
             "project",
-            f"refreshed project {updated.name!r} — progress unchanged; {still} "
-            f"(no new content){replaced}{forced}.",
+            f"refreshed project {identifier_text(context, repr(updated.name))} — progress "
+            f"unchanged; {still} (no new content){replaced}{forced}.",
         )
     age = reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
@@ -735,12 +745,17 @@ async def _op_refresh(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list').",
+        )
     if not (project.progress or "").strip():
         return _error(
             tool_call_id,
             "project",
-            f"project {project.name!r} has no recorded progress to refresh — write the "
+            f"project {identifier_text(context, repr(project.name))} has no recorded "
+            f"progress to refresh — write the "
             "first line with op='update' progress=<text>.",
         )
     reporter = _calling_session_id(context) or "operator"
@@ -758,7 +773,8 @@ async def _op_refresh(
         return _text(
             tool_call_id,
             "project",
-            f"project {outcome.project.name!r} is not stale — nothing written "
+            f"project {identifier_text(context, repr(outcome.project.name))} is not stale "
+            "— nothing written "
             "(a refresh is for a stale record; there is no reason to send it every turn).",
         )
     refreshed = outcome.project
@@ -771,7 +787,8 @@ async def _op_refresh(
     return _text(
         tool_call_id,
         "project",
-        f"refreshed project {refreshed.name!r} — progress unchanged; {still} "
+        f"refreshed project {identifier_text(context, repr(refreshed.name))} — progress "
+        f"unchanged; {still} "
         "(no new content; the stale badge stays until a new line lands).",
     )
 
@@ -795,7 +812,11 @@ async def _op_link(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list').",
+        )
     # The pre-state decides which receipt is true: linking an id that was
     # FILED moves it between lists, and a receipt that said "linked" would
     # hide the one act a reader must know about (its liveness role changed).
@@ -900,7 +921,11 @@ async def _op_milestone(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     if project is None:
-        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+        return _error(
+            tool_call_id,
+            "project",
+            f"no project named {identifier_text(context, repr(name))} (try op='list').",
+        )
     payload: dict[str, Any] = {"name": milestone_name, "remove": params.remove}
     if "milestone_target_date" in params.model_fields_set:
         payload["target_date"] = params.milestone_target_date
@@ -1023,12 +1048,18 @@ async def execute_project_delete(
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project_delete", str(exc))
     if project is None:
-        return _error(tool_call_id, "project_delete", f"no project named {name!r} to delete.")
+        return _error(
+            tool_call_id,
+            "project_delete",
+            f"no project named {identifier_text(context, repr(name))} to delete.",
+        )
     try:
         registry.delete_project(project.id)
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project_delete", f"could not delete project: {exc}")
-    return _text(tool_call_id, "project_delete", f"deleted project {name!r}.")
+    return _text(
+        tool_call_id, "project_delete", f"deleted project {identifier_text(context, repr(name))}."
+    )
 
 
 def build_project_delete_tool(context: ToolContext) -> AgentTool | None:

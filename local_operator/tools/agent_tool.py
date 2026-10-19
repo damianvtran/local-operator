@@ -275,7 +275,9 @@ _STARTER_ROW_CAP = 80
 _STRONG_MATCH = 0.115
 
 
-def _name_taken_message(name: str, *, installing: bool = False) -> str:
+def _name_taken_message(
+    name: str, *, installing: bool = False, context: ToolContext | None = None
+) -> str:
     """One wording for the same condition, wherever it is detected.
 
     `install` and `create`/`update` used to phrase this differently, and only
@@ -283,9 +285,11 @@ def _name_taken_message(name: str, *, installing: bool = False) -> str:
     """
 
     lead = (
-        f"an agent named {name!r} already exists and is not a role, so nothing was installed."
+        f"an agent named {identifier_text(context, repr(name))} already exists "
+        "and is not a role, so nothing was installed."
         if installing
-        else f"an agent named {name!r} already exists and is not a role."
+        else f"an agent named {identifier_text(context, repr(name))} already exists "
+        "and is not a role."
     )
     return f"{lead} Rename that agent, or use a different name for the role."
 
@@ -638,7 +642,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         return _error(
             tool_call_id,
             "agent",
-            f"no role or specialist named {name!r} (try op='list')",
+            f"no role or specialist named {identifier_text(context, repr(name))} (try op='list')",
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     # Identifier fields: the role name and label head the body; both are
@@ -706,7 +710,10 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         # cannot prove the harness wrote), so offering the verb here would be
         # the same dead end #141 was filed about. Name the op that DOES work
         # on the values printed above, which is what makes them copy-pasteable.
-        body += f", or op='update' name={profile.name!r} to apply the packaged values yourself"
+        body += (
+            f", or op='update' name={identifier_text(context, repr(profile.name))} "
+            "to apply the packaged values yourself"
+        )
     body += "."
     text, spill = spill_truncate(body, "agent", context)
     return _text(tool_call_id, "agent", text, details=spill or None)
@@ -867,7 +874,8 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         return _error(
             tool_call_id,
             "agent",
-            f"no packaged starter named {name!r}; starters: {', '.join(list_seeds())}",
+            f"no packaged starter named {identifier_text(context, repr(name))}; "
+            f"starters: {', '.join(list_seeds())}",
         )
     try:
         installed = install_seed(name, registry=registry)
@@ -875,11 +883,16 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         return _error(
             tool_call_id,
             "agent",
-            _name_taken_message(name, installing=True),
+            _name_taken_message(name, installing=True, context=context),
         )
     if installed is None:
-        return _error(tool_call_id, "agent", f"could not install starter {name!r}")
+        return _error(
+            tool_call_id,
+            "agent",
+            f"could not install starter {identifier_text(context, repr(name))}",
+        )
     profile, already_installed = installed
+    shown_name = identifier_text(context, repr(profile.name))
     if already_installed:
         # Say the no-op out loud. `install` is the only verb here that sounds
         # like "put the shipped one back", so answering "installed" to a
@@ -894,23 +907,23 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         found = _seed_provenance(registry, profile)
         resettable = found is not None and found[1] == "installed"
         restore = (
-            f"op='reset' name={profile.name!r} to put the packaged version back, or "
+            f"op='reset' name={shown_name} to put the packaged version back, or "
             if resettable
             else ""
         )
         return _text(
             tool_call_id,
             "agent",
-            f"role {profile.name!r} is already installed and was left as-is (your edits are "
-            f"kept): op='show' name={profile.name!r} to read it (it prints the packaged "
-            f"version too when yours has diverged), "
-            f"{restore}op='update' name={profile.name!r} to change it.",
+            f"role {shown_name} is already installed and was left as-is "
+            f"(your edits are kept): op='show' name={shown_name} to read it "
+            "(it prints the packaged version too when yours has diverged), "
+            f"{restore}op='update' name={shown_name} to change it.",
         )
     return _text(
         tool_call_id,
         "agent",
-        f"installed role {profile.name!r}: launch with task(agent={profile.name!r}), "
-        f"or change what it is told with op='update' name={profile.name!r}.",
+        f"installed role {shown_name}: launch with task(agent={shown_name}), "
+        f"or change what it is told with op='update' name={shown_name}.",
     )
 
 
@@ -945,15 +958,17 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
         try:
             if registry.get_agent_by_name(name) is not None:
                 registered = (
-                    f" You do have a role named {name!r}: it was authored here rather than "
-                    f"installed, so edit it with op='update' name={name!r}."
+                    f" You do have a role named {identifier_text(context, repr(name))}: "
+                    "it was authored here rather than installed, so edit it with "
+                    f"op='update' name={identifier_text(context, repr(name))}."
                 )
         except Exception:  # noqa: BLE001 - enrichment only; the refusal still stands
             registered = ""
         return _error(
             tool_call_id,
             "agent",
-            f"no packaged starter named {name!r}, so there is nothing to reset it to; "
+            f"no packaged starter named {identifier_text(context, repr(name))}, "
+            "so there is nothing to reset it to; "
             f"nothing was changed.{registered} Starters that can be reset: "
             f"{', '.join(list_seeds())}.",
         )
@@ -1051,18 +1066,23 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
     try:
         installed = install_seed(seed.name, registry=registry, overwrite=True)
     except NameTakenError:  # pragma: no cover - guarded above, kept for safety
-        return _error(tool_call_id, "agent", _name_taken_message(seed.name, installing=True))
+        return _error(
+            tool_call_id,
+            "agent",
+            _name_taken_message(seed.name, installing=True, context=context),
+        )
     if installed is None:
         return _error(tool_call_id, "agent", f"could not reset role {seed.name!r}")
     profile, _ = installed
+    shown_name = identifier_text(context, repr(profile.name))
 
     if previous is None:
         # Reset on a starter that was never installed is not an error: the end
         # state the caller asked for (registry holds the packaged text) is the
         # one they got. Saying which of the two happened keeps the report true.
         body = (
-            f"role {profile.name!r} was not installed; installed the packaged version. "
-            f"launch with task(agent={profile.name!r})."
+            f"role {shown_name} was not installed; installed the packaged "
+            f"version. launch with task(agent={shown_name})."
         )
         return _text(tool_call_id, "agent", body)
     # Echo EVERY field that was replaced, not just the prose. The restore is
@@ -1073,7 +1093,7 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
     # divergence actually reaches the overwrite, silence here would start
     # discarding tool restrictions the old short-circuit happened to leave
     # alone, so the report has to widen with the fix.
-    body = f"reset role {profile.name!r} to the packaged version ("
+    body = f"reset role {shown_name} to the packaged version ("
     body += ", ".join(diverged) + " replaced).\n"
     if "instructions" in diverged:
         body += f"\nyour instructions were:\n{(previous.instructions or '(none)').strip()}\n"
@@ -1081,8 +1101,8 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
         if field in diverged:
             body += f"\nyour {field}: {mine}"
     body += (
-        f"\n\nlaunch with task(agent={profile.name!r}), or op='update' "
-        f"name={profile.name!r} to put your own settings back."
+        f"\n\nlaunch with task(agent={shown_name}), or op='update' "
+        f"name={shown_name} to put your own settings back."
     )
     text, spill = spill_truncate(body, "agent", context)
     return _text(tool_call_id, "agent", text, details=spill or None)
@@ -1193,6 +1213,7 @@ def write_profile(
     *,
     creating: bool,
     expected_definition_revision: str | None = None,
+    context: ToolContext | None = None,
 ) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
@@ -1228,27 +1249,33 @@ def write_profile(
         kind = params.kind or "role"
         if existing is not None:
             if kind == "role" and not is_role(existing):
-                raise ValueError(_name_taken_message(name))
+                raise ValueError(_name_taken_message(name, context=context))
             raise ValueError(
-                f"{'role' if is_role(existing) else 'agent'} {name!r} already "
+                f"{'role' if is_role(existing) else 'agent'} "
+                f"{identifier_text(context, repr(name))} already "
                 "exists; use op='update' to change it."
             )
     else:
         if existing is None:
-            raise ValueError(f"no registered profile named {name!r} to update.")
+            raise ValueError(
+                f"no registered profile named {identifier_text(context, repr(name))} " "to update."
+            )
         if is_role(existing):
             kind = "role"
             if params.kind == "specialist":
-                raise ValueError(f"{name!r} is a role; do not pass kind='specialist' to update it.")
+                raise ValueError(
+                    f"{identifier_text(context, repr(name))} is a role; do not pass "
+                    "kind='specialist' to update it."
+                )
         elif is_specialist(existing):
             kind = "specialist"
             if params.kind == "role":
-                raise ValueError(_name_taken_message(name))
+                raise ValueError(_name_taken_message(name, context=context))
         else:
             # An ordinary conversational agent is neither a role nor a
             # specialist we authored. Converting it is the fail-open hijack
             # the role tag exists to stop.
-            raise ValueError(_name_taken_message(name))
+            raise ValueError(_name_taken_message(name, context=context))
 
     # A SPECIALIST ROW CARRIES NO ROLE FIELDS, and until now the tool accepted
     # them anyway: ``tools``/``effort``/``delegate`` were merged and built into
@@ -1495,15 +1522,17 @@ async def _op_write(
     creating: bool,
 ) -> ToolResult:
     try:
-        name, kind, action_class = write_profile(_registry(context), params, creating=creating)
+        name, kind, action_class = write_profile(
+            _registry(context), params, creating=creating, context=context
+        )
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
     verb = "created" if creating else "updated"
     if kind == "role":
-        how = f"launch with task(agent={name!r})"
+        how = f"launch with task(agent={identifier_text(context, repr(name))})"
     else:
         how = (
-            f"launch with --agent {name}, or put it on a team roster; "
+            f"launch with --agent {identifier_text(context, name)}, or put it on a team roster; "
             "its instructions are the reusable base, not a team brief"
         )
     # R37: a proactive class is LOUD in the receipt — it is the difference
@@ -1522,7 +1551,7 @@ async def _op_write(
     return _text(
         tool_call_id,
         "agent",
-        f"{verb} {kind} {name!r}; {how}.{class_clause}",
+        f"{verb} {kind} {identifier_text(context, repr(name))}; {how}.{class_clause}",
         details={"name": name, "kind": kind, "class": action_class},
     )
 
