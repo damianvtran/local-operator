@@ -693,6 +693,11 @@ def _live_state(peer_row: object) -> str:
       session is ``idle``, never ``attached``.
     """
     state = str(getattr(peer_row, "state", "") or "")
+    # Mixed-version relays can forward the first reaping scan's dead record.
+    # Its cached busy bit is not evidence of current work; retain a diagnostic
+    # not-answering row until the peer next refreshes instead of inventing live.
+    if state == "stale":
+        return "wedged"
     if state in ("busy", "idle", "attached", "wedged"):
         return state
     if state == "stored":
