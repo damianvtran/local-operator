@@ -298,7 +298,12 @@ def test_http_gate_and_login_flow() -> None:
     # branch is not the default.
     assert payload["unread"] == {"count": 0, "revision": [0, 0, 0], "degraded": []}
     capabilities = payload["capabilities"]
-    assert sorted(capabilities) == ["features", "i18n", "stt"]
+    assert sorted(capabilities) == ["features", "i18n", "session_tags", "stt"]
+    # The relay capability says these routes exist in THIS build; it is a
+    # sibling of, and not a substitute for, the core feature flag (asserted
+    # as the untouched build fact it is).
+    assert capabilities["session_tags"] == {"available": True}
+    assert capabilities["features"].get("session_tags") == 1
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]

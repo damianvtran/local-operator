@@ -597,6 +597,114 @@ def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | 
     )
 
 
+def _tags_stats(root: Path) -> tuple[Any, ...]:
+    """A fingerprint of the two places a tag write lands, for stores with no
+    revision token (see :func:`_tags_marker`). STATS ONLY: this runs on the
+    scan tick and must never walk the assignment directory.
+
+    The directory's own ``st_mtime_ns`` moves when a same-directory
+    ``os.replace`` lands in it, which is how every assignment write in the
+    store is performed; the inode and size of ``categories.json`` cover a
+    rewrite that lands inside one clock tick. The residue is the same one
+    ``_refresh_pins_if_changed`` states for the pin file: two same-size
+    replaces inside a single mtime tick on a filesystem that recycles inodes
+    can fingerprint equal, and the next write that moves size or inode is what
+    picks the change up. Bounded to that burst, never unbounded.
+    """
+
+    def stat(path: Path) -> tuple[int, int, int] | None:
+        try:
+            value = path.stat()
+        except OSError:
+            return None
+        return (value.st_ino, value.st_size, value.st_mtime_ns)
+
+    return (stat(root / "tags" / "session"), stat(root / "tags" / "categories.json"))
+
+
+def _tags_marker(root: Path) -> tuple[str, Any]:
+    """The equality marker for the shared tag store on this tick.
+
+    Two shapes, and the second exists only because older readers and writers
+    coexist with this build:
+
+    * ``("revision", token)`` -- the store's own change token, bumped by every
+      real ``write_categories``/``set_entity_tags`` mutation (see
+      ``session.session_tags``). One small file read, and no false move from a
+      no-op rewrite.
+    * ``("stats", fingerprint)`` -- a store with no revision file yet, which
+      is either one no build with the marker has written or one another build
+      is writing. Such a writer cannot bump a token it does not know about, so
+      the fallback watches the filesystem directly and STILL does not scan.
+
+    Either shape is compared for equality only: a marker is never an order and
+    never a timestamp a reader may reason about.
+    """
+    from local_operator.session.session_tags import read_tags_revision
+
+    token = read_tags_revision(root)
+    if token is not None:
+        return ("revision", token)
+    return ("stats", _tags_stats(root))
+
+
+def _read_tags_projection(root: Path) -> dict[str, dict[str, Any]]:
+    """One snapshot of every conversation's tag assignment, names resolved.
+
+    The registry is read ONCE and every assignment file is projected against
+    that same list, so two names on a row can never come from two different
+    registry generations. Unknown/deleted category ids are pruned by
+    ``read_entity_tags`` rather than surfaced, which is why an operator who
+    deletes a category never sees an error on the phone.
+
+    Bounded by the store's own cap: at most 32 categories, and a session
+    directory grows one assignment file per TAGGED conversation, so this walk
+    is far smaller than the session listing it decorates. It runs ONLY when
+    the marker moved; ``SessionTable.tags_snapshot`` owns that cache.
+    """
+    from local_operator.session.session_tags import read_categories, read_entity_tags
+
+    categories = read_categories(root)
+    lookup = {tag["id"]: tag["name"] for tag in categories}
+    snapshot: dict[str, dict[str, Any]] = {}
+    for path in (root / "tags" / "session").glob("*.json"):
+        session_id = path.stem
+        # The store's own id contract; a stray file was not written by it and
+        # must not become a row's decoration.
+        if not re.fullmatch(r"[a-f0-9]{12}", session_id):
+            continue
+        try:
+            state = read_entity_tags(root, "session", session_id, categories=categories)
+        except ValueError:
+            continue
+        snapshot[session_id] = {
+            "tags": [{"id": key, "name": lookup[key]} for key in state["tags"]],
+            "primary": state["primary"],
+        }
+    return snapshot
+
+
+#: The body-shape refusal, shared by the two malformed-body branches of the tag
+#: assignment route so a client cannot tell which check fired. Store-level
+#: refusals use the STORE's sentences instead (see ``session.session_tags``),
+#: because those are the ones the desktop surface shows and the two remain one
+#: vocabulary.
+_TAG_BODY_ERROR = "tags (a list of category ids) and primary (an id or null) are required"
+
+
+def _tag_fields(projection: dict[str, dict[str, Any]], session_id: str) -> dict[str, Any]:
+    """The two ALWAYS-PRESENT row fields for one conversation.
+
+    ``[]``/``None`` is the untagged answer on every path -- a durable row, a
+    live-only row, a past/search row -- so a client never needs a presence
+    check to decide whether the conversation has tags.
+    """
+    assignment = projection.get(session_id)
+    if assignment is None:
+        return {"tags": [], "primary": None}
+    return {"tags": list(assignment["tags"]), "primary": assignment["primary"]}
+
+
 class SessionTable:
     """The daemon's whole runtime state. One instance, owned by the loop."""
 
@@ -671,6 +779,43 @@ class SessionTable:
         #: would swallow the wake; see the invariant in
         #: ``_refresh_pins_if_changed``.
         self.pins: tuple[str, ...] = ()
+        #: The tag projection for every conversation, from ONE store snapshot:
+        #: ``{session_id: {"tags": [{"id", "name"}], "primary": str | None}}``.
+        #: Kept here rather than read per row for the same reason ``pins`` is --
+        #: one read decorates the whole listing, and ``_merge_summaries`` stays
+        #: in-memory -- and rebuilt ONLY when ``_tags_token`` (the store's
+        #: equality marker, see ``_tags_marker``) moves, so the 2 s scan tick
+        #: costs one small file read rather than a directory walk.
+        self._tags_snapshot: dict[str, dict[str, Any]] | None = None
+        #: The marker the projection above was built from. ``None`` means "no
+        #: marker has ever been read", which is distinct from every real marker
+        #: (both shapes are tuples), so the first read always builds.
+        self._tags_token: tuple[str, Any] | None = None
+
+    def tags_snapshot(self) -> dict[str, dict[str, Any]]:
+        """The tag projection, rebuilt only when the store's marker moved.
+
+        BLOCKING WORK: one marker read on every call, plus ONE categories read
+        and one assignment walk only when the marker changed -- which is why
+        every async caller runs this through ``asyncio.to_thread``. The cached
+        object is returned BY IDENTITY on an unchanged marker; that identity is
+        the test that no tick rescanned the store.
+
+        The projection is keyed by session id and holds plain JSON-ready
+        values. Values are SHARED between rows and frames and must never be
+        mutated by a reader (``_tag_fields`` copies what a row carries).
+        """
+        from local_operator.paths import config_dir
+
+        root = config_dir()
+        marker = _tags_marker(root)
+        cached = self._tags_snapshot
+        if cached is not None and marker == self._tags_token:
+            return cached
+        snapshot = _read_tags_projection(root)
+        self._tags_snapshot = snapshot
+        self._tags_token = marker
+        return snapshot
 
     def invalidate_summaries_cache(self) -> None:
         """Drop both summaries caches so the next read rescans.
@@ -914,7 +1059,11 @@ class SessionTable:
                 revision = None
             else:
                 self._attention_listing_degraded = False
-            out = self._merge_summaries(rows)
+            # Warm the tag projection OFF the loop (one marker read, and the
+            # one store walk only when something really changed); the merge
+            # below is then in-memory for tags like it is for pins.
+            tags = await asyncio.to_thread(self.tags_snapshot)
+            out = self._merge_summaries(rows, tags)
             # The rows and the aggregate leave the build TOGETHER and are
             # published by the caller in ONE assignment (review round 1,
             # MINOR-1): a caller that resumes late must never publish build A's
@@ -1138,7 +1287,9 @@ class SessionTable:
         self.invalidate_summaries_cache()
         return session_id in self.pins
 
-    def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
+    def _merge_summaries(
+        self, durable: dict[str, Any], tags: dict[str, dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """Merge cached durable rows with fresh live state into summary rows.
 
         Split out of ``summaries`` so the cache layer and the row shape are
@@ -1152,7 +1303,16 @@ class SessionTable:
         skips the check: it is user-facing by the scan's own verdict, and
         re-reading its marker would be a second syscall for an answer already
         in hand.
+
+        ``tags`` is the projection to decorate rows with; the caller passes the
+        table's cached snapshot (warming it off the loop first), while the
+        default is for direct callers and does the marker read itself. Either
+        way a row ALWAYS carries ``tags``/``primary`` -- untagged is ``[]`` and
+        ``None`` -- so a client never has to distinguish "no tags" from "this
+        build does not send them".
         """
+        if tags is None:
+            tags = self.tags_snapshot()
         active: dict[str, SessionEntry] = {}
         for entry in self.entries.values():
             if entry.ended:
@@ -1247,6 +1407,9 @@ class SessionTable:
                     # in two different lists depending on where you looked.
                     "section": "active" if is_active else "previous",
                     "pinned": session_id in self.pins,
+                    # Tag decoration, from the same registry snapshot for every
+                    # row in this listing. Always present (see the docstring).
+                    **_tag_fields(tags, session_id),
                     "conversation_name": (p.conversation_name if p else "")
                     or (entry.record.conversation_name if entry else "")
                     or (row.name if row else ""),
@@ -3509,6 +3672,7 @@ class MobileDaemon:
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
+        await self.refresh_tags_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
             self._attention_revision = revision
@@ -3797,6 +3961,44 @@ class MobileDaemon:
         self.table._summaries_at = 0.0
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
         self.table.notify_list_changed()
+
+    async def refresh_tags_if_changed(self) -> None:
+        """Wake the list stream when another surface changed a conversation's tags.
+
+        THE SAME HOLE THE PINS HAD, for the same reason: assignment lives in a
+        store shared with the desktop app, the TUI and agents/auto-tagging
+        (``session.session_tags``), while the table's projection was built only
+        when something asked for the listing -- and the list stream asks only
+        after ``notify_list_changed``. So a tag written outside this daemon's
+        route would stay invisible on an open phone until an unrelated event
+        (a session registering, a completion) happened to repaint.
+
+        ONE MARKER READ PER SCAN TICK, riding the pass that already runs every
+        ``SCAN_INTERVAL_S``; the assignment directory is walked only when the
+        marker moved (see ``_tags_marker`` for both shapes and their bound).
+        The rebuild happens HERE, off the loop, rather than lazily on the next
+        repaint: that keeps a store walk out of a request's path and warms the
+        identity cache the repaint will read. On a real move it drops only the
+        MERGED summaries cache -- tags are decoration the merge recomputes, so
+        re-walking every session directory for them would be waste -- and rings
+        the list bell on the loop, where ``put_nowait`` is safe.
+
+        A NO-OP WRITE OWES NO REPAINT: the store bumps its token only on a real
+        mutation, so an identical rewrite (the TUI saving the same assignment,
+        an agent retrying a dropped response) leaves the marker still and this
+        pass silent.
+        """
+        from local_operator.paths import config_dir
+
+        table = self.table
+        marker = await asyncio.to_thread(_tags_marker, config_dir())
+        if table._tags_snapshot is not None and marker == table._tags_token:
+            return
+        await asyncio.to_thread(table.tags_snapshot)
+        table._summaries_cache = None
+        table._summaries_at = 0.0
+        # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
+        table.notify_list_changed()
 
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""
@@ -4771,7 +4973,9 @@ def build_app(daemon: MobileDaemon):
         that module so this payload's repaint cadence never becomes a
         credential-store read cadence. An OLD daemon omits the key entirely, and
         the web's rule for absence is the same as for ``available: false``:
-        hide the mic.
+        hide the mic. ``session_tags`` is the same shape for the tag routes:
+        ``{"available": true}`` because they exist in this build, absent on an
+        older relay, and never a substitute for ``features.session_tags``.
 
         ``unread`` rides beside ``degraded`` for the same single-source reason
         (push/ack-sync S1 [ADR 0006 §1.1 @22e2cce2]): it is the SAME aggregate
@@ -4789,13 +4993,20 @@ def build_app(daemon: MobileDaemon):
         # this request's answer, not the table's state.
         sessions = list(await daemon.table.summaries())
         if include_peers:
-            sessions.extend(
-                await asyncio.to_thread(
-                    mobile_mesh.remote_session_rows,
-                    config_dir(),
-                    pinned=set(daemon.table.pins),
-                )
+            peers = await asyncio.to_thread(
+                mobile_mesh.remote_session_rows,
+                config_dir(),
+                pinned=set(daemon.table.pins),
             )
+            for row in peers:
+                # Remote rows carry the local row's ALWAYS-PRESENT shape with
+                # the empty values, not an omitted key. Their assignment lives
+                # in the other device's store, so this relay has nothing to
+                # read -- and nothing to write, which is why the route below
+                # refuses a remote id with 404 rather than needing a flag.
+                row["tags"] = []
+                row["primary"] = None
+            sessions.extend(peers)
         return {
             "sessions": sessions,
             "degraded": daemon.table.listing_degraded(),
@@ -4807,6 +5018,14 @@ def build_app(daemon: MobileDaemon):
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
+                # A RELAY capability, like ``i18n``: it says this build actually
+                # serves ``GET /api/tags`` and ``PUT /api/sessions/{id}/tags``,
+                # so a client may render assignment controls only when the
+                # routes are there to back them. Deliberately NOT
+                # ``features.session_tags``: that dict describes core's
+                # contract, not this app's routing table (see the i18n note
+                # above), and the two must not be conflated.
+                "session_tags": {"available": True},
             },
         }
 
@@ -5490,6 +5709,129 @@ def build_app(daemon: MobileDaemon):
         # The caller gets the state the list will show (the read-back), so a retry
         # is idempotent and the answer cannot claim a pin the reader pruned.
         return JSONResponse({"ok": True, "pinned": state})
+
+    async def api_tags(request: Request) -> Response:
+        """``GET /api/tags`` -- the shared catalogue, READ-ONLY on the phone.
+
+        THE SAME STORE, the same wire shape as ``GET /v1/desktop/tags``: id,
+        name, registry order, and the number of conversations assigned. That
+        read is deliberately served rather than reimplemented, and there is
+        deliberately no phone-side create/rename (``PUT /api/tags``): identity
+        is a cross-surface contract, so forking category logic is how the phone
+        ends up with a tag the desktop cannot see or cannot name. Creating and
+        renaming stay where they already live -- desktop and agent callers --
+        and the phone renders what they publish.
+
+        ``conversations`` is the store's own ``usage_counts``: distinct session
+        DIRECTORIES with an assignment, archived/hidden included (they still
+        hold the assignment) and deleted excluded (an assignment file left
+        below a deleted conversation is not a conversation). The count is not
+        "rows on this phone's page", so it cannot disagree with the desktop's
+        count for the same category.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+        from local_operator.session.session_tags import read_categories, usage_counts
+
+        def read() -> dict[str, Any]:
+            counts = usage_counts(config_dir())
+            return {
+                "tags": [
+                    {**tag, "order": order, "conversations": counts.get(tag["id"], 0)}
+                    for order, tag in enumerate(read_categories(config_dir()))
+                ]
+            }
+
+        return JSONResponse(await asyncio.to_thread(read))
+
+    async def api_session_tags(request: Request) -> Response:
+        """``PUT /api/sessions/{session_id}/tags`` -- set ONE conversation's tags.
+
+        DESIRED STATE, like the pin route above and like ``PUT
+        /v1/desktop/sessions/{session_id}/tags``: the body names the whole
+        assignment (``{"tags": [ids], "primary": id | null}``) and is applied
+        atomically, so a dropped response can be retried and lands on the same
+        state. ``tags: [], primary: null`` clears, which is the one shape that
+        has to be expressible without inventing a separate verb.
+
+        Refusals, each with NO file change:
+        * 422 from the STORE's own validation -- unknown id, duplicate ids,
+          more than 8, or a primary outside ``tags`` -- using the store's
+          sentence verbatim. That sentence is what the desktop surface shows;
+          re-wording it here would be a second vocabulary for one rule.
+        * 422 for a malformed body (types only, so the store is never handed a
+          value it would raise ``TypeError`` on).
+        * 404 for an id this machine has no conversation for -- bad shape,
+          unknown, or a REMOTE/mesh id. A remote row is listed (see
+          ``_list_frame``) but its assignment lives in the other device's
+          store and this relay has no directory to write; refusing is what
+          keeps a tag from binding to a conversation this surface cannot see.
+
+        The read-back is canonical: names resolved from ONE registry snapshot
+        AFTER the write, orphan ids pruned, and the settled primary -- so the
+        client renders the answer instead of re-deriving it, and a concurrent
+        category deletion answers the assignment the store actually kept.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        # The store's own id contract. Checked before the store so a shape it
+        # would reject as ``ValueError`` is the ROUTE's documented 404 rather
+        # than a 422 about a category.
+        if not re.fullmatch(r"[a-f0-9]{12}", session_id):
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None and _durable_user_session_dir(session_id) is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
+        tag_ids = body.get("tags") if isinstance(body, dict) else None
+        primary = body.get("primary") if isinstance(body, dict) else None
+        # TYPES ONLY: every value-level rule (cap, duplicates, unknown ids,
+        # primary membership) is the store's, in the store's words.
+        if (
+            not isinstance(tag_ids, list)
+            or any(not isinstance(key, str) for key in tag_ids)
+            or (primary is not None and not isinstance(primary, str))
+        ):
+            return JSONResponse({"error": _TAG_BODY_ERROR}, status_code=422)
+        from local_operator.paths import config_dir
+        from local_operator.session.session_tags import (
+            read_categories,
+            read_entity_tags,
+            set_entity_tags,
+        )
+
+        def apply() -> dict[str, Any]:
+            root = config_dir()
+            # ``set_entity_tags`` validates EVERYTHING before it writes, so the
+            # 422 paths below leave the store byte-identical.
+            set_entity_tags(root, "session", session_id, list(tag_ids), primary)
+            categories = read_categories(root)
+            state = read_entity_tags(root, "session", session_id, categories=categories)
+            lookup = {tag["id"]: tag for tag in categories}
+            return {
+                "session_id": session_id,
+                "tags": [lookup[key] for key in state["tags"] if key in lookup],
+                "primary": state["primary"],
+            }
+
+        try:
+            state = await asyncio.to_thread(apply)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        # THE STREAM WAKE IS THE LOOP'S, never the worker's (same rule the pin
+        # route states): ``notify_list_changed`` puts onto asyncio queues. Every
+        # connected client repaints with this row's new tags, and the writer's
+        # own optimistic render is replaced by the canonical read-back above.
+        daemon.table.invalidate_summaries_cache()
+        daemon.table.notify_list_changed()
+        return JSONResponse(state)
 
     async def api_transfer_session(request: Request) -> Response:
         """``POST /api/sessions/{session_id}/transfer`` — move (or copy) one conversation.
@@ -6822,7 +7164,11 @@ def build_app(daemon: MobileDaemon):
             limit = max(1, min(int(request.query_params.get("limit", "40")), 200))
         except ValueError:
             limit = 40
-        rows, degraded = await asyncio.to_thread(_search_sessions, query, limit)
+        # The tag projection is the table's cached one, passed through the
+        # thread boundary as plain values: one store read decorates the whole
+        # page, under the same marker cache the home listing uses.
+        tags = await asyncio.to_thread(daemon.table.tags_snapshot)
+        rows, degraded = await asyncio.to_thread(_search_sessions, query, limit, tags)
         return JSONResponse({"sessions": rows, "query": query, "degraded": degraded})
 
     async def api_directories(request: Request) -> Response:
@@ -7018,7 +7364,8 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        rows, degraded = await asyncio.to_thread(_past_sessions)
+        tags = await asyncio.to_thread(daemon.table.tags_snapshot)
+        rows, degraded = await asyncio.to_thread(_past_sessions, 20, tags)
         # The same marker the home listing carries, for the same reason: this is
         # another list of the operator's conversations, and a read that failed
         # must not reach it as "there are none".
@@ -7679,6 +8026,10 @@ def build_app(daemon: MobileDaemon):
         # verdict buckets out, a no-op batch still 2xx.
         Route("/api/attention/seen", api_attention_seen_many, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
+        # Read-only catalogue + per-conversation desired-state assignment; see
+        # the handlers for why creation/rename does not exist on this surface.
+        Route("/api/tags", api_tags),
+        Route("/api/sessions/{session_id:str}/tags", api_session_tags, methods=["PUT"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(
             "/api/sessions/{session_id:str}/agents/{job_id:str}/history",
@@ -7794,7 +8145,9 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
+def _past_sessions(
+    limit: int = 20, tags: dict[str, dict[str, Any]] | None = None
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Resumable past sessions for the phone's history list.
 
     ``forked`` rides along for the same reason the TUI picker draws it: a fork
@@ -7821,17 +8174,30 @@ def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
     from local_operator.resume import recent_session_rows
     from local_operator.session.errors import SessionStoreUnavailable
 
+    # ``tags`` is the caller's cached projection, handed through the thread
+    # boundary as plain values. The default exists for direct callers/tests and
+    # reads the store here, under this function's own thread hop.
+    projection = tags if tags is not None else _read_tags_projection(config_dir())
     try:
         rows = recent_session_rows(config_dir(), limit=limit, strict=True)
     except SessionStoreUnavailable:
         logger.warning("phone history listing could not read the session store", exc_info=True)
         return [], [DEGRADED_DURABLE_LISTING]
     return [
-        {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked} for row in rows
+        {
+            "id": row.id,
+            "name": row.name,
+            "mtime": row.mtime,
+            "forked": row.forked,
+            **_tag_fields(projection, row.id),
+        }
+        for row in rows
     ], []
 
 
-def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]], list[str]]:
+def _search_sessions(
+    query: str, limit: int = 40, tags: dict[str, dict[str, Any]] | None = None
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Past sessions matching ``query`` by name, id, or conversation body.
 
     One call into ``session_search.search_store``, which is the SAME admission,
@@ -7863,6 +8229,9 @@ def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]],
     from local_operator.session.errors import SessionStoreUnavailable
     from local_operator.session.session_search import search_store
 
+    # Same snapshot contract as ``_past_sessions`` above: the route passes the
+    # table's cached projection; the default is for direct callers.
+    projection = tags if tags is not None else _read_tags_projection(config_dir())
     try:
         matches = search_store(config_dir(), query, limit=limit, strict=True)
     except SessionStoreUnavailable:
@@ -7875,6 +8244,7 @@ def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]],
             "mtime": match.row.mtime,
             "body_match": match.body_match,
             "forked": match.row.forked,
+            **_tag_fields(projection, match.row.id),
         }
         for match in matches
     ], []

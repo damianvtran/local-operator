@@ -195,3 +195,65 @@ def test_duplicate_names_are_still_refused_with_explicit_rename(tmp_path: Path) 
     with pytest.raises(ValueError):
         write_categories(tmp_path, [(old["id"], "Renamed"), (None, " renamed ")])
     assert read_categories(tmp_path) == [old]
+
+
+def test_the_revision_token_moves_only_on_real_mutations(tmp_path: Path) -> None:
+    """The change marker is what lets the phone notice a store write cheaply.
+
+    A token that moved on a NO-OP rewrite would be as bad as one that never
+    moved: every identical save the TUI or an agent retries would repaint every
+    open phone list, and the 2 s tick would do a store walk for nothing.
+    """
+    from local_operator.session.session_tags import read_tags_revision
+
+    assert read_tags_revision(tmp_path) is None
+    review = write_categories(tmp_path, [(None, "Review")])[0]
+    first = read_tags_revision(tmp_path)
+    assert isinstance(first, str) and first
+
+    # An identical re-write lands on the same bytes: no move.
+    assert write_categories(tmp_path, [(review["id"], "Review")]) == [review]
+    assert read_tags_revision(tmp_path) == first
+
+    renamed = write_categories(tmp_path, [(review["id"], "Renamed")])[0]
+    second = read_tags_revision(tmp_path)
+    assert second is not None and second != first
+
+    # Assignment writes bump too, and an identical assignment does not.
+    set_entity_tags(tmp_path, "session", SID, [renamed["id"]], renamed["id"])
+    third = read_tags_revision(tmp_path)
+    assert third is not None and third != second
+    set_entity_tags(tmp_path, "session", SID, [renamed["id"]], renamed["id"])
+    assert read_tags_revision(tmp_path) == third
+
+    # Clearing is a real mutation; a repeated clear is not.
+    set_entity_tags(tmp_path, "session", SID, [], None)
+    fourth = read_tags_revision(tmp_path)
+    assert fourth is not None and fourth != third
+    set_entity_tags(tmp_path, "session", SID, [], None)
+    assert read_tags_revision(tmp_path) == fourth
+
+    # Read/assignment semantics are untouched by the marker.
+    assert read_categories(tmp_path) == [renamed]
+    assert read_entity_tags(tmp_path, "session", SID) == {"tags": [], "primary": None}
+    assert read_categories(tmp_path) == [renamed]
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "broken",
+        "[]",
+        '{"version":2,"token":"abc"}',
+        '{"version":1,"token":123}',
+        '{"version":1,"token":""}',
+    ],
+)
+def test_missing_or_unreadable_revision_is_none(tmp_path: Path, contents: str) -> None:
+    from local_operator.session.session_tags import read_tags_revision
+
+    assert read_tags_revision(tmp_path) is None
+    path = tmp_path / "tags" / "revision"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents)
+    assert read_tags_revision(tmp_path) is None
