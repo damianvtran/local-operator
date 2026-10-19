@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_chec
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     AgentMessage,
     AskUserFn,
-    EFFORT_CHOICE_UNSET,
     EventHandler,
     ImageContent,
     Message,

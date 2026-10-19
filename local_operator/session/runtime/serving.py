@@ -5146,22 +5146,19 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
-        elif (
-            current is not None
-            and (
-                (
-                    current.reasoning_effort
-                    and current.reasoning_effort != current.reasoning_default_effort
-                )
-                # OR THE CONVERSATION'S HELD CHOICE, which is the half that was
-                # missing. A trip through a route that cannot express the level
-                # leaves the SPEC at ``None``; the choice is still real (see
-                # ``Session.chosen_effort``), and a switch made from that route
-                # used to arrive here with nothing to carry and fall to the new
-                # model's seed — the observed "switch away from an aggregator and
-                # Max becomes High".
-                or getattr(self._session, "chosen_effort", None)
+        elif current is not None and (
+            (
+                current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
             )
+            # OR THE CONVERSATION'S HELD CHOICE, which is the half that was
+            # missing. A trip through a route that cannot express the level
+            # leaves the SPEC at ``None``; the choice is still real (see
+            # ``Session.chosen_effort``), and a switch made from that route
+            # used to arrive here with nothing to carry and fall to the new
+            # model's seed — the observed "switch away from an aggregator and
+            # Max becomes High".
+            or getattr(self._session, "chosen_effort", None)
         ):
             # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
             #

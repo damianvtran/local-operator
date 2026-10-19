@@ -65,8 +65,7 @@ def _rows(session: Session) -> list[dict[str, Any]]:
     return [
         entry.payload["details"]
         for entry in session._transcript.entries()
-        if entry.type == "custom"
-        and entry.payload.get("custom_type") == SELECTED_MODEL_CUSTOM_TYPE
+        if entry.type == "custom" and entry.payload.get("custom_type") == SELECTED_MODEL_CUSTOM_TYPE
     ]
 
 
@@ -152,9 +151,7 @@ async def test_max_survives_a_fallback_that_cannot_express_it(tmp_path):
     resumed.subscribe(events.append)
     assert resumed.model.reasoning_effort == "max"
 
-    await resumed._on_route_settled(
-        FallbackTarget("openai/gpt-5"), "provider failure: quota"
-    )
+    await resumed._on_route_settled(FallbackTarget("openai/gpt-5"), "provider failure: quota")
 
     # What is serving is the clamped level; what the conversation CHOSE is max.
     assert resumed.effective_model.reasoning_effort == "xhigh"
@@ -192,9 +189,7 @@ async def test_a_restart_during_a_fallback_restores_the_chosen_level(tmp_path):
     session.set_model(
         session.model.model_copy(update={"reasoning_effort": "max"}), effort_choice="max"
     )
-    await session._on_route_settled(
-        FallbackTarget("openai/gpt-5"), "provider failure: quota"
-    )
+    await session._on_route_settled(FallbackTarget("openai/gpt-5"), "provider failure: quota")
     await session.dispose()
 
     resumed = _session(tmp_path, NotifyingStream())
@@ -264,9 +259,7 @@ async def test_a_withdrawal_row_is_not_a_choice_on_another_model(tmp_path):
             "boot": "openai/gpt-6.1-sol",
         },
     )
-    birth = build_model_spec("openai", "gpt-6.1-sol").model_copy(
-        update={"reasoning_effort": "max"}
-    )
+    birth = build_model_spec("openai", "gpt-6.1-sol").model_copy(update={"reasoning_effort": "max"})
     session = Session(
         model=birth,
         stream_fn=NotifyingStream(),
