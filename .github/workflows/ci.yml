@@ -856,7 +856,27 @@ jobs:
     # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
     # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
     # unchanged; this is scheduling headroom, not a test-failure waiver.
-    timeout-minutes: 31
+    #
+    # 31 -> 32 on 2026-10-19, because the guard itself went RED on `main` and
+    # on the release branch, and that is the guard working rather than the
+    # guard being wrong. The unit tree grew again: 1701 files, heaviest shard
+    # 7220.4030s of serial weight, 1805.1008s on 4 workers, against a 1800s
+    # budget at 31 minutes (31*60 less the 60s job overhead) -- a margin of
+    # -5.1008s. `test_each_shard_job_timeout_exceeds_its_projected_wall[test]`
+    # therefore failed on every run of this tree.
+    #
+    # 32 gives 1860s, a margin of +54.8992s, and 32 is the guard's own
+    # minimum, ceil((1805.1008 + 60)/60). The bound stays expressed against
+    # SERIAL WEIGHT rather than a recorded wall, and it was NOT loosened to
+    # make the assertion pass: the CEILING moved to the work, not the bound to
+    # the ceiling.
+    #
+    # The alternative -- more shards -- was measured and rejected. Six shards
+    # put the heaviest at 6017.0s (1504.3s on 4 workers) and would fit a
+    # 27-minute ceiling, but they add a sixth job to EVERY run, and a sixth
+    # job per run is exactly the cost this repository is trying to stop
+    # paying (see the account-wide fan-out notes on `tui-e2e` below).
+    timeout-minutes: 32
     strategy:
       fail-fast: false
       matrix:
