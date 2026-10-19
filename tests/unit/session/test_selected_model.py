@@ -368,6 +368,30 @@ async def test_an_unresolvable_selection_falls_back_to_the_boot_model(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_dropped_selection_does_not_donate_its_level(tmp_path):
+    """A row the host cannot resolve is dropped WHOLE — its level included.
+
+    The session stays on the birth model, so a level recorded for a model that
+    no longer exists says nothing about the conversation it is actually on.
+    Recovering it (the pre-round-3 behaviour compared the row against the birth
+    spec) made a withdrawal on the vanished model ride every later switch as a
+    phantom choice (review round 3, M6).
+    """
+    birth = MODEL.model_copy(update={"reasoning_effort": "max"})
+    session = _session(tmp_path, NotifyingStream(), model=birth)
+    await session._transcript.append_custom(
+        SELECTED_MODEL_CUSTOM_TYPE,
+        {"selector": "no-such-provider/no-such-model", "effort": "max", "boot": "test/m"},
+    )
+    await session.dispose()
+
+    resumed = _session(tmp_path, NotifyingStream(), model=birth)
+    assert resumed.model_label == "test/m"
+    assert resumed.chosen_effort is None, "a dropped row donated its level"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "details",
     [
