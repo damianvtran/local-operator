@@ -7821,7 +7821,9 @@ def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
     gate that refused them would strand the pad's owner. Two no-growth shapes
     are exempt so the gate refuses only commands that ADD bytes: an ``mv`` whose
     sources and destination are all inside the pad (a rename), and a
-    ``mkdir``/``touch`` target that already exists as a directory. The pad's two
+    ``mkdir``/``touch`` target that already exists as an entry. Both exemptions
+    are PRECHECK-ONLY (review round 3, R3-1): the post-hoc shape audit still
+    sees the destination and reports a refused name it left behind. The pad's two
     known spellings are expanded before the walk, and a ``cd``/``pushd`` into
     the pad makes the relative creating operands that follow pad-relative
     (review round 1 M1: ``cd "<pad>" && mkdir d`` was the bypass).
@@ -8096,7 +8098,12 @@ def _bash_created_entries(
             if operands:
                 destination = resolved(operands[-1])
                 sources = tuple(resolved(source) for source in operands[:-1])
-                if pad is not None and name == "mv" and _pad_only_rename(destination, sources, pad):
+                if (
+                    exempt_no_growth
+                    and pad is not None
+                    and name == "mv"
+                    and _pad_only_rename(destination, sources, pad)
+                ):
                     continue
                 yield destination, sources
         elif mode == "template":
@@ -8146,12 +8153,16 @@ def _pad_existing_entry(candidate: str, pad: Path, *, allow_file: bool) -> bool:
     ``touch`` through a dangling link can create its target outside the pad, and
     the gate cannot judge where that lands.
     """
+    # BEFORE any resolve: ``_pad_target`` follows the link, which would erase
+    # the very fact this guard exists to see (review round 3, R3-2). ``touch``
+    # through a symlink can create its target outside the pad; only a real
+    # existing entry is a no-op.
+    if os.path.islink(candidate):
+        return False
     target = _pad_target(candidate, pad)
     if target is None or not scratchpad_contains(target, pad):
         return False
     try:
-        if target.is_symlink():
-            return False
         return target.is_dir() or (allow_file and target.is_file())
     except OSError:
         return False
