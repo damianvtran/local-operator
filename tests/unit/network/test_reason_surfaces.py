@@ -248,6 +248,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
     ),
+    # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
+    # from ``placement.grant_key_set`` and this handler's ``local-only`` check in
+    # process (``no_local_credential``, ``local_only``, ...); ``--json`` carries
+    # them as machine tokens and the human line only counts them. No peer prose
+    # can reach this read.
+    ("local_operator/network/cli.py", "_cmd_mcp_credentials", "reason"): (
+        1,
+        "this device's own grant-skip code, carried in --json as a machine token",
+    ),
+    # ``_dedupe_skip_rows`` reads the same local code only to form the dedupe
+    # identity: compared, never rendered.
+    ("local_operator/network/cli.py", "_dedupe_skip_rows", "reason"): (
+        1,
+        "the same local skip code, compared for deduplication — never rendered",
+    ),
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
         1,
         "the peer's own conflict sentence, printed verbatim",
