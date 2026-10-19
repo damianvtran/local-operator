@@ -90,11 +90,13 @@ CARRIED_ASKS_LIMIT = 50
 #: How many decision facts a pass may carry, newest first.
 #:
 #: **This is a RECENCY window, not supersession.** The memory layer has no
-#: supersession tracking over decision content: it records an explicit
-#: ``replaces`` edge and a manual ``status`` value of ``superseded``, but
-#: nothing derives which decision supersedes which, so "current" cannot be
-#: computed. A decision a later one contradicts may still appear in this list.
-#: Callers must treat it as "most recently written", never "in force".
+#: DERIVATION of supersession: the ``replaces`` edge parents the new op and
+#: nothing propagates it to the target, no content is compared, so "current"
+#: cannot be computed and a decision a later one contradicts may still appear.
+#: What IS excluded is what the store has been TOLD is dead — a past
+#: ``expires_at``, an ``expired`` status, a ``superseded`` status — because
+#: that needs no inference. Callers must treat the rest as "most recently
+#: written", never "in force".
 CARRIED_DECISIONS_LIMIT = 20
 
 #: The synthetic row's id IS this prefix (the cut-point predicate matches by
@@ -245,8 +247,10 @@ def read_recent_decisions(
     payload shape.
 
     **RECENCY, NOT SUPERSESSION.** See :data:`CARRIED_DECISIONS_LIMIT`: the
-    memory layer cannot say which decision is current, so this returns the
-    most recently created ones and a superseded decision may still appear.
+    memory layer cannot DERIVE which decision is current, so this returns the
+    most recently created ones and a contradicted decision may still appear.
+    Facts the store is explicitly told are dead (past ``expires_at``,
+    ``expired``, ``superseded``) are filtered by :meth:`MemoryStore.tagged`.
 
     Any failure -> carry nothing. Memory is an enhancement to a compaction
     pass, never a condition of one.

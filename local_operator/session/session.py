@@ -73,7 +73,6 @@ from local_operator.compaction.carry import (
     render_carried_tier,
 )
 from local_operator.compaction.cutpoint import (
-    CARRIED_TIER_ID_PREFIX,
     ELISION_GENUINE_COUNT_KEY,
     ELISION_INJECTION_COUNT_KEY,
     PRESERVED_TURN_ELISION_ID,
@@ -1824,10 +1823,11 @@ def _is_persistable_message(message: AgentMessage) -> bool:
     # The carried tier is synthesized on BOTH paths from the marker payload.
     # Journalling it would put a copy inside the replayed suffix, and the next
     # resume would re-inject the payload copy too — the exact duplication that
-    # doubled the elision notice (6 -> 7,167). Excluded by id here and dropped
-    # from the kept window at the commit; one guard failing silently is what
-    # produced that defect.
-    if message.id.startswith(CARRIED_TIER_ID_PREFIX):
+    # doubled the elision notice (6 -> 7,167). The predicate, not a local id
+    # check: it is the SAME test the cut walker and the kept-window filter use,
+    # and a guard that recognises less than its siblings is how a payload-flag
+    # copy would slip through one of the three.
+    if is_carried_tier(message):
         return False
     return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
