@@ -43796,12 +43796,10 @@ class OperatorApp(App[None]):
             destination = restored or "auto"
             scope = "(the model's own default)" if restored else "(nothing sent)"
             if restored == current:
-                # THE LEVEL DID NOT MOVE, BUT THE CHOICE MAY HAVE. A spec
-                # already sitting on its seed can still be holding a chosen
-                # level that a narrower route clamped onto the seed; the no-op
-                # voice must not skip the withdrawal, or that held level comes
-                # back on the next switch (review round 1, M3).
-                self._apply_effort(restored, remember=False)
+                # THE LEVEL DID NOT MOVE, BUT THE CHOICE MAY HAVE — and the
+                # `_apply_effort(..., remember=False)` above already carried the
+                # WITHDRAWAL to the session even when the spec did not move
+                # (review round 1, M3). Only the receipt differs here.
                 notice(f"reasoning effort: already {destination} {scope}")
                 return
             # U2: the withdrawal is CONVERSATION-scoped and the user is told the one
