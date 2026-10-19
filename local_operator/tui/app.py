@@ -20750,7 +20750,7 @@ class OperatorApp(App[None]):
             translate = tr("tui.team_authoring")
             if verb.casefold() == "new" and rest.strip():
                 self._system_notice(translate(keys.usage_new()), "warning")
-            elif verb.casefold() == "edit" and not rest.strip():
+            elif verb.casefold() == "edit" and len(rest.split()) != 1:
                 self._system_notice(translate(keys.usage_edit()), "warning")
             else:
                 self._open_team_form(
@@ -36802,8 +36802,11 @@ class OperatorApp(App[None]):
             return
         from local_operator.paths import config_dir
 
-        # One mode at a time: the settings page's close is the single teardown
-        # seam its siblings share, and it now closes this page too.
+        # Authoring pages have their own draft/composer ownership; the shared
+        # settings teardown only owns read-only sibling pages. Reclaim both
+        # forms before the library borrows the same full-page region.
+        self._close_agent_form()
+        self._close_team_form()
         self._close_settings_view()
         self._library_focus_restore = self.focused
         view = LibraryView(config_dir())
@@ -37372,6 +37375,10 @@ class OperatorApp(App[None]):
         from local_operator.i18n.keys import tui_team_authoring as keys
         from local_operator.i18n.text import tr
         from local_operator.teams import TeamEditFields
+        from local_operator.types import (
+            TeamRegistryLockTimeout,
+            TeamRegistryRecoveryError,
+        )
 
         page = self._team_form
         if page is None or page.refuse_read_only():
@@ -37395,6 +37402,17 @@ class OperatorApp(App[None]):
                 )
         except DefinitionRevisionMismatch:
             page.receipt(translate(keys.revision_changed()))
+            return
+        except KeyError:
+            # IDs, not names, identify an edited definition. A peer can delete
+            # it and even reuse its name while this draft stays on screen;
+            # never redirect that stale draft into the replacement row.
+            page.receipt(translate(keys.missing(name=draft.name)))
+            return
+        except (TeamRegistryRecoveryError, TeamRegistryLockTimeout) as exc:
+            # Recovery/lock refusals are durable-store state, not field errors.
+            # Keep the draft available for retry without crashing the key pump.
+            page.receipt(translate(keys.save_error(reason=str(exc))))
             return
         except (ValueError, OSError) as exc:
             # Registry uniqueness is authoritative. Keep its reason visible and

@@ -107,15 +107,24 @@ class TeamFormPage(Vertical):
         self._question.display = False
         self._receipt = Static("", classes="projects-form-error", markup=False)
         self._receipt.display = False
+        self._heading = Static("", classes="projects-form-label", markup=False)
+
+    def _sync_heading(self) -> None:
+        # The name is an unbreakable registry key. Rich wrapping would move it
+        # into a clipped second row of this deliberately one-row page heading.
+        title = Text(
+            _t(_x.edit(name=self.opening.name)) if self.initial else _t(_x.create()),
+            style=self._ink("muted"),
+            no_wrap=True,
+        )
+        title.truncate(max(1, self.content_size.width), overflow="ellipsis")
+        self._heading.update(title)
+
+    def on_resize(self) -> None:
+        self._sync_heading()
 
     def compose(self):
-        yield Static(
-            Text(
-                _t(_x.edit(name=self.opening.name)) if self.initial else _t(_x.create()),
-                style=self._ink("muted"),
-            ),
-            classes="projects-form-label",
-        )
+        yield self._heading
         with self._fields:
             yield from self.blocks.values()
         yield self._receipt
@@ -123,6 +132,7 @@ class TeamFormPage(Vertical):
         yield Static(_t(_x.legend()), classes="projects-form-hint", markup=False)
 
     def on_mount(self) -> None:
+        self._sync_heading()
         self.call_after_refresh(self._focus_opening)
 
     def _focus_opening(self) -> None:
@@ -231,9 +241,14 @@ class TeamFormPage(Vertical):
                 "invalid_aliases": _x.invalid_aliases,
             }
             block = self.blocks[plan.error_field]
-            block.set_error(_t(codes[plan.error_code]()))
+            sentence = _t(codes[plan.error_code]())
+            block.set_error(sentence)
+            # A wrapped hint can push the adjacent error below a narrow
+            # viewport. Pin the same refusal outside that viewport as well;
+            # scroll only after layout includes both newly visible receipts.
+            self.receipt(sentence)
             block.control.focus()
-            block.scroll_visible()
+            self.call_after_refresh(block.scroll_visible, animate=False)
             return
         if not plan.changes:
             self.receipt(_t(_x.no_change()))

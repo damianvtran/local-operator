@@ -177,7 +177,7 @@ async def test_clean_ctrl_c_closes(tmp_path, monkeypatch):
         assert app._last_interrupt_at == 0.0
 
 
-@pytest.mark.parametrize("mode", ["projects", "settings", "agent"])
+@pytest.mark.parametrize("mode", ["projects", "settings", "agent", "library"])
 async def test_sibling_replacement(tmp_path, monkeypatch, mode):
     _session, app = setup(tmp_path, monkeypatch)
     async with app.run_test(size=(60, 24)) as pilot:
@@ -396,3 +396,175 @@ async def test_registry_disappearing_during_draft_refuses(tmp_path, monkeypatch)
         assert "No team registry" in str(page._receipt.render())
         assert page.controls["instructions"].text == "Keep this draft."
         assert app._team_form is page
+
+
+@pytest.mark.parametrize("replace_name", [False, True])
+async def test_concurrent_delete_refuses_without_touching_replacement(
+    tmp_path, monkeypatch, replace_name
+):
+    session, app = setup(tmp_path, monkeypatch)
+    original = session.team_registry.create_team(
+        TeamEditFields(name="crew", instructions="Original")
+    )
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot, "/team edit crew")
+        page.controls["description"].value = "Retained draft"
+        peer = TeamRegistry(tmp_path)
+        peer.delete_team(original.id)
+        replacement = (
+            peer.create_team(TeamEditFields(name="crew", instructions="Replacement"))
+            if replace_name
+            else None
+        )
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app._team_form is page
+        assert not app._exit
+        assert "No installed team named crew" in str(page._receipt.render())
+        assert page.controls["description"].value == "Retained draft"
+        current = TeamRegistry(tmp_path).get_team_by_name("crew")
+        if replacement is None:
+            assert current is None
+        else:
+            assert current is not None
+            assert current.id == replacement.id != original.id
+            assert current.instructions == "Replacement"
+            assert current.description == ""
+
+
+@pytest.mark.parametrize("failure", ["recovery", "lock"])
+async def test_registry_store_refusal_retains_draft(tmp_path, monkeypatch, failure):
+    from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryError
+
+    session, app = setup(tmp_path, monkeypatch)
+    session.team_registry.create_team(TeamEditFields(name="crew", instructions="Original"))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot, "/team edit crew")
+        page.controls["description"].value = "Retained draft"
+
+        def refuse(*args, **kwargs):
+            error = TeamRegistryRecoveryError if failure == "recovery" else TeamRegistryLockTimeout
+            raise error("synthetic store refusal")
+
+        monkeypatch.setattr(session.team_registry, "update_team", refuse)
+        await pilot.press("ctrl+s")
+        assert app._team_form is page
+        assert "Could not save:" in str(page._receipt.render())
+        assert "synthetic store refusal" in str(page._receipt.render())
+        assert page.controls["description"].value == "Retained draft"
+        assert not app._exit
+
+
+async def test_edit_extra_arguments_refuse_before_open(tmp_path, monkeypatch):
+    session, app = setup(tmp_path, monkeypatch)
+    session.team_registry.create_team(TeamEditFields(name="crew"))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/team edit crew extra")
+        await pilot.pause()
+        assert app._team_form is None
+        assert "Use /team edit <name>." in _notices(app)[-1]
+
+
+@pytest.mark.parametrize(
+    "field,value", [("members", "coder:no"), ("aliases", "one,,two"), ("instructions", "")]
+)
+async def test_narrow_validation_pins_actionable_refusal(tmp_path, monkeypatch, field, value):
+    _session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot)
+        page.controls["name"].value = "crew"
+        page.controls["instructions"].text = "Retain draft"
+        control = page.controls[field]
+        if field == "instructions":
+            control.text = value
+        else:
+            control.value = value
+        control.focus()
+        page.blocks[field].scroll_visible()
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.blocks[field].error
+        assert page.blocks[field].error in str(page._receipt.render())
+        assert page._receipt.display
+        assert page._receipt.region.y >= page._fields.region.bottom
+        assert page._receipt.region.bottom <= app.query_one("#input-dock").region.y
+        assert app.focused is control
+        assert app._team_form is page
+        assert not page._fields.show_horizontal_scrollbar
+
+
+async def test_narrow_long_name_heading_is_bounded_not_wrapped(tmp_path, monkeypatch):
+    session, app = setup(tmp_path, monkeypatch)
+    name = "delivery-team-with-a-very-long-name-for-testing-layout-overflow"
+    session.team_registry.create_team(TeamEditFields(name=name, instructions="Help."))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot, "/team edit " + name)
+        title = str(page._heading.render())
+        assert "delivery-team" in title
+        assert title.endswith("…")
+        assert page._heading.region.height == 1
+        assert len(title) <= page._heading.region.width
+        page.controls["project"].focus()
+        page.blocks["project"].scroll_visible()
+        await pilot.pause()
+        assert "delivery-team" in str(page._heading.render())
+
+
+async def test_team_tree_keeps_dirty_agent_interrupt_on_agent_page(tmp_path, monkeypatch):
+    _session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        await open_form(app, pilot)
+        app._run_slash_command("/agent new")
+        await pilot.pause()
+        await pilot.pause()
+        page = app._agent_form
+        assert page is not None
+        assert app._team_form is None
+        page.controls["instructions"].text = "Retain the agent draft"
+        await pilot.press("ctrl+c", "ctrl+c", "ctrl+c")
+        assert page._confirm
+        assert app._agent_form is page
+        assert not app._exit
+        assert app._last_interrupt_at == 0.0
+        await pilot.press("enter")
+        assert not page._confirm
+        assert page.controls["instructions"].text == "Retain the agent draft"
+        await pilot.press("ctrl+c", "Y")
+        assert app._agent_form is None
+
+
+@pytest.mark.parametrize("kind", ["agent", "team"])
+async def test_library_and_authoring_keep_single_page_owner(tmp_path, monkeypatch, kind):
+    _session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        app._open_library_view()
+        await pilot.pause()
+        library = app._library_view
+        assert library is not None
+        app._run_slash_command(f"/{kind} new")
+        await pilot.pause()
+        await pilot.pause()
+        page = getattr(app, f"_{kind}_form")
+        assert page is not None
+        assert app._library_view is None
+        assert not library.is_attached
+        app._open_library_view()
+        await pilot.pause()
+        await pilot.pause()
+        assert getattr(app, f"_{kind}_form") is None
+        assert not page.is_attached
+        assert app._library_view is not None
+        app._close_library_view()
+        await pilot.pause()
+        assert app._editor().can_focus
+        assert app.focused is app._editor()
+        assert app._transcript_view().display
