@@ -1246,7 +1246,15 @@ def wake_display_name(wake_id: str) -> str:
     try:
         from local_operator.aida import proactive as aida_proactive
 
-        return aida_proactive.wake_display_label(wake_id)
+        label = aida_proactive.wake_display_label(wake_id)
+        if label != wake_id:
+            return label
+        # THE LIBRARIAN'S ROWS ride the same one-lookup contract: Aida's mapper
+        # answers unknown ids with the id itself, so an unchanged answer is the
+        # hand-off point, not a fallback.
+        from local_operator.librarian import proactive as librarian_proactive
+
+        return librarian_proactive.wake_display_label(wake_id)
     except Exception:  # noqa: BLE001 — a label is never worth a receipt
         return wake_id
 

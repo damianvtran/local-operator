@@ -2668,6 +2668,46 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
     ),
+    # The Librarian's small stores and her create-failure cleanup: the same
+    # shapes, the same arguments as Aida's block above.
+    (
+        "local_operator/librarian/state.py::write_json",
+        "os.replace",
+        "tmp FILE -> <config_dir>/librarian/*.json FILE; librarian-derived, never sessions/",
+    ),
+    (
+        "local_operator/librarian/state.py::write_json",
+        "os.unlink",
+        "clears the mkstemp FILE this call just wrote, on the failure path",
+    ),
+    (
+        "local_operator/librarian/state.py::clear_extras",
+        "<path>.unlink",
+        "removes the <config_dir>/librarian/extras.json tray FILE after processing it",
+    ),
+    (
+        "local_operator/librarian/bootstrap.py::_discard_failed_create",
+        "shutil.rmtree",
+        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
+    ),
+    (
+        "local_operator/librarian/proactive.py::reconcile",
+        "<path>.remove",
+        "list.remove on the IN-MEMORY schedule list when it exceeds the cap; no path",
+    ),
+    # The Library packages (backend core) write only under <config>/cache/library:
+    # the derived index's atomic replace and a thumbnail cache temp file. Neither
+    # builds a path from a session id or a caller-supplied directory.
+    (
+        "local_operator/library/index.py::_write",
+        "os.replace",
+        "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
+    ),
+    (
+        "local_operator/library/service.py::thumbnail",
+        "os.replace",
+        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
+    ),
     (
         "local_operator/evaluation/session_arm.py::declare_action_server",
         "<path>.replace",

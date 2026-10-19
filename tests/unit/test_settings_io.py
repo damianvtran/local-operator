@@ -414,6 +414,17 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
     consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
+    # The Librarian keys, asked of the package that reads them — the same split
+    # and the same reason as the Aida block above.
+    from local_operator.librarian import bootstrap as librarian_bootstrap
+    from local_operator.librarian import proactive as librarian_proactive
+
+    consumers["librarian.enabled"] = librarian_proactive.DEFAULT_ENABLED
+    consumers["librarian.name"] = librarian_bootstrap.SESSION_TITLE
+    consumers["librarian.cadence.at"] = librarian_proactive.DEFAULT_CADENCE_AT
+    consumers["librarian.cadence.paused"] = librarian_proactive.DEFAULT_PAUSED
+    consumers["librarian.cadence.max_extra_per_day"] = librarian_proactive.DEFAULT_MAX_EXTRA_PER_DAY
+    consumers["librarian.cadence.min_gap_minutes"] = librarian_proactive.DEFAULT_MIN_GAP_MINUTES
 
     # The wake-trigger keys, asked of the layer that reads them
     # (``local_operator/wakes/triggers/``). The registry rows carry literals
@@ -982,6 +993,7 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # arbitrary "round-trip-probe" spelling would do fine — but a real name
     # keeps the sample honest about what the field carries).
     settings_io._validate_aida_name: "Sovereign",
+    settings_io._validate_librarian_name: "Archivist",
     # A subagent tier's ordinary form is still a bare selector (#2428 adds the
     # ``{model, effort}`` mapping beside it; test_config covers that form).
     settings_io.validate_tier_value: "openai/gpt-5-mini",

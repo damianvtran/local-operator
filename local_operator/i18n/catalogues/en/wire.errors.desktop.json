@@ -46,6 +46,8 @@
   "wire.errors.desktop.library_tag_limit": "An asset may carry at most {max} tags.",
   "wire.errors.desktop.library_tag_name": "Tag names are 1-24 characters: {name}.",
   "wire.errors.desktop.library_tag_unknown": "That tag is not in the Library.",
+  "wire.errors.desktop.librarian_bootstrap_failed": "The Librarian's session could not be created; try again (see the logs).",
+  "wire.errors.desktop.librarian_disabled": "The Librarian is disabled on this backend, so {op} did nothing. Enable her with librarian.enabled (or unset LOCAL_OPERATOR_NO_LIBRARIAN) and try again.",
   "wire.errors.desktop.masked_credential_form": "Enter credentials in the masked credential form, not command text",
   "wire.errors.desktop.move_failed": "cannot move to {requested}: {error}",
   "wire.errors.desktop.packaged_profile_not_found": "Packaged profile not found",
