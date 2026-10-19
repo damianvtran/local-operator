@@ -153,7 +153,8 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # carried only now that its audit row exists (the carried-namespace gate
     # un-ships a locale for an unaudited file); `tui.projects_edit` is P2's
     # audited namespace, carried the same way on top of the union. P3a adds
-    # `tui.authoring` only after its independent 40-key audit passed.
+    # `tui.authoring` only after its independent 40-key audit passed. P3b adds
+    # `tui.team_authoring` after its independent 35-key audit passed.
     locale = "hi"
     namespaces = (
         "tui.authoring",
@@ -161,6 +162,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "tui.review",
         "tui.schedule",
         "tui.status",
+        "tui.team_authoring",
         "tui.transcript",
         "tui.welcome",
         "wire.errors",

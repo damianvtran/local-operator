@@ -22,7 +22,7 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # TWENTY: the original union plus the independently audited P3a namespace.
+    # TWENTY-ONE: the union plus independently audited P3a/P3b namespaces.
     # Base is twelve (the Wave-3 ten retain their audited source pins). Main
     # added a wire.settings row for the hub-setting deletion and the LOH-19
     # review slice added a tui.review row; the earlier branch added a
@@ -35,7 +35,8 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # audit — NINETEEN plus one. Keep the cardinality pin: adding an audited union must not
     # silently admit an unrelated held namespace or discard the previous audit
     # history.
-    assert len(hindi) == 20
+    # P3b adds its 35-key tui.team_authoring namespace after independent audit.
+    assert len(hindi) == 21
     assert all(entry["status"] == "passed" for entry in hindi)
 
 
