@@ -68,6 +68,24 @@
     "maxCells": 24,
     "note": "The narrow rung of `unpriced_failed`, used when the table's note budget cannot fit the widest spelling. It must still state the billing consequence on its own, without the failure clause. Zero ICU arguments; one short fragment, never a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   },
+  "tui.small.spend.unpriced_failed_mixed": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 30,
+    "note": "The widest rung for a MIXED spend row: stated money plus one or more failed attempts. It must say the failed attempt added NO CHARGE as an increment, not that the priced group was unbilled (design round 1, D-1). It is never used on a failed-only row, whose own ladder says the request failed and was not billed. Zero ICU arguments; the middle words are literal and must not be reordered into a whole-row claim. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_mixed_mid": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 24,
+    "note": "The 24-cell rung of `unpriced_failed_mixed`: the failed attempt's incremental charge is zero, shown as `+$0`. The `+` is deliberate — it names the increment, not a measured total — and the row's own money cell still shows the stated amount. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_failed_mixed_short": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 12,
+    "note": "The 12-cell rung of `unpriced_failed_mixed`, for an 80x24 terminal's 12-cell note budget. It must fit whole and still attribute the zero to the failed attempt rather than the priced group. Zero ICU arguments; one short fragment. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
   "tui.small.spend.unpriced_cancelled_wide": {
     "role": "session-spend row note",
     "tone": "plain, factual",
@@ -85,6 +103,12 @@
     "tone": "plain, factual",
     "maxCells": 24,
     "note": "The narrow rung of `unpriced_cancelled`, used when the table's note budget cannot fit the wider spelling. It must still state the possible charge on its own. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_cancelled_shortest": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 12,
+    "note": "The 12-cell rung for a cancelled spend row: the amount that would have been billed is unknown. It exists so the cancellation reason survives an 80x24 terminal's 12-cell note budget instead of shedding entirely (design round 1, D-2). It must not read as a measured zero; the money cell keeps `$—`. Zero ICU arguments; one short fragment, never a sentence. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   },
   "tui.small.spend.unpriced_ok": {
     "role": "session-spend row note",
@@ -109,6 +133,12 @@
     "tone": "plain, factual",
     "maxCells": 15,
     "note": "The narrow rung of `unpriced_partial`, used when the table's note budget cannot fit the wider spelling. It must still say some spend has no figure. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.unpriced_partial_shortest": {
+    "role": "session-spend row note",
+    "tone": "plain, factual",
+    "maxCells": 12,
+    "note": "The 12-cell rung for a partial spend row: some of the row's requests have no stated figure, so the money shown is a lower bound. It exists so the partial reason survives an 80x24 terminal's 12-cell note budget (design round 1, D-2). The row keeps its `+` mark; this is not a zero. Zero ICU arguments; one short fragment. Zero ICU arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   },
   "tui.small.timing.no_samples": {
     "role": "session timing table cell",

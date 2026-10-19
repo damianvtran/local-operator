@@ -1252,9 +1252,15 @@ def _row_note_candidates(row: dict[str, Any]) -> list[str]:
     mixed row (``failed · not billed · billed`` describes the failed attempt and
     the successful one in the same breath), so the reason is not combined with
     the basis or unit count. Rows without a reason keep the basis-tag ladder.
+
+    A MIXED row (stated money plus failed attempts) gets its own ladder: the
+    note must describe the failed attempt's INCREMENT, never label the priced
+    group as unbilled (design round 1, D-1).
     """
     reason = str(row.get("unpriced_reason") or "")
-    reason_rungs = _reason_rungs(reason)
+    reason_rungs = _reason_rungs(
+        reason, amount_known=_as_micro(row.get("amount_micro")) is not None
+    )
     if reason_rungs:
         return list(reason_rungs)
     rungs = _basis_rungs(
@@ -1271,16 +1277,26 @@ def _row_note_candidates(row: dict[str, Any]) -> list[str]:
     return candidates
 
 
-def _reason_rungs(reason: str) -> tuple[str, ...]:
+def _reason_rungs(reason: str, *, amount_known: bool) -> tuple[str, ...]:
     """The note ladder for one ``unpriced_reason``, widest first.
 
     Built at call time rather than module load so the strings resolve through
-    the active locale. Each ladder carries a rung short enough for the
-    canonical 83-cell card's 24-cell note budget, so a specific explanation
-    never sheds WHOLE at the width where the generic tag used to survive
-    (design round 1, D1/D6).
+    the active locale. Each ladder carries rungs down to the 12-cell budget of
+    an 80x24 terminal's 65-cell body, so a specific explanation never sheds
+    WHOLE: the generic tag used to survive at that width while an outcome- or
+    cancellation-specific reason vanished (design round 1, D-2).
+
+    ``amount_known`` separates a failed-only group from a mixed one. A mixed
+    row's note says the failed attempt added no charge; it must NOT say
+    "not billed", which would read as the priced group's disposition (D-1).
     """
     if reason == UNPRICED_FAILED_NOT_BILLED:
+        if amount_known:
+            return (
+                _t(copy.spend_unpriced_failed_mixed()),
+                _t(copy.spend_unpriced_failed_mixed_mid()),
+                _t(copy.spend_unpriced_failed_mixed_short()),
+            )
         return (
             _t(copy.spend_unpriced_failed_wide()),
             _t(copy.spend_unpriced_failed()),
@@ -1291,11 +1307,16 @@ def _reason_rungs(reason: str) -> tuple[str, ...]:
             _t(copy.spend_unpriced_cancelled_wide()),
             _t(copy.spend_unpriced_cancelled()),
             _t(copy.spend_unpriced_cancelled_short()),
+            _t(copy.spend_unpriced_cancelled_shortest()),
         )
     if reason == UNPRICED_NOT_STATED:
         return (_t(copy.spend_unpriced_ok()), _t(copy.spend_unpriced_ok_short()))
     if reason == UNPRICED_PARTIAL:
-        return (_t(copy.spend_unpriced_partial()), _t(copy.spend_unpriced_partial_short()))
+        return (
+            _t(copy.spend_unpriced_partial()),
+            _t(copy.spend_unpriced_partial_short()),
+            _t(copy.spend_unpriced_partial_shortest()),
+        )
     return ()
 
 

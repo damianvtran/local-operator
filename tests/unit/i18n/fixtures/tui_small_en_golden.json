@@ -130,5 +130,10 @@
   "tui.small.spend.unpriced_ok": "server stated no price",
   "tui.small.spend.unpriced_ok_short": "no price stated",
   "tui.small.spend.unpriced_partial": "some requests unpriced",
-  "tui.small.spend.unpriced_partial_short": "some unpriced"
+  "tui.small.spend.unpriced_partial_short": "some unpriced",
+  "tui.small.spend.unpriced_failed_mixed": "failed attempt added no charge",
+  "tui.small.spend.unpriced_failed_mixed_mid": "failed attempt: +$0",
+  "tui.small.spend.unpriced_failed_mixed_short": "failed: +$0",
+  "tui.small.spend.unpriced_cancelled_shortest": "bill unknown",
+  "tui.small.spend.unpriced_partial_shortest": "some unknown"
 }

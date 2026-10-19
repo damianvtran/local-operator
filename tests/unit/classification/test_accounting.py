@@ -831,3 +831,13 @@ async def test_the_service_records_the_priced_id_while_the_echo_rides_detail(man
     assert row.model == "jev-1.13", "the row is the priced-from id, not the echo"
     assert row.detail == "vendor-model=jev-1.13.0", "the echo survives as evidence"
     assert row.amount_micro == 11, "1.1424e-05 USD rounds to 11 micro-USD"
+
+
+async def test_canonical_model_id_normalises_none_to_the_empty_string() -> None:
+    """Q-1: the leaf's contract is ``str`` in and ``str`` out, empty for no model."""
+    from local_operator.model_ids import canonical_model_id
+
+    assert canonical_model_id(None) == ""
+    assert canonical_model_id("") == ""
+    assert canonical_model_id("jev-1.13.0") == "jev-1.13"
+    assert canonical_model_id("another-model") == "another-model"

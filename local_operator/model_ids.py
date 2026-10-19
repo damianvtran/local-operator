@@ -67,9 +67,12 @@ _DATED_ECHO_RE = re.compile(r"^(?:typesafe/)?jev-1\.13-\d{8}$")
 def canonical_model_id(model: str | None) -> str:
     """The canonical id for a known spelling; an unknown id is returned unchanged.
 
-    ``None`` and ``""`` stay as they are: "the caller recorded no model" is a
-    different fact from a model this module does not recognise, and neither is
-    a reason to invent the canonical id.
+    ``None`` is normalised to the empty string: every caller records the result
+    into a non-optional row field, where "no model recorded" is spelled ``""``
+    and is different from a model this module does not recognise. An unknown id
+    is returned as the ORIGINAL string (not the stripped spelling), because
+    rewriting an id outside the family is exactly what this module exists to
+    avoid.
     """
     if not model:
         return model or ""
