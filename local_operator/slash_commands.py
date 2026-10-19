@@ -19,9 +19,11 @@ from local_operator.i18n.keys import (
     tui_schedule,
     wire_memory,
     wire_slash,
+    wire_slash_library,
 )
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
+from local_operator.tui.librarian_control import VERBS as LIBRARIAN_VERBS
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
 #: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
@@ -1553,6 +1555,34 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "schedule",
         _tr(tui_schedule.slash_help()),
+    ),
+    # The Library page is a MODE over THIS machine's global asset catalog: the
+    # index is derived from this terminal's session journals and the metadata
+    # database lives under this config root. TUI-only on purpose — no
+    # `desktop_destination`, because the desktop already owns a Library pane
+    # reading its own view of the same catalog, and a destination here would
+    # offer that pane for a command this terminal paints itself. The owner
+    # argument is `/settings`' and `/import`'s: routing it would read another
+    # machine's files while the user looks at this one.
+    SlashCommand(
+        "library",
+        _tr(wire_slash_library.help()),
+    ),
+    # The Librarian's door, beside `/aida`'s shape: bare reports status, the
+    # verbs are the package's own hooks, and `open` is the pinned conversation.
+    # The module belongs to another work package; `librarian_control` keeps the
+    # import lazy and the absence a clear sentence. TUI-only for the same
+    # wrong-machine reason as `/library`, with `open` a session transition like
+    # `/resume` (which is frontend-local too).
+    SlashCommand(
+        "librarian",
+        _tr(wire_slash_library.librarian_help()),
+        arguments=ArgumentMode.OPTIONAL,
+        # `<verb>`, over this command's own vocabulary; the handler reads it and
+        # refuses anything else with the list. SUBCOMMAND, not ANY: a sentence
+        # after the verb is a message, not an organizing request.
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=LIBRARIAN_VERBS,
     ),
     SlashCommand(
         "sidebar",

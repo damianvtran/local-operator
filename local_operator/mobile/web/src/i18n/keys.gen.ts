@@ -1183,6 +1183,8 @@ export type MessageParams = {
   "wire.slash.unarchive": undefined;
   "wire.slash.update": undefined;
   "wire.slash.usage": undefined;
+  "wire.slash.library.help": undefined;
+  "wire.slash.library.librarian_help": undefined;
   "wire.tunnel_setup.checking": undefined;
   "wire.tunnel_setup.corrupt_intent": undefined;
   "wire.tunnel_setup.deadline": undefined;

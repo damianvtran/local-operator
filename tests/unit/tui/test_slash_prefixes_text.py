@@ -188,6 +188,10 @@ PREFIXES_TEXT_POLICY = {
     "archive": False,
     "unarchive": False,
     "delete": False,
+    # Takes no argument at all: the page is the receipt.
+    "library": False,
+    # The verbs are a selection; none of them is a prompt.
+    "librarian": False,
 }
 
 
@@ -286,6 +290,9 @@ ARGUMENT_SHAPE_POLICY = {
     # the command on every surface that validates it.
     "memory": ArgumentShape.SUBCOMMAND,
     "project": ArgumentShape.SUBCOMMAND,
+    # `<verb>` over `librarian_control.VERBS`; the handler refuses anything
+    # else with the list.
+    "librarian": ArgumentShape.SUBCOMMAND,
     # ANY text, because everything after the word is either a reserved word
     # (`AIDA_SUBCOMMANDS`) the HANDLER parses or a request she is given.
     # SUBCOMMAND would make the command route refuse a request
@@ -311,6 +318,8 @@ ARGUMENT_SHAPE_POLICY = {
     "failovers": ArgumentShape.NONE,
     "info": ArgumentShape.NONE,
     "mobile": ArgumentShape.NONE,
+    # The page is the receipt and takes no argument at all.
+    "library": ArgumentShape.NONE,
     # The operator's own row, and the reason it is NONE rather than ANY: the
     # desktop runs `/compact` and SILENTLY DROPS what follows (the report was
     # that `/compact hello` "used to run and silently eat `hello`"). A command
