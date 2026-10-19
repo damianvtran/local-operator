@@ -769,6 +769,8 @@ def feature_flags() -> dict[str, Any]:
         # POST would 404 on a backend without it. Absent, the tab simply has no
         # approval affordance, which is the pre-onboarding state.
         "approvals": 1,
+        # Existing signed SSH onboarding, surfaced without a new trust engine.
+        "mesh_onboard": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the

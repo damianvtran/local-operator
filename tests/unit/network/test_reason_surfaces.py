@@ -57,7 +57,7 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Exact executed-step discriminator for retaining signed intent; compared
     # internally, never rendered as a reason or substituted for signature proof.
-    ("local_operator/network/approvals.py", "sweep", "detail"): (
+    ("local_operator/network/approvals.py", "_sweep_namespace", "detail"): (
         1,
         "internal executed-permission retention discriminator, never rendered",
     ),

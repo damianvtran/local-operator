@@ -3157,3 +3157,108 @@ before new-domain adoption. Later unavailable units retain known/provisional
 records and require explicit source-unconfirmed reconcile; unavailable is not
 missing, reset, or a reason to poll an old peer. Metadata bootstrap remains
 lookup facts/domain only, never rank/causal-owner admission on an old body.
+
+### Signed remote-server onboarding (`mesh_onboard: 1`)
+
+This is **direct mesh / add remote server**, not phone access or a new tunnel.
+It exposes the existing nine-step signed SSH runner with a **new restricted
+network-enrollment-only authority**, not the legacy card's credential/tool
+provisioning policy. Older `approvals: 1` list/approve/deny behavior stays intact.
+Clients hide the new form and make **no new calls** when `mesh_onboard` is absent;
+there is no fallback to a legacy provisioning request. Bearer/Origin checks are
+the existing desktop boundary; the renderer never receives the bearer or keys.
+
+| Method/path | Input | `result` / effect |
+|---|---|---|
+| `POST /v1/desktop/approvals/probe` | `{host,user?,port?}` | `{host,user,port,host_key_fp,banner,reachable,detail,identity:"observed_tofu"}`. Public banner/keyscan only, original 6s/8s bounds; no credential resolution/login. Returned `host` includes the observed port using the existing parser. Conflicting explicit ports refuse. |
+| `POST /v1/desktop/approvals/request` | `{request_id,host,user?,name?,network_id,credential_ref,host_key_fp,unattended?,grant?}` | `{approval_id,state,device,what,expires_at}`. Only restricted kind; backend owns requester/root/window. `grant` is `[]` or `["approve"]` (default); explicit empty stays empty. Role is drive, never admin/broker. |
+| `POST /v1/desktop/approvals/{apn_id}/approve-network-enrollment` | Exactly `{authority_version:1,scope:"network_only",request_digest:"sha256:<64hex>"}` | Existing decision response. Validate the displayed snapshot, kind/namespace/version/scope/state/original expiry and commitment BEFORE the SAME presence signer, then recheck under record lock at write. Strict integers, no boolean/string coercion/extras. Stale acknowledgment requires redisplay, not automatic re-signing. |
+| `POST /v1/desktop/approvals/{id}/run` | No body | 202 after the existing signature/state/expiry/begin-run gate and shared target lease accept the owner. Full work continues beyond HTTP/window lifetime. Active/same-target conflict409, never a second worker. |
+| `GET /v1/desktop/approvals/{id}` | None | Local-only `{approval_id,kind,state,authority_version,scope,request_digest,expires_at,run_id,run_active,receipts,next,replacement_id}`. Bounded sanitized fields only; no bootstrap reference/path, raw record, signature or arbitrary step data. |
+
+Before signing, new clients render **Network enrollment only; account logins are
+not shared**, target/observed SSH key, exact public operator-anchor trio,
+network/drive role, control grants/unattended choice and original finite window.
+Generic merged rows contain `can_approve_here:false`, an actionable remedy, and
+`typed_approval:{action:"approve-network-enrollment",authority_version:1,
+scope:"network_only",request_digest}`. Generic `/approve` rejects ANY `apn_`
+prefix/restricted kind before presence regardless of body. Ignoring capability
+or row metadata cannot turn an older UI's generic action into a new signature.
+This acknowledgment is compatibility admission, not proof of rendered pixels or
+resistance to arbitrary malicious same-UID code. Existing credential-inheritance
+terminal-only approval safeguards and optional row fields remain unchanged.
+
+`credential_ref` is an existing SSH bootstrap reference, NOT private key/password
+text or a request to clone model/MCP logins. Stored/agent names reuse existing
+name validation; key paths stay references. Obvious PEM/key-shaped or multiline
+material refuses before card persistence; protected422 responses do not echo it.
+This new format requires an explicit reference; legacy optional/default SSH
+configuration behavior is unchanged. A probe observes **TOFU**, not independently
+verified identity. No automatic operator-anchor bootstrap/approval occurs.
+
+The closed internal authority uses kind `device_onboard_network_only`, ID
+`apn_<existing Crockford identifier>`, and **only**
+`network/enrollment-approvals/<id>.json`. The exact envelope is
+`{format:"lop-network-enrollment",version:1,record:<logical record>}`, with no
+legacy top-level ID/aliases/flat fallback. All existing lifecycle writers wrap;
+lookup/index/locks/tombstones/retention use this namespace parametrically, not a
+second engine. Legacy `ap_` records remain flat, with unchanged key/domains/policy.
+
+New request commitment is `sha256:` + SHA256 of
+`b"lop-network-enrollment-request-v1\0" + canonical_json({authority_version:1,
+approval_id,request_id,request:legacy_immutable_request(record)})`.
+It binds the original full scope/target/bootstrap reference/requester and finite
+creation/expiry window, plus the explicit new ID/version/request ID. Lookup
+FIRST under the namespace request lock returns the original ID/window/digest on
+same intent; only a true miss mints. Reusing a changed/spent request conflicts;
+retry never renews expiry. New decisions use `b"lop-network-enrollment-v1\0"`
+plus the original length-prefixed fields, with no legacy-domain fallback.
+
+An unchanged copied/renamed ENVELOPED pending card fails an old reader before
+presence because it has no top-level ID. Deliberately unwrapping/transformation
+loses that structural protection: old presence may run, but the new commitment
+and decision domain prevent replay execution. A local owner fully rebuilding a
+legacy request and obtaining fresh legacy approval creates different authority;
+no same-UID arbitrary-code/key-compromise defense is claimed.
+
+All nine runner stages remain. Restricted provision is a truthful **SKIPPED**
+receipt before offers/placement/broker/definitions/MCP/git/model provisioning.
+The existing pairing pre-answer selects `shares=[]`: no logins/access are
+shared. This does not claim passive masked sealed offer metadata never exists in
+the unchanged ceremony, and does not revoke earlier access on a trusted device.
+The signed control grants remain directional: the remote node grants those
+controls to this operator device; it does not silently become admin/broker.
+
+Restricted verify requires fresh known-positive targeted identity, both-sided
+membership in the signed network, reachability/build and operator-anchor proof.
+Empty/unknown/malformed/foreign-target evidence fails closed. Git/model/MCP/tool
+shortcomings remain equipment warnings, not repairs; normal `network ready`
+verdict is unchanged. A restricted final receipt alone may add bounded data
+`{enrollment_verified,ready_ok,task_ready:false,equipment_warnings:[{capability,code}]}`
+associated with the current run. Raw `ready_ok:false` survives GET/reopen; no
+file paths/diagnostics are in structured data. Legacy six-field400-character
+receipts/calls remain unchanged. Membership/enrollment is NOT task completion.
+No originating conversation ID is supplied to target readiness.
+
+Changed target facts fail before install/admission and file a corrected unsigned
+restricted card when possible. Its failed receipt carries only a safely validated
+replacement ID. Durable GET returns `next:"review_replacement"` plus
+`replacement_id`, or `next:"start_new_review"` if missing/unusable; do not blindly
+retry the old facts, mint repeatedly, or autoapprove the replacement. Ordinary
+eligible failures retry the same approval/new run ID and reuse active admission.
+
+The backend owns admitted work across window close/response cancellation and
+drains on shutdown. Process death uses existing stale-run rules. One shared
+CLI/desktop per-network/host/user nonblocking target lease spans BOTH namespaces;
+other targets are not globally serialized. Old0.73.1 has no such target lease,
+so no cross-runtime serialization claim is made for independently issued legacy
+cards. Do not automatically repeat run on409 or transport loss: reconcile GET.
+
+404 is missing card;409 is an actionable state/authority/target/snapshot conflict;
+422 is invalid strict input. A backend root different from `paths.config_dir()`
+refuses BEFORE mutation, credential resolution, invite or SSH with
+`onboard_root_mismatch`: restart with `LOCAL_OPERATOR_CONFIG_DIR` naming its
+configured profile. Normal app startup resolves both from the same path; no
+process-global environment switch or profile fallback occurs. Protocol/SAS/
+expiry/step deadlines, trust keys and deny rules are unchanged. Normal Radient
+tunnel/phone access remains separate and unchanged.

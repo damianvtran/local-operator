@@ -282,6 +282,18 @@ def begin_run(
     view = load(approval_id, root=root)
     if view is None:
         raise _refuse_missing(approval_id)
+    if view.kind == "device_onboard_network_only" and view.state == "failed" and view.receipts:
+        last = view.receipts[-1]
+        if (
+            isinstance(last.get("data"), dict)
+            and last["data"].get("failure_kind") == "changed_facts"
+        ):
+            # Re-running the old card would only refile the same contradiction.
+            # This hint denies work; it cannot grant authority if edited away.
+            raise MeshRefusal(
+                "network_enrollment_review_required",
+                "Review the replacement network enrollment card; do not retry the old target facts",
+            )
     # THE PRE-RUN DENY FIRST (its own sentence assumes no run yet), THEN the
     # signature half — F4's "before ANY step" includes the first one: the invite
     # edge mints a live token and writes the admit pre-answer, so a tampered
@@ -372,6 +384,8 @@ def finish(
     step: str = "",
     detail: str = "",
     root: Any = None,
+    enrollment_report: dict[str, Any] | None = None,
+    enrollment_failure: dict[str, Any] | None = None,
 ) -> None:
     """Terminate a run through the store's terminal writes.
 
@@ -390,6 +404,7 @@ def finish(
             step=step or "verify",
             detail=detail,
             root=root,
+            **({"enrollment_report": enrollment_report} if enrollment_report is not None else {}),
         )
     elif state == "failed":
         _call(
@@ -399,6 +414,9 @@ def finish(
             step=step or "failed",
             detail=detail,
             root=root,
+            **(
+                {"enrollment_failure": enrollment_failure} if enrollment_failure is not None else {}
+            ),
         )
 
 
@@ -476,3 +494,91 @@ def refile_after_contradiction(
     except MeshRefusal:
         return None
     return str((created or {}).get("approval_id") or "") or None
+
+
+def request_device(
+    *,
+    host: str,
+    user: str = "",
+    name: str = "",
+    device_id: str = "",
+    fingerprint: str = "",
+    host_key_fp: str = "",
+    network: str = "",
+    role: str = "drive",
+    credential_ref: str = "",
+    request_id: str = "",
+    session_id: str = "",
+    surface: str = "cli",
+    unattended: bool = True,
+    grants: tuple[str, ...] | None = None,
+    network_only: bool = False,
+    expires: float = 3600,
+    root: Any = None,
+) -> dict[str, Any]:
+    """ONE CLI/desktop card builder; frontends cannot invent a second policy.
+
+    This only files existing device_onboard authority. It does not install an
+    operator anchor, approve, resolve credentials or increase the default role.
+    The observed SSH key is TOFU observation, not independent identity proof.
+    The backend caller supplies its own root and requester provenance.
+    """
+    from local_operator.network import approvals as store
+    from local_operator.network.cli import _host_key_for_request, _resolve
+    from local_operator.network.identity import load_or_mint
+    from local_operator.network.types import ROLE_CAPABILITIES
+
+    if role not in ROLE_CAPABILITIES:
+        raise MeshRefusal("invalid_role", "Choose an existing mesh member role")
+    trio = store.local_anchor_trio(root)
+    if trio is None:
+        raise MeshRefusal(
+            "approval_anchor_unavailable",
+            "operator authority is not set up on this machine yet, and the card has to "
+            "name the key it will install: ask Local Operator to set up operator authority "
+            "for this machine (one approval and one admin password prompt), then file the request",
+        )
+    network_id = _resolve(network, root=root).network_id if network else ""
+    try:
+        requester = load_or_mint(root).device_id
+    except (OSError, ValueError):
+        requester = ""
+    moment = time.time()
+    what: dict[str, Any] = {
+        "connect": True,
+        "install": True,
+        "anchor": {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")},
+        "unattended": unattended,
+        "grant": (
+            (["approve"] if grants is None else list(grants))
+            if network_only
+            else (list(grants or ()) or ["approve"])
+        ),
+    }
+    if network_id:
+        what.update(network_id=network_id, role=role)
+    if network_only:
+        # New authority is opt-in and cryptographically separate. Legacy cards
+        # keep their historical provisioning semantics and flat wire format.
+        what["provisioning"] = "network_only"
+        expires = store.DEFAULT_EXPIRY_S
+    observed = _host_key_for_request(host, user, host_key_fp)
+    return store.create_request(
+        kind=store.enrollment.KIND if network_only else store.KIND_DEVICE_ONBOARD,
+        request_id=request_id or store.new_request_id(),
+        requested_by={"session_id": session_id, "device_id": requester, "surface": surface},
+        device={
+            "device_id": device_id,
+            "name": name or host,
+            "fingerprint": fingerprint,
+            "host": host,
+            "user": user,
+            "transport": "ssh",
+            "host_key_fp": observed,
+        },
+        what=what,
+        credential_ref={"kind": "ssh", "ref": credential_ref} if credential_ref else None,
+        created_at=moment,
+        expires_at=moment + expires,
+        root=root,
+    )
