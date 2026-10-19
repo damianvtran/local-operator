@@ -369,6 +369,26 @@ class EpisodeConfig:
     protocol's (64 actions x 60 s of waiting is the largest legal ``execute``,
     so 64.5 minutes is the largest a step can be funded for), and a wedged call
     declares nothing and is cut off exactly as before.
+
+    ``score_timeout`` is the one timeout whose work grows with the episode
+    rather than with a single request. Measured on ``osworld-task_005``
+    (2026-10-19): a 453-step episode issued 478 judge requests at roughly
+    0.6 s each, so one score ran just past 300 s -- exactly the budget the
+    operator script used to set, which discarded a completed 2.4 h episode
+    with ``TimeoutError: score exceeded its 300s budget`` and ``steps: 0``.
+    A 500-step episode extrapolates to ~528 requests / ~330 s at that rate,
+    and judge latency under fleet load is not bounded here, so the dataclass
+    default is 900 s (2.7x the 500-step extrapolation) and
+    ``scripts/run_episode.py`` sets 1800 s for paid campaigns. Both stay far
+    below the 6 h episode wall cap, and a scorer wedged for 15-30 minutes is
+    still cut off.
+
+    THE 478 REQUESTS ARE ALSO AN EFFICIENCY RECORD, not only a budget input:
+    scoring makes about one judge round-trip per step (1.055 measured), so
+    its cost is linear in ``max_steps``. The next optimisation pass should
+    batch, cache or replay judgements rather than raise this number again;
+    raising it was the minimal fix for a budget that was losing paid work,
+    and it deliberately changes no scoring behaviour.
     """
 
     evidence_root: Path
@@ -378,7 +398,7 @@ class EpisodeConfig:
     prepare_timeout: float = 120.0
     reset_timeout: float = 120.0
     step_timeout: float = 120.0
-    score_timeout: float = 120.0
+    score_timeout: float = 900.0
     cleanup_timeout: float = 60.0
     ask_deadline_ms: int = 60_000
     handshake_timeout: float = 30.0
@@ -1935,6 +1955,13 @@ class EpisodeRunner:
                     episode_id=self._spec.episode_id,
                 ),
                 timeout=self._config.score_timeout,
+                # The timeout sentence carries the step count so a reader of
+                # the fatal can tell a legitimate long episode from a wedged
+                # scorer without opening the run root (see EpisodeConfig's
+                # ``score_timeout`` note for the measured numbers).
+                timeout_context=(
+                    f"episode ran {self._steps_taken} of {self._config.max_steps} steps"
+                ),
             )
             score = result.score
             details_source = None

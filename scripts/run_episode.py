@@ -641,7 +641,17 @@ def build_config(
         prepare_timeout=120.0,
         reset_timeout=900.0,
         step_timeout=180.0,
-        score_timeout=300.0,
+        # Scoring is the ONE call whose work scales with the episode: every
+        # judge round-trip is a request, and a measured 453-step OSWorld
+        # episode issued 478 of them (~0.6 s each), so a single score ran just
+        # past 300 s. The old 300 s value therefore cut a COMPLETED 2.4 h
+        # episode off at scoring and discarded it (task_005, 2026-10-19,
+        # ``steps: 0``). A 500-step episode extrapolates to ~330 s; 1800 s is
+        # 5.4x that and a fraction of the 6 h episode wall cap, so it cannot
+        # plausibly be hit by a legitimate episode while still cutting off a
+        # wedged scorer. Do not lower this to the previous value without
+        # re-measuring the request count.
+        score_timeout=1800.0,
         cleanup_timeout=120.0,
         handshake_timeout=60.0,
         max_cycle_cost_micros=max_cycle_usd_micros,
