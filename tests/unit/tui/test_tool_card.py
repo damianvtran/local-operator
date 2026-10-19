@@ -2388,11 +2388,9 @@ def _shipped_advisory_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     pad.mkdir(parents=True)
     (pad / "bulk.dat").write_bytes(b"x" * 64)
 
-    monkeypatch.setattr(builtin_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 100)
     monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 100)
     budget = builtin_mod._pad_budget_line(pad)
 
-    monkeypatch.setattr(builtin_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 1 << 30)
     monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 1 << 30)
     (pad / "e2").write_bytes(b"")
     (pad / "e3").write_bytes(b"")

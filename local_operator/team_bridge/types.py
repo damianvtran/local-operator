@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
 
 __all__ = [
+    "SCREENING_CATEGORIES",
     "ACK_TARGETS",
     "AckTarget",
     "FeedSeq",
@@ -60,6 +61,24 @@ _EVENT_ID_KINDS = ("message_id", "request_id", "thread_id")
 #: The frozen §7.2 delivery-state set, defined ONCE at its source.
 DELIVERY_STATES = ("unread", "read", "working", "done", "blocked")
 _VERDICTS = ("allow", "reject")
+
+
+#: The closed screening-category vocabulary (§8.3). Defined HERE — the leaf
+#: module both the pipeline and the store already import — so the screener's
+#: parser and the persisted-proof validator cannot drift apart. A new category
+#: is added once, here, and both sides accept it; an unknown string is damaged
+#: proof, never re-emitted.
+SCREENING_CATEGORIES = (
+    "prompt_injection",
+    "social_engineering",
+    "harassment",
+    "malicious_link",
+    "spam",
+    # §3.3 scope/prying classes (bridge-screen-v2).
+    "personal_info_request",
+    "out_of_scope_work",
+    "new_work_request",
+)
 
 
 class TeamBridgeTypeError(ValueError):
