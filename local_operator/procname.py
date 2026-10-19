@@ -80,17 +80,20 @@ it::
 ``<build-key>`` is ``<real.parent.parent.name>-<sha256(realpath, size,
 mtime_ns)[:10]>``: a new Python build is a new key, and a replaced interpreter
 cannot be mistaken for the one already published. Published directories are
-IMMUTABLE and are never garbage-collected — a running process may still be
-executing one, and a key that is still on disk is one prompt that will not
-happen again.
+IMMUTABLE UNLESS CORRUPT and are never garbage-collected — a running process
+may still be executing one, and a key that is still on disk is one prompt that
+will not happen again. The one exception is a published directory whose image
+fails the integrity check (:func:`_healthy_image`): nothing can be executing an
+image that cannot start, so it is replaced under the same key.
 
 The image is a CLONE (``clonefile``, falling back to ``shutil.copy2``), not a
 hardlink: its own inode, ``nlink == 1``, same bytes and mtime. That removes the
 shared-inode blast radius below and makes it the first file of ours that could
 be re-signed without modifying uv's interpreter.
 
-Measured on this machine, 25 launches: through the venv symlink,
-``proc_pidpath`` and ``SecCodeCopyPath`` both report the runtime image path,
+Measured on this machine, 25 of 25 launches through the venv symlink
+(re-measured 2026-10-19, uv 3.12.14): ``proc_pidpath`` reports the runtime image
+path (and ``SecCodeCopyPath`` agreed in the original 25-launch run),
 ``sys.prefix`` is still the venv, and ``ucomm`` is the brand. That triple is the
 whole point — macOS sees one stable client, Python still sees its own venv.
 
@@ -185,11 +188,13 @@ THE LADDER, AND WHERE EACH RUNG IS IMPLEMENTED
   :func:`spawn_identity` hands a spawn site the label for ``argv[0]`` and the
   link for ``executable=``.
 - **Rung 1b — the per-venv hardlink and its dylib pin.** Taken when the
-  runtime image cannot be planted (a read-only stable root, a non-APFS volume,
-  EXDEV) or when the interpreter's own ``lib`` cannot back an image. It is one
-  release of insurance, kept because a cosmetic failure must not cost the name
-  everywhere. It MUST NOT replace a healthy runtime symlink: a sandboxed child
-  with a read-only runtime root must not undo what the parent planted.
+  runtime image cannot be planted (a read-only or full stable root) or when the
+  interpreter's own ``lib`` cannot back an image. A non-APFS volume is NOT one
+  of those: the clone falls back to a ``shutil.copy2`` byte copy and the
+  runtime rung still holds. It is one release of insurance, kept because a
+  cosmetic failure must not cost the name everywhere. It MUST NOT replace a
+  healthy runtime symlink: a sandboxed child with a read-only runtime root must
+  not undo what the parent planted.
 - **Rung 2 — the interpreter, unlabelled.** With no link,
   :func:`spawn_identity` returns ``(sys.executable, None)``: ``argv[0]`` stays
   the interpreter path and NO label is applied, so the row is ``python3.x``,
@@ -500,7 +505,9 @@ def real_interpreter() -> Path | None:
 
     Falls back to the executable path when there is no venv or no readable
     ``pyvenv.cfg`` (a source checkout's interpreter, a bare ``python -c``).
-    ``None`` only when there is nothing usable to answer with.
+    ``None`` when there is nothing usable to answer with, and when the answer
+    would be a published image that no valid ``source`` marker maps back (see
+    :func:`_build_or_none`).
     """
     try:
         if _is_venv():
@@ -518,14 +525,36 @@ def real_interpreter() -> Path | None:
                         continue
                     resolved = Path(os.path.realpath(candidate))
                     if resolved.is_file():
-                        return _source_for_image(resolved) or resolved
+                        return _build_or_none(resolved)
         executable = sys.executable
         if not executable:
             return None
-        resolved = Path(os.path.realpath(executable))
-        return _source_for_image(resolved) or resolved
+        return _build_or_none(Path(os.path.realpath(executable)))
     except Exception:  # noqa: BLE001 — a probe, and the caller has a fallback
         return None
+
+
+def _build_or_none(resolved: Path) -> Path | None:
+    """The build ``resolved`` stands for, or ``None`` when it is an unmapped clone.
+
+    A published image maps back through its ``source`` marker. One that does
+    not — marker missing, unreadable or refused by :func:`_source_for_image` —
+    is still a CLONE, and answering it would make the next plant publish a
+    clone of it under a second key: a second macOS privacy row for one Python
+    build. ``None`` there means "no plant", which costs this venv the brand and
+    nothing else.
+    """
+    source = _source_for_image(resolved)
+    if source is not None:
+        return source
+    root = runtime_root()
+    if root is not None:
+        try:
+            if _under(Path(os.path.realpath(root)), resolved):
+                return None
+        except OSError:
+            return None
+    return resolved
 
 
 def _real_interpreter() -> Path | None:
@@ -551,9 +580,8 @@ def _real_interpreter_for(interpreter: str | os.PathLike[str]) -> Path | None:
                 if candidate.is_file():
                     resolved = Path(os.path.realpath(candidate))
                     if resolved.is_file():
-                        return _source_for_image(resolved) or resolved
-        resolved = Path(os.path.realpath(target))
-        return _source_for_image(resolved) or resolved
+                        return _build_or_none(resolved)
+        return _build_or_none(Path(os.path.realpath(target)))
     except Exception:  # noqa: BLE001 — a probe, and the caller has a fallback
         return None
 
@@ -722,13 +750,14 @@ def _is_framework_build(real: Path) -> bool:
 
 
 def branded_link_path() -> Path | None:
-    """Where the branded hardlink lives, or None when this environment is out.
+    """Where this venv's branded link lives, or None when this environment is out.
 
-    ``<sys.prefix>/bin/Local Operator`` — beside the venv's own ``python``, so
-    dyld's ``@executable_path/../lib`` resolves into the venv where the
-    companion symlink is planted. Returns None (no plant, no re-exec, today's
-    behaviour) when the platform is not macOS or the interpreter is not a
-    brandable venv interpreter.
+    ``<sys.prefix>/bin/Local Operator`` — beside the venv's own ``python``, so a
+    process executed through it still finds this venv's ``pyvenv.cfg``. It is
+    normally a symlink to the runtime image for this build; on the fallback
+    rung it is a per-venv hardlink with its libpython pin in ``<venv>/lib``.
+    Returns None (no plant, no re-exec, today's behaviour) when the platform is
+    not macOS or the interpreter is not a brandable venv interpreter.
     """
     if sys.platform != "darwin":
         return None
@@ -764,23 +793,66 @@ def _stdlib_through(image: Path) -> bool:
         return False
 
 
+#: The first four bytes of every image this module can exec: thin Mach-O
+#: (32/64-bit, either byte order) and fat/universal (32/64-bit offsets).
+_MACHO_MAGICS = frozenset(
+    bytes.fromhex(magic)
+    for magic in (
+        "feedface",
+        "cefaedfe",
+        "feedfacf",
+        "cffaedfe",
+        "cafebabe",
+        "cafebabf",
+    )
+)
+
+#: How far an image's mtime may sit from its source's and still be the same
+#: copy. ``clonefile`` keeps the nanoseconds, but the ``shutil.copy2`` fallback
+#: lands on whatever the target volume stores: measured on an HFS+ volume, the
+#: copy's mtime came back truncated to the second (114,922,487 ns short). An
+#: exact comparison would call every copy-fallback image corrupt and republish
+#: it on every start. An in-place overwrite stamps "now", which is days from
+#: the interpreter's install time, so the slack costs no detection.
+_MTIME_SLACK_NS = 2_000_000_000
+
+
+def _intact_copy(resolved: Path, real: Path | None) -> bool:
+    """``resolved`` still holds an executable image, and ``real``'s when known.
+
+    Two stats and a 4-byte read, because ``X_OK`` plus a resolvable stdlib is
+    not the whole question an image has to answer. A TRUNCATED clone passes
+    both and dies at ``execve`` with ``[Errno 8] Exec format error``
+    (reproduced by ``truncate(12)``); so does one overwritten IN PLACE at the
+    same size (reproduced by zeroing the first 64 bytes). One image is shared
+    by every venv of its build, so either state disables the brand for all of
+    them. Size and mtime catch an overwrite (a clone keeps its source's mtime,
+    and a write stamps a new one); the Mach-O magic catches one whose size and
+    mtime were put back, such as an equal-length script.
+    """
+    if real is not None:
+        image_stat = resolved.stat()
+        real_stat = real.stat()
+        if image_stat.st_size != real_stat.st_size:
+            return False
+        if abs(image_stat.st_mtime_ns - real_stat.st_mtime_ns) >= _MTIME_SLACK_NS:
+            return False
+    with open(resolved, "rb") as handle:
+        return handle.read(4) in _MACHO_MAGICS
+
+
 def _healthy_image(image: Path, real: Path | None = None) -> bool:
     """``image`` is a file we can exec whose bytes and stdlib are intact.
 
     Follows symlinks. ``real`` is the interpreter the image must be a copy of;
-    when it is known, the size is compared, because ``X_OK`` plus a resolvable
-    stdlib is not the whole question an image has to answer. A TRUNCATED clone
-    passes both and then dies at ``execve`` with ``[Errno 8] Exec format error``
-    (reproduced by ``truncate(12)``), and because one image is shared by every
-    venv of its build, that state disables the brand for all of them until
-    someone deletes the directory by hand. The build key already encodes the
-    source's size, so the check is one ``stat``.
+    when it is known, its size and mtime are compared as well as the image's
+    magic — see :func:`_intact_copy` for the failures each one catches.
     """
     try:
         resolved = Path(os.path.realpath(image))
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             return False
-        if real is not None and resolved.stat().st_size != real.stat().st_size:
+        if not _intact_copy(resolved, real):
             return False
         return _stdlib_through(resolved)
     except OSError:
@@ -805,11 +877,12 @@ def _needs_replant(link: Path, real: Path, image: Path | None) -> bool:
     (b) it names a different image — ``uv tool install --force`` replaced the
         interpreter, so the build key moved;
     (c) the image is not executable by us, its stdlib does not resolve through
-        the ``lib`` beside it, or its SIZE no longer matches the interpreter it
-        was cloned from. Each shape dies at ``execve`` or at ``No module named
-        'encodings'``, and the last one is a truncated clone: ``X_OK`` and a
-        resolvable stdlib both pass, then the kernel answers ``[Errno 8] Exec
-        format error``;
+        the ``lib`` beside it, or its bytes are no longer the interpreter it
+        was cloned from (size, mtime or Mach-O magic, see
+        :func:`_intact_copy`). Each shape dies at ``execve`` or at ``No module
+        named 'encodings'``, and the last one is a truncated or overwritten
+        clone: ``X_OK`` and a resolvable stdlib both pass, then the kernel
+        answers ``[Errno 8] Exec format error``;
     (d) the file at the link path is present but WE CANNOT EXECUTE IT. Not
         hypothetical, and not necessarily ours: an EDR on the operator's
         machine replaced the planted link in five worktree venvs with a
@@ -821,8 +894,8 @@ def _needs_replant(link: Path, real: Path, image: Path | None) -> bool:
     version-stamp file is written; a stamp is a second source of truth that can
     itself go stale while the image it describes has already been replaced.
     ``real`` is the interpreter the image must be a copy of; it supplies the
-    size in (c), and the key that names the expected image is derived from it
-    upstream.
+    size and mtime in (c), and the key that names the expected image is derived
+    from it upstream.
     """
     try:
         if not link.is_symlink():
@@ -862,7 +935,8 @@ def _executable_image(link: Path | None, real: Path | None = None) -> Path | Non
       its base install; requiring a second ``lib`` under ``<venv>`` would
       refuse a shape that starts.
 
-    ``real``, when known, adds the size question — see :func:`_healthy_image`.
+    Every shape also gets the integrity question (:func:`_intact_copy`): the
+    Mach-O magic always, and size and mtime against ``real`` when it is known.
     """
     if link is None:
         return None
@@ -873,7 +947,7 @@ def _executable_image(link: Path | None, real: Path | None = None) -> Path | Non
         if link.is_symlink() or not (link.parent.parent / "pyvenv.cfg").is_file():
             if not _stdlib_through(target):
                 return None
-        if real is not None and target.stat().st_size != real.stat().st_size:
+        if not _intact_copy(target, real):
             return None
         return link
     except OSError:  # pragma: no cover — access answers False for a bad path
@@ -1134,11 +1208,21 @@ def _clone_or_copy(source: Path, target: Path) -> None:
     shutil.copy2(source, target)
 
 
+#: The two private names a runtime plant puts beside a build key: its staging
+#: tree, and a corrupt published tree it moved aside before replacing it.
+_PLANT_SCRATCH_INFIXES = (".tmp.", ".dead.")
+
+
+def _has_plant_scratch(root: Path) -> bool:
+    return any(any(root.glob(f"*{infix}*")) for infix in _PLANT_SCRATCH_INFIXES)
+
+
 def _sweep_orphan_plants(root: Path) -> None:
-    """Remove ``<key>.tmp.<pid>.<thread>`` trees a killed plant left behind.
+    """Remove ``<key>.tmp|dead.<pid>.<thread>`` trees a killed plant left behind.
 
     The runtime plant's staging name is a DIRECTORY beside the image, so a
-    planter killed between ``mkdir`` and ``rename`` leaks a tree. The liveness
+    planter killed between ``mkdir`` and ``rename`` leaks a tree; one killed
+    between moving a corrupt tree aside and removing it leaks that. The liveness
     question is the one :func:`_sweep_orphan_temps` asks — ``procstate``, never
     ``os.kill``, and a zombie counts as dead — and the direction is fail-closed:
     a pid the probe cannot answer for keeps its tree, and a tree that cannot be
@@ -1149,17 +1233,18 @@ def _sweep_orphan_plants(root: Path) -> None:
     try:
         from local_operator import procstate
 
-        for entry in root.glob("*.tmp.*"):
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            _, _, tail = entry.name.rpartition(".tmp.")
-            pid_text = tail.split(".", 1)[0]
-            if not pid_text.isdigit():
-                continue
-            pid = int(pid_text)
-            if procstate.pid_alive(pid) and not procstate.zombie_states([pid]).get(pid, False):
-                continue
-            shutil.rmtree(entry, ignore_errors=True)
+        for infix in _PLANT_SCRATCH_INFIXES:
+            for entry in root.glob(f"*{infix}*"):
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                _, _, tail = entry.name.rpartition(infix)
+                pid_text = tail.split(".", 1)[0]
+                if not pid_text.isdigit():
+                    continue
+                pid = int(pid_text)
+                if procstate.pid_alive(pid) and not procstate.zombie_states([pid]).get(pid, False):
+                    continue
+                shutil.rmtree(entry, ignore_errors=True)
     except Exception:  # noqa: BLE001 — housekeeping must never cost a startup
         return
 
@@ -1170,10 +1255,12 @@ def _plant_runtime(real: Path, root: Path | None) -> Path | None:
     Built under a PRIVATE staging directory and published with a single
     ``os.rename``, so a concurrent planter (several worktrees starting at once)
     sees either no directory or a complete one. Published directories are
-    IMMUTABLE and are never rewritten or collected: a running process may still
-    be executing one, and one that stays on disk is one macOS privacy prompt
-    that will not happen again. A loser of the rename race removes its own
-    staging tree and uses the winner's image.
+    IMMUTABLE UNLESS CORRUPT and are never collected: a running process may
+    still be executing one, and one that stays on disk is one macOS privacy
+    prompt that will not happen again. A published directory whose image fails
+    the integrity check (:func:`_healthy_image`) is replaced under the same
+    key. A loser of the rename race removes its own staging tree and uses the
+    winner's image.
 
     The two refusals are about the SOURCE, not this process: an interpreter
     whose own tree has no stdlib cannot back an image (the clone would die with
@@ -1201,7 +1288,7 @@ def _plant_runtime(real: Path, root: Path | None) -> Path | None:
         # ``ps`` for its zombie probe) and this runs inside a spawn path. With
         # no staging directory there is nothing to reclaim, and the common
         # fresh plant must not pay for a probe of the machine.
-        if any(root.glob("*.tmp.*")):
+        if _has_plant_scratch(root):
             _sweep_orphan_plants(root)
         staging = root / f"{key}.tmp.{os.getpid()}.{_temp_thread_token()}"
         try:
@@ -1232,23 +1319,83 @@ def _plant_runtime(real: Path, root: Path | None) -> Path | None:
                 shutil.rmtree(staging, ignore_errors=True)
                 return image
             # The published directory is CORRUPT (a truncated or replaced
-            # image), not a race winner. Published directories are immutable by
-            # CONVENTION, and this is the one case that outranks it: an image
-            # that does not execute cannot have a live process behind it, so it
-            # is ours to replace instead of downgrading every venv of this build
-            # to the fallback for the life of the machine. ``os.rename`` cannot
-            # replace a non-empty directory, so the dead one goes first and the
-            # staging tree still publishes atomically.
-            shutil.rmtree(root / key, ignore_errors=True)
-            try:
-                os.rename(staging, root / key)
-            except OSError:
-                shutil.rmtree(staging, ignore_errors=True)
-                return None
-        return image if _healthy_image(image, real) else None
+            # image), not a race winner. Published directories are immutable
+            # unless corrupt: an image that does not execute cannot have a live
+            # process behind it, so it is ours to replace instead of downgrading
+            # every venv of this build to the fallback for the life of the
+            # machine.
+            return _replace_corrupt(root, key, staging, image, real)
+        return _settled_image(image, real)
     except Exception:  # noqa: BLE001 — rung 2 exists for exactly this
         logger.debug("runtime image unavailable", exc_info=True)
         return None
+
+
+def _replace_corrupt(root: Path, key: str, staging: Path, image: Path, real: Path) -> Path | None:
+    """Swap a corrupt published ``<root>/<key>`` for ``staging``; the image or ``None``.
+
+    ``os.rename`` cannot replace a non-empty directory, so the dead tree has to
+    leave first — and it leaves by RENAME, to a private ``<key>.dead.<pid>.
+    <thread>``, never by an in-place ``rmtree``. Deleting in place left the key
+    missing for as long as the delete ran, and concurrent planters that looked
+    in that window answered ``None``: measured, 139 of 240 planters (8 at a time
+    on a truncated image), each one a venv dropped to the hardlink rung. The
+    aside rename is atomic, so the key is missing only between two renames.
+
+    The health question is asked again right before the move, because a
+    concurrent planter may have published a good tree since this one looked. A
+    planter that still moves aside a tree which turns out HEALTHY puts it back
+    rather than deleting a fresh image, and in that short gap another planter
+    can look at an empty key — so every answer here goes through
+    :func:`_settled_image`, which yields briefly before calling the key dead.
+    """
+    import shutil
+
+    published = root / key
+    if _healthy_image(image, real):
+        shutil.rmtree(staging, ignore_errors=True)
+        return image
+    aside = root / f"{key}.dead.{os.getpid()}.{_temp_thread_token()}"
+    try:
+        os.rename(published, aside)
+    except OSError:
+        pass  # another planter moved it first, or it is already gone
+    else:
+        if _healthy_image(aside / "bin" / BRAND, real):
+            try:
+                os.rename(aside, published)
+            except OSError:
+                pass  # someone published in the gap; theirs stands
+        shutil.rmtree(aside, ignore_errors=True)
+    try:
+        os.rename(staging, published)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+    return _settled_image(image, real)
+
+
+#: How long a planter on the repair path waits for a concurrent swap to land
+#: before it calls the key dead: ten yields of 20 ms. Only the corrupt-image
+#: path pays it; the steady state never reaches this function.
+_SETTLE_TRIES = 10
+_SETTLE_PAUSE_S = 0.02
+
+
+def _settled_image(image: Path, real: Path) -> Path | None:
+    """``image`` once it is healthy, or ``None`` if it stays unhealthy briefly.
+
+    A concurrent repair holds the key empty (or a healthy tree aside) for the
+    span of two renames. Reading the key once in that span answered ``None`` —
+    one venv dropped to the hardlink rung for nothing — so the answer is
+    re-read a bounded number of times first.
+    """
+    import time
+
+    for _ in range(_SETTLE_TRIES):
+        if _healthy_image(image, real):
+            return image
+        time.sleep(_SETTLE_PAUSE_S)
+    return image if _healthy_image(image, real) else None
 
 
 def _link_to(link: Path, image: Path) -> bool:

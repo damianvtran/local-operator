@@ -272,8 +272,11 @@ def bootstrap(args: argparse.Namespace) -> int:
                 env.pop(key, None)
         # The base for the controller venv must be the REAL interpreter, not
         # ``sys.executable``: once this process runs through the branded
-        # symlink, that path is the runtime clone, and ``uv venv --python``
-        # would build a venv whose base is a directory holding no interpreter.
+        # symlink, that path is the runtime clone. ``uv venv --python <clone>``
+        # does build a working venv, but its ``pyvenv.cfg`` then names the
+        # clone, so the controller is based on a copy this layout may replace
+        # (a corrupt image is republished) and every plant from it has to map
+        # back through the clone's ``source`` marker.
         # ``_base_interpreter`` owns the version-skew rule; the local import it
         # performs is why this module stays stdlib-only up to that call.
         base_interpreter = _base_interpreter()

@@ -52,8 +52,9 @@ _AMBIENT_VARS = (
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
     # Any test that reaches a spawn path plants one image there — measured, not
     # hypothetical: individual runs of ``test_daemon_plist_refresh.py``,
-    # ``test_broker_sweep.py`` and ``test_update.py`` each published a directory
-    # into the operator's real runtime root. Inherited from a developer's shell
+    # ``secrets/test_broker_sweep.py`` and ``test_update.py`` each published a
+    # directory into the operator's real runtime root. The venv half of the same
+    # plant is gated by ``refuse_real_venv_plant`` below. Inherited from a developer's shell
     # it steers where a test writes, so it is scrubbed like the rest and then
     # REPLACED with a per-test scratch root in ``isolate_environment`` (a
     # subprocess only sees an environment variable, not a monkeypatched
@@ -547,6 +548,113 @@ arm_process_desktop_gates()
 scrub_import_time_environment()
 
 
+#: The venv this suite runs from, resolved before any test can patch
+#: ``sys.prefix``. See :func:`refuse_real_venv_plant`.
+_SUITE_PREFIX = os.path.realpath(sys.prefix)
+#: The wrapper :func:`refuse_real_venv_plant` installed, so a second call is a no-op.
+_GUARDED_LINK_PATH: Callable[[], Path | None] | None = None
+
+
+def refuse_real_venv_plant() -> None:
+    """Never re-point the suite's own ``<venv>/bin/Local Operator``.
+
+    The per-test runtime root keeps the IMAGE out of the operator's tree, but
+    the link that names it lives in ``sys.prefix``: a test reaching a spawn or
+    plant path (``test_daemon_plist_refresh.py``, and the nested pytest in
+    ``secrets/test_broker_sweep.py``, both reproduced it) re-pointed the
+    worktree's real link at the per-test runtime root, and
+    ``tmp_path_retention_policy = "failed"`` then deleted that root and left
+    the link dangling. ``branded_link_path`` is where ``ensure_branded_interpreter``
+    and ``should_reexec`` both learn where to plant, so for the suite's own
+    prefix it answers ``None`` (rung 2).
+
+    Keyed on the PATH rather than opt-in by marker: the cells that exercise the
+    plant (``test_procname.py``'s ``branded`` fixture, the cross-tree cells)
+    patch ``sys.prefix`` to a fake venv under ``tmp_path`` and pass through.
+    Installed at IMPORT, not in a function-scoped fixture, because the nested
+    run plants from a MODULE-scoped teardown, after every function-scoped patch
+    has been undone. A test that monkeypatches ``branded_link_path`` gets this
+    wrapper back on undo. A child that does not load this conftest is not
+    covered.
+    """
+    global _GUARDED_LINK_PATH
+    from local_operator import procname
+
+    current = procname.branded_link_path
+    if current is _GUARDED_LINK_PATH:
+        return
+
+    def guarded() -> Path | None:
+        if os.path.realpath(sys.prefix) == _SUITE_PREFIX:
+            return None
+        return current()
+
+    _GUARDED_LINK_PATH = guarded
+    procname.branded_link_path = guarded
+
+
+refuse_real_venv_plant()
+
+
+class RuntimeRootEscape(RuntimeError):
+    """A test could resolve a runtime root outside its own scratch tree."""
+
+
+def _passwd_runtime_root() -> Path | None:
+    """The operator's REAL runtime root, as ``procname.runtime_root`` derives it."""
+    try:
+        import pwd
+
+        from local_operator.install_defaults import STABLE_ROOT_RELATIVE
+
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # noqa: BLE001 — no passwd entry: there is no real root to reach
+        return None
+    return home / STABLE_ROOT_RELATIVE / "runtime"
+
+
+def assert_runtime_root_isolated(scratch: Path) -> Path:
+    """Fail unless ``procname.runtime_root()`` resolves under ``scratch``.
+
+    Checking that ``LOCAL_OPERATOR_RUNTIME_ROOT`` is SET is not enough: the
+    failure this exists for was the code IGNORING it. A reviewer mutation that
+    made ``runtime_root()`` skip the variable let ``test_procname.py`` fixtures
+    delete and republish the operator's real ``~/.local/share/lop/runtime/<key>``
+    — the image every venv on the machine executes. So this asks the function
+    itself, compares its answer with the passwd-home root it would fall back
+    to, and raises naming both paths before the test body can plant anything.
+    """
+    value = os.environ.get("LOCAL_OPERATOR_RUNTIME_ROOT", "")
+    if not value:
+        raise RuntimeRootEscape(
+            "LOCAL_OPERATOR_RUNTIME_ROOT is unset or empty at fixture time; "
+            "procname.runtime_root() would fall back to the operator's real root "
+            f"{_passwd_runtime_root()}"
+        )
+    from local_operator import procname
+
+    resolved = procname.runtime_root()
+    if resolved is None:
+        raise RuntimeRootEscape("procname.runtime_root() answered None under the suite's override")
+    answer = Path(os.path.realpath(resolved))
+    real = _passwd_runtime_root()
+    if real is not None:
+        real_resolved = Path(os.path.realpath(real))
+        if answer == real_resolved or real_resolved in answer.parents:
+            raise RuntimeRootEscape(
+                f"procname.runtime_root() resolved to {answer}, the operator's REAL "
+                f"runtime root ({real_resolved}); refusing to run a test that could "
+                "plant or delete there"
+            )
+    bound = Path(os.path.realpath(scratch))
+    if answer != bound and bound not in answer.parents:
+        raise RuntimeRootEscape(
+            f"procname.runtime_root() resolved to {answer}, outside this test's "
+            f"scratch tree {bound}"
+        )
+    return resolved
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Re-assert the desktop gates once pytest owns the process.
 
@@ -693,7 +801,11 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # scrub above removes an inherited value; this is the positive half, and it
     # must come after the loop. See the entry's comment in ``_AMBIENT_VARS``
     # for what went wrong without it.
-    monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(tmp_path_factory.mktemp("runtime")))
+    runtime = tmp_path_factory.mktemp("runtime")
+    monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(runtime))
+    # ...and prove the code HONOURS it before any test body runs: the variable
+    # being set is not the guarantee, ``runtime_root()`` reading it is.
+    assert_runtime_root_isolated(runtime)
     # The suite must never reach the operator's DESKTOP either. A runtime with
     # no attached client announces a parked gate through `detached_notify`,
     # which on darwin spawns a real `osascript display notification` — so six

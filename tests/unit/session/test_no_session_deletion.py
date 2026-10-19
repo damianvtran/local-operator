@@ -142,24 +142,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # interpreter's own (parent name, resolved path, size, mtime), the root
         # is passwd-home-derived, and the basenames are the brand — no session
         # id, config dir or caller input can reach any of them.
-        "Reclaims <runtime root>/<key>.tmp.<pid>.<thread>, a staging tree this module made",
+        "Reclaims <runtime root>/<key>.tmp|dead.<pid>.<thread>, a staging or aside tree "
+        "this module made",
     ),
     (
         "local_operator/procname.py::_plant_runtime",
         "os.rename",
         "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
-        2,
     ),
     (
         "local_operator/procname.py::_plant_runtime",
         "shutil.rmtree",
-        # Four: the failed-build staging tree (a clone that died on ENOSPC must
-        # never be renamed onto the build key), a staging tree whose rename lost
-        # to a healthy concurrent planter, a CORRUPT <runtime root>/<key>, and a
-        # staging tree that could not be published. Every one is either this
-        # plant's own staging entry or an interpreter-derived key.
-        "Removes this plant's own staging tree, or a CORRUPT <runtime root>/<key>",
-        4,
+        # Two: the failed-build staging tree (a clone that died on ENOSPC must
+        # never be renamed onto the build key) and a staging tree whose rename
+        # lost to a healthy concurrent planter. Both are this plant's own entry.
+        "Removes this plant's own staging tree",
+        2,
+    ),
+    (
+        "local_operator/procname.py::_replace_corrupt",
+        "os.rename",
+        # Three: a CORRUPT <runtime root>/<key> moved aside to <key>.dead.<pid>.
+        # <thread>, that aside put back when it proved healthy after all, and
+        # this plant's staging tree published onto the key. Every path is the
+        # interpreter-derived key or a private name beside it.
+        "Swaps a CORRUPT <runtime root>/<key> aside and publishes staging; interpreter-derived",
+        3,
+    ),
+    (
+        "local_operator/procname.py::_replace_corrupt",
+        "shutil.rmtree",
+        # Three: this plant's staging tree when a concurrent planter repaired
+        # the key first, the moved-aside dead tree, and a staging tree whose
+        # final rename lost. None is ever the published key itself.
+        "Removes <runtime root>/<key>.dead.<pid>.<thread> or this plant's own staging tree",
+        3,
     ),
     (
         "local_operator/procname.py::_link_to",
