@@ -16,6 +16,7 @@ fails until it is removed.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -347,3 +348,27 @@ def test_allowance_growth_skips_without_a_base_ref(
     monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     assert i18n_check.check_allowance_growth("definitely-not-a-ref") == []
+
+
+def test_allowance_growth_rejects_explicit_typo_inside_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    # Explicit refs are operator input: a typo must not turn the gate off.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setattr(i18n_check, "REPO", tmp_path)
+    assert i18n_check.check_allowance_growth("definitely-not-a-ref") == [
+        "allowance growth: explicit base ref cannot be resolved: definitely-not-a-ref"
+    ]
+
+
+def test_allowance_growth_notes_missing_default_inside_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, i18n_check
+) -> None:
+    # An exported/shallow checkout need not carry origin/main; implicit
+    # defaults cannot be held to the stronger explicit-input contract.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setattr(i18n_check, "REPO", tmp_path)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    assert i18n_check.check_allowance_growth() == []
+    assert "allowance growth: skipped (no base ref)" in capsys.readouterr().out

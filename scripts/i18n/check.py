@@ -686,6 +686,12 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     silent escape. A base branch without the file is the introduction case.
     """
     ref = _resolve_allowance_base(base)
+    # A supplied ref is operator input, not a best-effort default: inside git,
+    # a typo must fail rather than silently disable the growth comparison.
+    # Repo-less fixtures still skip because no ref can resolve there.
+    if ref is None and base is not None:
+        if _git("rev-parse", "--is-inside-work-tree").returncode == 0:
+            return [f"allowance growth: explicit base ref cannot be resolved: {base}"]
     if ref is None:
         print(
             # i18n: ignore checker diagnostic (operator tooling output, English-only)
