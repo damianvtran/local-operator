@@ -1544,12 +1544,20 @@ class TeamBridgeClient:
         )
 
     async def conversation_join(
-        self, conversation_id: str, *, access: OAuthAccess | None = None
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
         """Accept an invitation, or self-join a tenant-visible channel."""
 
+        body = {"tenant_id": tenant_id} if tenant_id else None
         return await self._send(
-            "POST", f"/messaging/conversations/{conversation_id}/join", access=access
+            "POST",
+            f"/messaging/conversations/{conversation_id}/join",
+            body=body,
+            access=access,
         )
 
     async def conversation_leave(
@@ -1694,16 +1702,19 @@ class TeamBridgeClient:
         *,
         seq: int | None = None,
         muted: bool | None = None,
+        notify: Literal["all", "mention", "mute"] | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """Advance the cursor and/or mute. A stale seq never moves the cursor back."""
+        """Advance the cursor and/or set the notification policy."""
 
         body: dict[str, Any] = {}
         if seq is not None:
             body["seq"] = int(seq)
         if muted is not None:
             body["muted"] = bool(muted)
+        if notify is not None:
+            body["notify"] = notify
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(
