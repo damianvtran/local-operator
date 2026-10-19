@@ -550,7 +550,24 @@ def _mesh_context(root: Path) -> dict[str, Any]:
 
         records = store.list_networks(root)
     except Exception:  # noqa: BLE001 — no readable network state is the zero-peer answer
-        records = []
+        # RETURN the empty answer rather than falling through: the artifacts-only
+        # block below needs ``PlacementDocument``/``mcp_state``, which are the very
+        # imports that just failed, and pyright is right that they would be
+        # unbound (review round 5, type-check).
+        def _no_holder(ref_name: str) -> bool:
+            return False
+
+        def _no_revoked(secret_names: list[str]) -> bool:
+            return False
+
+        return {
+            "entries": entries,
+            "evidence": evidence,
+            "has_records": False,
+            "lost_membership": False,
+            "holder_of_secret": _no_holder,
+            "evidence_revoked": _no_revoked,
+        }
     for record in records:
         has_records = True
         try:

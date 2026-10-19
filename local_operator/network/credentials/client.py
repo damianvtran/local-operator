@@ -1022,6 +1022,10 @@ class MeshCredentialClient:
         """This root's credential database, explicitly — see :meth:`_sync_engine`."""
         from local_operator.providers.auth_store import AuthStore
 
+        if self.root is None:
+            # Only reachable if a caller builds the factory without a root; the
+            # engine passes it conditionally, but the type is ``Path | None``.
+            raise RuntimeError("no config root for the credential store")
         return AuthStore(db_path=self.root / "auth.db", config_dir=self.root)
 
     def _sync_engine(self) -> Any:
@@ -1060,7 +1064,14 @@ class MeshCredentialClient:
         from local_operator.network.credentials import mcp_state, sync as sync_mod
 
         placement = self.placement
-        entry = placement.entry(key) if placement is not None else None
+        if placement is None:
+            # No document is a placement fact, not a question for the owner.
+            return {
+                "ok": False,
+                "state": "revoked" if self._has_prior_claim(key) else "unknown",
+                "code": "not_a_holder",
+            }
+        entry = placement.entry(key)
         if entry is None or not entry.is_holder(self.self_device):
             # A placement fact, not something to ask the owner about. The state is
             # ``revoked`` only for a device that had a claim; a cold device gets
