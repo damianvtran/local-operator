@@ -2157,9 +2157,14 @@ async def test_a_level_less_switch_carries_the_choice_not_the_clamp(
 
     handle, session = make_handle()
     applied: list[Any] = []
-    monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
-    )
+
+    def _apply(spec: Any, explicit: bool = False, **kw: Any) -> None:
+        # Assign like the real Session does, or the second hop would read the
+        # FIRST spec and the assertion could pass for the wrong reason.
+        applied.append(spec)
+        session.model = spec
+
+    monkeypatch.setattr(session, "set_model", _apply, raising=False)
     monkeypatch.setattr(handle, "_refresh_state", lambda: None)
 
     session.model = build_model_spec("anthropic", "claude-opus-5").model_copy(
