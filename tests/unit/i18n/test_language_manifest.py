@@ -162,10 +162,7 @@ def test_every_missing_key_is_covered_by_the_shrink_only_allowance() -> None:
         f"i18n/coverage-allowance.json: {sorted(unlisted)}. Translate them into every "
         "language in i18n/languages.json, or add each pair with a reason."
     )
-    assert not complete, (
-        "Shrink-only allowance entries are now complete and must be removed: "
-        f"{sorted(complete)}"
-    )
+    assert not complete, f"Complete allowance pairs must be removed: {sorted(complete)}"
     assert not unknown, (
         "i18n/coverage-allowance.json names pairs that do not exist in the manifest "
         f"or English catalogues: {sorted(unknown)}"
