@@ -3394,19 +3394,24 @@ async def test_a_pad_over_budget_is_flagged_on_the_real_result(
     tmp_path, monkeypatch, spelling
 ) -> None:
     """The channel the guide used to call unpoliced, driven through the REAL
-    bash tool: the command took the pad over budget, and the result says so —
-    in the head window (line 2, under the exit code), one line, naming the size
-    held and the budget in the unit a reader parses (MiB once it is one,
-    design review round 1, D2) and claiming exactly what the write path refuses
-    — writes that add (F3: the earlier "refuse further writes" overstated a
-    shrinking overwrite's fate).
+    bash tool: the pad is over budget, and the result says so — in the head
+    window (line 2, under the exit code), one line, naming the size held and
+    the budget in the unit a reader parses (MiB once it is one, design review
+    round 1, D2) and claiming exactly what the write path refuses — writes that
+    add (F3: the earlier "refuse further writes" overstated a shrinking
+    overwrite's fate).
+
+    A READ-ONLY command drives this arm on purpose: a command that would CREATE
+    under the over-cap pad is now refused before it runs
+    (``_bash_pad_precheck``), which is a different sentence. ``ls`` names the pad
+    and leaves it alone, so the post-hoc state line is what the result carries.
 
     Both variable spellings, because either is how a session writes the pad and
     a gate that missed one would be silent exactly half the time.
     """
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
 
-    text = await _run_bash(context, f'mkdir -p "{spelling}/logs"')
+    text = await _run_bash(context, f'ls "{spelling}"')
 
     expected = (
         f"[scratch] The pad now holds ≥{held:,} bytes, over its {held - 1:,}-byte budget — "
@@ -3480,8 +3485,21 @@ async def test_the_shape_line_wins_over_the_budget_line_and_there_is_only_one(
     """At most one line per result, and the shape line is the one — it
     attributes the change to THIS command while the budget line reports state
     the pad already had. Pinned because the alternative (a second line, or the
-    budget line first) is what a later "improvement" reaches for."""
-    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+    budget line first) is what a later "improvement" reaches for.
+
+    The pad is over its ENTRY cap rather than its byte cap: a byte-over pad
+    refuses the creating command before it runs, so the two lines cannot meet
+    there any more. Over the entry cap the command still runs (the pre-check
+    judges bytes, as specified), and both arms are live on one result.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    for index in range(3):
+        (pad / f"f{index}.md").write_text("x")
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(builtin, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
 
     text = await _run_bash(
         context,
@@ -3499,7 +3517,7 @@ async def test_the_literal_pad_path_is_named_too(tmp_path, monkeypatch) -> None:
     session copies from one — names the pad exactly as the variable does."""
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
 
-    text = await _run_bash(context, f'mkdir -p "{pad}/logs"')
+    text = await _run_bash(context, f'ls "{pad}"')
 
     assert text.splitlines()[1].startswith("[scratch] The pad now holds ≥"), text
 
@@ -8213,3 +8231,115 @@ async def test_scratchpad_edit_checks_projected_utf8_bytes_before_mutation(
     )
     assert f"over the {budget:,}-byte ceiling" in result.text
     assert after == before, "a refused quota-changing edit must not mutate the file"
+
+
+# ---------------------------------------------------------------------------
+# The pad cap BEFORE the child exists: a shell cannot be refused after the fact
+# ---------------------------------------------------------------------------
+
+
+def _pad_cap_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: int) -> None:
+    """Point the config root at a fresh file carrying only the pad cap.
+
+    The floor is patched to 1 KiB so the fixture can measure a kilobyte pad
+    instead of the shipped 16 MiB; the clamp itself is exercised in
+    ``test_scratchpad.py``.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    config = tmp_path / "cap-config"
+    config.mkdir()
+    (config / "config.yml").write_text(
+        f"values:\n  session:\n    scratchpad:\n      max_bytes: {value}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+
+
+@pytest.mark.asyncio
+async def test_a_creating_command_is_refused_before_it_runs_on_an_over_cap_pad(
+    tmp_path, monkeypatch
+) -> None:
+    """The requirement: a command that would CREATE under an over-cap pad must
+    not run. The sentence names the held bytes, the cap and all three remedies,
+    because a refusal that only says no sends the work to the user's directory.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    cap = held - 1
+    _pad_cap_config(tmp_path, monkeypatch, cap)
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-refused",
+        {"command": f'mkdir -p "{pad}/build/sub"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "refused before running" in result.text
+    assert f"{held:,} bytes" in result.text
+    assert f"{cap:,}-byte cap" in result.text
+    assert "session.scratchpad.max_bytes" in result.text
+    assert "git worktree" in result.text
+    assert "did not run" in result.text
+    assert not (pad / "build" / "sub").exists(), "the command must not have run"
+
+
+@pytest.mark.asyncio
+async def test_reads_and_shrinks_still_run_on_an_over_cap_pad(tmp_path, monkeypatch) -> None:
+    """``ls`` and ``rm`` are the recovery path. A gate that refused them would
+    strand the pad's owner with an unusable pad and no way back under the cap.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+    (pad / "build").mkdir()
+    (pad / "build" / "out.o").write_bytes(b"x" * 128)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    listed = await tools["bash"].execute(
+        "bash-pad-ls", {"command": f'ls "{pad}"'}, None, None, context
+    )
+    assert listed.is_error is False, listed.text
+    assert "bulk.dat" in listed.text
+
+    removed = await tools["bash"].execute(
+        "bash-pad-rm", {"command": f'rm -rf "{pad}/build"'}, None, None, context
+    )
+    assert removed.is_error is False, removed.text
+    assert not (pad / "build").exists()
+
+
+def test_a_browser_screenshot_destination_under_the_pad_is_checked(
+    tmp_path, monkeypatch
+) -> None:
+    """The screenshot path takes an ordinary filesystem path, so the pad policy
+    must run on it explicitly — an absolute destination into ``scratchpad/``
+    otherwise wrote a PNG the next ``write`` would have refused."""
+    from local_operator.tools import builtin as builtin_module
+
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+
+    refused = builtin_module._pad_destination_refusal(
+        "shot-under-pad", "browser", str(pad / "shot.png"), context, 16
+    )
+    assert refused is not None and refused.is_error is True
+    assert "byte ceiling" in refused.text or "bytes, so this write" in refused.text
+
+    outside = builtin_module._pad_destination_refusal(
+        "shot-outside-pad", "browser", str(tmp_path / "shot.png"), context, 16
+    )
+    assert outside is None

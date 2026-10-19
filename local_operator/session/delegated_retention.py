@@ -95,10 +95,10 @@ session scratchpad trees"):
 
 Rules 3-5 keep the RECORD of a session whose work may still matter (an active
 parent, an open project, a scratchpad repo with uncommitted/unpushed work);
-they were never about bytes nobody can reach. So, for a delegated session
-past the class window whose record survived the record pass, the scratchpad
-is walked — bounded, symlinks never followed, ``.git`` never matched by shape
-— and reclaimed by three arms:
+they were never about bytes nobody can reach. So, for EVERY delegated session
+whose record survives the record pass — INSIDE the class window too — the
+scratchpad is walked; bounded, symlinks never followed, ``.git`` never matched
+by shape — and reclaimed by three arms:
 
 * MERGED-CLEAN GIT TREES. A directory that is a git tree (its ``.git``
   resolves) is reclaimed WHOLE only when its HEAD resolves, its status is
@@ -164,9 +164,11 @@ is walked — bounded, symlinks never followed, ``.git`` never matched by shape
   ``desktop-suite.log`` family).
 
 HARD GUARDS: nothing is content-reclaimed for the current session, a live
-claim or lease, an armed wake or monitor, a session inside the window, a
-non-delegated origin — and any guard evaluation that fails keeps the pad and
-counts an error. Parent-still-active, open projects and the git hazard are
+claim or lease, an armed wake or monitor, a non-delegated origin — and any
+guard evaluation that fails keeps the pad and counts an error. AGE IS NOT A
+CONTENT GUARD (changed 2026-10-19): the window below still governs the RECORD,
+but a dead session's build tree is cache-shaped data and no longer waits out
+``max_age_hours``. Parent-still-active, open projects and the git hazard are
 NOT content guards: they keep the record, and that carve-out is the point.
 Unread spooled mail and open asks are not content guards either: neither is a
 running process, the record stays (reopening still finds the conversation),
@@ -193,8 +195,9 @@ deliberate halves rather than drift:
   tuned for THIS host's disk pressure, and it removes blob-level candidates
   with no knowledge of what the session was for;
 * THIS module's content layer is the shipped, default-on retention policy:
-  window = the class's ``max_age_hours``, and it takes only merged-clean git
-  trees, build shapes and stale output, with the record guards left standing.
+  it runs against every non-live delegated pad (the record's age window is
+  not its gate), and it takes only merged-clean git trees, build shapes and
+  stale output, with the LIVENESS guards left standing.
 
 The thresholds differ because the audiences do: the desk automates a
 MACHINE-LOCAL disk emergency and can be aggressive under its own approval,
@@ -1305,21 +1308,26 @@ def _content_guard(
     Narrower than the record pass's :func:`_evaluate` BY DESIGN — the carve-out
     is the point: parent-still-active, open projects and the scratchpad git
     hazard keep the RECORD; only the current session, a live claim or lease, an
-    armed wake or monitor, the (possibly widened) window and the REAP
-    predicate refuse CONTENT. Spooled mail and open asks keep the record but
-    not the content: neither is a running process, and the desk's class
-    (merged+clean+stale) is exactly what is safe to take from a session that
-    may later be reopened. The caller wraps this call: a probe that raises
-    keeps the pad and counts an error (fail closed).
+    armed wake or monitor and the REAP predicate refuse CONTENT. Spooled mail
+    and open asks keep the record but not the content: neither is a running
+    process, and the desk's class (merged+clean+stale) is exactly what is safe
+    to take from a session that may later be reopened.
+
+    THE AGE REFUSAL IS DELIBERATELY GONE (policy change 2026-10-19). It refused
+    every pad inside the record window, which made a dead subagent's build tree
+    wait out the full ``max_age_hours`` — cache-shaped data with no reading as
+    scratch, held for two days only because its TRANSCRIPT was young. The desk's
+    authority is merged+clean+stale, and the liveness guards below are the
+    safety gate; the record pass's window still governs the record. ``cutoff``
+    stays in the signature for the caller's shape, but the re-stat below judges
+    against the PASS CLOCK (``now``): a session whose activity moved after the
+    scan is live work in progress whatever its age, while an in-window pad that
+    stopped changing hours ago is dead for content purposes. The caller wraps
+    this call: a probe that raises keeps the pad and counts an error (fail
+    closed).
     """
-    if cand.clock >= cutoff:
-        return "inside the (widened) window"
-    # Rule 6's re-stat, mirrored (review N1): a session that moved AFTER the
-    # scan is inside the window again — its record stays, and its content is
-    # not this pass's to take (the next pass sees the fresh clock and decides
-    # then).
     fresh = session_activity_path(os.fspath(cand.path))
-    if fresh is not None and fresh >= cutoff:
+    if fresh is not None and fresh >= now:
         return "active since the scan"
     if live_resolved is not None:
         try:
@@ -1444,7 +1452,10 @@ def _reclaim_pad_content(
     bundle_bytes = 0 if dry_run else sum(written.get(path, 0) for path in planned)
     outcome.row = ContentRow(
         session=cand.path.name,
-        reason=" + ".join(f"{name} past the window" for name in classes),
+        # No age claim: the content layer now judges liveness, not the
+        # record window, so "past the window" would be false for an in-window
+        # dead pad. The classes are the finding the operator acts on.
+        reason=" + ".join(classes),
         title=_title(cand),
         bytes=sum(removal.bytes for removal in taken),
         entries=sum(removal.entries for removal in taken),
@@ -1599,6 +1610,15 @@ def _is_live(directory: Path, now: float) -> bool:
 @dataclass
 class _Scan:
     candidates: list[_Cand] = field(default_factory=list)
+    #: Every REAPABLE delegated session the scan saw, with its activity clock
+    #: (0.0 when there is no usable one), not only the past-window candidates.
+    #: The CONTENT layer's pool: cache-shaped data (a build tree, a stale log) is
+    #: reclaimable as soon as the session is dead, so an in-window pad must be
+    #: visible to it — the record window is the RECORD pass's gate, not the
+    #: content one. "Reapable" excludes origins
+    #: ``cleanup.deletable_origins()`` never names, which the content layer may
+    #: not take content from either.
+    delegated: list[_Cand] = field(default_factory=list)
     #: Sessions (any class) that are live or inside the window: the parents whose
     #: rosters protect children.
     sources: dict[str, Path] = field(default_factory=dict)
@@ -1671,6 +1691,14 @@ def _scan(
                     scan.hidden.add(entry.name)
                     scan.delegated_total += 1
                     scan.within_window += 1
+                    # The CONTENT pool is the REAPABLE delegated class: an
+                    # origin retention may never remove (``agent-config``) has
+                    # nothing the content layer may take either, and putting it
+                    # in the pool would fill the preview's kept list with one
+                    # "origin is not reapable" row per such session (measured:
+                    # 600 rows in the CLI's own capped-listing fixture).
+                    if _is_deletable_dir(path):
+                        scan.delegated.append(_Cand(path, activity, False))
                     if len(scan.window_names) < WINDOW_NAMES_CAP:
                         scan.window_names.append(entry.name)
             except Exception:  # noqa: BLE001
@@ -1688,13 +1716,23 @@ def _scan(
         scan.hidden.add(entry.name)
         scan.delegated_total += 1
         clock = activity if activity is not None else _clock_without_activity(path, now)
+        # Read ONCE and reused for the record's rule 0 and the content pool: the
+        # content layer now runs inside the window too, so it needs the same
+        # answer this branch already asks below.
+        deletable = _is_deletable_dir(path)
+        if deletable:
+            # 0.0 and not a sentinel: the CONTENT layer no longer judges age,
+            # and a candidate with no clock must still reach it (the record
+            # pass below keeps the record, as rule 1 always did). The value only
+            # feeds the preview's ordering.
+            scan.delegated.append(_Cand(path, clock if clock is not None else 0.0, False))
         if clock is None or clock >= cutoff:
             # Rule 1's last clause: no clock, no removal.
             scan.within_window += 1
             if len(scan.window_names) < WINDOW_NAMES_CAP:
                 scan.window_names.append(entry.name)
             continue
-        if not _is_deletable_dir(path):
+        if not deletable:
             # Rule 0: over-age and hidden, but this origin is NOT one retention
             # may reap (``cleanup.deletable_origins()``). Unknown must fail CLOSED:
             # a value minted by a newer build is kept until somebody names it
@@ -1711,6 +1749,7 @@ def _scan(
             pass
         scan.candidates.append(_Cand(path, clock, has_transcript))
     scan.candidates.sort(key=lambda cand: (cand.clock, cand.path.name))
+    scan.delegated.sort(key=lambda cand: (cand.clock, cand.path.name))
     return scan
 
 
@@ -2030,7 +2069,14 @@ def run_delegated_pass(
     content_runs = force or (policy.delegated_enabled and policy.delegated_scratchpad_enabled)
     if content_runs:
         removed_names = {row.session for row in result.removed}
-        content_pool = [cand for cand in scan.candidates if cand.path.name not in removed_names]
+        # EVERY delegated session, not only the past-window candidates: the age
+        # refusal left ``_content_guard`` with the record pass, so an in-window
+        # pad is content-reclaimable as soon as it is dead. Parent directories
+        # are never in this pool (``_scan.delegated``), which is what keeps the
+        # user's own conversations audit-only.
+        content_pool = [
+            cand for cand in scan.delegated if cand.path.name not in removed_names
+        ]
         if content_only is not None:
             # The preview's own set (review F4): an apply reclaims from exactly
             # the pads the operator was shown, never a pad that became eligible
