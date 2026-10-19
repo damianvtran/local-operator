@@ -2466,17 +2466,19 @@ class MemoryStore:
         that wants the most recent decisions, and because ``scan`` has no date
         order at all.
 
-        **This is a RECENCY window, not supersession.** The store records an
-        explicit ``replaces`` edge and accepts a manual ``status`` of
-        ``superseded``, but nothing derives which fact supersedes which — there
-        is no supersession tracking over content — so "current" cannot be
-        computed here. A decision a later one contradicts may still appear; the
-        caller must label the result as "most recently written", never "in
-        force".
+        **This is a RECENCY window, not supersession.** The store has no
+        DERIVATION of supersession: the ``replaces`` edge only parents the new
+        op, nothing propagates it to the target's status, and content is never
+        compared, so the store cannot compute which of two decisions is
+        current. A decision a later one contradicts may therefore still appear
+        in this list. Callers must label the result "most recently written",
+        never "in force".
 
-        ``expires_at`` in the past and a stored ``expired`` status are excluded,
-        matching :meth:`search`'s freshness rule: carrying a fact the store
-        itself considers dead would be worse than carrying none.
+        What IS dropped is what the store has been TOLD is dead: a past
+        ``expires_at``, a stored ``expired`` status, and a stored
+        ``superseded`` status. Excluding those needs no derivation — the store
+        already treats them as settled — so this is not the supersession
+        inference the paragraph above declines to invent.
         """
         if not isinstance(tag, str) or not tag or len(tag) > 64:
             raise MemoryError("A memory tag is a short non-empty string.")
@@ -2492,7 +2494,7 @@ class MemoryStore:
                 "WHERE tag_row.value=?) "
                 "AND (json_extract(current.fact,'$.expires_at') IS NULL "
                 "OR json_extract(current.fact,'$.expires_at')>?) "
-                "AND json_extract(current.fact,'$.status')<>'expired' "
+                "AND json_extract(current.fact,'$.status') NOT IN ('expired','superseded') "
                 "ORDER BY json_extract(current.fact,'$.created_at') DESC, entity_id DESC "
                 "LIMIT ?",
                 [*values, tag, time.time(), limit],

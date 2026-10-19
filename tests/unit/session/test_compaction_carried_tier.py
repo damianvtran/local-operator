@@ -411,3 +411,127 @@ def test_the_renderer_marks_the_row_as_harness_output():
     assert "[compaction carry]" in row.text
     assert "not the user's words" in row.text
     assert extract_preserved_user_turns([row], {row.id}) == []
+
+
+def test_an_explicitly_superseded_decision_is_not_carried(tmp_path):
+    """A status the store has been TOLD is dead is not a "current decision".
+
+    Excluding `superseded` is not the supersession inference the docstring
+    declines to make: nothing derives it, but when it is present the store is
+    saying the fact is settled, and carrying it would contradict that.
+    """
+    store = MemoryStore(
+        tmp_path / "config", MemoryIdentity("sess", "", ""), origin="device-test"
+    )
+    store.put(
+        "session",
+        {
+            "title": "live decision",
+            "body": "ACTIVE-DECISION",
+            "tags": ["decision"],
+            "created_at": 1_700_000_000,
+        },
+    )
+    store.put(
+        "session",
+        {
+            "title": "dead decision",
+            "body": "SUPERSEDED-DECISION",
+            "tags": ["decision"],
+            "status": "superseded",
+            "created_at": 1_700_000_100,
+        },
+    )
+
+    bodies = [item["body"] for item in read_recent_decisions(store)]
+    assert "ACTIVE-DECISION" in bodies
+    assert "SUPERSEDED-DECISION" not in bodies
+
+
+@pytest.mark.asyncio
+async def test_the_mobile_fold_injects_the_carried_tier(tmp_path):
+    """The phone's durable fold is a third replay path; it must seat the same
+    row, from the same renderer, in the same position."""
+    from local_operator.mobile.durable import _compaction_prefix
+
+    transcript = Transcript(tmp_path / "sess")
+    entry = await transcript.append_compaction(
+        "SUMMARY",
+        "kept-1",
+        10,
+        carried_asks=[
+            {"id": "a-1", "question": "Proceed?", "created_at": _BASE_MS}
+        ],
+        carried_decisions=[{"body": "keep the helper", "tag": "decision"}],
+    )
+
+    prefix = _compaction_prefix(entry)
+    assert prefix[0].id == entry.id
+    assert prefix[-1].id == CARRIED_TIER_ID_PREFIX
+    expected = render_carried_tier(
+        entry.payload["carried_asks"], entry.payload["carried_decisions"]
+    )
+    assert expected is not None
+    assert prefix[-1].text == expected.text
+
+
+def test_the_wire_band_ruler_counts_the_carried_row():
+    """The carried row is re-synthesized IN FRONT of the kept window, so the
+    byte-aware cut must price it in its fixed prefix. Without this the band's
+    arithmetic undercounts by the block on every pass."""
+    from types import SimpleNamespace
+
+    from local_operator.harness.types import ImageContent, TextContent
+    from local_operator.session.session import Session
+
+    carried = render_carried_tier(
+        [{"id": "a-1", "question": "Proceed?", "created_at": _BASE_MS}],
+        [{"body": "keep the helper", "tag": "decision"}],
+    )
+    assert carried is not None
+    preserved = Message(role="user", content=[TextContent(text="PRESERVED")])
+    preserved.provider_payload = {"compaction_preserved": True}
+    image = Message(
+        role="user",
+        content=[ImageContent(data="AAAA", mime_type="image/png")],
+    )
+
+    def ruler(messages):
+        return sum(
+            len(block.text)
+            for message in messages
+            for block in message.content
+            if isinstance(block, TextContent)
+        )
+
+    seen: dict[str, int] = {}
+
+    def advance(messages, cut, *, kept_bytes, band_bytes, replayable):
+        # The empty suffix: what remains is exactly the FIXED prefix the cut
+        # seats in front of the kept window.
+        seen["fixed"] = kept_bytes(len(messages))
+        return cut
+
+    api = SimpleNamespace(
+        estimate_wire_bytes=ruler,
+        resolve_wire_bytes_trigger=lambda settings: 1,
+        WIRE_RECOVERY_BAND=0.2,
+        PRESERVED_USER_TURN_KEY="compaction_preserved",
+        CARRIED_TIER_KEY="compaction_carried",
+        advance_cut_to_wire_band=advance,
+    )
+    session = Session.__new__(Session)
+    session._transcript = SimpleNamespace(has_entry=lambda entry_id: True)
+
+    # Prefix = [call, preserved, carried]; the image is on the kept side so the
+    # image-pressure gate fires.
+    session._advance_cut_for_wire_band(
+        api, object(), [Message.user("call"), preserved, carried, image], 3
+    )
+    with_carried = seen["fixed"]
+    session._advance_cut_for_wire_band(
+        api, object(), [Message.user("call"), preserved, image], 3
+    )
+    without_carried = seen["fixed"]
+
+    assert with_carried - without_carried == len(carried.text)
