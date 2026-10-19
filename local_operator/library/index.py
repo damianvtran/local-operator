@@ -28,6 +28,7 @@ journal without proof is excluded, exactly as the design says.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -45,13 +46,56 @@ logger = logging.getLogger(__name__)
 
 INDEX_DIRNAME: Final = "library"
 INDEX_FILENAME: Final = "index.json"
-INDEX_SCHEMA: Final = 2
+INDEX_SCHEMA: Final = 3
 DEFAULT_BUDGET_S: Final = service.DEFAULT_BUDGET_S
 
 #: The three groups the Library shows. Raw origins stay on each occurrence.
 ORIGIN_GROUPS: Final = ("generated", "created", "mentioned")
 _CREATED_ORIGINS: Final = frozenset({"written", "screenshot", "download", "edited", "command"})
 _GENERATED_ORIGINS: Final = frozenset({"generated"})
+
+#: The parent's own sidecar naming every child/grandchild run. Its changes are
+#: membership changes: a roster-only edit (the parent transcript untouched) can
+#: add or retract a whole journal, and a signature that watched only
+#: ``transcript.jsonl`` served the old family forever.
+ROSTER_SIDECAR: Final = "subagent-roster.v1.json"
+#: Last parsed digest per sidecar, keyed on its stat identity. The full hash is
+#: only re-read when the file moved; an atomic replace changes the inode, which
+#: is the writer's actual pattern.
+_ROSTER_DIGESTS: dict[str, tuple[tuple[int, int, int], str]] = {}
+
+
+def _roster_signature(session_dir: Path) -> dict[str, Any] | None:
+    """Identity of the parent roster sidecar, ``None`` when there is none."""
+    path = session_dir / ROSTER_SIDECAR
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    key = (info.st_size, info.st_mtime_ns, info.st_ino)
+    held = _ROSTER_DIGESTS.get(str(path))
+    if held is not None and held[0] == key:
+        digest = held[1]
+    else:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+        _ROSTER_DIGESTS[str(path)] = (key, digest)
+    return {"size": info.st_size, "mtime": info.st_mtime_ns, "inode": info.st_ino, "digest": digest}
+
+
+def _roster_matches(cached: Any, current: dict[str, Any] | None) -> bool:
+    if cached is None and current is None:
+        return True
+    if not isinstance(cached, dict) or not isinstance(current, dict):
+        return False
+    return (
+        cached.get("digest") == current.get("digest")
+        and cached.get("size") == current.get("size")
+        and cached.get("mtime") == current.get("mtime")
+        and cached.get("inode") == current.get("inode")
+    )
 
 
 def origin_group(origins: list[str] | tuple[str, ...]) -> str:
@@ -396,7 +440,8 @@ def _session_entry(
     # The containment proof lives beside the desktop session pool, whose module
     # graph costs ~2.3 s to import. Only a session that actually HAS a roster
     # can have children, so a normal conversation never pays it.
-    has_roster = (session_dir / "subagent-roster.v1.json").is_file() or (
+    roster_sig = _roster_signature(session_dir)
+    has_roster = roster_sig is not None or (
         isinstance(snapshot.scan.roster, dict) and bool(snapshot.scan.roster.get("details"))
     )
     proven: list[Any] = []
@@ -431,6 +476,7 @@ def _session_entry(
     return (
         {
             "sig": dict(snapshot.sig),
+            "roster_sig": roster_sig,
             "parent_revision": snapshot.revision,
             "revision": total_revision,
             "title": title,
@@ -561,6 +607,7 @@ def build_catalog(
             isinstance(cached, dict)
             and cached.get("complete")
             and _sig_matches(cached.get("sig"), current)
+            and _roster_matches(cached.get("roster_sig"), _roster_signature(session_dir))
         ):
             entry = cached
             entry_complete = True
