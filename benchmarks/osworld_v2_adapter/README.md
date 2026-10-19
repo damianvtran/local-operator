@@ -21,6 +21,26 @@ plus `local_operator.computer_input` and `local_operator.helpers` — by design:
 session construction belongs to the driver process, never to the isolated
 adapter worker.
 
+## Guest-down health evidence
+
+After an execute connection failure whose readiness check also fails, the AWS
+provider saves `guest-health-execute.json` beside `guest-preparation.json` in the
+episode cache. One shared four-second budget covers the EC2 instance-state
+lookup and, only for a running instance, one read-only command over the existing
+control-server transport. The command reports root disk free/total bytes,
+`/proc/meminfo` memory/swap counters, and whether the action-server port has a
+listening socket. No process arguments, environment values or arbitrary guest
+output are retained. Probe errors/timeouts do not replace the original action
+outcome; terminal diagnostics distinguish an absent/stopped/terminated instance
+from a running instance whose guest channel cannot answer.
+
+This evidence does **not** establish an independent recovery channel: the
+adapter currently has neither SSH credentials nor an SSM-agent/service-unit
+contract. The command endpoint is hosted by the same action server, so a dead
+server cannot be restarted through it. An unreachable guest is not proof that
+the service process is absent. No restart or successful recovery is claimed.
+The existing console capture remains complementary out-of-band evidence.
+
 ## Why it is its own distribution
 
 The adapter imports `local_operator.evaluation.adapters.api`, so it is coupled
