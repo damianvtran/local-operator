@@ -102,6 +102,10 @@ def no_change() -> Msg:
     return Msg("tui.authoring.no_change", {})
 
 
+def notice_read_only() -> Msg:
+    return Msg("tui.authoring.notice_read_only", {})
+
+
 def proactive() -> Msg:
     return Msg("tui.authoring.proactive", {})
 

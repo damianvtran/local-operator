@@ -14,7 +14,7 @@ from tests.unit.tui.test_projects_view import _boot, _notices
 pytestmark = pytest.mark.asyncio
 
 
-def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, OperatorApp]:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     session = FakeSession()
     session.agent_registry = AgentRegistry(tmp_path)
@@ -267,3 +267,98 @@ async def test_follower_authoring_never_routes_to_owner(tmp_path, monkeypatch):
             await pilot.pause()
             assert app._agent_form is None
             assert "Read-only" in _notices(app)[-1]
+
+
+@pytest.mark.parametrize("mode", ["projects", "settings"])
+async def test_replacing_mode_reclaims_agent_page(tmp_path, monkeypatch, mode):
+    _session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot)
+        page.controls["name"].value = "old-draft"
+        assert not app.screen.has_class("boot")
+        assert not app._editor().can_focus
+        if mode == "projects":
+            app._open_projects_view()
+        else:
+            app._open_settings_view()
+        await pilot.pause()
+        assert app._agent_form is None
+        assert not page.is_attached
+        assert not app.query("#agent-authoring")
+        assert not app._transcript_view().display
+        assert not app._editor().can_focus
+        if mode == "projects":
+            app._close_projects_view()
+        else:
+            app._close_settings_view()
+        await pilot.pause()
+        assert app._editor().can_focus
+        assert app.focused is app._editor()
+        assert app._transcript_view().display
+
+
+async def test_session_reboot_reclaims_agent_page(tmp_path, monkeypatch):
+    session, app = setup(tmp_path, monkeypatch)
+    replacement = FakeSession()
+    replacement.agent_registry = session.agent_registry
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot)
+        page.controls["instructions"].text = "Old conversation draft"
+        monkeypatch.setattr(app, "_session_factory", lambda: _factory(replacement))
+        await app._reload_session()
+        await pilot.pause()
+        assert app._session is replacement
+        assert app._agent_form is None
+        assert not page.is_attached
+        assert not app.query("#agent-authoring")
+        assert not app.screen.has_class("projects")
+        assert app._transcript_view().display
+        assert app._editor().can_focus
+        assert app.focused is app._editor()
+
+
+async def test_ctrl_c_leaves_form_before_receipting_interrupt(tmp_path, monkeypatch):
+    _session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app._agent_form is None
+        assert not page.is_attached
+        assert not app.query("#agent-authoring")
+        assert app._transcript_view().display
+        assert app._editor().can_focus
+        assert app.focused is app._editor()
+
+
+async def test_uppercase_discard_answers(tmp_path, monkeypatch):
+    _session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot)
+        page.controls["name"].value = "unfinished"
+        await pilot.press("escape", "N")
+        assert not page._confirm
+        assert app._agent_form is page
+        assert page.controls["name"].value == "unfinished"
+        await pilot.press("escape", "Y")
+        await pilot.pause()
+        assert app._agent_form is None
+
+
+async def test_edit_registry_read_failure_is_a_refusal(tmp_path, monkeypatch):
+    session, app = setup(tmp_path, monkeypatch)
+
+    def unreadable(*args):
+        raise OSError("fixture registry unavailable")
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        monkeypatch.setattr(session.agent_registry, "get_agent_by_name", unreadable)
+        app._run_slash_command("/agent edit writer")
+        await pilot.pause()
+        assert app._agent_form is None
+        assert "fixture registry unavailable" in _notices(app)[-1]

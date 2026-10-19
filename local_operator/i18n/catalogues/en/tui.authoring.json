@@ -37,5 +37,6 @@
   "tui.authoring.registry_missing": "No agent registry is attached to this session.",
   "tui.authoring.footer": "/agent new · /agent edit <name> · /agent clear detaches",
   "tui.authoring.save_error": "Could not save: {reason}",
-  "tui.authoring.description_clear_unsupported": "This form cannot clear an existing description yet."
+  "tui.authoring.description_clear_unsupported": "This form cannot clear an existing description yet.",
+  "tui.authoring.notice_read_only": "Read-only: this conversation's runtime is on another device, so profile changes are not available here."
 }

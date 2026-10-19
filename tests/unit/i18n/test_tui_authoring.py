@@ -15,7 +15,7 @@ from local_operator.i18n.keys import tui_authoring
 def test_authoring_catalogue_is_complete_and_renderable(locale: str) -> None:
     source = catalogues.load_catalogue("en", "tui.authoring")
     translated = catalogues.load_catalogue(locale, "tui.authoring")
-    assert len(source) == 39
+    assert len(source) == 40
     assert set(translated) == set(source)
     for key, value in translated.items():
         assert value

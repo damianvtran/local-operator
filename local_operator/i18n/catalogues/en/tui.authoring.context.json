@@ -193,5 +193,10 @@
     "role": "form guidance or receipt",
     "tone": "brief, direct, keyboard-first",
     "note": "Refusal for deleting an existing description; draft remains. Not a general edit refusal."
+  },
+  "tui.authoring.notice_read_only": {
+    "role": "read-only refusal",
+    "tone": "direct, calm",
+    "note": "Agent profile changes, not project changes. Follower session cannot open/save the local editor."
   }
 }

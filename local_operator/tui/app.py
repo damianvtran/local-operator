@@ -9673,6 +9673,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_agent_form()
             self._close_projects_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
@@ -11320,6 +11321,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_agent_form()
             self._close_projects_view()
         self._set_sidebar_open(not self._session_sidebar.display)
 
@@ -16458,6 +16460,7 @@ class OperatorApp(App[None]):
         self._close_settings_view()
         # The projects page hides that same region, so it cannot outlive the
         # conversation either.
+        self._close_agent_form()
         self._close_projects_view()
         # The aside goes too, and this is the general form of the interrupt
         # case. It is a question ABOUT a conversation that is being replaced,
@@ -25662,6 +25665,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_agent_form()
             self._close_projects_view()
             self._close_aside()
             # Same two lines the draft and barren-click rungs run for the same
@@ -25831,6 +25835,7 @@ class OperatorApp(App[None]):
         # behind it, where the hidden transcript cannot show it — while a second
         # press quit the app: a silent dead end (QA round 1, Q1 / review
         # finding 1).
+        self._close_agent_form()
         self._close_projects_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
@@ -26596,6 +26601,7 @@ class OperatorApp(App[None]):
         # the one thing a user must not be able to miss.
         self._close_settings_view()
         # The projects page too — the same region, the same reason.
+        self._close_agent_form()
         self._close_projects_view()
         # The aside yields for the identical reason, one layer up: the card
         # floats OVER the transcript, so the question would be drawn behind it
@@ -26774,6 +26780,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_agent_form()
         self._close_projects_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
@@ -29495,6 +29502,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_agent_form()
         self._close_projects_view()
         # Same rule for the aside card, and the same sentence: Ctrl+L acts on
         # the CONVERSATION, and the aside is a floating question about it that
@@ -36141,6 +36149,7 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        self._close_agent_form()
         comms = getattr(self._session, "_subagent_comms", None)
         node_lookup = getattr(comms, "node", None)
         node = node_lookup(job_id) if callable(node_lookup) else None
@@ -36338,6 +36347,7 @@ class OperatorApp(App[None]):
         # Conversation boot needs the dismissal message, not the optional
         # renderer. Import before registry/focus/layout work so a first-use
         # import failure remains observable without leaving a half-entered mode.
+        self._close_agent_form()
         from local_operator.tui.widgets.org_chart_view import OrgChartView
 
         registry = self._team_registry()
@@ -36465,6 +36475,7 @@ class OperatorApp(App[None]):
         Its data loading is async in the widget's own worker, so the first
         frame is the loading state rather than a blocked app.
         """
+        self._close_agent_form()
         if self._import_view is not None:
             return
         if self._settings_view is not None:
@@ -36538,6 +36549,7 @@ class OperatorApp(App[None]):
         loading is async in the widget's own worker, so the first frame is the
         loading state rather than a blocked app.
         """
+        self._close_agent_form()
         if self._review_view is not None:
             return
         if self._settings_view is not None:
@@ -36615,6 +36627,7 @@ class OperatorApp(App[None]):
         page reads the live scheduler synchronously, so its first frame is the
         populated (or empty) list rather than a loading state.
         """
+        self._close_agent_form()
         if self._schedule_view is not None:
             return
         if self._settings_view is not None:
@@ -36708,6 +36721,7 @@ class OperatorApp(App[None]):
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
         """
+        self._close_agent_form()
         if self._settings_view is not None:
             return
         from local_operator.config import ConfigManager
@@ -36970,14 +36984,13 @@ class OperatorApp(App[None]):
         from local_operator.harness.subagent import configured_effort_tiers
         from local_operator.hub_sync.definition import definition_revision
         from local_operator.i18n.keys import tui_authoring as keys
-        from local_operator.i18n.keys import tui_projects as projects_keys
         from local_operator.i18n.text import tr
         from local_operator.tui.agent_authoring import AgentDraft
         from local_operator.tui.widgets.agent_form import AgentFormPage
 
         translate = tr("tui.authoring")
         if self._projects_read_only():
-            self._system_notice(tr("tui.projects")(projects_keys.notice_read_only()), "warning")
+            self._system_notice(translate(keys.notice_read_only()), "warning")
             return
         registry = getattr(self._session, "agent_registry", None)
         if registry is None:
@@ -36986,7 +36999,12 @@ class OperatorApp(App[None]):
         initial = None
         revision = None
         if name is not None:
-            row = registry.get_agent_by_name(name)
+            try:
+                row = registry.get_agent_by_name(name)
+                data = registry.definition_revision_fields(str(row.id)) if row is not None else None
+            except Exception as exc:  # noqa: BLE001 — unreadable registry refuses, not a pump crash
+                self._system_notice(translate(keys.save_error(reason=str(exc))), "warning")
+                return
             if row is None or not (is_role(row) or is_specialist(row)):
                 sentence = (
                     keys.seed_not_installed()
@@ -36995,7 +37013,7 @@ class OperatorApp(App[None]):
                 )
                 self._system_notice(translate(sentence), "warning")
                 return
-            data = registry.definition_revision_fields(str(row.id))
+            assert data is not None
             revision = definition_revision("agent", str(row.id), data)
             initial = AgentDraft(
                 **{
@@ -37009,6 +37027,11 @@ class OperatorApp(App[None]):
             # second command while the full-page editor owns the keyboard.
             self._agent_form.focus()
             return
+        self._close_subagent_view()
+        self._close_org_chart_view()
+        self._close_import_view()
+        self._close_review_view()
+        self._close_schedule_view()
         self._close_projects_view()
         self._close_settings_view()
         self._agent_form_focus_restore = self.focused
@@ -37040,7 +37063,7 @@ class OperatorApp(App[None]):
         self._set_composer_read_only(False)
         restore = self._agent_form_focus_restore
         self._agent_form_focus_restore = None
-        if restore is not None and restore.is_mounted:
+        if restore is not None and restore.is_attached:
             restore.focus()
         else:
             self._editor().focus()
@@ -37096,6 +37119,7 @@ class OperatorApp(App[None]):
         view switch, zoom and cursor movement without ever re-reading, so a
         repaint costs no registry or filesystem I/O.
         """
+        self._close_agent_form()
         if self._projects_view is not None:
             if view is not None or associated is not None:
                 import time as _time
@@ -37744,6 +37768,7 @@ class OperatorApp(App[None]):
         # page closes first, exactly as the `↵`-to-conversation jump does
         # (`on_projects_view_jump_requested`): a mode that hides the transcript
         # must be gone before the conversation it hid comes back.
+        self._close_agent_form()
         self._close_projects_view()
         self._resume_session(session_id, self._notice)
 
@@ -51677,6 +51702,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_agent_form()
         self._close_projects_view()
         self._close_aside()
         instructions = None
@@ -53841,12 +53867,12 @@ class OperatorApp(App[None]):
 
             return await class_switch_receipt(self._session, rest.strip(), SlashResult)
         if first.strip().casefold() in {"new", "edit"}:
-            from local_operator.i18n.keys import tui_projects as project_keys
+            from local_operator.i18n.keys import tui_authoring as author_keys
             from local_operator.i18n.text import tr
 
             return SlashResult(
                 kind="notice",
-                text=tr("tui.projects")(project_keys.notice_read_only()),
+                text=tr("tui.authoring")(author_keys.notice_read_only()),
                 style="warning",
             )
         return self._agent_attach_slash_result(arg, SlashResult)

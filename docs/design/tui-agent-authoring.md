@@ -35,8 +35,9 @@ and silently dropping it.
 Tab/Shift+Tab traverse fields; left/right cycle choices. Instructions use a
 TextArea where Tab moves focus, not inserts indentation. Ctrl+S saves. Esc
 closes a clean page; a dirty page pins an inline y/n question **outside** the
-scroll body. Y discards; N, Enter, or Esc returns to editing. Tab cannot escape
-the confirmation into the underlying form.
+scroll body. Y discards; N, Enter, or Esc returns to editing (letters are case-insensitive). Tab cannot escape
+the confirmation into the underlying form. Session replacement and sibling full-page modes reclaim the
+form; Ctrl+C leaves it before painting the conversation's interrupt receipt.
 
 ## Persistence, refusals, and no-op
 
@@ -52,7 +53,7 @@ definition revision. The same CAS token accompanies the shared writer's update;
 a stale definition refuses with an honest reopen instruction. Registry duplicate
 names and other backend errors remain visible inline; failed saves never close
 the form or destroy the draft. Read-only/follower sessions refuse before opening
-or writing, using the projects page's existing ownership guard and notice.
+or writing, using the projects page's ownership semantics and a profile-specific notice.
 
 The shared writer currently treats empty description/instructions as omission
 on update. **P3a does not change those cross-client core semantics.** Clearing a

@@ -61,7 +61,7 @@ class AgentFormPage(Vertical):
         *,
         tiers: Sequence[str],
         on_submit: Callable[[AgentPlan, AgentDraft], None],
-        on_cancel: Callable[[], None],
+        on_cancel: Callable[[], object],
         read_only: Callable[[], bool],
         style_for: Any = None,
     ) -> None:
@@ -172,9 +172,10 @@ class AgentFormPage(Vertical):
         if self._confirm:
             event.stop()
             event.prevent_default()
-            if event.key == "y":
+            key = event.key.casefold()
+            if key == "y":
                 self._on_cancel()
-            elif event.key in ("n", "escape", "enter"):
+            elif key in ("n", "escape", "enter"):
                 self._confirm = False
                 self._question.display = False
                 if self._restore is not None:
@@ -247,12 +248,10 @@ class AgentFormPage(Vertical):
         self._question.focus()
 
     def refuse_read_only(self) -> bool:
-        """Use the projects page's exact ownership notice, including followers."""
+        """Use projects' ownership predicate, with a profile-specific notice."""
         if not self._read_only():
             return False
-        from local_operator.i18n.keys import tui_projects as project_keys
-
-        self.receipt(tr("tui.projects")(project_keys.notice_read_only()))
+        self.receipt(_t(_x.notice_read_only()))
         return True
 
     def receipt(self, sentence: str) -> None:
