@@ -75,7 +75,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
+from local_operator.evaluation.record_frames import RecordFrames
 from local_operator.session.store_failures import SPACE_ERRNOS
+
+# Binary frames belong in the artifact store. Large TEXT is never truncated:
+# exceptional lines carry a machine-readable size warning for evidence readers.
+MAX_RECORD_LINE_BYTES = 256 * 1024
 
 #: The seal's reserved margin, pre-allocated at open and kept until the seal
 #: needs it. Derived, not chosen: the seal artifacts measured 322-328 B
@@ -209,8 +214,10 @@ class RecordSink:
         expected_bytes: int = RECORD_EXPECTED_BYTES,
         reserve_bytes: int = SEAL_RESERVE_BYTES,
         calls: _SinkCalls | None = None,
+        artifact_root: Path | None = None,
     ) -> None:
         self._path = Path(path)
+        self._frames = RecordFrames(self._path, artifact_root)
         self._expected_bytes = int(expected_bytes)
         self._reserve_bytes = int(reserve_bytes)
         # A negative budget would make the pre-flight accept LESS room than the
@@ -363,12 +370,18 @@ class RecordSink:
                 bytes_written=self._offset,
             )
         try:
-            line = (
-                json.dumps({"kind": kind, **payload}, ensure_ascii=False, default=str).encode(
-                    "utf-8"
-                )
-                + b"\n"
-            )
+            document = self._frames.project({"kind": kind, **payload})
+            line = json.dumps(document, ensure_ascii=False, default=str).encode("utf-8") + b"\n"
+            if len(line) > MAX_RECORD_LINE_BYTES:
+                # Do not lose long text, arguments or errors to a size cap. A
+                # reader can distinguish intentional oversized evidence from
+                # an accidental recurrence of embedded binary frame growth.
+                document["record_oversized"] = {
+                    "reason": "non_image_payload_exceeds_limit",
+                    "limit_bytes": MAX_RECORD_LINE_BYTES,
+                    "unflagged_bytes": len(line),
+                }
+                line = json.dumps(document, ensure_ascii=False, default=str).encode("utf-8") + b"\n"
         except Exception as error:  # noqa: BLE001 - a record write must never break the run
             self._note_failure(error, last_complete=self._offset)
             return
