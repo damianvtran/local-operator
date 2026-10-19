@@ -177,6 +177,120 @@ def test_carry_identifiers_are_context_only_and_never_standalone():
 
 
 @pytest.mark.parametrize(
+    "heading,body,tag",
+    [
+        ("Key Decisions", "采用标题解析，而不是定位符扫描。", "decision"),
+        ("Progress", "已经运行了定向测试。", "progress"),
+        ("Key Decisions", "Используем заголовки вместо сканирования локаторов.", "decision"),
+        ("Progress", "Проверка завершена успешно.", "progress"),
+        ("Key Decisions", "Deploy в staging через the new parser.", "decision"),
+    ],
+)
+def test_knowledge_in_any_script_is_captured(heading, body, tag):
+    """Q8: non-Latin knowledge must not be a silent English-only `ok`/0."""
+    rows = extract(f"## {heading}\n- {body}")
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == [tag]
+
+
+def test_a_section_with_no_judgeable_prose_is_counted_not_silent_ok_zero(store):
+    """A locator-only section is DECLINED at admission, never a clean `ok`/0."""
+    rows = extract("## Progress\n- https://example.invalid/only-a-locator")
+    assert list(rows) == [] and rows.skipped == 1
+    assert persist(store, "locator-only-section", rows, "ok") == (
+        "declined",
+        "admission-skip",
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        r"C:\Users\damian\file.txt",
+        r"\\server\share\file.txt",
+        "www.example.com",
+        "mailto:ops@example.com",
+    ],
+)
+def test_adjacent_locator_shapes_are_context_not_facts(body):
+    """m1: Windows/UNC paths, bare domains and mailto are locator shapes too."""
+    rows = extract("## Progress\n- " + body)
+    assert list(rows) == [] and rows.skipped == 1
+
+
+def test_all_six_prompt_sections_are_recognised():
+    """m2: the capture scheme must agree with what the prompt mandates."""
+    summary = (
+        "# Goal\n- Ship the memory fix.\n"
+        "# Constraints\n- Do not touch the write path.\n"
+        "# Progress\n- Wrote the parser and ran the suite.\n"
+        "# Key Decisions\n- Keep locators as context only.\n"
+        "# Next Steps\n- Open the PR and run QA.\n"
+        "# Critical Context\n- The live store is 54 MB.\n"
+    )
+    rows = extract("", summary)
+    assert len(rows) == 6
+    assert {row["tags"][0] for row in rows} == {
+        "goal",
+        "constraint",
+        "progress",
+        "decision",
+        "next-step",
+        "context",
+    }
+    assert "Do not touch the write path." in {row["body"] for row in rows}
+    assert "Open the PR and run QA." in {row["body"] for row in rows}
+
+
+def test_the_prompt_exclusion_and_heading_vocabulary_are_pinned_to_the_template():
+    """m3: a template edit must fail a test, not silently disable the exclusion."""
+    from local_operator.compaction.api import _load_instruction_template
+    from local_operator.memory_capture import _HEADING_TAGS, _PROMPT_SIGNATURE
+
+    template = _load_instruction_template()
+    assert template.splitlines()[0].startswith(_PROMPT_SIGNATURE)
+    mandated = {
+        line[3:].strip().lower() for line in template.splitlines() if line.startswith("## ")
+    }
+    assert set(_HEADING_TAGS) <= mandated, sorted(set(_HEADING_TAGS) - mandated)
+    for name in ("constraints", "next steps"):
+        assert name in mandated
+
+
+def test_carry_rows_never_overshoots_the_context_body_cap():
+    """n1: the candidate and its separator must count toward the 600-char cap."""
+    from local_operator.memory_capture import carry_rows
+
+    segment = "/src/" + "/".join(["dir"] * 65) + "/proof"
+    carry = (
+        "- Asks: "
+        + "x" * 280
+        + "\n"
+        + "".join(f"- Identifiers: {segment}{n}.md\n" for n in range(3))
+    )
+    rows = carry_rows(carry, locators=True)
+    assert len(rows) == 1
+    # The first identifier fits; the second would overshoot once its own
+    # characters and separator are counted. Before the fix the second was
+    # admitted and the body reached 855.
+    assert 280 < len(rows[0]["body"]) <= 600
+
+
+def test_line_heavy_input_stops_inside_the_heading_walk(monkeypatch):
+    """n2: the first budget check must happen inside the lazy line walk."""
+    import local_operator.memory_capture as capture
+
+    ticks = count(0)
+    monkeypatch.setattr(
+        capture,
+        "time",
+        types.SimpleNamespace(monotonic=lambda: next(ticks) * 0.5, time=time.time),
+    )
+    with pytest.raises(TimeoutError):
+        extract("plain prose\n" * 200_000)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         NOISY_LOCATORS,
@@ -1135,7 +1249,7 @@ def _fake_scan_clock(monkeypatch, step):
 
 
 def test_a_scan_that_runs_out_of_budget_hands_back_the_rows_it_found(monkeypatch):
-    text = _fake_scan_clock(monkeypatch, 1.1)
+    text = _fake_scan_clock(monkeypatch, 0.5)
     with pytest.raises(TimeoutError) as stopped:
         extract(text)
     assert getattr(
@@ -1146,7 +1260,7 @@ def test_a_scan_that_runs_out_of_budget_hands_back_the_rows_it_found(monkeypatch
 @pytest.mark.asyncio
 async def test_budget_exhaustion_lands_a_partial_result_instead_of_failure(store, monkeypatch):
     """PARTIAL BUDGET: the rows found before the stop land, attributed ``timeout``."""
-    text = _fake_scan_clock(monkeypatch, 1.1)
+    text = _fake_scan_clock(monkeypatch, 0.5)
     task = asyncio.create_task(asyncio.to_thread(extract, text))
     terminal = await finish(store, "budget-marker", task, "")
     assert (terminal, watermark(store, "budget-marker")) == ("ok", ("ok", 40))
@@ -1157,7 +1271,7 @@ async def test_budget_exhaustion_lands_a_partial_result_instead_of_failure(store
 @pytest.mark.asyncio
 async def test_a_budget_stop_with_no_rows_is_a_failure(store, monkeypatch):
     """TOTAL LOSS: a budget stop that found nothing must not read as a completed pass."""
-    _fake_scan_clock(monkeypatch, 1.1)
+    _fake_scan_clock(monkeypatch, 0.5)
     # No locator in any window: the scan stops having found nothing at all.
     task = asyncio.create_task(asyncio.to_thread(extract, "plain prose " * 1200))
     terminal = await finish(store, "budget-empty", task, "")
@@ -1170,7 +1284,7 @@ async def test_a_budget_stop_with_no_rows_is_a_failure(store, monkeypatch):
 @pytest.mark.asyncio
 async def test_carry_rows_survive_a_budget_stop(store, monkeypatch):
     """MINOR 1: the marquee retention is not the arm that ran out of budget."""
-    _fake_scan_clock(monkeypatch, 1.1)
+    _fake_scan_clock(monkeypatch, 0.5)
     task = asyncio.create_task(asyncio.to_thread(extract, "plain prose " * 1200))
     terminal = await finish(
         store,

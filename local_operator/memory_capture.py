@@ -1,17 +1,19 @@
 """Best-effort capture is speculative; ONLY a committed marker authorizes writes.
 
-Knowledge first: heading sections (Goal / Key Decisions / Progress / Critical
-Context) are the primary fact source, from a context-full summary and from the
-transcript itself; snapcompact's carry digest supplies asks/decisions with no
-inference fork. A locator is never a fact — it is supporting context on a real
-memory, and `memory.capture.locators` (default off) governs even that. Explicit
-stores remain the guaranteed route for decisions, especially long runs.
+Knowledge first: heading sections (Goal / Constraints / Key Decisions /
+Progress / Next Steps / Critical Context) are the primary fact source, from a
+context-full summary and from the transcript itself; snapcompact's carry digest
+supplies asks/decisions with no inference fork. A locator is never a fact — it is
+supporting context on a real memory, and `memory.capture.locators` (default off)
+governs even that. Explicit stores remain the guaranteed route for decisions,
+especially long runs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import re
@@ -109,15 +111,20 @@ _PROMPT_SIGNATURE = "You are summarizing the conversation so far"
 #: bullet when the prompt block itself was parsed. Bounded literal, not a grammar.
 _TEMPLATE_MARKERS = ("{{#if previous_summary}}", "{{/if}}")
 
-#: The semantic headings a compaction summary is asked to emit (see
-#: ``prompts_md/compaction_summary.md``). A captured heading is KNOWLEDGE: its
-#: bullets and prose become facts. The named group is the tag source, so a decision
-#: is stored as `decision` rather than the old, uninformative `summary`.
-_HEADINGS = re.compile(r"^#{1,4}\s*(?P<name>Goal|Key Decisions|Progress|Critical Context)\b", re.I)
+#: The semantic headings the compaction prompt asks for (see
+#: ``prompts_md/compaction_summary.md``): all six, not four. `Constraints` and
+#: `Next Steps` were being silently dropped even though the prompt mandates them
+#: (QA m2); the tag vocabulary names each section honestly.
+_HEADINGS = re.compile(
+    r"^#{1,4}\s*(?P<name>Goal|Constraints|Key Decisions|Progress|Next Steps|Critical Context)\b",
+    re.I,
+)
 _HEADING_TAGS = {
     "goal": "goal",
+    "constraints": "constraint",
     "key decisions": "decision",
     "progress": "progress",
+    "next steps": "next-step",
     "critical context": "context",
 }
 #: Bounds for knowledge capture. A compaction summary has a handful of sections;
@@ -131,8 +138,20 @@ _KNOWLEDGE_PARAGRAPH_CHARS = 400
 _CONTEXT_BODY_CHARS = 600
 _CONTEXT_LOCATORS = 8
 #: A word, after locators are removed, is what distinguishes a decision/goal line
-#: from a bare path. A transcript of URLs and paths therefore yields zero facts.
-_WORD = re.compile(r"[A-Za-z]{3,}")
+#: from a bare path. Unicode letters in ANY script: `[^\W\d_]` is a letter (not a
+#: digit or underscore), so CJK/Cyrillic/Greek knowledge is not silently English-only
+#: (QA Q8). Two characters because scripts such as CJK have one-character words.
+_WORD = re.compile(r"[^\W\d_]{2,}")
+#: Locator shapes that `_LOCATOR` deliberately does NOT own (that grammar is pinned
+#: byte-identical to ``compaction/mine.py``): Windows drive paths, UNC shares, bare
+#: domains and `mailto:`. They are context like every other locator, so they must not
+#: make a locator-only bullet look substantive (QA m1). Admission-only pattern.
+_ADJACENT_LOCATOR = re.compile(
+    r"\b[A-Za-z]:[\\/][^\s<>\"']{1,400}"
+    r"|\\\\[^\s<>\"']{1,400}"
+    r"|(?<![\w@.-])mailto:[^\s<>\"']{0,400}"
+    r"|(?<![\w@.-])(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?![\w.-])"
+)
 
 
 class CaptureRows(list[dict[str, Any]]):
@@ -290,7 +309,7 @@ def carry_rows(carry: str, *, limit: int = 12, locators: bool = False) -> list[d
             if (
                 not body
                 or body in seen
-                or len(rows[0]["body"]) + len(" — context: ") + len(", ".join(extra))
+                or len(rows[0]["body"]) + len(" — context: ") + len(", ".join(extra + [body]))
                 > _CONTEXT_BODY_CHARS
             ):
                 continue
@@ -396,18 +415,28 @@ class _Section(NamedTuple):
     end: int
 
 
-def _sections(source: str) -> list[_Section]:
+def _sections(
+    source: str,
+    *,
+    deadline: float | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    skipped: int = 0,
+) -> list[_Section]:
     """Bounded heading scan: the knowledge regions of a summary or transcript.
 
-    A markdown heading that is NOT one of the four recognised ones CLOSES the
+    A markdown heading that is NOT one of the SIX recognised ones CLOSES the
     region; fenced code is skipped so a `# Key Decisions` line inside a tool
-    output or a shell snippet cannot invent a section.
+    output or a shell snippet cannot invent a section. The walk is lazy and
+    checks the shared deadline every 512 lines, so a line-heavy 2 MB input is
+    bounded by TIME, not only by the work it happens to find (QA n2).
     """
     sections: list[_Section] = []
     current: _Section | None = None
     fenced = False
     offset = 0
-    for line in source.splitlines(keepends=True):
+    for number, line in enumerate(io.StringIO(source)):
+        if deadline is not None and number % SCAN_WINDOW == 0 and time.monotonic() > deadline:
+            raise BudgetExceeded(CaptureRows(list(rows or ()), skipped=skipped))
         stripped = line.lstrip()
         if stripped.startswith("```"):
             fenced = not fenced
@@ -447,10 +476,14 @@ def _substantive(body: str) -> bool:
     This is the admission rule that makes a transcript of URLs and paths yield
     ZERO facts: `- ~/tools/x/proof.md` is a locator with no memory around it,
     while `- Store evidence at ~/tools/x/proof.md` is a decision whose path is
-    supporting detail. Called before the write guard so a locator-only bullet
-    is not mis-recorded as a guard refusal in the admission-skip count.
+    supporting detail. Locator grammar is removed first, then the adjacent shapes
+    `_LOCATOR` deliberately does not own (Windows/UNC, bare domains, mailto) —
+    they are context too (QA m1). A candidate with nothing left is COUNTED at
+    admission, never silently dropped as an `ok`/0 pass (QA Q8).
     """
-    return bool(_WORD.search(_LOCATOR.sub(" ", body)))
+    remaining = _LOCATOR.sub(" ", body)
+    remaining = _ADJACENT_LOCATOR.sub(" ", remaining)
+    return bool(_WORD.search(remaining))
 
 
 def _admitted(body: str, tag: str) -> None:
@@ -493,13 +526,14 @@ def _emit(
     if len(rows) >= _KNOWLEDGE_ROWS:
         return skipped
     body = " ".join(body.split())
-    if (
-        not body
-        or body in seen
-        or not _substantive(body)
-        or _PROMPT_SIGNATURE in body
-        or any(marker in body for marker in _TEMPLATE_MARKERS)
-    ):
+    if not body or body in seen:
+        return skipped
+    if not _substantive(body):
+        # A section of bare locators (or text no script rule can judge) is an
+        # ADMISSION skip and is counted. Before Q8 this returned silently, so a
+        # whole non-Latin knowledge section landed as `ok`/0 with no attribution.
+        return skipped + 1
+    if _PROMPT_SIGNATURE in body or any(marker in body for marker in _TEMPLATE_MARKERS):
         return skipped
     try:
         # Same guard the WRITE applies: a candidate whose body — or whose
@@ -531,7 +565,7 @@ def _knowledge_rows(
     contribute nothing. Locator-only lines are not facts here — they may only be
     attached as context to a section fact (see :func:`_attach_context`).
     """
-    sections = _sections(source)
+    sections = _sections(source, deadline=deadline, rows=rows, skipped=skipped)
     for index, section in enumerate(sections):
         if len(rows) >= _KNOWLEDGE_ROWS:
             break
@@ -547,7 +581,7 @@ def _knowledge_rows(
             paragraph = []
             length = 0
 
-        for number, line in enumerate(source[section.start : section.end].splitlines()):
+        for number, line in enumerate(io.StringIO(source[section.start : section.end])):
             # Every 64 lines is frequent enough for a 2 s budget on the bounded
             # input and coarse enough that normal summaries never pay for it.
             if number % 64 == 0 and time.monotonic() > deadline:

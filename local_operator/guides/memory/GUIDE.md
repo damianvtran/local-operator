@@ -132,12 +132,17 @@ move exists (global); session and the other scopes consolidate in place.
 ## Compaction and mobility
 
 A concurrent deterministic scan captures **knowledge first**: it reads the semantic
-sections a compaction summary is asked to emit (`Goal`, `Key Decisions`, `Progress`,
-`Critical Context`) and heading sections in the transcript itself, and stores their
-bullets/prose as session facts tagged `goal`/`decision`/`progress`/`context`. Paths,
-URLs and ids are supporting detail, not facts: they are attached to a captured
+sections a compaction summary is asked to emit (`Goal`, `Constraints`, `Progress`,
+`Key Decisions`, `Next Steps`, `Critical Context`) and heading sections in the
+transcript itself, and stores their bullets/prose as session facts tagged
+`goal`/`constraint`/`progress`/`decision`/`next-step`/`context`. Text in any script
+counts as knowledge (a run of Unicode letters is judged, not an ASCII-only one).
+Paths, URLs, ids, Windows/UNC paths, bare domains and `mailto:` addresses are
+supporting detail, not facts: they are attached to a captured
 section fact as `— context: …` and never stored on their own. A transcript that is
-nothing but URLs and paths therefore yields zero facts. This is reversible with
+nothing but URLs and paths therefore yields zero facts; a section with no judgeable
+prose is counted as an admission skip (so the pass declines honestly instead of
+reporting a clean zero). This is reversible with
 `memory.capture.locators` (default **off**), which re-enables only that context arm;
 existing rows are never migrated or deleted. Context-full additionally reuses
 semantic sections of its existing summary. Snapcompact still makes **no model-summary
