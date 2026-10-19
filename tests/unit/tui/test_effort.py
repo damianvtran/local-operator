@@ -52,6 +52,17 @@ class EffortSession(FakeSession):
     own variable and nothing would prove the request changed.
     """
 
+    #: The CONVERSATION's chosen level, as the real session reports it. Declared
+    #: so the app's adoption path can read it (a typed attribute, not a
+    #: ``setattr``), and asserted by the tests below.
+    chosen_effort: str | None = None
+
+    #: What the app LAST stated to the session: the level it chose, or ``None``
+    #: for the withdrawal. The real session records this on the spec; the
+    #: double records it here so a test can prove the TUI stated the decision
+    #: rather than only moving the band.
+    last_effort_choice: object = EFFORT_CHOICE_UNSET
+
     def __init__(self, provider: str = "anthropic", model_id: str = "claude-opus-5") -> None:
         super().__init__()
         self._spec = build_model_spec(provider, model_id)
@@ -252,7 +263,9 @@ async def test_effort_with_a_level_sets_it_and_says_what_changed() -> None:
         band = _band(app)
         session = app._session
     assert level == "low"
-    assert session.last_effort_choice == "low", "the TUI applied but never stated the choice"
+    assert (
+        getattr(session, "last_effort_choice", None) == "low"
+    ), "the TUI applied but never stated the choice"
     assert "low" in band
     receipt = [n for n in notices if "reasoning effort" in n]
     assert receipt, notices
@@ -322,7 +335,9 @@ async def test_effort_auto_returns_to_the_models_own_default() -> None:
         session = app._session
     assert level == "high"
     assert remembered is None
-    assert session.last_effort_choice is None, "the withdrawal was never stated to the session"
+    assert (
+        getattr(session, "last_effort_choice", "unset") is None
+    ), "the withdrawal was never stated to the session"
 
 
 @pytest.mark.asyncio

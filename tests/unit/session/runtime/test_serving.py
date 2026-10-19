@@ -65,6 +65,9 @@ class FakeSession:
         #: stated because the pair-only-switch regression assigns a real spec
         #: here to stand in for a session the user is already on (#2471).
         self.model: ModelSpec | None = None
+        #: The CONVERSATION's chosen level, as the real session reports it (the
+        #: carry reads it). Declared so the tests can set it on the double.
+        self.chosen_effort: str | None = None
         self.conversation_name = ""
         self.is_streaming = False
         self._handlers: list[Any] = []
@@ -3647,9 +3650,7 @@ class _AccessSession(FakeSession):
         self.model_label = label
         self.effective_model_label = label
 
-    def set_model(
-        self, spec: Any, *, explicit: bool = False, effort_choice: object = None
-    ) -> None:
+    def set_model(self, spec: Any, *, explicit: bool = False, effort_choice: object = None) -> None:
         self.model = spec
         self.model_label = f"{spec.provider}/{spec.model_id}"
         self.effective_model_label = self.model_label

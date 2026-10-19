@@ -3323,9 +3323,7 @@ def effective_identity_for(
     return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
 
 
-def effort_displacement(
-    selected: Any, effective: Any, chosen: str | None = None
-) -> dict[str, str]:
+def effort_displacement(selected: Any, effective: Any, chosen: str | None = None) -> dict[str, str]:
     """The chosen reasoning level that is NOT in force on the serving model.
 
     A fallback may serve at a level other than the one the conversation chose,

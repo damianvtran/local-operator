@@ -33,6 +33,7 @@ from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     AgentEndEvent,
     AgentEvent,
     AgentStartEvent,
@@ -42,7 +43,6 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
-    EFFORT_CHOICE_UNSET,
     EventHandler,
     HistoryDeltaEvent,
     ImageContent,
@@ -9221,9 +9221,7 @@ class AttachedSession:
                 # cannot express a WITHDRAWAL; ``auto`` is the owner's word for
                 # "no level chosen" and ``set_model_effort`` accepts it.
                 chosen = "auto" if effort_choice is None else str(effort_choice)
-                asyncio.create_task(
-                    client.set_model(model.provider, model.model_id, effort=chosen)
-                )
+                asyncio.create_task(client.set_model(model.provider, model.model_id, effort=chosen))
             elif model.reasoning_effort != old.reasoning_effort:
                 # A LEVEL moved but this caller stated no DECISION (a carried
                 # spec, an adoption). `set_effort` is an explicit choice on the

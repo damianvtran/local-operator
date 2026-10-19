@@ -217,8 +217,7 @@ async def test_an_effort_change_journals_the_level_but_is_not_a_switch(tmp_path)
     switch_rows = [
         entry
         for entry in session._transcript.entries()
-        if entry.type == "custom"
-        and entry.payload.get("custom_type") == "session_model_switch"
+        if entry.type == "custom" and entry.payload.get("custom_type") == "session_model_switch"
     ]
     assert switch_rows == []
     resumed = _session(tmp_path, NotifyingStream())
