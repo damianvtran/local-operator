@@ -1,0 +1,6 @@
+{
+  "cli.aida_help.aida": "Aida的个人档案备注：记录她应记住的信息",
+  "cli.aida_help.note": "在system_prompt.md的'About the operator'下追加备注",
+  "cli.aida_help.note_text": "要记录的备注；省略则从STDIN读取",
+  "cli.aida_help.note_description": "将备注写入<config root>/system_prompt.md中标记的'About the operator'部分，让之后的每个会话和子智能体都能看到。文件从配置根目录解析，不能作为参数传入；备注不得包含该部分的标记。省略TEXT则从STDIN读取备注（多行备注无需引号）。"
+}

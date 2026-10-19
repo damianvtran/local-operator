@@ -1,0 +1,6 @@
+{
+  "relay.login.page.title": "local operator — 登录",
+  "relay.login.password.label": "密码",
+  "relay.login.submit.label": "登录",
+  "relay.login.error.password": "密码错误。"
+}

@@ -1,0 +1,7 @@
+{
+  "cli.serve_help.serve": "启动FastAPI服务器",
+  "cli.serve_help.host": "主机地址（默认：127.0.0.1）。策略仅允许回环地址：拒绝所有非回环绑定。回环连接上的文件服务不受范围限制；通过显式隧道或SSH端口转发远程访问此API。",
+  "cli.serve_help.port": "服务器端口（默认：1111）",
+  "cli.serve_help.reload": "启用服务器热重载",
+  "cli.serve_help.listener_fd": "接管已绑定的监听套接字，而非自行绑定。由将自身进程映像替换为新构建的守护进程（`server/reload`）设置，确保端口始终有服务承接。非面向用户的标志。"
+}

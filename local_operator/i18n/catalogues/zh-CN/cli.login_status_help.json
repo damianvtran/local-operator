@@ -1,0 +1,4 @@
+{
+  "cli.login_status_help.login_status": "列出已存储的提供商凭据及其状态",
+  "cli.login_status_help.status_alias": "作为login-status的别名：列出已存储的提供商凭据"
+}
