@@ -480,3 +480,61 @@ def test_a_ref_free_dropped_server_needs_no_credential(
 
     assert rows["plain"]["shape"] == "none", rows
     assert rows["plain"]["state"] == "synced", rows
+
+
+def test_a_tombstoned_grant_reads_expired_on_both_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M4: a dead marker is a GRANT that failed, not "never signed in".
+
+    Covers both row sources: the enabled server (``_oauth_row``) and one the
+    discovery loader dropped (``_fact_row``).
+    """
+    import asyncio
+    import json
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+    from local_operator.providers.auth_store import AuthStore
+
+    other = "https://dropped.test/mcp"
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "enabled": {"type": "http", "url": URL, "auth": {"type": "oauth"}},
+                    "dropped": {"type": "http", "url": other, "auth": {"type": "oauth"}},
+                },
+                "disabledServers": ["dropped"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save(_record(), root)
+    grants = AuthStore(db_path=root / "auth.db", config_dir=root)
+    for server_url in (URL, other):
+        storage = McpTokenStorage(server_url, grants)
+        asyncio.run(
+            storage.set_tokens(
+                OAuthToken(
+                    **{
+                        "access_token": "tmp_path",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "tmp_path",
+                    }
+                )
+            )
+        )
+        assert storage.mark_grant_dead() is True
+
+    rows = server_states(str(root), base=root)
+
+    assert rows["enabled"]["state"] == "expired", rows
+    assert "sign in again on this device" in rows["enabled"]["reason"]
+    assert rows["dropped"]["state"] == "expired", rows
+    assert "sign in again on this device" in rows["dropped"]["reason"]
