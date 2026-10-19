@@ -374,6 +374,29 @@ async def test_the_chosen_level_survives_a_session_rebuild() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_restored_choice_follows_the_first_model_switch() -> None:
+    """The journal's choice is the app's STARTING preference after a restart.
+
+    ``_effort_choice`` is in-process state and starts empty when the app adopts
+    a resumed session. Without seeding it from ``Session.chosen_effort``, the
+    first ``/model`` lands on the target's seed and the band reads as though the
+    stored choice had been dropped — the reported defect one step later.
+    """
+    session = EffortSession()
+    session._spec = build_model_spec("anthropic", "claude-opus-5").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session.chosen_effort = "max"
+    app = OperatorApp(lambda: _factory(session), provider_controller=EffortProviderController())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/model anthropic/claude-sonnet-5-5")
+        level = _level(app)
+        band = _band(app)
+    assert level == "max", band
+
+
+@pytest.mark.asyncio
 async def test_a_level_the_next_model_cannot_take_is_forgotten_not_hidden(
     monkeypatch, tmp_path
 ) -> None:

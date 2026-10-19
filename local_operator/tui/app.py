@@ -12355,8 +12355,20 @@ class OperatorApp(App[None]):
         # user's chosen level would repaint the band with a level they did not
         # choose and are no longer running.
         spec = _model_spec(session)
+        follower = callable(getattr(session, "route_shared_slash", None))
+        # A RESTORED choice already belongs to the session; the app's own
+        # preference starts empty after a restart. Seed it BEFORE the restore
+        # guard below, or a resumed session with nothing else to restore never
+        # runs the restore at all and the first `/model` would apply the
+        # target's seed — the reported defect one step later (review round 5).
+        # Never on a FOLLOWER: its remembered local effort must not rewrite the
+        # shared owner's model, and the owner projection is authoritative.
+        if not follower and self._effort_choice is None:
+            restored_choice = getattr(session, "chosen_effort", None)
+            if restored_choice:
+                self._effort_choice = restored_choice
         if (
-            not callable(getattr(session, "route_shared_slash", None))
+            not follower
             and spec is not None
             and (self._effort_choice is not None or self._fast_choice)
             and hasattr(session, "set_model")
