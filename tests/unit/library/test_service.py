@@ -152,3 +152,56 @@ def test_chat_link_verifies_the_session_and_clears_a_dead_one(tmp_path, monkeypa
         pass
     else:  # pragma: no cover
         raise AssertionError("a malformed session id must be refused")
+
+
+def test_user_fields_survive_agent_writes_and_locked_rows(monkeypatch) -> None:
+    import tempfile
+
+    from local_operator.library.metadata import MetadataStore, TagRefused
+
+    work = Path(tempfile.mkdtemp())
+    root = config_root(monkeypatch, work)
+    path = work / "a.txt"
+    path.write_text("x")
+    build(root, write_rows("w1", 1, path))
+    asset_id = listing(root, service.Query())["rows"][0]["id"]
+
+    service.update_asset(root, asset_id, {"name": "Mine", "description": "My words"}, actor="user")
+    # A caller that names the writer but omits `source` must not claim a user
+    # edit: provenance defaults to the actor.
+    service.update_asset(
+        root, asset_id, {"name": "Librarian", "description": "Librarian words"}, actor="librarian"
+    )
+    service.update_asset(root, asset_id, {"name": "Agent"}, actor="agent")
+    row = service.get_asset(root, asset_id)
+    assert (row["name"], row["description"]) == ("Mine", "My words")
+    store = MetadataStore(root)
+    assert store.asset(asset_id)["name_source"] == "user"
+    assert store.asset(asset_id)["description_source"] == "user"
+
+    # The tags path carries actor/provenance too, and must not touch the
+    # effective name/description while replacing assignments.
+    tag = store.create_tag("shared-vocabulary")
+    service.set_tags(root, asset_id, [tag["id"]], actor="librarian")
+    assert service.get_asset(root, asset_id)["name"] == "Mine"
+
+    service.update_asset(root, asset_id, {"locked": True}, actor="user")
+    for actor in ("librarian", "agent"):
+        try:
+            service.update_asset(root, asset_id, {"name": f"{actor} name"}, actor=actor)
+        except TagRefused as error:
+            assert error.code == "asset_locked"
+        else:  # pragma: no cover
+            raise AssertionError(f"{actor} overwrote a locked asset")
+    locked_tag = store.create_tag("locked-test")
+    try:
+        service.set_tags(root, asset_id, [locked_tag["id"]], actor="librarian")
+    except TagRefused as error:
+        assert error.code == "asset_locked"
+    else:  # pragma: no cover
+        raise AssertionError("a non-user tag write touched a locked asset")
+    # The user remains able to unlock and edit their own row.
+    assert service.update_asset(root, asset_id, {"locked": False}, actor="user")["locked"] is False
+    assert service.update_asset(root, asset_id, {"name": "Mine again"}, actor="user")["name"] == (
+        "Mine again"
+    )

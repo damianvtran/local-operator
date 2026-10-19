@@ -458,8 +458,15 @@ def list_assets(
     all_assets = catalog.assets
     # Materialise a row per asset once, in one transaction: metadata writes
     # (tags, chat, edit history) key on ``assets.asset_id``, and a list request
-    # is the first place most assets are ever seen.
+    # is the first place most assets are ever seen. BEFORE the revision is read
+    # — the first call creates rows and therefore bumps it, and reading first
+    # would mint a cursor that is stale on the very next page.
     store.ensure_assets((asset.id, asset.key, asset.derived_name) for asset in all_assets)
+    # The cursor is bound to BOTH halves: the derived catalog (journals) and
+    # the metadata revision (names/descriptions/tags). A metadata edit can move
+    # a row across a page boundary with no journal change, and a revision that
+    # ignored it would let the next page duplicate one row and skip another.
+    revision = catalog.revision + store.metadata_revision()
     metas = _metadata_for(store, all_assets)
     tag_map = store.tags_for_assets(asset.id for asset in all_assets)
     primary_map = store.primary_tags(asset.id for asset in all_assets)
@@ -503,19 +510,19 @@ def list_assets(
 
     offset, reset = (0, False)
     if query.cursor:
-        offset, reset = _read_cursor(query.cursor, query, catalog.revision)
+        offset, reset = _read_cursor(query.cursor, query, revision)
     page = filtered[offset : offset + query.limit]
     more = offset + query.limit < len(filtered)
     return {
         "state": catalog.state,
-        "revision": catalog.revision,
+        "revision": revision,
         "total": len(filtered),
         # Counts are catalog-wide on purpose: the filter rail must not empty
         # itself while the user is narrowing a search.
         "counts": _counts(all_assets),
         "tags": store.list_tags(),
         "rows": [row for _asset, row in page],
-        "next_cursor": _cursor(query, catalog.revision, offset + query.limit) if more else None,
+        "next_cursor": _cursor(query, revision, offset + query.limit) if more else None,
         "cursor_reset": reset,
         "scan": {
             "sessions_total": catalog.sessions_total,
@@ -587,12 +594,18 @@ def update_asset(
     fields: dict[str, Any],
     *,
     actor: str = "user",
-    source: str = "user",
+    source: str | None = None,
     confidence: float | None = None,
 ) -> dict[str, Any]:
-    """Apply editable metadata. Records an edit row; returns the refreshed row."""
+    """Apply editable metadata. Records an edit row; returns the refreshed row.
+
+    ``source`` defaults to ``actor``: a caller that names the writer but omits
+    the provenance must not accidentally claim a USER edit and outrank a user's
+    own value. The route passes both explicitly; the tool passes both.
+    """
     config = Path(config_dir)
     _known_asset(config, asset_id)
+    source = source or actor
     if source not in FIELD_SOURCES:
         raise TagRefused("bad_source", source)
     if actor not in ("user", "librarian", "agent", "system"):
@@ -647,7 +660,10 @@ def set_tags(
     source: str | None = None,
     confidence: float | None = None,
 ) -> dict[str, Any]:
-    """Replace an asset's tag set and return the refreshed row."""
+    """Replace an asset's tag set and return the refreshed row.
+
+    ``source`` defaults to ``actor`` for the same reason as :func:`update_asset`.
+    """
     config = Path(config_dir)
     asset = _known_asset(config, asset_id)
     store = MetadataStore(config)

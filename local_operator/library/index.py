@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 INDEX_DIRNAME: Final = "library"
 INDEX_FILENAME: Final = "index.json"
-INDEX_SCHEMA: Final = 1
+INDEX_SCHEMA: Final = 2
 DEFAULT_BUDGET_S: Final = service.DEFAULT_BUDGET_S
 
 #: The three groups the Library shows. Raw origins stay on each occurrence.
@@ -282,6 +282,55 @@ def _highlight_paths(
     return found
 
 
+def _child_entry(
+    config_dir: Path,
+    child_id: str,
+    *,
+    label: str | None,
+    cwd: str,
+    home: str,
+    deny: Any,
+    budget_s: float | None,
+) -> dict[str, Any] | None:
+    """Refresh one PROVEN child journal into its parent's cache entry."""
+    child_dir = config_dir / "sessions" / child_id
+    snapshot = ledger.refresh(
+        config_dir,
+        child_id,
+        child_dir,
+        cwd=service.session_cwd(config_dir, child_id, child_dir) or cwd,
+        home=home,
+        deny=deny,
+        budget_s=budget_s,
+    )
+    if snapshot is None:
+        return None
+    return {
+        "label": label,
+        "sig": dict(snapshot.sig),
+        "revision": snapshot.revision,
+        "complete": bool(snapshot.complete),
+        "entries": [_record_dict(record) for record in snapshot.scan.records.values()],
+    }
+
+
+def _entry_revision(entry: dict[str, Any]) -> float:
+    """Parent revision plus every child's: the number the catalog sums.
+
+    Child revisions used to be computed and thrown away, so a child append left
+    the catalog revision identical and every warm reader saw stale rows.
+    """
+    total = float(entry.get("parent_revision") or entry.get("revision") or 0.0)
+    children = entry.get("children")
+    if isinstance(children, dict):
+        total += sum(
+            float(child.get("revision") or 0.0)
+            for child in children.values()
+            if isinstance(child, dict)
+        )
+    return total
+
+
 def _session_entry(
     config_dir: Path,
     session_id: str,
@@ -364,34 +413,26 @@ def _session_entry(
         except Exception:  # noqa: BLE001 - an unprovable roster is an empty child set
             proven = []
     for child in proven:
-        child_snapshot = ledger.refresh(
+        child_entry = _child_entry(
             config_dir,
             child.child_id,
-            child.session_dir,
-            cwd=service.session_cwd(config_dir, child.child_id, child.session_dir) or cwd,
+            label=child.label,
+            cwd=cwd,
             home=home,
             deny=deny,
             budget_s=budget_s,
         )
-        if child_snapshot is None:
+        if child_entry is None:
             continue
-        child_entries = [
-            _record_dict(record) for record in child_snapshot.scan.records.values()
-        ]
-        children[child.child_id] = {
-            "label": child.label,
-            "sig": dict(child_snapshot.sig),
-            "revision": child_snapshot.revision,
-            "complete": bool(child_snapshot.complete),
-            "entries": child_entries,
-        }
-        total_revision += child_snapshot.revision
-        complete = complete and bool(child_snapshot.complete)
+        children[child.child_id] = child_entry
+        total_revision += float(child_entry["revision"])
+        complete = complete and bool(child_entry["complete"])
 
     return (
         {
             "sig": dict(snapshot.sig),
-            "revision": snapshot.revision,
+            "parent_revision": snapshot.revision,
+            "revision": total_revision,
             "title": title,
             "cwd": cwd,
             "complete": complete,
@@ -521,8 +562,51 @@ def build_catalog(
             and cached.get("complete")
             and _sig_matches(cached.get("sig"), current)
         ):
-            sessions[session_id] = cached
-            scanned += 1
+            entry = cached
+            entry_complete = True
+            children = cached.get("children")
+            if isinstance(children, dict):
+                changed = False
+                for child_id, child in list(children.items()):
+                    if not isinstance(child, dict):
+                        children.pop(child_id, None)
+                        changed = True
+                        continue
+                    child_dir = config / "sessions" / str(child_id)
+                    if _sig_matches(child.get("sig"), _signature(child_dir)):
+                        continue
+                    remaining = (
+                        None if deadline is None else max(0.0, deadline - time.monotonic())
+                    )
+                    if deadline is not None and remaining <= 0:
+                        building = True
+                        entry_complete = False
+                        continue
+                    refreshed = _child_entry(
+                        config,
+                        str(child_id),
+                        label=child.get("label"),
+                        cwd=str(cached.get("cwd") or ""),
+                        home=home,
+                        deny=deny,
+                        budget_s=remaining,
+                    )
+                    if refreshed is None:
+                        children.pop(child_id, None)
+                    else:
+                        children[child_id] = refreshed
+                        entry_complete = entry_complete and bool(refreshed.get("complete"))
+                    changed = True
+                if changed:
+                    entry = dict(cached)
+                    entry["children"] = children
+                    entry["revision"] = _entry_revision(entry)
+                    entry["complete"] = bool(cached.get("complete")) and entry_complete
+            sessions[session_id] = entry
+            if entry.get("complete"):
+                scanned += 1
+            else:
+                building = True
             continue
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         if deadline is not None and remaining <= 0:

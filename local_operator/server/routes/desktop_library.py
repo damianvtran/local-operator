@@ -100,6 +100,27 @@ def _metadata_refusal(error: MetadataUnavailable) -> HTTPException:
     return _unavailable()
 
 
+_FIELD_BY_CODE = {
+    "bad_organized": "organized",
+    "bad_name": "name",
+    "name_required": "name",
+    "description_invalid": "description",
+    "bad_description": "description",
+    "asset_locked": "locked",
+}
+
+
+def _field_refusal(error: TagRefused) -> HTTPException:
+    """A malformed PATCH field is a client refusal, never a 500.
+
+    ``TagRefused`` is the store's vocabulary; a route that lets it escape turns
+    a typo (``organized: "garbage"``) or an explicit null name into an internal
+    error, which reads to the client as a broken backend rather than a bad body.
+    """
+    field = _FIELD_BY_CODE.get(error.code, "body")
+    return _bad_filter(field, error.code)
+
+
 def _tag_refusal(error: TagRefused) -> HTTPException:
     if error.code in ("unknown_tag", "tag_unknown"):
         return HTTPException(404, _wd.library_tag_unknown().envelope(code="library_tag_unknown"))
@@ -288,6 +309,8 @@ async def patch_library_asset(asset_id: AssetID, body: LibraryAssetPatch, reques
         )
     except service.AssetNotFound:
         raise _asset_not_found() from None
+    except TagRefused as error:
+        raise _field_refusal(error) from None
     except MetadataUnavailable as error:
         raise _metadata_refusal(error) from None
     return reply(row)
