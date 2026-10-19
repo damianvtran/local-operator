@@ -22,14 +22,13 @@ and neither changes what an episode measures.
    saying which one happened turns "the guest went away" from a guess into a
    fact on the wedge record.
 
-   The verdict is a CLASSIFICATION, not a licence to retry. A bounded retry of a
-   connect-phase failure was considered and NOT added: the only preserved
-   execute-phase loss refused every request for the remaining ~4 minutes of the
-   episode (nine refused screenshot reads and then the refused ``/execute``),
-   so a retry could not have recovered it and would only have lengthened the
-   dead time this change is meant to shorten. The data does not support a retry;
-   the verdict is recorded instead. Anything not PROVEN connect-phase is
-   ``ambiguous`` -- there is deliberately no third "probably not sent".
+   The verdict classifies ONE request, not the whole batch: earlier statements
+   may already have applied. ``AwsProvider.execute`` may retry only that unsent
+   request, bounded to three attempts after one successful readiness probe.
+   A failed readiness probe ends recovery immediately, since a dead control
+   server cannot accept input. Anything not PROVEN connect-phase remains
+   ``ambiguous`` -- there is deliberately no third "probably not sent", and
+   even a successful readiness probe cannot make ambiguous input replayable.
 
 2. ``capture_guest_console`` -- READ-ONLY EVIDENCE BEFORE THE GUEST IS GONE.
 
@@ -88,7 +87,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: The TCP connection was provably never established: no byte of the request was
-#: sent, so the batch did NOT apply.
+#: sent, so this request did NOT apply (earlier batch statements may have).
 DELIVERY_NOT_SENT = "not_sent"
 #: Anything else. The request may have been written, and the guest may have
 #: acted on it. Fail-closed: never replayed.
