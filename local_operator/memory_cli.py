@@ -386,6 +386,34 @@ def _bulk_flags(args: argparse.Namespace) -> list[str]:
     return parts
 
 
+#: Flags a bulk preview can add to narrow a selection, in the order a reader is
+#: most likely to reach for them. `--unverified` is absent deliberately: it
+#: selects a property rather than tightening the slice the filter already names.
+_NARROWING_FLAGS = ("--older-than", "--tag", "--title-matches")
+
+
+def _narrowing_hints(args: argparse.Namespace) -> list[str]:
+    """Narrowing flags this filter does NOT already carry.
+
+    WHY: a refusal that tells the reader to "add --tag" when the preview already
+    carries ``--tag`` is circular advice that cannot change the selection. Only an
+    unapplied flag can actually narrow it.
+    """
+    applied = {
+        "--older-than": bool(args.older_than),
+        "--tag": bool(args.tag),
+        "--title-matches": bool(args.title_matches),
+    }
+    return [flag for flag in _NARROWING_FLAGS if not applied[flag]]
+
+
+def _or_list(values: list[str]) -> str:
+    """'a', 'a or b', 'a, b or c' — the join a remedy sentence reads as prose."""
+    if len(values) == 1:
+        return values[0]
+    return ", ".join(values[:-1]) + " or " + values[-1]
+
+
 def _bulk_filter_text(args: argparse.Namespace) -> str:
     """The filter echoed back in words, for a human who did not just read the flags."""
     parts = [f"scope {args.scope}"]
@@ -452,11 +480,20 @@ def _bulk_forget(
     total = selection["total"]
     if len(items) > MAX_BULK_FORGET:
         # The preview must never print a confirmation the store will reject: a
-        # command that cannot run reads as a bug in the store, not a limit.
+        # command that cannot run reads as a bug in the store, not a limit. The
+        # remedy names only flags the filter does not already carry, or it would
+        # tell the reader to add the very flag that produced this selection.
+        hints = _narrowing_hints(args)
+        if hints:
+            remedy = f"Narrow the filter (for example add {_or_list(hints)})"
+        else:
+            remedy = (
+                "Every narrowing flag (--older-than, --tag, --title-matches) is already "
+                "applied, so tighten those values"
+            )
         raise MemoryError(
             f"This filter matches {len(items)} fact(s), but one bulk forget accepts at "
-            f"most {MAX_BULK_FORGET}. Nothing was previewed or forgotten. Narrow the "
-            "filter (for example add --older-than, --tag or --title-matches) and run "
+            f"most {MAX_BULK_FORGET}. Nothing was previewed or forgotten. {remedy} and run "
             "again; a larger cleanup has to be done in chunks."
         )
     base = {
@@ -1239,7 +1276,18 @@ def _bulk_preview_text(value: dict[str, Any]) -> str:
         lines.append(f"  … and {hidden} more (--json lists every row).")
     lines.append("")
     lines.append("Nothing was deleted.")
-    lines += _shaped(f"To forget exactly these {value['count']} fact(s), run:")
+    if value["guarded"]:
+        # The command still omits --force: a guard whose own suggested command
+        # defeats it trains people to paste past the warning. The instruction and
+        # the consequence sit NEXT TO the line, so nobody pastes it blind and
+        # reads "refused" as a broken preview.
+        lines += _shaped(
+            f"This removes {value['count']} of {value['total']} fact(s) in {value['scope']} "
+            f"({value['fraction']:.0%}) and cannot be undone. To proceed, add --force to the "
+            "command below deliberately; without it the confirmation is refused."
+        )
+    else:
+        lines += _shaped(f"To forget exactly these {value['count']} fact(s), run:")
     lines.append(f"  {value['confirm']}")
     return "\n".join(lines)
 
