@@ -73,7 +73,7 @@ def _asset(
 
 @pytest.fixture()
 def library(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Three real files plus the catalog that names them, under this HOME.
+    """Four real files plus the catalog that names them, under this HOME.
 
     The files live under this test HOME, NOT under the config root: the
     denylist refuses the config directory on read, so a fixture there would
@@ -89,25 +89,41 @@ def library(monkeypatch: pytest.MonkeyPatch) -> Any:
     notes.write_text("# Launch notes\n\nA short document.\n", encoding="utf-8")
     page = root / "page.html"
     page.write_text("<html><body><script>alert(1)</script>hi</body></html>", encoding="utf-8")
-    assets = [
-        _asset(image, name="photo.png", kind="image", category="image", content_type="image/png"),
-        _asset(
-            notes,
-            name="notes.md",
-            kind="markdown",
-            category="document",
-            content_type="text/markdown",
-            origin="written",
-        ),
-        _asset(
-            page,
-            name="page.html",
-            kind="html",
-            category="document",
-            content_type="text/html",
-            origin="written",
-        ),
-    ]
+    icon = root / "icon.svg"
+    icon.write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg'>"
+        "<script>alert(1)</script><rect width='8' height='8' fill='red'/>"
+        "</svg>",
+        encoding="utf-8",
+    )
+    image_asset = _asset(
+        image, name="photo.png", kind="image", category="image", content_type="image/png"
+    )
+    notes_asset = _asset(
+        notes,
+        name="notes.md",
+        kind="markdown",
+        category="document",
+        content_type="text/markdown",
+        origin="written",
+    )
+    page_asset = _asset(
+        page,
+        name="page.html",
+        kind="html",
+        category="document",
+        content_type="text/html",
+        origin="written",
+    )
+    svg_asset = _asset(
+        icon,
+        name="icon.svg",
+        kind="image",
+        category="image",
+        content_type="image/svg+xml",
+        origin="written",
+    )
+    assets = [image_asset, notes_asset, page_asset, svg_asset]
     catalog = Catalog(
         assets=assets,
         revision=7,
@@ -123,7 +139,12 @@ def library(monkeypatch: pytest.MonkeyPatch) -> Any:
     store = MetadataStore(config_dir())
     for asset in assets:
         store.ensure_asset(asset.id, asset.key, derived_name=asset.derived_name)
-    return {asset.kind: asset for asset in assets}
+    return {
+        "image": image_asset,
+        "markdown": notes_asset,
+        "html": page_asset,
+        "svg": svg_asset,
+    }
 
 
 def test_library_routes_require_authentication(library: dict[str, Any]) -> None:
@@ -145,8 +166,8 @@ def test_list_projects_display_paths_and_counts(library: dict[str, Any]) -> None
     client = _client()
     payload = client.get("/api/library/assets").json()
     assert payload["state"] == "ready"
-    assert payload["total"] == 3
-    assert payload["counts"]["kind"]["image"] == 1
+    assert payload["total"] == 4
+    assert payload["counts"]["kind"]["image"] == 2
     assert {row["kind"] for row in payload["rows"]} == {"image", "markdown", "html"}
     for row in payload["rows"]:
         # The phone projection NEVER carries the absolute spelling.
@@ -212,6 +233,7 @@ def test_metadata_patch_and_reread(library: dict[str, Any]) -> None:
     assert patched.status_code == 200
     assert patched.json()["name"] == "Launch notes (edited)"
     assert patched.json()["favorite"] is True
+    assert patched.json()["ref"]["path"] is None
     reread = client.get(f"/api/library/assets/{asset_id}").json()
     assert reread["name"] == "Launch notes (edited)"
 
@@ -233,6 +255,7 @@ def test_tag_lifecycle_and_assignment(library: dict[str, Any]) -> None:
         f"/api/library/assets/{asset_id}/tags", json={"tags": [tag_id], "primary": tag_id}
     )
     assert assigned.status_code == 200
+    assert assigned.json()["ref"]["path"] is None
     assert assigned.json()["tags"][0]["name"] == "launch"
     detail = client.get(f"/api/library/assets/{asset_id}").json()
     assert detail["primary_tag"] == tag_id
@@ -331,9 +354,29 @@ def test_a_missing_file_reports_content_missing(
     assert response.json()["code"] == "content_missing"
 
 
+def test_svg_is_sandboxed_on_content_and_thumbnail(library: dict[str, Any]) -> None:
+    client = _client()
+    asset_id = library["svg"].id
+
+    content = client.get(f"/api/library/assets/{asset_id}/content")
+    assert content.status_code == 200
+    policy = content.headers["content-security-policy"]
+    assert policy.startswith("sandbox") and "default-src 'none'" in policy
+    assert b"<script>" in content.content
+
+    thumb = client.get(f"/api/library/assets/{asset_id}/thumbnail")
+    assert thumb.status_code == 200
+    assert thumb.headers["content-type"].startswith("image/svg+xml")
+    assert "default-src 'none'" in thumb.headers["content-security-policy"]
+
+    png = client.get(f"/api/library/assets/{library['image'].id}/content")
+    assert png.status_code == 200
+    assert "content-security-policy" not in png.headers
+
+
 def test_facets_without_rows(library: dict[str, Any]) -> None:
     client = _client()
     facets = client.get("/api/library/facets").json()
-    assert facets["total"] == 3
+    assert facets["total"] == 4
     assert "rows" not in facets
     assert facets["counts"]["category"]["document"] == 2

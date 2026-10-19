@@ -211,7 +211,12 @@ def patch_payload(
     """Editable metadata only. Unknown keys are ignored by the service, so a
     newer desktop client's additive field is not fatal to an older relay."""
     try:
-        return library_service.update_asset(config_dir, asset_id, body)
+        library_service.update_asset(config_dir, asset_id, body)
+        # The service's write answer is the desktop projection (display=False).
+        # Re-read through the phone projection so the absolute spelling never
+        # crosses this plane on a WRITE either — the list/detail guarantee must
+        # not end at the first mutation.
+        return library_service.get_asset(config_dir, asset_id, display=True)
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:
@@ -291,9 +296,11 @@ def set_tags_payload(
         # the refreshed ROW, the same shape the desktop route serves: the app's
         # schema reads ``libraryAsset`` from this response, and a tag envelope
         # would make it re-read for values this call already has.
-        return library_service.set_tags(
+        library_service.set_tags(
             config_dir, asset_id, raw, primary=primary, actor="user"
         )
+        # Same re-projection as PATCH: the write returns the desktop row.
+        return library_service.get_asset(config_dir, asset_id, display=True)
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:

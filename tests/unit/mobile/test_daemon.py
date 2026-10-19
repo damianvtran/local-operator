@@ -300,7 +300,10 @@ def test_http_gate_and_login_flow() -> None:
     capabilities = payload["capabilities"]
     # ``library`` is conditional on the module being importable and IS in this
     # tree; the capability is how the phone knows to offer the destination.
-    assert sorted(capabilities) == ["features", "i18n", "library", "stt"]
+    # NOT an exact key set: capabilities are additive (the Librarian will add
+    # its own key), so a new key must not fail this relay's contract test.
+    for key in ("features", "i18n", "stt", "library"):
+        assert key in capabilities
     assert capabilities["library"] == 1
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)

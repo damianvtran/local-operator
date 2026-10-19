@@ -7889,6 +7889,12 @@ def build_app(daemon: MobileDaemon):
         content_type = (ref.content_type or "").lower()
         if content_type in ("text/html", "application/xhtml+xml"):
             headers["Content-Security-Policy"] = "sandbox"
+        elif content_type in ("image/svg+xml", "image/svg"):
+            # SVG is a document that can carry script. CSP sandbox neutralises
+            # it on a direct navigation, and `default-src 'none'` denies every
+            # subresource it might try to load; keeping the disposition inline
+            # preserves the phone's image preview (an <img> never executes it).
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
         if download:
             headers["Cache-Control"] = "no-store"
         else:
@@ -7955,10 +7961,10 @@ def build_app(daemon: MobileDaemon):
                     status_code=error.status,
                 )
             raise
-        headers = {
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=3600",
-        }
+        # Thumbnail follows the same policy as content: an SVG thumbnail is
+        # served original by the service, so it needs the same sandbox header.
+        headers = _library_response_headers(ref, download=False)
+        headers["Cache-Control"] = "private, max-age=3600"
         return FileResponse(ref.path, media_type=ref.content_type, headers=headers)
 
     routes: list[BaseRoute] = [

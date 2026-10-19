@@ -182,7 +182,8 @@ describe("library asset detail", () => {
 		expect(screen.getByText("download")).toBeTruthy();
 	});
 
-	it("saves metadata and re-reads the asset instead of patching locally", async () => {
+	it("saves metadata, preserves the primary tag, and re-reads the asset", async () => {
+		getLibraryAsset.mockResolvedValue(asset({ primary_tag: "tag_launch" }));
 		render(<LibraryAssetScreen assetId="la_0123456789abcdef" />);
 		await screen.findByText("launch notes");
 		fireEvent.click(screen.getByRole("button", { name: "edit" }));
@@ -194,9 +195,44 @@ describe("library asset detail", () => {
 			name: "renamed notes",
 			description: "why the launch moved",
 		});
-		expect(setLibraryTags).toHaveBeenCalledWith("la_0123456789abcdef", ["tag_launch"]);
+		// The sheet has no primary editor, so the selected primary rides along
+		// rather than being sent as null and cleared (review R-3).
+		expect(setLibraryTags).toHaveBeenCalledWith(
+			"la_0123456789abcdef",
+			["tag_launch"],
+			"tag_launch",
+		);
 		// Twice: the first read on mount, the second after the write.
 		await waitFor(() => expect(getLibraryAsset).toHaveBeenCalledTimes(2));
+	});
+
+	it("reconciles the detail after a partial write and keeps the refusal", async () => {
+		getLibraryAsset
+			.mockResolvedValueOnce(asset({ primary_tag: "tag_launch" }))
+			.mockResolvedValueOnce(
+				asset({
+					name: "renamed notes",
+					description: "why the launch moved",
+					primary_tag: "tag_launch",
+				}),
+			);
+		setLibraryTags.mockRejectedValue(new Error("tag write refused"));
+		render(<LibraryAssetScreen assetId="la_0123456789abcdef" />);
+		await screen.findByText("launch notes");
+		fireEvent.click(screen.getByRole("button", { name: "edit" }));
+		const name = await screen.findByDisplayValue("launch notes");
+		fireEvent.change(name, { target: { value: "renamed notes" } });
+		fireEvent.click(screen.getByRole("button", { name: "save" }));
+
+		expect(await screen.findByText("tag write refused")).toBeTruthy();
+		// The PATCH landed, so the detail behind the sheet must show its result
+		// while the refusal still explains the half that did not (review R-5).
+		// The sheet marks the detail inert, so a role query would ignore it;
+		// the h1 itself is the reconciliation evidence.
+		await waitFor(() =>
+			expect(screen.getByText("renamed notes", { selector: "h1" })).toBeTruthy(),
+		);
+		expect(screen.getByText("tag write refused")).toBeTruthy();
 	});
 
 	it("offers a retry when the read fails", async () => {

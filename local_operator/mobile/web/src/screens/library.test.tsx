@@ -4,7 +4,7 @@
 // server search, the category chip, the filter Sheet, the card menu and cursor
 // paging. The screens' copy is plain English (advisory i18n scope); assertions
 // are by role and name, the convention every phone test follows.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LibraryAsset, LibraryListing } from "../types";
 import type { LibraryQuery } from "../api";
@@ -77,6 +77,14 @@ function asset(overrides: Partial<LibraryAsset> = {}): LibraryAsset {
 		archived: false,
 		...overrides,
 	};
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((settle) => {
+		resolve = settle;
+	});
+	return { promise, resolve };
 }
 
 function listing(overrides: Partial<LibraryListing> = {}): LibraryListing {
@@ -170,13 +178,39 @@ describe("library list", () => {
 		expect(await screen.findByText("launch notes")).toBeTruthy();
 	});
 
-	it("sends the debounced search to the server and ignores a stale answer", async () => {
+	it("ignores a stale answer that resolves after the newer one", async () => {
+		const older = deferred<LibraryListing>();
+		const newer = deferred<LibraryListing>();
+		getLibrary.mockReset();
+		getLibrary.mockResolvedValueOnce(listing());
+		getLibrary.mockImplementationOnce(() => older.promise);
+		getLibrary.mockImplementationOnce(() => newer.promise);
+
 		render(<LibraryScreen />);
 		await screen.findByText("launch notes");
-		fireEvent.change(screen.getByLabelText("search assets"), { target: { value: "launch" } });
+
+		fireEvent.change(screen.getByLabelText("search assets"), { target: { value: "old" } });
 		await waitFor(() => expect(getLibrary).toHaveBeenCalledTimes(2), { timeout: 1500 });
-		const sent = getLibrary.mock.calls[1][0] as LibraryQuery;
-		expect(sent.q).toBe("launch");
+		expect((getLibrary.mock.calls[1][0] as LibraryQuery).q).toBe("old");
+
+		fireEvent.change(screen.getByLabelText("search assets"), { target: { value: "new" } });
+		await waitFor(() => expect(getLibrary).toHaveBeenCalledTimes(3), { timeout: 1500 });
+		expect((getLibrary.mock.calls[2][0] as LibraryQuery).q).toBe("new");
+
+		/* Resolve NEWER first, then OLDER: the sequence guard must keep the
+		   newer rows and drop the answer that arrived late. */
+		await act(async () => {
+			newer.resolve(listing({ total: 1, rows: [asset({ name: "newer result" })] }));
+		});
+		expect(await screen.findByText("newer result")).toBeTruthy();
+
+		await act(async () => {
+			older.resolve(listing({ total: 1, rows: [asset({ name: "stale result" })] }));
+			await older.promise;
+		});
+		await waitFor(() => expect(getLibrary).toHaveBeenCalledTimes(3));
+		expect(screen.queryByText("stale result")).toBeNull();
+		expect(screen.getByText("newer result")).toBeTruthy();
 	});
 
 	it("filters by the category chip the counts offer", async () => {
