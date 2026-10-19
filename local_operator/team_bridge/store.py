@@ -2335,8 +2335,8 @@ class Store:
         old epoch stale and the commit refuses (H3-Q3). Monotonic: the epoch
         only advances, and a template FLOOR is enforced — once a template
         hash is accepted, a different one may only arrive as a later
-        explicitly-known version (today only byte-equal bridge-screen-v1 is
-        accepted upstream; the floor row is what a future version bumps).
+        explicitly-known version (the client accepts only byte-equal embedded
+        bridge-screen-v1/v2 today; the floor row is what a future version bumps).
         """
 
         with self._connect() as conn:
