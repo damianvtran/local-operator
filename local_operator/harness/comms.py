@@ -2076,7 +2076,9 @@ class SubagentComms:
                 record.cancel_reason = item.cancel_reason
             record.last_step = item.last_step or record.last_step
             record.wip_ref = item.wip_ref or record.wip_ref
-            record.death_cause = item.death_cause or record.death_cause
+            # Reconciliation fills missing evidence; a settled loop's own
+            # classification outranks an earlier stop request that raced it.
+            record.death_cause = record.cut_off_cause or record.death_cause or item.death_cause
             record.wip_files = item.wip_files or record.wip_files
             record.wip_at = item.wip_at or record.wip_at
             if item.never_settled:

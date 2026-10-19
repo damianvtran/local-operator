@@ -1327,3 +1327,14 @@ def test_lane_step_throttles_but_new_commit_can_force_matching_step(tmp_path):
     lane = ledger.read_lane_receipts(tmp_path)[0]
     assert lane["last_step"] == "bash: second"
     assert lane["last_step_at"] == 101 and lane["wip_ref"] == ref
+
+
+def test_reconcile_does_not_replace_recorded_loop_cause_with_cancel_request():
+    from tests.unit.harness.test_comms import FakeJobs, FakeParent
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("j", "coder", prompt="work")
+    comms.record_outcome("j", "failed", cut_off_cause="continuation-limit")
+    comms.apply_lane_evidence([ledger.LaneEvidence(job_id="j", death_cause="child-cancelled")])
+    row = next(row for row in comms.roster() if row.job_id == "j")
+    assert row.death_cause == "continuation-limit"
