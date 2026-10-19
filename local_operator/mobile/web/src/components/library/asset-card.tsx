@@ -4,7 +4,7 @@
  * Two decisions worth naming:
  *
  * 1. **The thumbnail mounts lazily.** A catalog can hold thousands of assets and
- *    the list only paints a window of them; firing every `/thumb` on first
+ *    the list only paints a window of them; firing every `/thumbnail` on first
  *    paint would be a request storm against a relay whose own list is budgeted.
  *    The IntersectionObserver gate is the transcript's own pattern
  *    (`supplement-block.tsx`), one viewer per card, disconnected on unmount.
