@@ -374,6 +374,11 @@ class ChildInfo:
     #: ``""``. Read by a parent asking "why did that child stop?" after the job
     #: row was swept, which is exactly when this roster is the only surface
     #: left that can answer.
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
+    wip_files: int = 0
+    wip_at: float = 0.0
     cut_off_cause: str = ""
     #: Terminal payloads resolved with the same lifecycle precedence as
     #: ``status``. These survive the job-manager sweep so reconnecting readers
@@ -573,6 +578,11 @@ class _ChildRecord:
     #: job manager sweeps settled rows after its retention window while this
     #: record outlives them, so without it ``hub op='list'`` could say a child
     #: failed but never WHY once its row aged out.
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
+    wip_files: int = 0
+    wip_at: float = 0.0
     cut_off_cause: str = ""
     #: The child's terminal payload. Kept with the outcome because status and
     #: content are one durable fact after the ephemeral job row is swept.
@@ -1098,6 +1108,11 @@ class RosterPass:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            last_step=record.last_step,
+            wip_ref=record.wip_ref,
+            death_cause=record.death_cause,
+            wip_files=record.wip_files,
+            wip_at=record.wip_at,
             cut_off_cause=record.cut_off_cause,
             result_text=result_text,
             error_text=error_text,
@@ -2024,6 +2039,26 @@ class SubagentComms:
         record.ended_by = stamp.prior_ended_by
         record.cancel_reason = stamp.prior_cancel_reason
 
+    def note_checkpoint(
+        self,
+        job_id: str,
+        *,
+        last_step: str = "",
+        wip_ref: str = "",
+        death_cause: str = "",
+        wip_files: int = 0,
+        wip_at: float = 0.0,
+    ) -> None:
+        """Carry recovery evidence past the live job's retention window."""
+        record = self._records.get(job_id)
+        if record is not None:
+            record.last_step = last_step or record.last_step
+            record.wip_ref = wip_ref
+            record.death_cause = death_cause or record.death_cause
+            record.wip_files = wip_files
+            record.wip_at = wip_at
+            self._notify_change()
+
     def apply_lane_evidence(self, evidence: "Iterable[ledger.LaneEvidence]") -> None:
         """Fold the boot reconcile pass's findings onto the live records.
 
@@ -2039,6 +2074,13 @@ class SubagentComms:
             if item.ended_by or item.cancel_reason:
                 record.ended_by = item.ended_by
                 record.cancel_reason = item.cancel_reason
+            record.last_step = item.last_step or record.last_step
+            record.wip_ref = item.wip_ref or record.wip_ref
+            # Reconciliation fills missing evidence; a settled loop's own
+            # classification outranks an earlier stop request that raced it.
+            record.death_cause = record.cut_off_cause or record.death_cause or item.death_cause
+            record.wip_files = item.wip_files or record.wip_files
+            record.wip_at = item.wip_at or record.wip_at
             if item.never_settled:
                 record.lane_never_settled = True
 
@@ -2158,6 +2200,11 @@ class SubagentComms:
                     "outcome": record.outcome,
                     # Rides with the outcome: both are the same durable fact,
                     # and both must outlive the job row the manager sweeps.
+                    "last_step": record.last_step,
+                    "wip_ref": record.wip_ref,
+                    "death_cause": record.death_cause,
+                    "wip_files": record.wip_files,
+                    "wip_at": record.wip_at,
                     "cut_off_cause": record.cut_off_cause,
                     "result_text": record.result_text,
                     "error_text": record.error_text,
@@ -2292,6 +2339,11 @@ class SubagentComms:
                 # Missing defaults to "", which is right for a sidecar written
                 # before this field existed: it reproduces today's behaviour for
                 # old rows and cannot invent a cut-off that was never recorded.
+                last_step=str(row.get("last_step") or ""),
+                wip_ref=str(row.get("wip_ref") or ""),
+                death_cause=str(row.get("death_cause") or ""),
+                wip_files=int(row.get("wip_files") or 0),
+                wip_at=float(row.get("wip_at") or 0),
                 cut_off_cause=str(row.get("cut_off_cause") or ""),
                 result_text=(
                     str(row["result_text"]) if row.get("result_text") is not None else None
@@ -3263,6 +3315,13 @@ class SubagentComms:
             jobs_manager=jobs,
             model_spec=model_spec,
             resume_dir=record.session_dir,
+            resume_facts={
+                "cut_off_cause": record.cut_off_cause,
+                "death_cause": record.death_cause,
+                "error_text": record.error_text,
+                "last_step": record.last_step,
+                "wip_ref": record.wip_ref,
+            },
             agent=agent,
             effort=effort,
             model_selector=selector,

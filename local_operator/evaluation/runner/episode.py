@@ -369,6 +369,33 @@ class EpisodeConfig:
     protocol's (64 actions x 60 s of waiting is the largest legal ``execute``,
     so 64.5 minutes is the largest a step can be funded for), and a wedged call
     declares nothing and is cut off exactly as before.
+
+    ``score_timeout`` is the one timeout whose work grows with the episode
+    rather than with a single request: one call grades everything the episode
+    did. Measured on ``osworld-task_005`` (2026-10-19): the score over a
+    453-step, 2.4 h episode consumed the whole 300 s the operator script used
+    to set, and the episode was discarded with ``TimeoutError: score exceeded
+    its 300s budget after 300.0s (request 478; operation_id score-ep-...)``
+    and ``steps: 0``. ``request 478`` there is the parent-wire RPC id
+    (``RpcClient._next_id``), NOT a count of judge requests: the adapter
+    scores in its own process, so its internal round-trips never reach this
+    side. What is measured is the 300 s the single score call took at 453
+    steps; a 500-step episode is 1.10x that work, so the dataclass default is
+    900 s (~2.7x the projected 330 s) and ``scripts/run_episode.py`` sets
+    1800 s for paid campaigns. Judge latency under fleet load is not bounded
+    anywhere in this repo, so the margin is headroom, not a guarantee.
+
+    THIS CONSTANT IS THE ONLY BOUND ON THE SCORE CALL. ``--max-wall-s``
+    (default 18000 s) is a guest-side ``BudgetAuthorization`` resource and the
+    owner lease, not a parent-side deadline on ``score``: a scorer that hangs
+    is cut off here or not at all.
+
+    THE COST SIDE IS UNMEASURED FROM HERE. Both facts the parent can see --
+    one score call, and its duration growing with episode length -- point the
+    next optimisation pass inside the adapter: instrument the judge's own
+    round-trip count there before deciding whether to batch, cache or replay
+    judgements. Raising this budget was the minimal fix for a budget that was
+    losing paid work; it deliberately changes no scoring behaviour.
     """
 
     evidence_root: Path
@@ -378,7 +405,7 @@ class EpisodeConfig:
     prepare_timeout: float = 120.0
     reset_timeout: float = 120.0
     step_timeout: float = 120.0
-    score_timeout: float = 120.0
+    score_timeout: float = 900.0
     cleanup_timeout: float = 60.0
     ask_deadline_ms: int = 60_000
     handshake_timeout: float = 30.0
@@ -1935,6 +1962,13 @@ class EpisodeRunner:
                     episode_id=self._spec.episode_id,
                 ),
                 timeout=self._config.score_timeout,
+                # The timeout sentence carries the step count so a reader of
+                # the fatal can tell a legitimate long episode from a wedged
+                # scorer without opening the run root (see EpisodeConfig's
+                # ``score_timeout`` note for the measured numbers).
+                timeout_context=(
+                    f"episode ran {self._steps_taken} of {self._config.max_steps} steps"
+                ),
             )
             score = result.score
             details_source = None

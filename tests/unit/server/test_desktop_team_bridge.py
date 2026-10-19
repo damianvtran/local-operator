@@ -342,6 +342,9 @@ class FakeClient:
 
     behavior: dict[str, Any] = {}
     instances: list["FakeClient"] = []
+    #: Every scripted method reach lands here; the route guards are asserted to
+    #: refuse BEFORE this counter moves.
+    calls: int = 0
     #: The committed hub of the fixtures below. A REAL client always names its
     #: destination, and the read path refuses one that cannot (the shared
     #: destination guard), so a double that omitted this would exercise the
@@ -353,6 +356,7 @@ class FakeClient:
         FakeClient.instances.append(self)
 
     def _answer(self, name: str) -> Any:
+        FakeClient.calls += 1
         value = FakeClient.behavior.get(name, {})
         if isinstance(value, Exception):
             raise value
@@ -433,6 +437,167 @@ class FakeClient:
             "expected_account_id": expected_account_id,
         }
         return self._answer("put_allowlist")
+
+    async def conversations(
+        self,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before: str | None = None,
+        cursor: str | None = None,
+        scope: str | None = None,
+        access: Any = None,
+    ) -> dict[str, Any]:
+        FakeClient.behavior["last_conversations_kwargs"] = {
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "before": before,
+            "cursor": cursor,
+            "scope": scope,
+        }
+        return self._answer("conversations")
+
+    async def conversation(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: Any = None,
+    ):
+        FakeClient.behavior["last_conversation_id"] = conversation_id
+        return self._answer("conversation")
+
+    async def create_conversation(self, body: Any, *, access: Any = None):
+        FakeClient.behavior["last_create_body"] = dict(body)
+        return self._answer("create_conversation")
+
+    async def conversation_lifecycle(
+        self, conversation_id: str, action: str, *, access: Any = None
+    ):
+        FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
+        return self._answer("conversation_lifecycle")
+
+    async def conversation_members(
+        self, conversation_id: str, members: Any, *, tenant_id=None, access=None
+    ):
+        FakeClient.behavior["last_members"] = list(members)
+        return self._answer("conversation_members")
+
+    async def conversation_remove_member(
+        self, conversation_id: str, account_id: str, *, access=None
+    ):
+        FakeClient.behavior["last_removed"] = (conversation_id, account_id)
+        return self._answer("conversation_remove_member")
+
+    async def conversation_consent(
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        decision: str,
+        consent_version: str,
+        tenant_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_consent"] = (
+            conversation_id,
+            account_id,
+            decision,
+            consent_version,
+        )
+        return self._answer("conversation_consent")
+
+    async def conversation_join(self, conversation_id: str, *, access=None):
+        FakeClient.behavior["last_join"] = conversation_id
+        return self._answer("conversation_join")
+
+    async def conversation_leave(self, conversation_id: str, *, access=None):
+        FakeClient.behavior["last_leave"] = conversation_id
+        return self._answer("conversation_leave")
+
+    async def conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id=None,
+        limit=None,
+        before_seq=None,
+        after_seq=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_history_kwargs"] = {
+            "conversation_id": conversation_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "before_seq": before_seq,
+            "after_seq": after_seq,
+            "endpoint_id": endpoint_id,
+        }
+        return self._answer("conversation_messages")
+
+    async def conversation_send(
+        self,
+        conversation_id: str,
+        *,
+        client_ref: str,
+        text: str,
+        tenant_id=None,
+        agent_label=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_send"] = {
+            "conversation_id": conversation_id,
+            "client_ref": client_ref,
+            "text": text,
+            "tenant_id": tenant_id,
+            "agent_label": agent_label,
+        }
+        return self._answer("conversation_send")
+
+    async def conversation_body(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        return self._answer("conversation_body")
+
+    async def conversation_admit(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        verdict: str,
+        body_hash: str,
+        tenant_id=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_admit"] = (
+            conversation_id,
+            message_id,
+            verdict,
+            body_hash,
+            endpoint_id,
+        )
+        return self._answer("conversation_admit")
+
+    async def conversation_read(
+        self, conversation_id: str, *, seq=None, muted=None, tenant_id=None, access=None
+    ):
+        FakeClient.behavior["last_read"] = (conversation_id, seq, muted, tenant_id)
+        return self._answer("conversation_read")
+
+    async def unread(self, *, tenant_id=None, scope=None, access=None):
+        FakeClient.behavior["last_unread_kwargs"] = {
+            "tenant_id": tenant_id,
+            "scope": scope,
+        }
+        return self._answer("unread")
 
 
 class FakeDiscipline:
@@ -2126,3 +2291,397 @@ async def test_a_text_epoch_is_a_typed_refusal_and_not_a_500(api) -> None:
     assert result["content"] is None
     assert result["body_included"] is False
     assert "not-a-number" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Conversations (docs/TEAM-BRIDGE-CONVERSATIONS.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_conversation_list_forwards_tenant_and_paging(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [{"id": "bcv_1", "kind": "dm", "unread_count": 2}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&limit=20&before=2026-10-18T00:00:00Z"
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["conversations"][0]["id"] == "bcv_1"
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "before": "2026-10-18T00:00:00Z",
+        "cursor": None,
+        "scope": None,
+    }
+
+
+async def test_conversation_list_forwards_the_account_scope_and_cursor(api):
+    """The merged page: one server-derived scope, one opaque position."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [
+            {"id": "bcv_1", "kind": "dm", "tenant_id": "tnt_1"},
+            {"id": "bcv_2", "kind": "group", "tenant_id": "tnt_2"},
+        ],
+        "cursor": "bcur_next",
+        "has_more": True,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?scope=account&limit=20&cursor=bcur_abc"
+    )
+    assert response.status_code == 200, response.text
+    # Each row still belongs to exactly ONE org: the account page groups by the
+    # row's tenant_id and never merges conversations across orgs.
+    assert [row["tenant_id"] for row in response.json()["result"]["conversations"]] == [
+        "tnt_1",
+        "tnt_2",
+    ]
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": None,
+        "limit": 20,
+        "before": None,
+        "cursor": "bcur_abc",
+        "scope": "account",
+    }
+
+
+async def test_conversation_list_refuses_a_tenant_or_a_before_beside_the_account_scope(api):
+    """The aggregate's org set is the server's; a second position is a conflict."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations?scope=account&tenant_id=tnt_1"),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations?scope=account&before=2026-10-18T00:00:00Z"
+        ),
+        # ``after`` is not a name of this read at all; the closed table refuses
+        # it on every page.
+        await client.get("/v1/desktop/team-bridge/conversations?scope=account&after=x"),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before, "a refused query reached the transport"
+
+
+async def test_conversation_list_forwards_a_cursor_on_a_tenant_page(api):
+    """Upstream returns ``next_cursor`` on tenant pages too; ties depend on it."""
+
+    client, _root, _d = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&cursor=bcur_abc"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "limit": None,
+        "before": None,
+        "cursor": "bcur_abc",
+        "scope": None,
+    }
+
+
+async def test_conversation_list_refuses_before_combined_with_cursor(api):
+    """The compound position and the legacy timestamp bound are exclusive."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get(
+            "/v1/desktop/team-bridge/conversations"
+            "?tenant_id=tnt_1&before=2026-10-18T00:00:00Z&cursor=bcur_abc"
+        ),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations"
+            "?scope=account&before=2026-10-18T00:00:00Z&cursor=bcur_abc"
+        ),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_reads_refuse_an_unknown_scope(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations?scope=tenant"),
+        await client.get("/v1/desktop/team-bridge/unread?scope=organisation"),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_id_addressed_reads_refuse_a_scope(api):
+    """The id already names one org; a dropped scope would answer the wrong one."""
+
+    client, _root, _d = api
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations/bcv_abc12345?scope=account"),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+            "/messages/bcmsg_abcdef12/body?scope=account"
+        ),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.instances == []
+
+
+async def test_conversation_create_forwards_the_strict_body(api):
+    client, _root, _d = api
+    FakeClient.behavior["create_conversation"] = {"id": "bcv_2", "kind": "dm"}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations",
+        json={
+            "tenant_id": "tnt_1",
+            "kind": "dm",
+            "members": [{"account_id": "acct-b", "kind": "human", "display_label": "Bea"}],
+        },
+    )
+    assert response.status_code == 200
+    body = FakeClient.behavior["last_create_body"]
+    assert body["kind"] == "dm"
+    assert body["members"][0]["account_id"] == "acct-b"
+
+
+async def test_conversation_create_refuses_an_unknown_field(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations",
+        json={"kind": "dm", "members": [], "unexpected": True},
+    )
+    assert response.status_code == 422
+
+
+async def test_conversation_send_requires_a_client_ref(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"body": "hello"},
+    )
+    assert response.status_code == 422
+
+
+async def test_conversation_send_forwards_the_text_and_key(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_1", "seq": 1}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"tenant_id": "tnt_1", "client_ref": "ref-1", "body": "hello"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send"] == {
+        "conversation_id": "bcv_abc12345",
+        "client_ref": "ref-1",
+        "text": "hello",
+        "tenant_id": "tnt_1",
+        "agent_label": None,
+    }
+
+
+async def test_conversation_read_requires_something_to_do(api):
+    client, _root, _d = api
+    response = await client.post("/v1/desktop/team-bridge/conversations/bcv_abc12345/read", json={})
+    assert response.status_code == 422
+
+
+async def test_unread_is_one_badge_read(api):
+    client, _root, _d = api
+    FakeClient.behavior["unread"] = {
+        "total": 3,
+        "conversations": [{"conversation_id": "bcv_1", "unread_count": 3, "muted": False}],
+    }
+    response = await client.get("/v1/desktop/team-bridge/unread?tenant_id=tnt_1")
+    assert response.status_code == 200
+    assert response.json()["result"]["total"] == 3
+    assert FakeClient.behavior["last_unread_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "scope": None,
+    }
+
+
+async def test_unread_forwards_the_account_scope(api):
+    """One authorized read for the badge, with a per-org breakdown."""
+
+    client, _root, _d = api
+    FakeClient.behavior["unread"] = {
+        "total": 7,
+        "organizations": [
+            {"tenant_id": "tnt_1", "tenant_name": "One", "unread": 5, "eligible": True},
+            {"tenant_id": "tnt_2", "tenant_name": "Two", "unread": 2, "eligible": False},
+        ],
+    }
+    response = await client.get("/v1/desktop/team-bridge/unread?scope=account")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["total"] == 7
+    assert FakeClient.behavior["last_unread_kwargs"] == {
+        "tenant_id": None,
+        "scope": "account",
+    }
+
+
+async def test_unread_refuses_a_tenant_beside_the_account_scope(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.get("/v1/desktop/team-bridge/unread?scope=account&tenant_id=tnt_1")
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_every_desktop_write_refuses_a_scope(api):
+    """A write names exactly one tenant; ``scope`` is refused before any I/O."""
+
+    client, _root, _d = api
+    base = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+    writes = (
+        (
+            "put",
+            "/v1/desktop/team-bridge/settings?scope=account",
+            {"state": "active", "expected_account_id": "acc_a"},
+        ),
+        (
+            "put",
+            "/v1/desktop/team-bridge/allowlist?scope=account",
+            {"entries": [], "expected_account_id": "acc_a"},
+        ),
+        ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
+        ("post", f"{base}/archive?scope=account", None),
+        ("post", f"{base}/unarchive?scope=account", None),
+        (
+            "post",
+            f"{base}/members?scope=account",
+            [{"account_id": "acc_b", "display_label": "Bea"}],
+        ),
+        ("delete", f"{base}/members/acc_b?scope=account", None),
+        (
+            "post",
+            f"{base}/members/acc_b/consent?scope=account",
+            {"decision": "accept", "consent_version": "v1"},
+        ),
+        ("post", f"{base}/join?scope=account", None),
+        ("post", f"{base}/leave?scope=account", None),
+        (
+            "post",
+            f"{base}/messages?scope=account",
+            {"client_ref": "ref-1", "body": "hello"},
+        ),
+        (
+            "post",
+            f"{base}/messages/bmsg_1/admit?scope=account",
+            {"verdict": "allow", "body_hash": "hash-1"},
+        ),
+        ("post", f"{base}/read?scope=account", {"seq": 1}),
+    )
+    for method, path, payload in writes:
+        response = await client.request(method, path, json=payload)
+        assert response.status_code == 422, (path, response.text)
+        assert response.json()["detail"]["code"] == "invalid_request", path
+    # Construction is what a guard moved after ``_conversation_client`` would
+    # reach; ``_answer`` never runs on a refused write, so ``calls`` cannot see it.
+    assert FakeClient.instances == []
+
+
+async def test_conversation_history_forwards_parsed_cursors(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages"
+        "?tenant_id=tnt_1&limit=20&before_seq=41"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_history_kwargs"] == {
+        "conversation_id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "before_seq": 41,
+        "after_seq": None,
+        "endpoint_id": None,
+    }
+
+
+async def test_conversation_history_refuses_a_non_numeric_cursor(api):
+    client, _root, _d = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?before_seq=nope"
+    )
+    # A caller-controlled cursor is the family's invalid_request (422), never a
+    # 500 from int().
+    assert response.status_code == 422
+
+
+async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
+    client, _root, _d = api
+    cases = (
+        ("get", "/v1/desktop/team-bridge/conversations/nope", None),
+        ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        (
+            "post",
+            "/v1/desktop/team-bridge/conversations/nope/members",
+            [{"account_id": "acc_b", "display_label": "Bea"}],
+        ),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/join", {}),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/leave", {}),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/read", {"seq": 1}),
+        (
+            "post",
+            "/v1/desktop/team-bridge/conversations/nope/messages/bcmsg_abc12345/admit",
+            {"verdict": "allow", "body_hash": "x"},
+        ),
+    )
+    calls_before = FakeClient.calls
+    for method, path, payload in cases:
+        response = (
+            await client.get(path) if method == "get" else await client.post(path, json=payload)
+        )
+        assert response.status_code == 422, (path, response.text)
+    # None of the guards admitted a transport call.
+    assert FakeClient.calls == calls_before
+
+
+def test_account_grammar_matches_the_reader():
+    from local_operator.server.routes.desktop_team_bridge import _ACCOUNT_ID
+    from local_operator.team_bridge.read_context import ACCOUNT_ID_PATTERN
+
+    assert _ACCOUNT_ID.pattern == ACCOUNT_ID_PATTERN
+
+
+async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
+    client, _root, _d = api
+    # `..` collapses the DELETE path; `x?tenant_id=evil` injects a query. Both
+    # must be refused by the local charset guard, never handed to httpx.
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/%2E%2E"
+    )
+    assert response.status_code == 422, response.text
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/x%3Ftenant_id%3Devil"
+    )
+    assert response.status_code == 422, response.text
+    # The message id itself is a path segment: a value outside the minted
+    # grammar must be refused before the transport builds anything.
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/nope/body"
+    )
+    assert response.status_code == 422, response.text
+    # Consent names an account in the path; `..` must not reshape it.
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/%2E%2E/consent",
+        json={"decision": "accept", "consent_version": "bridge_consent_v1"},
+    )
+    assert response.status_code == 422, response.text

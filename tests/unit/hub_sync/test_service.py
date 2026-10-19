@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,16 +120,36 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return ctx, hub, agents, teams, root
 
 
+def _make_legacy(root: Path, kind: str, local_id: str) -> None:
+    """Rewrite a baseline file the way a PRE-FIX pull left it: no identity at all.
+
+    ``write_baseline`` preserves an established identity (an origin is
+    immutable, and the write path refuses a differing one), so a legacy row can
+    only be simulated by editing the stored file. That is exactly what the rows
+    this fix repairs look like on a real machine: a hub id, a tenant, and no
+    origin.
+    """
+    path = root / "hub" / "baselines" / f"{kind}-{local_id}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("identity", None)
+    path.write_text(json.dumps(raw, indent=1, sort_keys=True), encoding="utf-8")
+
+
 def _pull_agent(
     agents: AgentRegistry, hub: Hub, root: Path, text: str = BASE, desc: str = "d"
 ) -> Any:
-    """What a real pull leaves: a stamped row plus a baseline record."""
+    """What a real pull leaves: a stamped row, a baseline record and its origin.
+
+    The origin is the base the pull was SERVED by -- the hub the rig answers
+    from -- because that is the base a check reports as ``served_by`` and the
+    one the integration gate compares the link's source against.
+    """
 
     hub.agents["h1"] = (text, desc)
     row = agents.create_agent(_fields(name="coder", description=desc, tags=["role"]))
     agents.set_agent_system_prompt(row.id, text)
     stamped = agents._stamp_hub_provenance(agents.get_agent(row.id), "h1")
-    agents._record_hub_baseline(stamped, "h1", None)
+    agents._record_hub_baseline(stamped, "h1", None, hub.client())
     return stamped
 
 
@@ -729,10 +750,9 @@ def test_resolve_source_materializes_identity_and_preserves_scope(env) -> None:
     """The resolve arm confirms SOURCE+SCOPE and refuses a differing known scope."""
     ctx, hub, agents, teams, root = env
     stamped = _pull_agent(agents, hub, root)
-    # Drop the identity so the row is a LEGACY unknown-origin link (hub id only).
-    record = prov.read_baseline(root, "agent", stamped.id)
-    assert record is not None
-    prov.write_baseline(root, dataclasses.replace(record, identity=None, scope_known=True))
+    # Make the row a LEGACY unknown-origin link (hub id only), the state a pull
+    # before the fix left behind.
+    _make_legacy(root, "agent", stamped.id)
 
     resolved = svc.resolve_source(
         ctx,

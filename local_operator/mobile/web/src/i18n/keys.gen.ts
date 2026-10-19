@@ -319,6 +319,8 @@ export type MessageParams = {
   "wire.host_speed.retire_below_tps.label": undefined;
   "wire.memory.capture.help": undefined;
   "wire.memory.capture.label": undefined;
+  "wire.memory.capture.locators.help": undefined;
+  "wire.memory.capture.locators.label": undefined;
   "wire.memory.command": undefined;
   "wire.memory.description": undefined;
   "wire.memory.enabled.help": undefined;

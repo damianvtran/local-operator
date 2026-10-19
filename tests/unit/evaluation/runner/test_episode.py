@@ -229,6 +229,44 @@ async def test_paper_action_overhead_funds_actual_execute_timeout(
 
 
 @pytest.mark.asyncio
+async def test_a_slow_score_seals_and_reports_the_episodes_steps(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A score that takes real time still reaches ``scoring_result``.
+
+    The production numbers are 300 s (retired) and 1800 s (current); waiting
+    either is not a unit test, so 0.4 s stands in for a slow judge and 2.0 s
+    for the new budget. ``FakeAdapter`` replaces the supervisor, so the
+    deadline itself is exercised in ``test_rpc`` -- what this test holds is
+    the episode half of the incident: the run is not discarded, the score is
+    sealed in a verified bundle, and the timeout sentence, had it fired,
+    would have carried the step count the runner supplies.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id, score_delay=0.4)
+    runner = _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "finish"]),
+        config=build_config(tmp_path, score_timeout=2.0),
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert "scoring_result" in _kinds(root)
+    # The message is built one layer below this fake; what the runner owes it
+    # is the step count, which is the fact the incident's fatal lacked.
+    assert adapter.timeout_contexts["score"] == ["episode ran 1 of 4 steps"]
+
+
+@pytest.mark.asyncio
 async def test_happy_episode_writes_every_event_in_protocol_order(
     tmp_path: Path, episode_id: str
 ) -> None:
@@ -3578,6 +3616,7 @@ async def test_host_refusal_does_not_publish_supplied_answer(
         *,
         timeout: float,
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> Any:
         if method == "ask_user_exchange":
             adapter.calls.append(method)
@@ -3590,6 +3629,7 @@ async def test_host_refusal_does_not_publish_supplied_answer(
             result_type,
             timeout=timeout,
             execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+            timeout_context=timeout_context,
         )
 
     adapter._call_raw = refusing

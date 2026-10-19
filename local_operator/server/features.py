@@ -305,6 +305,15 @@ def feature_flags() -> dict[str, Any]:
         # The number is the READ SHAPE's version, not a gate: 1 is ids, states
         # and coarse codes with no message body.
         "team_bridge_read": 1,
+        # The CONVERSATION domain (docs/TEAM-BRIDGE-CONVERSATIONS.md): DMs,
+        # groups and channels with human and agent participants, over
+        # `/v1/desktop/team-bridge/conversations` and `/unread`. Its own key by
+        # the same rule: a renderer that does not see it must keep the surface
+        # it has (settings/inbox) rather than mount a page whose every call
+        # 404s. 1 is the shape version -- list/detail/messages/unread with a
+        # live body read, never a cached one. The server dark gate still answers
+        # 503, which the status route renders as a state.
+        "team_bridge_conversations": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
