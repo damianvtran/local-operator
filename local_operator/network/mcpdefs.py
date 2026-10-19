@@ -810,7 +810,7 @@ def state_rows(root: Path) -> list[dict[str, Any]]:
         for ref in _public_refs(env, headers):
             ref_id = str(ref.get("id") or "")
             if ref_id not in presence:
-                presence[ref_id] = _reference_present(root, ref_id)
+                presence[ref_id] = reference_present(root, ref_id)
             refs.append({"id": ref_id, "set": presence[ref_id]})
         rows.append(
             {
@@ -841,8 +841,14 @@ def _public_refs(env: Mapping[str, Any], headers: Mapping[str, Any]) -> list[dic
     )
 
 
-def _reference_present(root: Path, name: str) -> bool | None:
-    """Is ``name`` resolvable from this root's encrypted secret store?"""
+def reference_present(root: Path, name: str) -> bool | None:
+    """Is ``name`` resolvable from this root's encrypted secret store?
+
+    PUBLIC because ``readiness.mcp_servers_fact`` publishes the same ref state
+    for every user-scope server (all transports) and must ask the question the
+    definitions push asks; a second presence check beside this one is how a
+    status surface comes to disagree with the wire.
+    """
     try:
         from local_operator.secrets import access
         from local_operator.secrets.errors import SecretNotFound

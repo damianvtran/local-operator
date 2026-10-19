@@ -243,6 +243,103 @@ def test_a_re_run_is_idempotent(provision_root: Path, monkeypatch: pytest.Monkey
     assert holders.count(NODE) == 1, holders
 
 
+def test_adoption_runs_before_the_mcp_push_and_the_offer(
+    provision_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The order that makes the needs-list complete: adopt, then push, then build.
+
+    ``build_items`` preselects a class-2 key from ``needs_names``, which reads the
+    references the pushed MCP rows declare. A literal adopted AFTER either step
+    would still be invisible to the grant, so the step's own order is the fix.
+    """
+    import local_operator.mcp.credential_sources as credential_sources
+    from local_operator.network.credentials import offers as offers_mod
+
+    order: list[str] = []
+    real_adopt = credential_sources.adopt_literal_credentials
+
+    def _adopt(root: Path, **kwargs: Any) -> Any:
+        order.append("adopt")
+        return real_adopt(root, **kwargs)
+
+    real_build = offers_mod.build_items
+
+    def _build(config: Path, **kwargs: Any) -> Any:
+        order.append("build")
+        return real_build(config, **kwargs)
+
+    monkeypatch.setattr(credential_sources, "adopt_literal_credentials", _adopt)
+    monkeypatch.setattr(offers_mod, "build_items", _build)
+
+    (provision_root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "gh": {
+                        "type": "stdio",
+                        "command": "npx",
+                        "env": {"GITHUB_TOKEN": "ghp-provision-sentinel"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _seed(provision_root, "openai", {"refresh": "r", "access": "a", "email": "d@example.com"})
+    _operator_record(provision_root)
+    _real_networks(monkeypatch)
+    recorded: list[list[str]] = []
+    transport = FakeTransport(
+        outputs=[
+            ("network credentials", {"stdout": json.dumps(_listing(held=["openai"]))}),
+            ("mcp state", {"stdout": json.dumps({"ok": True, "servers": []})}),
+        ]
+    )
+
+    outcome = _run(_view(), transport, _pushes_ok(recorded)).step_provision()
+
+    assert outcome.ok, outcome.detail
+    assert order.index("adopt") < order.index("build")
+    assert [row["key"] for row in outcome.data["mcp_credentials"]["adopted"]] == ["GITHUB_TOKEN"]
+    mcp_push = next(index for index, argv in enumerate(recorded) if "mcp" in argv)
+    definitions_push = next(index for index, argv in enumerate(recorded) if "definitions" in argv)
+    assert definitions_push < mcp_push
+    # The adopted name is now a served class-2 key on the offer's own projection.
+    document = placement_mod.PlacementDocument.load(
+        NETWORK_ID, provision_root, self_device=OPERATOR
+    )
+    assert document.entry("secret:GITHUB_TOKEN") is not None
+
+
+def test_an_adoption_failure_is_recorded_and_the_step_still_runs(
+    provision_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.mcp.credential_sources as credential_sources
+
+    def _boom(_root: Path, **_kwargs: Any) -> Any:
+        raise RuntimeError("adoption is not available")
+
+    monkeypatch.setattr(credential_sources, "adopt_literal_credentials", _boom)
+    _seed(provision_root, "openai", {"refresh": "r", "access": "a", "email": "d@example.com"})
+    _operator_record(provision_root)
+    _real_networks(monkeypatch)
+    recorded: list[list[str]] = []
+    transport = FakeTransport(
+        outputs=[
+            ("network credentials", {"stdout": json.dumps(_listing(held=["openai"]))}),
+            ("mcp state", {"stdout": json.dumps({"ok": True, "servers": []})}),
+        ]
+    )
+
+    outcome = _run(_view(), transport, _pushes_ok(recorded)).step_provision()
+
+    assert outcome.ok, outcome.detail
+    assert outcome.data["mcp_credentials"]["error"] == "RuntimeError"
+    assert outcome.data["mcp_credentials"]["adopted"] == []
+    assert outcome.data["grants"]["granted"] == ["openai"]
+    assert any("mcp" in argv and "push" in argv for argv in recorded)
+
+
 def test_the_receipt_settles_in_order_and_folds_to_connected(
     provision_root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
