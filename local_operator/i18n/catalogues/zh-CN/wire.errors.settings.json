@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "获取配置失败：{error}",
+  "wire.errors.settings.config_unreadable": "配置文件无法读取。修复后再保存。",
+  "wire.errors.settings.config_update_failed": "更新配置失败：{error}",
+  "wire.errors.settings.credential_key_empty": "凭据名称不能为空",
+  "wire.errors.settings.credential_retrieve_failed": "获取凭据失败：{error}",
+  "wire.errors.settings.credential_update_failed": "更新凭据失败：{error}",
+  "wire.errors.settings.inline_credentials": "使用不含内嵌凭据或查询参数的endpoint。",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "未提供有效的更新字段",
+  "wire.errors.settings.not_registered": "该设置未注册。",
+  "wire.errors.settings.system_prompt_retrieve_failed": "获取系统提示词失败：{error}",
+  "wire.errors.settings.system_prompt_update_failed": "更新系统提示词失败：{error}"
+}

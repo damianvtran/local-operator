@@ -1,0 +1,11 @@
+{
+  "cli.stop_help.stop": "停止运行中的lop会话（先正常停止，再发送信号）",
+  "cli.stop_help.target": "conversation-name / session-id / pid / cwd子串（不区分大小写）",
+  "cli.stop_help.pid": "按确切pid指定目标",
+  "cli.stop_help.session": "按确切会话ID指定目标",
+  "cli.stop_help.all": "停止此机器上的所有会话（在TTY上提示；用--yes跳过）",
+  "cli.stop_help.yes": "跳过--all确认（stdin不是TTY时必需）",
+  "cli.stop_help.json": "每个目标的机器可读结果",
+  "cli.stop_help.timeout": "升级处理前等待各会话正常停止的时间（默认10）",
+  "cli.stop_help.force": "越过拒绝或跳过并升级处理：向套接字无法确认身份、报告轮次正在进行或收到信号后已在退出的目标发送信号；这些操作都可能中断其当前轮次。配合响应的轮次中运行时无需此项：普通stop即可通过套接字及时停止它"
+}

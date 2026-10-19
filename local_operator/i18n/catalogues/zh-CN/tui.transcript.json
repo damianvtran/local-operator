@@ -1,0 +1,19 @@
+{
+  "tui.transcript.ask.key_name": "{keys}（密钥名）",
+  "tui.transcript.ask.not_answered": "未回答",
+  "tui.transcript.ask.not_provided": "未提供",
+  "tui.transcript.attach.receipt": "↑ 已附加 {count, plural, other {# 张图像}}",
+  "tui.transcript.catchup.headline": "补收 — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, other {# 次错过的唤醒}}",
+  "tui.transcript.queued.newest": "· 已排队，等待下次运行时 — esc取回",
+  "tui.transcript.queued.older": "· 已排队，等待下次运行时",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "其他会话",
+  "tui.transcript.group.messages": "消息 · {count}",
+  "tui.transcript.group.actions": "{count, plural, other {{label}项操作}}",
+  "tui.transcript.group.reply_requested": "{count, plural, other {{label}项回复请求}}",
+  "tui.transcript.group.steered": "{count, plural, other {{label}项引导}}",
+  "tui.transcript.hub.reply_requested": "请求回复",
+  "tui.transcript.hub.steered": "已引导",
+  "tui.transcript.hub.from": "来自{identity}"
+}
