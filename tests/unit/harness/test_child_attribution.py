@@ -1129,13 +1129,13 @@ async def test_real_child_keeps_wip_and_delivers_cause_step_and_ref(iso, ending)
         assert git(repo, "show", f"{job.wip_ref}:untracked") == "saved new"
         assert receipt["ref"] == job.wip_ref
         assert receipt["child_session_id"] == directory.name
-        cause = "child-cancelled" if ending == "hang" else "child-provider-error"
+        cause = "child-cancelled" if ending == "hang" else "child-failed"
         assert job.death_cause == cause
         assert not is_cut_off_cause("child-cancelled")
         delivery = Session._job_result_message(job_id, "", job).details["text"]
         assert "last completed step: bash: Writing recoverable child work" in delivery
         assert f"WIP checkpoint: {job.wip_ref}" in delivery
-        assert ("explicitly cancelled" if ending == "hang" else "provider failed") in delivery
+        assert ("explicitly cancelled" if ending == "hang" else "the child run failed") in delivery
         end = next(e for e in events if isinstance(e, SubagentEndEvent))
         assert end.last_step == job.last_step and end.wip_ref == job.wip_ref
         assert end.death_cause == cause
@@ -1217,13 +1217,13 @@ async def test_resume_first_request_carries_recovery_brief_and_prior_messages(is
         request = provider.requests[request_count]
         texts = "\n".join(m.text for m in request.messages if isinstance(m, Message))
         assert "[resume context — the previous attempt ended:" in texts
-        assert ("explicitly cancelled" if ending == "hang" else "provider failed") in texts
+        assert ("explicitly cancelled" if ending == "hang" else "the child run failed") in texts
         assert "host disappeared" not in texts
         assert "Last completed step: bash: Writing recoverable child work" in texts
         assert f"[WIP checkpoint: {ref}" in texts
         assert "Commit saved changes" in texts and "Wait for review" in texts
         assert "Keep prior work" not in texts
-        assert "restore with: git -C" in texts
+        assert "restore with: (tmp=$(mktemp)" in texts
         await wait_until(lambda: job_of(parent, new_id).status == "completed")
         after_ids = {m.id for m in Transcript(directory).build_llm_history()}
         assert {m.id for m in before} <= after_ids
@@ -1286,9 +1286,17 @@ asyncio.run(main())
                     record = json.loads((iso / "launch.json").read_text())
                     directory = Path(record["session_dir"])
                     lanes = ledger.read_lane_receipts(directory)
-                    if lanes and lanes[0].get("last_step") and lanes[0].get("wip_ref"):
+                    if (
+                        lanes
+                        and lanes[0].get("last_step")
+                        and lanes[0].get("wip_ref")
+                        and git(repo, "show", f"{lanes[0]['wip_ref']}:untracked") == "saved new"
+                    ):
+                        # A timer may have captured the tracked write before
+                        # the tool created the untracked file. Kill only once
+                        # the receipt points to the complete write under test.
                         break
-                except (OSError, ValueError):
+                except (OSError, ValueError, subprocess.CalledProcessError):
                     pass
                 time.sleep(0.05)
             else:
@@ -1338,3 +1346,121 @@ def test_reconcile_does_not_replace_recorded_loop_cause_with_cancel_request():
     comms.apply_lane_evidence([ledger.LaneEvidence(job_id="j", death_cause="child-cancelled")])
     row = next(row for row in comms.roster() if row.job_id == "j")
     assert row.death_cause == "continuation-limit"
+
+
+@pytest.mark.asyncio
+async def test_read_only_config_startup_is_generic_failure_before_provider(iso):
+    provider = WritingChild()
+    parent, _ = make_git_parent(iso, provider)
+    await parent.async_init()
+    sessions = iso / "config" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    sessions.chmod(0o500)
+    # Failure delivery must not wake the PARENT's provider; this assertion is
+    # specifically about whether the child ever reaches its first request.
+    parent.retire_job_deliveries_to_transcript()
+    try:
+        with pytest.raises(PermissionError):
+            (sessions / "permission-negative-control").mkdir()
+        job_id = parent._launch_subagent(label="startup-failure", prompt="Do the work.")
+        await wait_until(lambda: job_of(parent, job_id).status == "failed")
+        job = job_of(parent, job_id)
+        assert provider.requests == []
+        assert "Permission denied" in job.error_text
+        assert job.death_cause == "child-failed"
+        delivery = Session._job_result_message(job_id, "", job).details["text"]
+        assert "the child run failed" in delivery and "Permission denied" in delivery
+        assert "provider" not in delivery
+        record = parent.subagent_comms._record(job_id)
+        assert record.death_cause == "child-failed"
+        from local_operator.harness.subagent import _resume_context
+
+        directory = iso / "resume-evidence"
+        directory.mkdir()
+        brief = _resume_context(
+            directory,
+            {
+                "death_cause": record.death_cause,
+                "error_text": record.error_text,
+            },
+        )
+        assert "the child run failed" in brief and "Permission denied" in brief
+        assert "provider" not in brief
+    finally:
+        sessions.chmod(0o700)
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_real_pause_delivery_matches_roster_and_has_single_clause_separator(iso):
+    provider = WritingChild()
+    parent, _ = make_git_parent(iso, provider)
+    await parent.async_init()
+    try:
+        job_id = parent._launch_subagent(label="paused-coder", prompt="Write the files.")
+        await wait_until(lambda: bool(job_of(parent, job_id).last_step))
+        await parent.subagent_comms.pause(job_id, by="parent-hub", reason="park")
+        job = job_of(parent, job_id)
+        assert job.status == "cancelled" and job.death_cause == "child-paused"
+        delivery = Session._job_result_message(job_id, "", job).details["text"]
+        assert delivery.startswith("background job 'paused-coder' paused — ")
+        assert "cancelled" not in delivery and "killed" not in delivery
+        assert ". —" not in delivery and "\n" not in delivery
+        assert "last completed step: bash: Writing recoverable child work" in delivery
+        assert f"WIP checkpoint: {job.wip_ref}" in delivery
+        row = next(r for r in parent.subagent_comms.roster() if r.job_id == job_id)
+        assert row.status == "paused"
+    finally:
+        await asyncio.wait_for(parent.dispose(), timeout=30)
+
+
+@pytest.mark.parametrize("status", [401, 402])
+def test_provider_attribution_requires_the_provider_renderer(status):
+    from local_operator.harness.subagent import _child_failure_cause
+    from local_operator.providers.failover import ProviderError
+
+    assert (
+        _child_failure_cause(str(ProviderError(status, "refused request")))
+        == "child-provider-error"
+    )
+    assert _child_failure_cause("PermissionError: read-only config") == "child-failed"
+    assert _child_failure_cause("provider exploded after writing") == "child-failed"
+
+
+@pytest.mark.asyncio
+async def test_superseded_checkpoint_clears_live_job_and_durable_record(iso, monkeypatch):
+    from tests.unit.harness.test_wip_checkpoint import git
+
+    # The event-driven first snapshot is real; defer the timer so it cannot
+    # mint a different checkpoint halfway through this synthetic commit.
+    monkeypatch.setenv("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "3600")
+    parent, repo = make_git_parent(iso, WritingChild())
+    parent.retire_job_deliveries_to_transcript()
+    await parent.async_init()
+    try:
+        job_id = parent._launch_subagent(label="committing-coder", prompt="Write files.")
+        directory = await wait_child_dir(parent, job_id)
+        await wait_until(lambda: bool(job_of(parent, job_id).last_step))
+
+        def complete_checkpoint():
+            ref = job_of(parent, job_id).wip_ref
+            return (
+                bool(ref) and "untracked" in git(repo, "ls-tree", "--name-only", ref).splitlines()
+            )
+
+        await wait_until(complete_checkpoint)
+        saved_ref = job_of(parent, job_id).wip_ref
+        git(repo, "update-ref", "HEAD", saved_ref)
+        (repo / "tracked").write_text("newer committed work\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "move beyond checkpoint")
+        # Cancellation awaits the real forced snapshot before child disposal.
+        await parent.subagent_comms.cancel(job_id)
+        await wait_until(lambda: not job_of(parent, job_id).wip_ref)
+        record = parent.subagent_comms._record(job_id)
+        assert record.wip_ref == "" and record.wip_files == 0
+        assert not (directory / f"subagent-wip-{job_id}.v1.json").exists()
+        assert git(repo, "for-each-ref", saved_ref) == ""
+        assert (repo / "tracked").read_text() == "newer committed work\n"
+    finally:
+        await asyncio.wait_for(parent.dispose(), timeout=30)
