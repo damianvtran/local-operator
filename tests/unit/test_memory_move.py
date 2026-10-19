@@ -289,7 +289,7 @@ def test_a_peer_correction_the_mover_never_saw_is_refused_not_erased(tmp_path):
         peer.apply_ops(second["ops"], origins={"device-a"})
     # The copy must be true: there is no sync verb, and the retry is automatic
     # (30 min refusal floor), with a restart as the faster route.
-    assert "30 minutes" in str(refused.value)
+    assert "after about 30 minutes" in str(refused.value)
     assert "restarting" in str(refused.value)
     # The correction survives, is still searchable, and no destination copy appeared.
     assert peer.show("global", item["id"])["fact"]["body"].startswith("IMPORTANT")

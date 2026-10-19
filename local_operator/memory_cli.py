@@ -518,7 +518,7 @@ def _searched_line(value: dict[str, Any], prefix: str) -> str:
 #: the fallbacks so a code whose refusal carried no sentence is still actionable.
 _PEER_REMEDY: dict[str, str] = {
     "bad_memory": "Resolve the named memory conflict on the refusing peer; memory sync "
-    "retries automatically within 30 minutes (restarting the retrying device picks it "
+    "retries automatically after about 30 minutes (restarting the retrying device picks it "
     "up sooner).",
     # A receiver-side capability refusal (`_push_to_peer` reports `skipped:no_admin`
     # when the peer does not grant this device the admin the memory stream requires).
@@ -598,7 +598,16 @@ def _status_text(value: dict[str, Any]) -> str:
         truncated = len(message) > PEER_EXCERPT_CHARS
         if truncated:
             message = message[:PEER_EXCERPT_CHARS].rsplit(" ", 1)[0].rstrip() + " …"
-        label = str(receipt.get("name") or "") or device
+        # The display name arrives verbatim from a peer's pairing handshake
+        # (`MemberRecord.name`), and an older build may already have stored a
+        # hostile or oversized one. The render point is therefore the boundary
+        # that protects every row, not just names admitted after a fix: strip the
+        # same control sequences as the sentence and bound the width, or a name
+        # is a second unauthenticated route into the terminal.
+        name = " ".join(strip_control_sequences(str(receipt.get("name") or "")).split())
+        if len(name) > PEER_NAME_CHARS:
+            name = name[: PEER_NAME_CHARS - 1].rstrip() + "…"
+        label = name or device
         if label != device:
             label = f"{label} ({device})"
         lines += _shaped(f"Not syncing with {label}: {code}. {message or fallback}")
@@ -655,6 +664,11 @@ _PROPOSALS = {
 #: the `1 failing` header out of a 40-row viewport. The full text stays in
 #: `lop memory status --json`, and the code-keyed remedy is printed beside it.
 PEER_EXCERPT_CHARS = 240
+
+#: How much of a peer's display name is shown. A name is peer-supplied and was
+#: stored verbatim; bounded at 48 so the name plus the prefix stays under the
+#: 80-column bar even before the stable id is appended.
+PEER_NAME_CHARS = 48
 
 #: The repo's own list-row bar (see ``_row``: "an 80-column terminal never
 #: clips the ID or splits a status"). Every line of this page is shaped to it.

@@ -1737,7 +1737,7 @@ def test_a_handler_refusal_is_recorded_locally_with_its_code(root: Path) -> None
         raise types.MeshRefusal(
             "bad_memory",
             "Memory move refused: resolve the conflict on this device. Memory sync "
-            "retries automatically within 30 minutes; restarting this device picks the "
+            "retries automatically after about 30 minutes; restarting this device picks the "
             "retry up sooner.",
         )
 
