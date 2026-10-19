@@ -2369,14 +2369,41 @@ async def test_conversation_list_refuses_a_tenant_or_a_before_beside_the_account
     assert FakeClient.calls == calls_before, "a refused query reached the transport"
 
 
-async def test_conversation_list_refuses_a_cursor_on_a_tenant_page(api):
+async def test_conversation_list_forwards_a_cursor_on_a_tenant_page(api):
+    """Upstream returns ``next_cursor`` on tenant pages too; ties depend on it."""
+
     client, _root, _d = api
-    calls_before = FakeClient.calls
     response = await client.get(
         "/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&cursor=bcur_abc"
     )
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "invalid_request"
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "limit": None,
+        "before": None,
+        "cursor": "bcur_abc",
+        "scope": None,
+    }
+
+
+async def test_conversation_list_refuses_before_combined_with_cursor(api):
+    """The compound position and the legacy timestamp bound are exclusive."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get(
+            "/v1/desktop/team-bridge/conversations"
+            "?tenant_id=tnt_1&before=2026-10-18T00:00:00Z&cursor=bcur_abc"
+        ),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations"
+            "?scope=account&before=2026-10-18T00:00:00Z&cursor=bcur_abc"
+        ),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
     assert FakeClient.calls == calls_before
 
 
@@ -2391,6 +2418,23 @@ async def test_conversation_reads_refuse_an_unknown_scope(api):
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == "invalid_request"
     assert FakeClient.calls == calls_before
+
+
+async def test_id_addressed_reads_refuse_a_scope(api):
+    """The id already names one org; a dropped scope would answer the wrong one."""
+
+    client, _root, _d = api
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations/bcv_abc12345?scope=account"),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+            "/messages/bcmsg_abcdef12/body?scope=account"
+        ),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.instances == []
 
 
 async def test_conversation_create_forwards_the_strict_body(api):
@@ -2499,7 +2543,6 @@ async def test_every_desktop_write_refuses_a_scope(api):
     """A write names exactly one tenant; ``scope`` is refused before any I/O."""
 
     client, _root, _d = api
-    calls_before = FakeClient.calls
     base = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
     writes = (
         (
@@ -2544,7 +2587,9 @@ async def test_every_desktop_write_refuses_a_scope(api):
         response = await client.request(method, path, json=payload)
         assert response.status_code == 422, (path, response.text)
         assert response.json()["detail"]["code"] == "invalid_request", path
-    assert FakeClient.calls == calls_before, "a refused write reached the transport"
+    # Construction is what a guard moved after ``_conversation_client`` would
+    # reach; ``_answer`` never runs on a refused write, so ``calls`` cannot see it.
+    assert FakeClient.instances == []
 
 
 async def test_conversation_history_forwards_parsed_cursors(api):
