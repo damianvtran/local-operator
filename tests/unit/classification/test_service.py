@@ -846,3 +846,78 @@ async def test_provider_available_is_true_when_a_leg_can_serve(manager, install_
     subject, legs = service(manager, install_legs, radient={"credential": True})
     assert await subject.provider_available() is True
     assert legs["radient"].calls == []
+
+
+# ---------------------------------------------------------------------------
+# Routing trace: a fallback is named on the outcome and the spend row
+# ---------------------------------------------------------------------------
+
+
+async def test_a_fallback_names_the_skipped_leg_on_the_outcome_and_the_row(
+    holder_root, install_legs
+) -> None:
+    """The measured defect: OpenRouter answered and nothing said Radient was skipped.
+
+    The placement row is real (the head owns Radient and lends it here), the stub
+    Radient leg reports no credential — the state the node was in — and the
+    decision must carry both the skipped leg and the reason, on the
+    ``Recommendation`` and on the channel-ledger row.
+    """
+    subject = ClassificationService(config_dir=holder_root, settings=settings())
+    behaviours = install_legs(
+        radient={"credential": False, "note_posts": True},
+        typesafe={"credential": True, "note_posts": True},
+    )
+    rows = []
+    subject.bind_spend_sink(rows.append)
+
+    outcome = await subject.recommend_resources(request())
+
+    assert behaviours["radient"].credential_calls == 1
+    assert outcome.vendor == "typesafe"
+    assert (outcome.fallback_from, outcome.fallback_reason) == ("radient", "not_synced")
+    assert len(rows) == 1
+    assert rows[0].detail.startswith("fallback from radient: not_synced")
+    assert subject.routing_note == (
+        "radient not available on this device (not_synced); using typesafe"
+    )
+
+
+async def test_a_first_leg_decision_keeps_the_empty_fallback_shape(manager, install_legs) -> None:
+    """No skip means no note: the outcome and the row keep their pre-slice shape."""
+    subject, behaviours = service(
+        manager,
+        install_legs,
+        radient={"credential": True, "note_posts": True},
+        typesafe={"credential": False, "note_posts": True},
+        openrouter={"credential": False, "note_posts": True},
+    )
+    rows = []
+    subject.bind_spend_sink(rows.append)
+
+    outcome = await subject.recommend_resources(request())
+
+    assert behaviours["radient"].calls
+    assert outcome.vendor == "radient"
+    assert (outcome.fallback_from, outcome.fallback_reason) == ("", "")
+    assert subject.routing_note == ""
+    assert len(rows) == 1 and rows[0].detail == ""
+
+
+async def test_a_zero_peer_session_never_constructs_the_borrow_store(
+    bare_manager, monkeypatch
+) -> None:
+    """The hot path on a device with nothing lent to it pays no mesh construction."""
+    from local_operator.network.credentials import store as mesh_store
+
+    def explode(*args, **kwargs):
+        raise AssertionError("a zero-peer device must not construct a mesh store")
+
+    monkeypatch.setattr(mesh_store, "build_auth_store", explode)
+
+    subject = ClassificationService(config_dir=bare_manager, settings=settings())
+
+    outcome = await subject.recommend_resources(request())
+
+    assert outcome.skipped == "no-vendor"
+    assert subject.routing_note == ""

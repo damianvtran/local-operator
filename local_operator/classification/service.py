@@ -116,11 +116,12 @@ import httpx
 from local_operator.classification import accounting
 from local_operator.classification.cascade import (
     DEFAULT_VENDOR,
+    VendorResolution,
     classification_section,
     leg_order,
     model_override,
     pinned_vendor,
-    resolve_vendor,
+    resolve_vendor_with_trace,
     vendor_status,
 )
 from local_operator.classification.context import (
@@ -330,6 +331,12 @@ class ClassificationService:
         self._disabled_shapes: set[str] = set()
         self._vendor_name: str | None = None
         self._legs: tuple[DecisionVendor, ...] | None = None
+        #: Why the first leg was skipped, when it was. Set by :meth:`_available_legs`
+        #: from the resolution trace and cleared with ``_legs`` so a stale reason can
+        #: never describe a newly resolved cascade. ``None`` means "not resolved yet";
+        #: a resolution that found a first-leg credential leaves it with no skipped
+        #: rows, which reads the same as "nothing was skipped".
+        self._routing_trace: VendorResolution | None = None
         self._vendors: dict[str, DecisionVendor] = {}
         #: One keep-alive client for the session; created on first use so a
         #: session that never classifies never opens a socket, and closed by
@@ -399,6 +406,29 @@ class ClassificationService:
             if available:
                 return name
         return None
+
+    @property
+    def routing_note(self) -> str:
+        """One sentence naming the preferred leg this session had to skip, or "".
+
+        Empty when the first preferred leg resolved (the ordinary case), when the
+        cascade has not resolved yet, and when it resolved nothing at all — there
+        is no "using X" to say in the last case. After a fallback it names the
+        skipped leg and the trace's reason, e.g. ``"radient not available on this
+        device (not_synced); using openrouter"``, so a diagnostics surface can
+        report the downgrade instead of presenting it as the choice.
+
+        Cleared with ``_legs`` (see :attr:`_routing_trace`): a reason describes one
+        resolution and must not outlive it.
+        """
+        trace = self._routing_trace
+        if trace is None or trace.vendor is None or not trace.skipped:
+            return ""
+        first = trace.skipped[0]
+        return (
+            f"{first['vendor']} not available on this device ({first['reason']}); "
+            f"using {trace.vendor.name}"
+        )
 
     # -- public API --------------------------------------------------------
 
@@ -616,10 +646,17 @@ class ClassificationService:
                 request.max_recommendations, max_recommendations(self._settings)
             ),
         )
+        skipped = self._routing_trace.skipped if self._routing_trace is not None else ()
         recommendation = Recommendation(
             resources=resources,
             block=render_block(resources),
             vendor=response.vendor,
+            # The RESOLUTION's skipped leg, not the answering leg: a later leg can
+            # also answer after the first resolved one failed at request time, and
+            # that runtime fallback is a different event (it is in the attempts log,
+            # not in the credential trace). Empty when nothing was skipped.
+            fallback_from=skipped[0]["vendor"] if skipped else "",
+            fallback_reason=skipped[0]["reason"] if skipped else "",
             cost_usd=response.cost_usd,
             # The vendor's own counts, carried so the harness's cost line can print
             # them: input is what this layer is billed for, so a line that could not
@@ -729,6 +766,7 @@ class ClassificationService:
                     attempts.append(f"{vendor.name}:{exc.kind}")
                     attempts_walk.append(f"{vendor.name}:{exc.kind}")
                     self._legs = None
+                    self._routing_trace = None
                     self._vendor_name = None
                     logger.debug(
                         "classification: leg %s failed (%s), trying next", vendor.name, exc.kind
@@ -793,6 +831,7 @@ class ClassificationService:
         # standalone caller's result when there is nowhere to send the record.
         if self._spend_sink is None:
             return await vendor.decide(request, timeout_s=timeout_s)
+        note = self._fallback_note()
         meter, token = accounting.begin_attempt()
         try:
             response = await vendor.decide(request, timeout_s=timeout_s)
@@ -800,7 +839,10 @@ class ClassificationService:
             if meter.posts:
                 self._emit(
                     lambda: accounting.interrupted_record(
-                        vendor.name, accounting.model_of(vendor), posts=meter.posts
+                        vendor.name,
+                        accounting.model_of(vendor),
+                        posts=meter.posts,
+                        note=note,
                     )
                 )
             raise
@@ -808,7 +850,11 @@ class ClassificationService:
             if meter.posts:
                 self._emit(
                     lambda error=exc: accounting.failed_record(
-                        vendor.name, accounting.model_of(vendor), error, posts=meter.posts
+                        vendor.name,
+                        accounting.model_of(vendor),
+                        error,
+                        posts=meter.posts,
+                        note=note,
                     )
                 )
             raise
@@ -822,11 +868,27 @@ class ClassificationService:
                         # the row was billed under, not the vendor's echo.
                         requested_model=accounting.model_of(vendor),
                         posts=meter.posts,
+                        note=note,
                     )
                 )
             return response
         finally:
             accounting.end_attempt(token)
+
+    def _fallback_note(self) -> str:
+        """The spend row's routing note, or "" for the ordinary first-leg path.
+
+        Names the FIRST preferred leg the resolution skipped. That is the leg the
+        operator would have been billed on had it been available here, so it is the
+        one a reconciled row has to mention — naming the answering leg alone would
+        present the fallback as the choice (the defect this slice closes). Empty
+        when nothing was skipped, which keeps every pre-slice row identical.
+        """
+        trace = self._routing_trace
+        if trace is None or not trace.skipped:
+            return ""
+        first = trace.skipped[0]
+        return f"fallback from {first['vendor']}: {first['reason']}"
 
     def _emit(self, build: Callable[[], Any]) -> None:
         """Build and hand over one row within the same fail-soft boundary."""
@@ -870,15 +932,24 @@ class ClassificationService:
     async def _available_legs(self) -> tuple[DecisionVendor, ...]:
         """Resolve the cascade once per session, keeping the instances.
 
-        Uses :func:`~local_operator.classification.cascade.resolve_vendor` — the
-        one definition of "first usable leg" — and then builds the legs AFTER the
-        resolved one, because a leg ahead of it has just been proven unusable.
-        Instances are cached, so a leg's credential is resolved once no matter
-        how many messages the session classifies.
+        Uses :func:`~local_operator.classification.cascade.resolve_vendor_with_trace`
+        — the one definition of "first usable leg" plus the skipped rows — and then
+        builds the legs AFTER the resolved one, because a leg ahead of it has just
+        been proven unusable. Instances are cached, so a leg's credential is
+        resolved once no matter how many messages the session classifies. The
+        trace is kept on the service (:attr:`routing_note`) and cleared whenever
+        ``_legs`` is.
         """
         if self._legs is not None:
             return self._legs
-        first = await resolve_vendor(self._config_dir, self._settings, client=self._client())
+        resolution = await resolve_vendor_with_trace(
+            self._config_dir, self._settings, client=self._client()
+        )
+        # Record the trace even when nothing resolved: the next re-resolution starts
+        # from ``_legs is None`` anyway, and keeping the skipped rows here lets the
+        # caller's diagnostics explain WHY no leg was available.
+        self._routing_trace = resolution
+        first = resolution.vendor
         if first is None:
             self._legs = ()
             return self._legs
@@ -940,6 +1011,7 @@ class ClassificationService:
             await client.aclose()
         self._vendors.clear()
         self._legs = None
+        self._routing_trace = None
         self._vendor_name = None
 
     def warm_up(self) -> None:

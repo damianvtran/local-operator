@@ -6044,3 +6044,75 @@ async def test_genuine_historical_paid_wire_requires_trustworthy_refresh(
         await stream.close()
         peer.close()
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Model listing: a provider login lent by a mesh owner
+# ---------------------------------------------------------------------------
+
+OWNER_DEVICE = "d_00000000000000000000000000000001"
+
+
+@pytest.fixture
+def holder_root(tmp_path, monkeypatch):
+    """A config root where ANOTHER device owns ``radient`` and lends it here."""
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "holder"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    identity = mint(root, name="node")
+    document = placement_mod.PlacementDocument(
+        "n_model_listing_borrow", root=root, written_by=OWNER_DEVICE
+    )
+    document.declare(
+        "radient",
+        owner_device=OWNER_DEVICE,
+        owner_device_name="head",
+        provider="radient",
+        identity_label="damian@example.test",
+        by=OWNER_DEVICE,
+    )
+    document.grant("radient", identity.device_id, by=OWNER_DEVICE)
+    document.save()
+    return root
+
+
+def test_the_listing_borrows_a_provider_login_from_an_owner(holder_root, monkeypatch) -> None:
+    """The model picker's path had the same gap as classification (design §7)."""
+    from local_operator.model import configure as configure_mod
+    from local_operator.network import credentials as credentials_pkg
+
+    calls: list[tuple[str, object]] = []
+
+    async def fake_borrow(provider: str, config_dir=None) -> str:
+        calls.append((provider, config_dir))
+        return "lent-listing-token"
+
+    monkeypatch.setattr(credentials_pkg, "borrowed_provider_key", fake_borrow)
+
+    assert configure_mod._oauth_listing_token("radient", base=holder_root) == (
+        "lent-listing-token",
+        False,
+        None,
+    )
+    assert calls == [("radient", holder_root)]
+
+
+def test_the_listing_does_not_construct_a_mesh_store_without_placement(
+    tmp_path, monkeypatch
+) -> None:
+    from local_operator.model import configure as configure_mod
+    from local_operator.network.credentials import store as mesh_store
+
+    root = tmp_path / "bare"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+
+    def explode(*args, **kwargs):
+        raise AssertionError("a zero-peer device must not construct a mesh store")
+
+    monkeypatch.setattr(mesh_store, "build_auth_store", explode)
+
+    assert configure_mod._oauth_listing_token("radient", base=root) == ("", False, None)

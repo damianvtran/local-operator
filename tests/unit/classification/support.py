@@ -100,6 +100,11 @@ class LegBehaviour:
     name: str
     credential: bool = True
     credential_raises: bool = False
+    #: Record the wire request with ``accounting.note_post()`` — what a real leg
+    #: does from ``_send``. Off by default so the many service tests that do not
+    #: bind a spend sink keep their exact behaviour; a test that asserts a
+    #: channel-ledger row must turn it on or there is no request to record.
+    note_posts: bool = False
     script: list[Any] = field(default_factory=list)
     delay_s: float = 0.0
     calls: list[DecisionRequest] = field(default_factory=list)
@@ -134,6 +139,10 @@ def leg_class(behaviour: LegBehaviour) -> type:
 
         async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse:
             behaviour.calls.append(request)
+            if behaviour.note_posts:
+                from local_operator.classification import accounting
+
+                accounting.note_post()
             if behaviour.delay_s:
                 await asyncio.sleep(behaviour.delay_s)
             outcome = behaviour.decision()
