@@ -248,7 +248,9 @@ def write_lane_receipt(child_dir: Path, payload: Mapping[str, Any]) -> Path | No
     return target
 
 
-def note_lane_step(child_dir: Path, job_id: str, step: str, at: float, wip_ref: str = "") -> None:
+def note_lane_step(
+    child_dir: Path, job_id: str, step: str, at: float, wip_ref: str = "", *, force: bool = False
+) -> None:
     """Persist the last completed operation before a hard death can erase it."""
     target = lane_receipt_path(child_dir, job_id)
     try:

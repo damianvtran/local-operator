@@ -1315,3 +1315,15 @@ asyncio.run(main())
             except ProcessLookupError:
                 pass
             process.wait(timeout=10)
+
+
+def test_lane_step_throttles_but_new_commit_can_force_matching_step(tmp_path):
+    ledger.write_lane_receipt(tmp_path, ledger.build_lane_payload(job_id="j"))
+    ref = "refs/lop/wip/child/j"
+    ledger.note_lane_step(tmp_path, "j", "bash: first", 100, ref)
+    ledger.note_lane_step(tmp_path, "j", "bash: second", 101, ref)
+    assert ledger.read_lane_receipts(tmp_path)[0]["last_step"] == "bash: first"
+    ledger.note_lane_step(tmp_path, "j", "bash: second", 101, ref, force=True)
+    lane = ledger.read_lane_receipts(tmp_path)[0]
+    assert lane["last_step"] == "bash: second"
+    assert lane["last_step_at"] == 101 and lane["wip_ref"] == ref
