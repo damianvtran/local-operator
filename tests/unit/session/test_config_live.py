@@ -784,6 +784,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # reader against the watched directory.
     "memory.enabled": (False, lambda s, w: policy(w.config_dir)["enabled"]),
     "memory.capture": (False, lambda s, w: policy(w.config_dir)["capture"]),
+    "memory.capture.locators": (True, lambda s, w: policy(w.config_dir)["locators"]),
     "memory.suggest": (False, lambda s, w: policy(w.config_dir)["suggest"]),
     # -- team_bridge: the local machine prefs, observed through the public
     # bridge settings plumbing the status route's ``local`` block calls -------

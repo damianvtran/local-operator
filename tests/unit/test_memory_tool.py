@@ -296,9 +296,12 @@ async def test_relative_sensitive_paths_refused_by_actual_store_and_capture_in_e
         context=context,
     )
     assert not good.is_error
+    # Capture is knowledge-first: a bare URL is not a fact, but it survives as
+    # context on a real progress/decision bullet.
+    assert extract("https://example.invalid/runbook") == []
     assert any(
-        row["body"] == "https://example.invalid/runbook"
-        for row in extract("https://example.invalid/runbook")
+        "https://example.invalid/runbook" in row["body"]
+        for row in extract("## Progress\n- Wrote the runbook at https://example.invalid/runbook")
     )
     # A URL carrying credential material still uses the credential-shape guard.
     bad_url = await execute_fact_memory(

@@ -12,7 +12,7 @@ import time
 import pytest
 
 from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore
-from local_operator.memory_cli import render_human, run
+from local_operator.memory_cli import _or_list, render_human, run
 
 
 @pytest.fixture
@@ -59,7 +59,12 @@ def test_dry_run_is_default_deletes_nothing_and_echoes_the_filter(rig):
     assert "Filter: scope global · older than 30d" in text
     assert "3 match(es) of 4 fact(s) in global (75%)" in text
     assert "Nothing was deleted." in text
-    assert "To forget exactly these 3 fact(s), run:" in text
+    # 3 of 4 is above the guard: the confirmation must be marked as needing
+    # --force, never presented as a paste-and-run line.
+    assert "To forget exactly these" not in text
+    assert "add --force to the command below" in text
+    # Normalise the 80-column wrap before matching the consequence sentence.
+    assert "cannot be undone" in " ".join(text.split())
     assert statuses(store, matched) == ["active", "active", "active"]
     assert store.show("global", keep["id"])["status"] == "active"
 
@@ -162,6 +167,17 @@ def test_whole_scope_match_is_refused_without_force_then_allowed_with_it(rig):
     root, identity, session_dir, store = rig
     matched = [old_fact(store, f"Old personal note {index}") for index in range(2)]
 
+    text, failed = human("forget --scope global --older-than 30d", root, identity, session_dir)
+    assert not failed
+    # Every fact is in scope, so the command is guarded: the guidance sits beside
+    # the line and the line is never labelled as directly runnable.
+    assert "To forget exactly these" not in text
+    assert "add --force to the command below" in text
+    assert (
+        "Running that confirmation removes 2 of 2 fact(s) in global (100%) and cannot be undone."
+        in (" ".join(text.split()))
+    )
+
     preview = payload(
         "forget --scope global --older-than 30d",
         root,
@@ -198,6 +214,12 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
         session_dir,
         prefix="lop memory",
     )
+    guarded_text, failed = human(
+        "forget --scope global --older-than 30d", root, identity, session_dir
+    )
+    assert not failed
+    assert "To forget exactly these" not in guarded_text
+    assert "add --force to the command below" in guarded_text
     # 4 of 6 is above half: the guard must refuse without --force.
     assert preview["count"] == 4 and preview["total"] == 6
     assert preview["guarded"] is True and "--force" not in preview["confirm"]
@@ -225,6 +247,14 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
     )
     assert allowed["count"] == 2 and allowed["total"] == 4
     assert allowed["guarded"] is False and "--force" not in allowed["confirm"]
+    # Exactly half is unguarded, so the paste-ready label is back and carries no
+    # --force caveat.
+    allowed_text, failed = human(
+        "forget --scope global --older-than 30d", root, identity, session_dir
+    )
+    assert not failed
+    assert "To forget exactly these 2 fact(s), run:" in allowed_text
+    assert "add --force to the command below" not in allowed_text
     confirmed, failed = human(allowed["confirm"][len("lop memory ") :], root, identity, session_dir)
     assert not failed and "Forgotten 2 fact(s)" in confirmed
     assert statuses(store, old[2:]) == ["forgotten", "forgotten"]
@@ -232,7 +262,7 @@ def test_fraction_threshold_refuses_above_half_and_allows_exactly_half(rig):
 
 def test_preview_refuses_above_the_bulk_cap(rig):
     root, identity, session_dir, store = rig
-    old = [old_fact(store, f"Old personal note {index}") for index in range(201)]
+    old = [old_fact(store, f"Old personal note {index}", tags=["stale"]) for index in range(201)]
     store.put("global", {"title": "Recent note", "body": "Note"})
 
     text, failed = human("forget --scope global --older-than 30d", root, identity, session_dir)
@@ -242,6 +272,36 @@ def test_preview_refuses_above_the_bulk_cap(rig):
     assert failed
     assert "201 fact(s)" in text and "at most 200" in text
     assert "Narrow the filter" in text and "chunks" in text
+    # --older-than already produced this selection: offering it again is circular.
+    # Three remaining hints pin the three-element rendering of _or_list.
+    assert "add --tag, --title-matches or --body-matches" in text
+    assert "add --older-than" not in text
+
+    # With --tag also applied, only the two unapplied flags are offered.
+    tagged_text, failed = human(
+        "forget --scope global --older-than 30d --tag stale", root, identity, session_dir
+    )
+    assert failed
+    assert "add --title-matches or --body-matches" in tagged_text
+    assert "add --tag" not in tagged_text and "add --older-than" not in tagged_text
+
+    # Every narrowing flag applied -- including --body-matches: name none of them,
+    # and say what remains. Claiming completeness while --body-matches was free
+    # was the round-1 MINOR.
+    all_text, failed = human(
+        "forget --scope global --older-than 30d --tag stale --title-matches 'Old personal note' "
+        "--body-matches 'A personal note'",
+        root,
+        identity,
+        session_dir,
+    )
+    assert failed
+    assert (
+        "Every narrowing flag (--older-than, --tag, --title-matches or --body-matches) "
+        "is already applied" in all_text
+    )
+    assert "tighten those values" in all_text
+    assert "add --" not in all_text
     assert statuses(store, old) == ["active"] * 201
 
     # Exactly the cap still previews, and its command is runnable.
@@ -256,6 +316,16 @@ def test_preview_refuses_above_the_bulk_cap(rig):
     )
     assert preview["count"] == 200
     assert preview["confirm"].startswith("lop memory forget ")
+
+
+def test_or_list_renders_one_two_and_three_alternatives():
+    """Pin every branch: the cap remedy is prose, and a missing separator reads as a bug."""
+    assert _or_list(["--tag"]) == "--tag"
+    assert _or_list(["--tag", "--title-matches"]) == "--tag or --title-matches"
+    assert (
+        _or_list(["--tag", "--title-matches", "--body-matches"])
+        == "--tag, --title-matches or --body-matches"
+    )
 
 
 def test_preview_prefixes_are_unique_when_ids_share_a_timestamp(rig, monkeypatch):
