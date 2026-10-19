@@ -12,7 +12,7 @@
   "tui.authoring.action_class": "lớp",
   "tui.authoring.role": "vai trò",
   "tui.authoring.specialist": "chuyên gia",
-  "tui.authoring.inherit": "kế thừa",
+  "tui.authoring.inherit": "inherit",
   "tui.authoring.yes": "có",
   "tui.authoring.no": "không",
   "tui.authoring.reactive": "theo yêu cầu",
@@ -37,5 +37,6 @@
   "tui.authoring.registry_missing": "Phiên này chưa kết nối sổ đăng ký tác nhân.",
   "tui.authoring.footer": "/agent new · /agent edit <name> · /agent clear tách ra",
   "tui.authoring.save_error": "Không lưu được: {reason}",
-  "tui.authoring.description_clear_unsupported": "Biểu mẫu này chưa thể xóa mô tả hiện có."
+  "tui.authoring.description_clear_unsupported": "Biểu mẫu này chưa thể xóa mô tả hiện có.",
+  "tui.authoring.notice_read_only": "Chỉ đọc: runtime của cuộc trò chuyện này ở thiết bị khác nên không thể sửa hồ sơ tại đây."
 }

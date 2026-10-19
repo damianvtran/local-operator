@@ -37,5 +37,6 @@
   "tui.authoring.registry_missing": "К этой сессии не подключён реестр агентов.",
   "tui.authoring.footer": "/agent new · /agent edit <name> · /agent clear открепляет",
   "tui.authoring.save_error": "Не удалось сохранить: {reason}",
-  "tui.authoring.description_clear_unsupported": "Эта форма пока не позволяет очистить существующее описание."
+  "tui.authoring.description_clear_unsupported": "Эта форма пока не позволяет очистить существующее описание.",
+  "tui.authoring.notice_read_only": "Только чтение: рантайм этой беседы на другом устройстве, поэтому здесь нельзя изменять профили."
 }

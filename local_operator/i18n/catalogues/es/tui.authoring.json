@@ -37,5 +37,6 @@
   "tui.authoring.registry_missing": "Esta sesión no tiene un registro de agentes conectado.",
   "tui.authoring.footer": "/agent new · /agent edit <name> · /agent clear desvincula",
   "tui.authoring.save_error": "No se pudo guardar: {reason}",
-  "tui.authoring.description_clear_unsupported": "Este formulario aún no permite borrar una descripción existente."
+  "tui.authoring.description_clear_unsupported": "Este formulario aún no permite borrar una descripción existente.",
+  "tui.authoring.notice_read_only": "Solo lectura: el runtime de esta conversación está en otro dispositivo; aquí no puedes cambiar perfiles."
 }
