@@ -1080,6 +1080,9 @@ def _wrap_cells(text: str, width: int) -> list[str]:
     return lines or [""]
 
 
+WAITING_MARKER = "◴"
+
+
 def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     """``(glyph, ink)`` for one row's live state. Empty glyph when cold.
 
@@ -1135,6 +1138,8 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         # when seven interrupted sessions read as seven errors. The LADDER
         # position above is deliberately untouched (see the docstring).
         return WEDGED_MARKER, "warning"
+    if row.waiting_on > 0:
+        return WAITING_MARKER, "accent"
     if row.live_state == "busy":
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
     if row.live_state == "attached":
@@ -3147,6 +3152,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # tooltip's sentence gains the count (``CatalogEntry.status``). Two rows
         # differing only here are therefore not the same row on screen, which is
         # the whole test for membership in this tuple.
+        # Wait/job transitions change the marker and tooltip under an open picker.
+        "waiting_on",
+        "jobs_running",
         "subagents_running",
         "subagents_queued",
         # In the signature because it MOVES A ROW IN OR OUT OF THE LIST UNDER THE

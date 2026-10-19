@@ -2159,6 +2159,8 @@ class DesktopFeed:
         # feed's copy reads ``idle`` is precisely the divergence the parity test
         # exists to catch. ``None`` when there is no record — never ``0``, which
         # would be a count nobody reported (see ``SessionRow.delegating``).
+        waiting_on = 0
+        jobs_running: int | None = None
         subagents_running: int | None = None
         subagents_queued: int | None = None
         if cached is not None and cached[1] != "stale":
@@ -2177,9 +2179,11 @@ class DesktopFeed:
                 live_state = "attached"
             else:
                 live_state = "idle"
-            pending = record.pending or None
+            pending = (record.pending or None) if state == "live" else None
             kind = str(record.kind or "")
             leaving = str(record.leaving or "")
+            waiting_on = getattr(record, "waiting_on", 0)
+            jobs_running = getattr(record, "jobs_running", None)
             subagents_running = getattr(record, "subagents_running", None)
             subagents_queued = getattr(record, "subagents_queued", None)
             # The age from the same owner the list asks, and without the zombie
@@ -2203,6 +2207,8 @@ class DesktopFeed:
             live_state=live_state,
             pending=pending,
             leaving=leaving,
+            waiting_on=waiting_on,
+            jobs_running=jobs_running,
             subagents_running=subagents_running,
             subagents_queued=subagents_queued,
             wakes=len(scheduled_wake_rows(schedules)),
