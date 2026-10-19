@@ -250,6 +250,7 @@ def test_status_reports_effective_state_and_names_the_config_key(rig, tmp_path):
     status, failed = human("status", root, identity, session_dir)
     assert not failed
     assert "Agent memory: off (memory.enabled)" in status
+    assert "Capture locator context: off (memory.capture.locators; default off)" in status
     assert "Trusted-peer sync: off" in status and "{" not in status
     listed, _ = human("list", root, identity, session_dir)
     assert "Agent memory is OFF (memory.enabled=false)" in listed
