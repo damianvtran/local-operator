@@ -1575,19 +1575,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # payload shape the nit asked for, and every variant that keeps it fails. The
 # raise is chosen to keep the payload clue AND leave margin, not to fit by
 # deleting the thing the nit was about.
-# RAISED 31,025 -> 31,100 for evidence-attachment discoverability, stated with
-# the arithmetic because this guard exists to make that an explicit decision.
-# Measured by THIS script on an isolated HOME at each tree, same machine:
-#   608fbaa01c  base (origin/main)        86,204 chars = ~31,009 billed  PASS, 16 headroom
-#   c5400d7df9  evidence-attachment head   86,404 chars = ~31,081 billed  FAIL by 56
-#   = +200 chars of ``tool_schemas``, ALL of it the ``project`` tool's
-#     ``attach`` description: when to use it (before/after frame, chart or data
-#     extract, log excerpt), that files are copied into the store, and the
-#     10-file/5 MB cap. The field existed but named no occasion, which is why
-#     agents recorded progress without the evidence beside it; trimming the
-#     occasion to fit 45 chars of headroom would delete the change. The raise
-#     is stated in the PR thread for a reviewer to verify before it settles.
-BUDGET_BILLED_TOKENS = 31_100
+# RAISED 31,025 -> 31,614 for the Team Bridge agent channel tool (#2665),
+# stated with the arithmetic because this guard exists to make that an explicit
+# decision, not an unrelated budget increase. Measured with THIS script on the
+# same machine, isolated HOME, both trees:
+#   8714b008c1  base (origin/main)             86,816 chars = ~31,229 billed
+#   ddad7631ce  pre-round-1 head               88,211 chars = ~31,731 billed
+#   head, after the round-1 prose trim         87,735 chars = ~31,559 billed
+#   = +919 chars of ``tool_schemas`` vs base (59,306 -> 60,225) = ~+330 billed;
+#     every other counter byte-identical. The trim took 476 chars out FIRST
+#     (wire description 376 -> 240, two model docstrings to one line each).
+# The residual is STRUCTURAL, not prose: four op literals, eleven parameter
+# entries and the nested ``ChannelMemberParams`` model are the minimum a model
+# needs to call channels/create/post/history, and every field is load-bearing
+# (name/topic/visibility are request facts; members is the invite shape).
+# Local renders above CI by the config delta this file documents; the CI arm at
+# the pre-trim head was 31,510 (+485), so the same +330 delta lands it at
+# ~31,338 (+313) after the trim. The ceiling is measured head + this file's
+# 55-token band (31,559 + 55), which keeps CI green with margin.
+BUDGET_BILLED_TOKENS = 31_614
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1692,13 +1698,7 @@ BUDGET_BILLED_TOKENS = 31_100
 # audio pair and on the same measurement pass (child arm measured 27,688 billed
 # on this head). The two ceilings move together because the pair is in every
 # session's surface, child included; the difference between them is unchanged.
-# RAISED 28,100 -> 28,175 with ``BUDGET_BILLED_TOKENS`` above, same change and
-# same measurement pass: the child arm carries ``project`` too and moves by the
-# SAME +200 chars of ``tool_schemas`` — measured with this script's child arm:
-#   608fbaa01c  base (origin/main)  78,063 chars = ~28,080 billed  PASS, 20 headroom
-#   c5400d7df9  head               78,263 chars = ~28,152 billed  FAIL by 52
-# Ceiling = head + 23, this arm's own measured margin (the top arm is head + 19).
-BUDGET_CHILD_BILLED_TOKENS = 28_175
+BUDGET_CHILD_BILLED_TOKENS = 28_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

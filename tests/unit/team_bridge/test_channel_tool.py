@@ -73,7 +73,11 @@ class RecordingClient:
         messages: dict[str, Any] | None = None,
     ) -> None:
         self.conversations_result = conversations or {"conversations": [], "next_cursor": None}
-        self.created_result = created or {"id": "conv_new", "kind": "channel", "member_count": 1}
+        self.created_result = created or {
+            "id": "bcv_newchat1",
+            "kind": "channel",
+            "member_count": 1,
+        }
         self.sent_result = sent or {"message": {"id": "cmsg_1", "seq": 4}}
         self.messages_result = messages or {"messages": []}
         self.calls: list[dict[str, Any]] = []
@@ -218,6 +222,7 @@ async def test_channel_create_adds_the_agent_and_not_the_human_owner() -> None:
     assert call["actor_endpoint_id"] == "bep_1"
     assert call["origin_session_id"] == "sess_1"
     assert call["body"] == {
+        "tenant_id": TENANT,
         "kind": "channel",
         "name": "build",
         "topic": "CI signals",
@@ -288,7 +293,7 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         )
     )
     first = await execute_bridge(
-        runtime, {"op": "channel_post", "channel_id": "conv_1", "body": "hello"}
+        runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello"}
     )
     assert first["ok"] is True
 
@@ -303,7 +308,7 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
     assert retried_body["tenant_id"] == TENANT
 
     second = await execute_bridge(
-        runtime, {"op": "channel_post", "channel_id": "conv_1", "body": "hello again"}
+        runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello again"}
     )
     assert second["ok"] is True
     # A second CALL is a second message, so it gets a fresh idempotency key.
@@ -317,7 +322,7 @@ async def test_channel_history_refuses_both_bounds_together() -> None:
         _runtime(client),
         {
             "op": "channel_history",
-            "channel_id": "conv_1",
+            "channel_id": "bcv_abcd1234",
             "before_seq": 10,
             "after_seq": 5,
         },
@@ -337,7 +342,7 @@ async def test_channel_history_reads_as_the_agent_endpoint() -> None:
     )
     outcome = await execute_bridge(
         _runtime(client),
-        {"op": "channel_history", "channel_id": "conv_1", "limit": 20, "after_seq": 5},
+        {"op": "channel_history", "channel_id": "bcv_abcd1234", "limit": 20, "after_seq": 5},
     )
 
     assert outcome["ok"] is True
@@ -345,7 +350,7 @@ async def test_channel_history_reads_as_the_agent_endpoint() -> None:
     assert client.calls == [
         {
             "method": "conversation_messages",
-            "conversation_id": "conv_1",
+            "conversation_id": "bcv_abcd1234",
             "tenant_id": TENANT,
             "limit": 20,
             "before_seq": None,
@@ -362,7 +367,7 @@ async def test_channel_history_limit_is_bounded() -> None:
     client = RecordingClient()
     outcome = await execute_bridge(
         _runtime(client),
-        {"op": "channel_history", "channel_id": "conv_1", "limit": 101},
+        {"op": "channel_history", "channel_id": "bcv_abcd1234", "limit": 101},
     )
     assert outcome["ok"] is False and outcome["code"] == "invalid_request"
     assert client.calls == []
@@ -375,4 +380,68 @@ async def test_every_channel_op_refuses_without_an_owner_endpoint(op: str) -> No
     outcome = await execute_bridge(_runtime(client, endpoint_id=""), {"op": op})
     assert outcome["ok"] is False
     assert outcome["code"] == "no_agent_endpoint"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op", "extra"),
+    [
+        ("channel_post", {"body": "hello"}),
+        ("channel_history", {"limit": 20}),
+    ],
+)
+@pytest.mark.parametrize(
+    "channel_id",
+    [
+        "",
+        "conv_1",
+        "../../status",
+        "bcv_abcd1234#x",
+        "bcv_abcd1234/messages",
+    ],
+)
+async def test_a_malformed_channel_id_never_reaches_the_client(
+    op: str, extra: dict[str, Any], channel_id: str
+) -> None:
+    """The id is interpolated into the upstream path; the bcv_ grammar is the gate."""
+
+    client = RecordingClient()
+    outcome = await execute_bridge(_runtime(client), {"op": op, "channel_id": channel_id, **extra})
+    assert outcome["ok"] is False and outcome["code"] == "invalid_request"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "member",
+    [
+        {"account_id": "acc_2", "kind": "human", "endpoint_id": "bep_2"},
+        {"account_id": "acc_2", "kind": "agent"},
+    ],
+)
+async def test_member_shapes_that_could_collide_with_the_actor_are_refused(
+    member: dict[str, str],
+) -> None:
+    """A human endpoint would win the creator key; an agent without one is dead."""
+
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client), {"op": "channel_create", "kind": "channel", "members": [member]}
+    )
+    assert outcome["ok"] is False and outcome["code"] == "invalid_request"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_decide_keeps_its_own_sentence_before_the_endpoint_gate() -> None:
+    client = RecordingClient()
+    outcome = await execute_bridge(_runtime(client, endpoint_id=""), {"op": "decide"})
+    assert outcome["ok"] is False and outcome["code"] == "not_permitted"
+    assert "ask queue" in outcome["error"]
+    assert client.calls == []
+
+    unknown = await execute_bridge(_runtime(client, endpoint_id=""), {"op": "invented"})
+    assert unknown["ok"] is False and unknown["code"] == "invalid_request"
+    assert "unknown bridge op" in unknown["error"]
     assert client.calls == []
