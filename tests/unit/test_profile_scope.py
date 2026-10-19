@@ -226,9 +226,7 @@ def test_a_scoped_registry_is_not_nested_twice(
     global_agents, global_teams, session_dir = stores
     agents, teams = scope_session_registries(global_agents, global_teams, session_dir)
 
-    again_agents, again_teams = scope_session_registries(
-        agents, teams, session_dir / "elsewhere"
-    )
+    again_agents, again_teams = scope_session_registries(agents, teams, session_dir / "elsewhere")
     assert again_agents is agents
     assert again_teams is teams
 

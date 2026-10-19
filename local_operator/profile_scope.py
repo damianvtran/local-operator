@@ -93,9 +93,7 @@ class ScopedAgentRegistry:
 
     # -- reads ----------------------------------------------------------------
     def list_agents(self) -> list[Any]:
-        return list(self.session_registry.list_agents()) + list(
-            self.global_registry.list_agents()
-        )
+        return list(self.session_registry.list_agents()) + list(self.global_registry.list_agents())
 
     def get_agent(self, agent_id: str) -> Any:
         row = self._session_row(agent_id)
@@ -149,9 +147,7 @@ class ScopedAgentRegistry:
     def save_agent(self, metadata: Any) -> Any:
         return self._owner_for_id(getattr(metadata, "id", "")).save_agent(metadata)
 
-    def update_agent(
-        self, agent_id: str, fields: Any, *, precondition: Any = None
-    ) -> Any:
+    def update_agent(self, agent_id: str, fields: Any, *, precondition: Any = None) -> Any:
         return self._owner_for_id(agent_id).update_agent(
             agent_id, fields, precondition=precondition
         )
@@ -216,9 +212,7 @@ class ScopedTeamRegistry:
             return row
         return self.global_registry.get_team(team_id, recovery_wait=recovery_wait)
 
-    def get_team_by_name(
-        self, name: str, *, recovery_wait: float | None = None
-    ) -> Any | None:
+    def get_team_by_name(self, name: str, *, recovery_wait: float | None = None) -> Any | None:
         row = self.session_registry.get_team_by_name(name, recovery_wait=recovery_wait)
         if row is not None:
             return row
@@ -231,12 +225,8 @@ class ScopedTeamRegistry:
     def save_team(self, team: Any) -> Any:
         return self._owner_for_id(getattr(team, "id", "")).save_team(team)
 
-    def update_team(
-        self, team_id: str, fields: Any, *, precondition: Any = None
-    ) -> Any:
-        return self._owner_for_id(team_id).update_team(
-            team_id, fields, precondition=precondition
-        )
+    def update_team(self, team_id: str, fields: Any, *, precondition: Any = None) -> Any:
+        return self._owner_for_id(team_id).update_team(team_id, fields, precondition=precondition)
 
     def delete_team(self, team_id: str) -> None:
         self._owner_for_id(team_id).delete_team(team_id)
@@ -258,9 +248,7 @@ class ScopedTeamRegistry:
         )
 
 
-def scope_agent_registry(
-    global_registry: Any, session_dir: str | Path
-) -> Any:
+def scope_agent_registry(global_registry: Any, session_dir: str | Path) -> Any:
     """Wrap ``global_registry`` with the session store in ``session_dir``.
 
     Idempotent: an already-scoped registry is returned unchanged, so a subagent
@@ -278,14 +266,10 @@ def scope_agent_registry(
     # directories or run the global store's legacy migrations. ``save_agent``
     # makes the tree on the first real write.
     session_registry = AgentRegistry(root, initialize=False, migrate=False)
-    return ScopedAgentRegistry(
-        global_registry, session_registry, scope_dir=root
-    )
+    return ScopedAgentRegistry(global_registry, session_registry, scope_dir=root)
 
 
-def scope_team_registry(
-    global_registry: Any, session_dir: str | Path
-) -> Any:
+def scope_team_registry(global_registry: Any, session_dir: str | Path) -> Any:
     """The team twin of :func:`scope_agent_registry`."""
     if global_registry is None:
         return None
@@ -297,9 +281,7 @@ def scope_team_registry(
     root = scope_dir_for(session_dir)
     # TeamRegistry is already mkdir-free; a missing ``teams/`` is "no teams".
     session_registry = TeamRegistry(root)
-    return ScopedTeamRegistry(
-        global_registry, session_registry, scope_dir=root
-    )
+    return ScopedTeamRegistry(global_registry, session_registry, scope_dir=root)
 
 
 def scope_session_registries(
