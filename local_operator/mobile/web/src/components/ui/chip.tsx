@@ -22,13 +22,26 @@ import { cn } from "../../lib/cn";
 export function Chip({
 	className,
 	children,
+	selected = false,
 	...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { children: ReactNode }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+	children: ReactNode;
+	/** The pressed/selected state. A BOOLEAN, not a class override: the base
+	    rule already names `border-control`/`bg-surface`, and a caller adding
+	    `border-accent` beside them leaves both utilities in the class list —
+	    Tailwind emits the base one later, so the selected chip rendered exactly
+	    like an unselected one (measured on the Library filter sheet). One
+	    branch, decided here. */
+	selected?: boolean;
+}) {
 	return (
 		<button
 			type="button"
 			className={cn(
-				"inline-flex min-h-11 items-center gap-1 rounded-sm border border-control bg-surface px-2 text-mono-sm text-ink-muted select-none active:bg-elevated",
+				"inline-flex min-h-11 items-center gap-1 rounded-sm border px-2 text-mono-sm select-none active:bg-elevated",
+				selected
+					? "border-accent bg-accent-wash text-accent"
+					: "border-control bg-surface text-ink-muted",
 				className,
 			)}
 			{...rest}

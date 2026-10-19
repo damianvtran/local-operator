@@ -44,6 +44,7 @@ import {
 	messageRuntime,
 	publishMarkNotice,
 	retainSessionListStream,
+	useCapabilities,
 	useMarkNotice,
 	usePinMarks,
 	useSessions,
@@ -51,6 +52,7 @@ import {
 import { WideViewButton } from "../components/wide-view-button";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
+import { LIBRARY_LABEL } from "../lib/library-copy";
 import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
 import type { SessionSummary } from "../types";
@@ -597,6 +599,14 @@ function ThemePicker({
 	return (
 		<Sheet open={open} onClose={onClose} title="theme">
 			<div className="flex flex-col p-2">
+				{/* The wide-view preference moved here when the Library entry made the
+				    footer six controls wide: measured at 360px the six-control row ran
+				    372px against a 360px footer, clipping `wide`. Both preferences are
+				    per-phone display settings, so one sheet is where they belong; the
+				    component stays shared with the session header. */}
+				<div className="border-b border-hairline pb-1">
+					<WideViewButton className="w-full" />
+				</div>
 				{THEMES.map((t) => (
 					<button
 						key={t.id}
@@ -826,6 +836,7 @@ function usePaintedRows(
 
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
+	const capabilities = useCapabilities();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and
 	   its top in LAYOUT space (see `layoutTop`). The element is part of the
 	   record because a pin LIFT remounts a card under another section — a new
@@ -1609,7 +1620,7 @@ export function SessionListScreen() {
 					{startError}
 				</p>
 			) : null}
-			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
+			<footer className="flex items-center gap-1 border-t border-hairline px-2 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
 					type="button"
 					onClick={() => void startNewSession()}
@@ -1629,15 +1640,29 @@ export function SessionListScreen() {
 				<button
 					type="button"
 					onClick={() => navigate("/past")}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
 				>
 					past
 				</button>
+				{/* THE LIBRARY DESTINATION (design §6.3). Gated on the relay's own
+				    ``capabilities.library``: an older relay cannot serve the routes,
+				    so offering the destination would paint a screen whose every
+				    request 404s. The label is owned copy in an advisory module —
+				    see ``lib/library-copy`` for why it is not a key yet. */}
+				{capabilities?.library ? (
+					<button
+						type="button"
+						onClick={() => navigate("/library")}
+						className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
+					>
+						{LIBRARY_LABEL}
+					</button>
+				) : null}
 				<button
 					type="button"
 					ref={projectsButtonRef}
 					onClick={() => setProjectsOpen(true)}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
 				>
 					projects
 				</button>
@@ -1649,12 +1674,6 @@ export function SessionListScreen() {
 				>
 					◐
 				</button>
-				{/* WIDE VIEW (issue #1870): the same control the session screen's
-				    header carries — one component, so the label and the pressed state
-				    cannot drift between the two places a reader can reach it. Lives
-				    here beside the theme because it is the same kind of preference
-				    (per-phone, persisted, not content). */}
-				<WideViewButton />
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
 			<ProjectsSheet

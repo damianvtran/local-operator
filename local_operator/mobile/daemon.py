@@ -2013,6 +2013,28 @@ def _operator_handshake(entry: SessionEntry, op: str) -> str | None:
     )
 
 
+def _optional_capabilities() -> dict[str, Any]:
+    """Capabilities a build may or may not carry, keyed for the phone.
+
+    ``library`` is the global asset catalog; ``librarian`` is the organizing
+    agent that lives on top of it. Both are read from the installed tree rather
+    than a constant so a packaged build without the module advertises nothing —
+    the web's footer then hides the destination instead of rendering a screen
+    whose every request would 404.
+    """
+    flags: dict[str, Any] = {}
+    try:
+        from local_operator.mobile.library import is_available, librarian_available
+
+        if is_available():
+            flags["library"] = 1
+        if librarian_available():
+            flags["librarian"] = 1
+    except Exception:  # noqa: BLE001 - an absent module is "no capability"
+        pass
+    return flags
+
+
 def _feature_flags() -> dict[str, Any]:
     """The lifted feature-flag dict for the mobile capabilities payload.
 
@@ -4807,6 +4829,10 @@ def build_app(daemon: MobileDaemon):
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
+                # Conditional because this build may predate the Library module:
+                # the phone's footer shows the destination iff the key is here,
+                # and a missing key means "this relay cannot serve it".
+                **_optional_capabilities(),
             },
         }
 
@@ -7645,6 +7671,303 @@ def build_app(daemon: MobileDaemon):
             str(request.path_params["device_id"]),
         )
 
+    # -- library --------------------------------------------------------------
+    #
+    # Transport only: every handler below calls ``local_operator.mobile.library``
+    # which projects the shared service with ``display=True``. The module is
+    # imported per handler (not at module scope) so an older build without it
+    # still serves its whole route table — the same laziness the projects and
+    # schedules handlers use for server-tier imports.
+
+    async def _library_call(name: str, *args: Any) -> Response:
+        from local_operator.mobile import library as mobile_library
+
+        try:
+            payload = await asyncio.to_thread(getattr(mobile_library, name), *args)
+        except mobile_library.LibraryRouteError as error:
+            return JSONResponse(
+                {"error": error.message, "code": error.code}, status_code=error.status
+            )
+        if isinstance(payload, Response):
+            return payload
+        return JSONResponse(payload)
+
+    async def _library_body(request: Request) -> dict[str, Any] | None:
+        try:
+            body = await request.json()
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+
+    async def api_library_list(request: Request) -> Response:
+        """One list frame. The server sorts and filters; the phone groups."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call("list_payload", config_dir(), dict(request.query_params))
+
+    async def api_library_facets(request: Request) -> Response:
+        """Counts, tags and build state without a page of rows."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call("facets_payload", config_dir())
+
+    async def api_library_detail(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "detail_payload", config_dir(), str(request.path_params["asset_id"])
+        )
+
+    async def api_library_patch(request: Request) -> Response:
+        """Editable metadata: name, description, favorite, locked, archived."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "patch_payload",
+            config_dir(),
+            str(request.path_params["asset_id"]),
+            body,
+        )
+
+    async def api_library_tags(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call("tags_payload", config_dir())
+
+    async def api_library_tag_create(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call("create_tag_payload", config_dir(), body)
+
+    async def api_library_tag_patch(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "rename_tag_payload",
+            config_dir(),
+            str(request.path_params["tag_id"]),
+            body,
+        )
+
+    async def api_library_tag_merge(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "merge_tag_payload",
+            config_dir(),
+            str(request.path_params["tag_id"]),
+            body,
+        )
+
+    async def api_library_set_tags(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "set_tags_payload",
+            config_dir(),
+            str(request.path_params["asset_id"]),
+            body,
+        )
+
+    async def api_library_chat(request: Request) -> Response:
+        """Record an asset↔session link AFTER the phone created the session."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _library_body(request)
+        if body is None:
+            return JSONResponse(
+                {"error": "request body must be an object", "code": "bad_body"},
+                status_code=400,
+            )
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "chat_payload",
+            config_dir(),
+            str(request.path_params["asset_id"]),
+            body,
+        )
+
+    async def api_library_chat_clear(request: Request) -> Response:
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _library_call(
+            "clear_chat_payload", config_dir(), str(request.path_params["asset_id"])
+        )
+
+    def _library_response_headers(ref: Any, *, download: bool) -> dict[str, str]:
+        """Policy for one content response, applied to errors by omission.
+
+        ``nosniff`` is non-negotiable: the service's ``content_type`` comes from
+        the classifier, never from the bytes, so a ``.txt`` holding HTML must
+        render as text. ``inline`` (the default) is what makes a tap open the
+        file in the phone's viewer; ``?download=1`` asks the browser to save it.
+        HTML is additionally sandboxed by a response CSP: inline HTML from this
+        same origin would otherwise run script with the relay's cookies, which
+        is the one class of asset this route must not turn into a page.
+        """
+        from urllib.parse import quote
+
+        name = (ref.name or "asset").replace("\r", "").replace("\n", "")
+        ascii_name = (
+            "".join(
+                character
+                for character in name
+                if character not in '"\\' and 31 < ord(character) < 127
+            )
+            or "asset"
+        )
+        disposition = "attachment" if download else "inline"
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": (
+                f'{disposition}; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(name, safe='')}"
+            ),
+            "Cross-Origin-Resource-Policy": "same-origin",
+        }
+        content_type = (ref.content_type or "").lower()
+        if content_type in ("text/html", "application/xhtml+xml"):
+            headers["Content-Security-Policy"] = "sandbox"
+        elif content_type in ("image/svg+xml", "image/svg"):
+            # SVG is a document that can carry script. CSP sandbox neutralises
+            # it on a direct navigation, and `default-src 'none'` denies every
+            # subresource it might try to load; keeping the disposition inline
+            # preserves the phone's image preview (an <img> never executes it).
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+        if download:
+            headers["Cache-Control"] = "no-store"
+        else:
+            headers["Cache-Control"] = "private, max-age=300"
+        return headers
+
+    async def api_library_bytes(request: Request) -> Response:
+        """One asset's bytes. Addressed by id, Range-capable, never a path."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        config = config_dir()
+        try:
+            from local_operator.mobile import library as mobile_library
+
+            ref = await asyncio.to_thread(
+                mobile_library.content_ref, config, str(request.path_params["asset_id"])
+            )
+        except Exception as error:  # noqa: BLE001 - mapped below
+            from local_operator.mobile import library as mobile_library
+
+            if isinstance(error, mobile_library.LibraryRouteError):
+                return JSONResponse(
+                    {"error": error.message, "code": error.code},
+                    status_code=error.status,
+                )
+            raise
+        download = _query_flag(request, "download")
+        return FileResponse(
+            ref.path,
+            media_type=ref.content_type or "application/octet-stream",
+            headers=_library_response_headers(ref, download=download),
+        )
+
+    async def api_library_thumb(request: Request) -> Response:
+        """A bounded image thumbnail; non-images are refused, not faked."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        raw = request.query_params.get("w", "480")
+        try:
+            width = int(raw)
+        except ValueError:
+            return JSONResponse({"error": "bad width", "code": "bad_width"}, status_code=400)
+        try:
+            from local_operator.mobile import library as mobile_library
+
+            ref = await asyncio.to_thread(
+                mobile_library.thumb_ref,
+                config_dir(),
+                str(request.path_params["asset_id"]),
+                width,
+            )
+        except Exception as error:  # noqa: BLE001 - mapped below
+            from local_operator.mobile import library as mobile_library
+
+            if isinstance(error, mobile_library.LibraryRouteError):
+                return JSONResponse(
+                    {"error": error.message, "code": error.code},
+                    status_code=error.status,
+                )
+            raise
+        # Thumbnail follows the same policy as content: an SVG thumbnail is
+        # served original by the service, so it needs the same sandbox header.
+        headers = _library_response_headers(ref, download=False)
+        headers["Cache-Control"] = "private, max-age=3600"
+        return FileResponse(ref.path, media_type=ref.content_type, headers=headers)
+
     routes: list[BaseRoute] = [
         Route("/healthz", healthz),
         Route("/login", login_page, methods=["GET"]),
@@ -7754,6 +8077,40 @@ def build_app(daemon: MobileDaemon):
             api_project_unlink,
             methods=["DELETE"],
         ),
+        # -- library -------------------------------------------------------
+        # Asset routes live under ``/api/library/assets``; the vocabulary routes
+        # (``facets``, ``tags``) are its siblings. The Expo client's schemas
+        # already name this shape, so the relay follows it rather than growing a
+        # second spelling for the same catalog.
+        Route("/api/library/assets", api_library_list),
+        Route("/api/library/facets", api_library_facets),
+        Route("/api/library/tags", api_library_tags),
+        Route("/api/library/tags", api_library_tag_create, methods=["POST"]),
+        Route("/api/library/tags/{tag_id:str}", api_library_tag_patch, methods=["PATCH"]),
+        Route(
+            "/api/library/tags/{tag_id:str}/merge",
+            api_library_tag_merge,
+            methods=["POST"],
+        ),
+        Route("/api/library/assets/{asset_id:str}", api_library_detail),
+        Route("/api/library/assets/{asset_id:str}", api_library_patch, methods=["PATCH"]),
+        Route(
+            "/api/library/assets/{asset_id:str}/tags",
+            api_library_set_tags,
+            methods=["PUT"],
+        ),
+        Route(
+            "/api/library/assets/{asset_id:str}/chat",
+            api_library_chat,
+            methods=["PUT"],
+        ),
+        Route(
+            "/api/library/assets/{asset_id:str}/chat",
+            api_library_chat_clear,
+            methods=["DELETE"],
+        ),
+        Route("/api/library/assets/{asset_id:str}/content", api_library_bytes),
+        Route("/api/library/assets/{asset_id:str}/thumbnail", api_library_thumb),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
