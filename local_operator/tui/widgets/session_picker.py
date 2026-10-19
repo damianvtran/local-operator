@@ -1089,8 +1089,9 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     The picker is the one place a user can see the whole fleet, so it is where
     "which of these is actually running, and which one wants me" has to be
     answerable at a glance. Precedence is by URGENCY, not by state machine:
-    needs-you outranks everything (a person is blocked), then wedged (not
-    answering), then busy, then an ARMED wake, then the runtime's own presence.
+    needs-you outranks everything that can still answer (a person is blocked), then
+    wedged (not answering; a parked gate it cannot serve is not needs-you), then
+    busy, then an ARMED wake, then the runtime's own presence.
     The wedged-above-busy order is a tie-break that can never fire —
     ``live_state`` is ONE token per row — so it is left exactly as it was.
 
@@ -1126,7 +1127,9 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     which is what makes the spinner honest: it had been pinned on by any
     background job or subagent the session had ever launched.
     """
-    if row.pending:
+    if row.pending and row.live_state != "wedged":
+        # A wedged owner cannot serve a parked gate: ``CatalogEntry.status``
+        # suppresses the same phantom gate, and the glyph must agree with it.
         return NEEDS_YOU_MARKER, "warning"
     if row.live_state == "wedged":
         # ``warning``, not ``danger``, and the ink is the point of the change:
