@@ -43838,10 +43838,16 @@ class OperatorApp(App[None]):
             # out in full, so the shorter form still points at the state it means.
             # Kept word for word in `_effort_slash_result`, or a phone and a
             # terminal answer one command two ways.
-            # Same reason as the `auto` no-op above, mirrored: typing the
-            # level the band already shows RE-AFFIRMS it, which matters when
-            # the held choice is a different one a narrow route clamped away.
-            self._apply_effort(wanted)
+            # Typing the level the band already shows is a NO-OP unless a
+            # DIFFERENT level is held: a narrow route can clamp a real choice
+            # (say `max`) onto the level on the band, and the user typing that
+            # level is how they replace it. With nothing held, arming the
+            # switch-following preference here would leak it across an
+            # unrelated later `/model` — exactly the B2 leak this branch's
+            # neighbour pins (see `_pending_effort_override`).
+            held = getattr(session, "chosen_effort", None)
+            if held and held != wanted:
+                self._apply_effort(wanted)
             self._system_notice(
                 f"reasoning effort: already {wanted} — /effort auto restores the default"
             )
@@ -54225,10 +54231,12 @@ class OperatorApp(App[None]):
         if wanted == current:
             # Word for word the sibling site above, including its cell budget: the
             # two surfaces exist so one command gets one answer whatever renders it.
-            # The re-affirmation is applied for the same reason as the sibling:
-            # a held choice a narrow route clamped onto this level must be
-            # replaced by the level the user just typed (review round 1, M3).
-            self._apply_effort(wanted)
+            # Same conditional as the sibling: only a DIFFERENT held choice is
+            # replaced; with nothing held this is a true no-op and must not arm
+            # a switch-following preference (review round 1, M3 / B2).
+            held = getattr(session, "chosen_effort", None)
+            if held and held != wanted:
+                self._apply_effort(wanted)
             return SlashResult(
                 kind="notice",
                 text=f"reasoning effort: already {wanted} — /effort auto restores the default",
