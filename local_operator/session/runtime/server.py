@@ -7574,6 +7574,14 @@ class RuntimeServer:
                     by=str(frame.get("by", "")),
                     **ask_kwargs,
                 )
+            elif op == "ask_dismiss" and frame.get("reason"):
+                # Forwarded only when sent, so an older owner handle whose
+                # ``ask_dismiss`` predates ``reason`` is still called as before.
+                outcome = method(
+                    str(frame.get("ask_id", "")),
+                    by=str(frame.get("by", "")),
+                    reason=str(frame["reason"]),
+                )
             else:
                 outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
             # ``method`` came from a getattr probe, so what it returns is not

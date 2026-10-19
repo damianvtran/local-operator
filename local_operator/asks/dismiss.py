@@ -1,40 +1,48 @@
-"""Dismiss a lapsed ask with NO runtime — the cold door (design §2.2, §14).
+"""Dismiss an ask with NO runtime — the cold door (design §2.2, §14, §15).
 
 WHY THIS MODULE EXISTS (fork A, 2026-10-16). Every other ask op needs a runtime:
 an answer is READ by the model, so a session with no runtime must be engaged to
 receive one — that is the whole reason ``_ASK_ANSWER_OPS`` engages. A dismissal
-has no reader. It is one append plus a derived-index rewrite, decided entirely by
-the fold, and the phone's own promise has always been the plain one: "dismiss —
-send no reply". Yet the only door was the engage, so a stopped conversation was
-BOOTED, and the boot reconcile delivered the deadline notice the dismissal had not
-cancelled yet, which started a paid turn (measured end to end; the architect's E1).
+has no reader AT THE MOMENT it is made. It is one append plus a derived-index
+rewrite, decided entirely by the fold, and the phone's own promise has always been
+the plain one: "dismiss — send no reply". Yet the only door was the engage, so a
+stopped conversation was BOOTED, and the boot reconcile delivered a row the
+dismissal had not cancelled yet, which started a paid turn (measured end to end;
+the architect's E1).
+
+WHAT IT ACCEPTS (D6, design §15): a TIMED-OUT ask, and an OPEN one — the cold
+session is exactly "no agent work is running", the only state in which an open ask
+may be dismissed. Nothing here starts, wakes or injects: the agent hears at its
+next real run.
 
 THREE PROPERTIES MAKE WRITING FROM HERE SAFE, and each one is a check below:
 
 * **A live owner is refused, never written behind.** A runtime republishes its
   in-memory wake list over an outside write (``wakes/arm.py`` :41-49) and tracks
   the rows it has handed out internally (``AskQueue._handed``), so an outside
-  append under a running session can be lost, or can deliver a notice without the
-  turn the notice is for. The caller falls back to the dial on
-  ``ask_owner_present`` — and ONLY on that, because every other refusal is an
-  answer rather than a reason to boot something.
+  append under a running session can be lost, or can deliver a row without the
+  turn the row is for. The caller falls back to the dial on ``ask_owner_present``
+  — and ONLY on that, because every other refusal is an answer rather than a
+  reason to boot something. (The live door then applies the stopped-session
+  rule of D6 itself.)
 * **The fold decides, in the queue's own words.** The refusal sentence comes from
   :func:`asks.render.dismiss_refusal`, the same function ``AskQueue.dismiss``
   calls, so a surface cannot tell which door answered it by the wording.
-* **The deadline wake row goes with it.** ``ask-timeout-<id>`` is what makes a
-  deadline survive a runtime that does not exist: the supervisor engages a runtime
-  for it. Removing it is the reason a dismissal boots nothing at all — and it is
-  safe for exactly ONE reason, which is the condition this module is allowed to
-  exist under:
+* **The deadline wake row goes with it, on the grounds that fit the timing.**
+  ``ask-timeout-<id>`` is what makes a deadline survive a runtime that does not
+  exist: the supervisor engages a runtime for it. Removing it is the reason a
+  dismissal boots nothing at all, and it is safe for ONE of two reasons:
 
-  **Only a timed-out ask can be dismissed, so its deadline has already passed and
-  the wake row has nothing left to deliver except the boot itself.** The notice
-  the row would have delivered is not lost: the fold keeps it owed
-  (``store.fold``'s ``notice_owed``) and the next real reconcile delivers it in
-  its dismissed wording. If a dismissal is ever allowed BEFORE the deadline,
-  removing the row becomes wrong — the fire would be the only thing that delivers
-  a notice for a live ask — and this module must change in the same edit as that
-  rule.
+  - **Timed-out ask:** the deadline has passed, so the row has nothing left to
+    deliver except the boot itself. The notice it would have delivered is not
+    lost: the fold keeps it owed (``store.fold``'s ``notice_owed``) and the next
+    real reconcile delivers it in its dismissed wording.
+  - **Open ask (D3, §15):** a dismissal stamped BEFORE the deadline owes an
+    ``ask-response-<id>`` row (``response_owed``), not a deadline notice, and ANY
+    boot's reconcile delivers that row — the wake row's fire is no longer the
+    only thing that tells the agent. The cost is stated in the design: an idle
+    cold asker no longer wakes at the deadline, so if nothing starts it within
+    7 days the row lapses unread.
 
 The dismissal is durable before anything else happens: ``append_event`` is the
 truth (``O_APPEND``, one line) and the index is derived from it, so a failure to
@@ -94,9 +102,10 @@ async def dismiss_cold(
     ask_id: str,
     *,
     by: str = "unknown",
+    reason: str | None = None,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Settle a TIMED-OUT ask and boot nothing. ``{"ok": True}`` or a refusal.
+    """Settle a timed-out or OPEN ask and boot nothing. ``{"ok": True}`` or a refusal.
 
     The refusals are the queue's own ``{"ok": False, "error": <sentence>}`` shape
     plus one code no live dismissal can produce — ``ask_owner_present``, which the
@@ -107,6 +116,8 @@ async def dismiss_cold(
     (they sent nothing), which is the word the live path records for the same tap;
     an omitted ``by`` is the caller's honest "unknown".
     """
+    if reason is not None and reason not in store.DISMISS_REASONS:
+        return {"ok": False, "error": render.DISMISS_BAD_REASON}
     root = Path(config_dir)
     directory = store.session_dir(root, session_id)
     now = now_ms if now_ms is not None else store.now_ms()
@@ -133,6 +144,7 @@ async def dismiss_cold(
         "ask_id": ask_id,
         "at": now,
         "by": {"surface": by or _REMOTE_SURFACE},
+        "reason": reason or store.DISMISS_REASON_DEFAULT,
     }
     if not store.append_event(directory, payload):
         return {"ok": False, "error": "the dismissal could not be recorded."}

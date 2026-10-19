@@ -935,6 +935,12 @@ def gate_waited_text(details: Mapping[str, Any] | None) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+#: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
+#: the relay stamps for the phone's tap (an empty ``by`` on the wire).
+_DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
+_DISMISS_REASON_WORDS = {"answered_in_chat": "settled in chat", "moot": "no longer needed"}
+
+
 def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_response`` row: ``(text, kind)``.
 
@@ -956,6 +962,16 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
         return (f"Ask {ask_id} declined — the agent was told", "info")
     if status == "late":
         return (f"Answered late — the agent was told (ask {ask_id})", "warning")
+    if status == "dismissed":
+        # The audit receipt of an operator dismissal (design §15): who, through
+        # which surface, and why. Without this branch the row would fall through
+        # to "Answered — delivering", which is false for a dismissal.
+        by = details.get("by")
+        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
+        surface = _DISMISS_SURFACE_WORDS.get(surface, surface)
+        reason = _DISMISS_REASON_WORDS.get(str(details.get("reason") or ""), "no longer needed")
+        via = f" ({surface})" if surface else ""
+        return (f"Dismissed by you{via} — {reason} (ask {ask_id})", "info")
     return (f"Answered — delivering (ask {ask_id})", "info")
 
 
