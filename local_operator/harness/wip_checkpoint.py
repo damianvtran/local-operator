@@ -67,7 +67,11 @@ class WipCheckpointer:
         self.number = 0
         try:
             saved = json.loads(self.path.read_text())
-            if saved.get("job_id") == job_id and saved.get("artifact") == "subagent-wip":
+            if (
+                isinstance(saved, dict)
+                and saved.get("job_id") == job_id
+                and saved.get("artifact") == "subagent-wip"
+            ):
                 self.result = saved
                 self.step = str(saved.get("step") or "")
                 self.step_at = float(saved.get("last_step_at") or 0)
@@ -104,6 +108,11 @@ class WipCheckpointer:
             "ref": self.ref,
             "root": str(self.root or self.cwd),
             "child_session_id": self.child_session_id,
+            "commit": "",
+            "tree": "",
+            "head": "",
+            "files": [],
+            "at": time.time(),
             **self.result,
             "step": self.step,
             "last_step_at": self.step_at,
@@ -134,9 +143,9 @@ class WipCheckpointer:
         self.last_snapshot = time.monotonic()
         index = ""
         try:
-            self.root = Path(self._git("rev-parse", "--show-toplevel"))
             if self._git("rev-parse", "--is-bare-repository") == "true":
                 raise ValueError("bare repository")
+            self.root = Path(self._git("rev-parse", "--show-toplevel"))
             try:
                 head = self._git("rev-parse", "--verify", "HEAD")
             except subprocess.CalledProcessError:

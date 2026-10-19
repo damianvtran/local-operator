@@ -459,7 +459,7 @@ def reconcile_lane_evidence(
                 wip = {}
         except (OSError, ValueError):
             wip = {}
-        recovery = dict(
+        recovery: dict[str, Any] = dict(
             last_step=str(lane.get("last_step") or wip.get("step") or ""),
             wip_ref=str(lane.get("wip_ref") or (wip.get("ref") if wip.get("commit") else "") or ""),
             wip_files=len(wip.get("files") or []),
