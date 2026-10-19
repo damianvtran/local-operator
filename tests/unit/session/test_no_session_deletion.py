@@ -2744,17 +2744,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "In-memory viewport cursor (self.state.move); no filesystem path",
     ),
     (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
         "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_down",
         "<path>.move",
         "In-memory viewport cursor (self.state.move); no filesystem path",
     ),
     (
         "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_up",
-        "<path>.move",
-        "In-memory viewport cursor (self.state.move); no filesystem path",
-    ),
-    (
-        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_up",
         "<path>.move",
         "In-memory viewport cursor (self.state.move); no filesystem path",
     ),

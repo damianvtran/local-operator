@@ -895,7 +895,8 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 # ``aida`` is new here and is CORRECT: her packaged seed is an
                 # agent profile like any other (design §2.1), so `/agent aida`
                 # attaches her instructions to a session — the completion
-                # vocabulary is the registry, and she is in it.
+                # vocabulary is the registry, and she is in it. ``librarian``
+                # joins for the same reason when the Library ships its seed.
                 "aida",
                 "architect",
                 "auditor",
@@ -904,6 +905,7 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 "dashboard-sme",
                 "designer",
                 "hollow-role",
+                "librarian",
                 "manager",
                 # Packaged QA is now addressable just like the other starters.
                 "qa-tester",
@@ -1223,10 +1225,13 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
     session = FakeSession()
     session.agent_registry = _agent_registry(tempfile.mkdtemp())
     app = OperatorApp(lambda: _factory(session))
-    # Tall on purpose: the listing carries the six packaged starters too, and
-    # the transcript keeps scrolled to the bottom, so a short frame would have
-    # scrolled the registered rows out of the paint this test reads.
-    async with app.run_test(size=(100, 74)) as pilot:
+    # Tall on purpose: the listing carries the packaged starters too (twelve
+    # seeds since the Librarian's, plus the two registry rows), and the
+    # transcript keeps scrolled to the bottom, so a short frame would have
+    # scrolled the registered rows out of the paint this test reads. The height
+    # is a frame bound rather than an exact fit; the asserts below name the
+    # first and last content the 110-row frame must hold.
+    async with app.run_test(size=(100, 110)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/agent")
         rows = _user_rows(app)

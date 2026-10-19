@@ -1190,8 +1190,11 @@ def test_stylesheet_region_has_no_literal_hex() -> None:
     The region runs to EOF, so every section added after the welcome block is
     checked here whether or not it belongs to this view — which is why a border
     STYLE keyword (`none`, `tall`, `solid`) has to be a legal part of a border
-    value and not a violation: it is not a colour. `color` and `background` stay
-    strict — a keyword there would be a mistake, not a spelling.
+    value and not a violation: it is not a colour. `background` additionally
+    learns Textual's `transparent` keyword — it means "paint no ground", the
+    deliberate choice where the themed screen already supplies one (the
+    Library's full-page form), rather than a colour spelling. `color` stays
+    strict: a keyword there would be a mistake.
     """
     text = TCSS.read_text()
     marker = "/* ---- welcome view"
@@ -1215,6 +1218,12 @@ def test_stylesheet_region_has_no_literal_hex() -> None:
             # a hand-copied list would be a second source that drifts silently
             # when a version adds a style.
             parts = [part for part in parts if part not in VALID_BORDER]
+        if prop == "background":
+            # Textual's `transparent` is a KEYWORD for "no ground", not a
+            # colour: the Library view relies on it so a themed or transparent
+            # terminal is never painted over with an opaque rectangle. `color`
+            # stays strict — transparent ink is a mistake, not a spelling.
+            parts = [part for part in parts if part != "transparent"]
         for part in parts:
             assert part.startswith("$lo-"), f"non-token color in welcome region: {prop}: {value!r}"
 
