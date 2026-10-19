@@ -14590,13 +14590,14 @@ async def test_a_desktop_pin_shows_in_the_tui_and_a_tui_pin_shows_on_the_desktop
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
-    # The server lifespan ENSURES AIDA (her session, pin and cadence) on
-    # every boot of the real app — a deliberate product behaviour — and this
-    # test asserts EXACT pin and row sets on this root. The documented kill
-    # switch is what keeps its subject (pin semantics) isolated from a feature
-    # it does not test; without it her boot-time session is a fourth row and
-    # her pin a second line in the store.
+    # The server lifespan ENSURES AIDA and the LIBRARIAN (their sessions, pins
+    # and cadences) on every boot of the real app — a deliberate product
+    # behaviour — and this test asserts EXACT pin and row sets on this root.
+    # The documented kill switches are what keep its subject (pin semantics)
+    # isolated from features it does not test; without them the assistants'
+    # boot-time sessions are extra rows and their pins extra lines in the store.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_LIBRARIAN", "1")
     for name in list(os.environ):
         if name.startswith("CMUX_"):
             monkeypatch.delenv(name)
@@ -14686,13 +14687,14 @@ async def test_a_pinned_run_the_desktop_cannot_list_produces_no_row(tmp_path, mo
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
-    # The server lifespan ENSURES AIDA (her session, pin and cadence) on
-    # every boot of the real app — a deliberate product behaviour — and this
-    # test asserts EXACT pin and row sets on this root. The documented kill
-    # switch is what keeps its subject (pin semantics) isolated from a feature
-    # it does not test; without it her boot-time session is a fourth row and
-    # her pin a second line in the store.
+    # The server lifespan ENSURES AIDA and the LIBRARIAN (their sessions, pins
+    # and cadences) on every boot of the real app — a deliberate product
+    # behaviour — and this test asserts EXACT pin and row sets on this root.
+    # The documented kill switches are what keep its subject (pin semantics)
+    # isolated from features it does not test; without them the assistants'
+    # boot-time sessions are extra rows and their pins extra lines in the store.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_LIBRARIAN", "1")
     for name in list(os.environ):
         if name.startswith("CMUX_"):
             monkeypatch.delenv(name)

@@ -2398,9 +2398,9 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 /* Selection and caret are COMPONENTS, not the input's own ink. Textual's
- * stock pair is `$input-selection-*`, and on the light ramp that measured
- * #e0e0e0 on #9bc3e3 = 1.41:1 — design round 1 D1: a filename a user is
- * about to replace was unreadable. This takes the SAME pair the projects
+ * stock pair is `$input-selection-*`, and on the light ramp it measured
+ * 1.41:1 — design round 1 D1: a filename a user is about to replace was
+ * unreadable. This takes the SAME pair the projects
  * form and composer already use (`fg` ink on the `edge` selected-prose
  * ground; surface ink on the `fg` caret step), measured there across all 35
  * registered themes rather than re-derived here. Scoped to the Library form

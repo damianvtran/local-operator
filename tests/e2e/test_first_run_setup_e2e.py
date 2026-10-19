@@ -168,6 +168,10 @@ class _TuiChild:
         # driven frame must not repaint a title or raise a notification on the
         # machine's real desktop, and the shimmer timer would turn "is the
         # loop painting" into a question about an animation clock.
+        # This leg pins Aida's first-login wake. The Librarian is a second
+        # built-in session with her own boot ensure and pin; disable her here
+        # so the leg's durable facts are not racing an unrelated boot.
+        env["LOCAL_OPERATOR_NO_LIBRARIAN"] = "1"
         env["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
         env["LOCAL_OPERATOR_NO_TERMINAL_TITLE"] = "1"
         env.update(NO_NOTIFY_ENV)

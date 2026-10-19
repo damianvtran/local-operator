@@ -38,7 +38,10 @@ async def _settle(pilot, predicate, *, turns: int = 300) -> None:
 
 
 def test_absence_is_a_state_not_an_error(monkeypatch) -> None:
-    monkeypatch.delitem(sys.modules, "local_operator.librarian", raising=False)
+    # The package is merged now, so emptying ``sys.modules`` no longer simulates
+    # an absent build — the next import simply re-finds the real package. Pin the
+    # bridge's own seam instead: it is the exact call production makes.
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
     assert librarian_control.module() is None
     result = librarian_control.call("status")
     assert result.available is False
@@ -101,8 +104,19 @@ async def test_async_hooks_are_awaited_and_blocking_hooks_leave_the_loop(
 
 @pytest.mark.asyncio
 async def test_ensure_session_names_absence_and_hands_back_an_id(monkeypatch) -> None:
-    monkeypatch.delitem(sys.modules, "local_operator.librarian", raising=False)
+    # Absence goes through the bridge's seam, not ``sys.modules`` (the merged
+    # package would be re-imported). The second half must see the fake package,
+    # so the stand-in delegates to the real lookup once the flag flips.
+    real_module = librarian_control.module
+    absent = {"value": True}
+    monkeypatch.setattr(
+        librarian_control,
+        "module",
+        lambda: None if absent["value"] else real_module(),
+    )
     assert await librarian_control.ensure_session() == (None, "")
+
+    absent["value"] = False
 
     async def ensure_session() -> str:
         return "abc123def456"
@@ -116,7 +130,8 @@ async def test_ensure_session_names_absence_and_hands_back_an_id(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_the_command_degrades_without_the_package() -> None:
+async def test_the_command_degrades_without_the_package(monkeypatch) -> None:
+    monkeypatch.setattr(librarian_control, "module", lambda: None)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot, lambda: app._session is not None)

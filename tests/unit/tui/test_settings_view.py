@@ -3102,10 +3102,12 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 
             await pilot.press("home")
             await pilot.pause()
-            # A cushion, not a count: the settings list grows with every section
-            # (26 presses on the fdf52ada4 merge; main alone sits at 25) and
-            # paging clamps, so extra presses are no-ops.
-            for _ in range(40):
+            # A cushion, not a count, but DERIVED since the Library merge added
+            # sections: a fixed 40 no longer reached the end at 42 headers and
+            # reported the Memory section as the bottom. Paging clamps, so the
+            # extra presses after the last section are no-ops.
+            presses = sum(1 for row in view._rows if row.kind == "header") + 2
+            for _ in range(presses):
                 await pilot.press("pagedown")
             await pilot.pause()
 
@@ -3119,7 +3121,7 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
             ), "paging reached the last row without reaching the bottom of the view"
 
             # And back: `pageup` reaches the first row the same way.
-            for _ in range(40):
+            for _ in range(presses):
                 await pilot.press("pageup")
             await pilot.pause()
             assert view._selected == view._selectable()[0]
