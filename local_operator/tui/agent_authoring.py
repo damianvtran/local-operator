@@ -61,7 +61,10 @@ def build_agent_plan(
         return refuse("tools", "invalid_tools")
     if draft.kind == "specialist" and (tools or draft.effort != "inherit" or draft.delegate):
         return refuse("kind", "specialist_fields")
-    if draft.effort != "inherit" and draft.effort not in tiers:
+    # A historical pin may outlive its configuration. An unrelated edit must
+    # omit it, not force the operator to reset policy they did not change.
+    effort_changed = initial is None or draft.effort.strip() != initial.effort.strip()
+    if effort_changed and draft.effort != "inherit" and draft.effort not in tiers:
         return refuse("effort", "invalid_effort")
     changes: dict[str, Any] = {}
     for field in fields(draft):

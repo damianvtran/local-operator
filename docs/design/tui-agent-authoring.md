@@ -37,7 +37,8 @@ TextArea where Tab moves focus, not inserts indentation. Ctrl+S saves. Esc
 closes a clean page; a dirty page pins an inline y/n question **outside** the
 scroll body. Y discards; N, Enter, or Esc returns to editing (letters are case-insensitive). Tab cannot escape
 the confirmation into the underlying form. Session replacement and sibling full-page modes reclaim the
-form; Ctrl+C leaves it before painting the conversation's interrupt receipt.
+form; Ctrl+C uses the same dirty-discard protection as Esc; repeated Ctrl+C while
+confirming does not arm the conversation's exit ladder.
 
 ## Persistence, refusals, and no-op
 

@@ -319,7 +319,7 @@ async def test_session_reboot_reclaims_agent_page(tmp_path, monkeypatch):
         assert app.focused is app._editor()
 
 
-async def test_ctrl_c_leaves_form_before_receipting_interrupt(tmp_path, monkeypatch):
+async def test_ctrl_c_closes_clean_form_without_arming_interrupt_exit(tmp_path, monkeypatch):
     _session, app = setup(tmp_path, monkeypatch)
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
@@ -332,6 +332,8 @@ async def test_ctrl_c_leaves_form_before_receipting_interrupt(tmp_path, monkeypa
         assert app._transcript_view().display
         assert app._editor().can_focus
         assert app.focused is app._editor()
+        assert app._last_interrupt_at == 0.0
+        assert not app._exit
 
 
 async def test_uppercase_discard_answers(tmp_path, monkeypatch):
@@ -362,3 +364,101 @@ async def test_edit_registry_read_failure_is_a_refusal(tmp_path, monkeypatch):
         await pilot.pause()
         assert app._agent_form is None
         assert "fixture registry unavailable" in _notices(app)[-1]
+
+
+async def test_removed_tier_noop_and_label_edit_preserve_historical_pin(tmp_path, monkeypatch):
+    from local_operator.config import ConfigManager
+
+    session, app = setup(tmp_path, monkeypatch)
+    config = ConfigManager(tmp_path)
+    config.set_config_value(
+        "subagents", {"models": {"hi": "openai/gpt-5-mini"}, "model_choice": "operator"}
+    )
+    write_profile(
+        session.agent_registry,
+        AgentParams(op="create", name="historic", instructions="Help.", effort="hi"),
+        creating=True,
+    )
+    config.set_config_value("subagents", {"models": {}, "model_choice": "operator"})
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot, "/agent edit historic")
+        assert page.controls["effort"].value == "hi"
+        assert page.tiers == ()
+        await pilot.press("ctrl+s")
+        assert not page.blocks["effort"].error
+        assert "no changes" in str(page._receipt.render())
+        page.controls["label"].value = "New label"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app._agent_form is None
+        row = session.agent_registry.get_agent_by_name("historic")
+        data = session.agent_registry.definition_revision_fields(row.id)
+        assert data["label"] == "New label"
+        assert data["effort"] == "hi"
+        page = await open_form(app, pilot, "/agent edit historic")
+        page.controls["effort"].set_value("med", keep_foreign=True)
+        await pilot.press("ctrl+s")
+        assert page.blocks["effort"].error
+        assert app._agent_form is page
+        assert session.agent_registry.definition_revision_fields(row.id)["effort"] == "hi"
+
+
+@pytest.mark.parametrize("answer", ["n", "enter", "Y"])
+async def test_dirty_ctrl_c_preserves_draft_and_never_arms_exit(tmp_path, monkeypatch, answer):
+    session, app = setup(tmp_path, monkeypatch)
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        page = await open_form(app, pilot)
+        page.controls["name"].value = "interrupt-draft"
+        page.controls["instructions"].text = "Keep this draft."
+        page.controls["instructions"].focus()
+        await pilot.press("ctrl+c", "ctrl+c", "ctrl+c")
+        await pilot.pause()
+        assert app._agent_form is page
+        assert page._confirm
+        assert page.controls["instructions"].text == "Keep this draft."
+        assert page._question.region.y == 16
+        assert app._last_interrupt_at == 0.0
+        assert not app._exit
+        assert session.aborts == []
+        await pilot.press(answer)
+        await pilot.pause()
+        if answer != "Y":
+            assert app._agent_form is page
+            assert not page._confirm
+            assert page.controls["instructions"].text == "Keep this draft."
+            await pilot.press("ctrl+c", "Y")
+            await pilot.pause()
+        assert app._agent_form is None
+        assert app._last_interrupt_at == 0.0
+        assert session.agent_registry.get_agent_by_name("interrupt-draft") is None
+
+
+@pytest.mark.parametrize("name", ["new", "edit", "class", "=foo"])
+async def test_attach_receipt_suggests_an_invokable_escaped_name(tmp_path, monkeypatch, name):
+    import re
+
+    session, app = setup(tmp_path, monkeypatch)
+    write_profile(
+        session.agent_registry,
+        AgentParams(op="create", name=name, instructions="Help."),
+        creating=True,
+    )
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command(f"/agent ={name}")
+        await pilot.pause()
+        receipt = _notices(app)[-1]
+        match = re.search(r"Send a request with (/agent .+?) <message>", receipt)
+        assert match is not None, receipt
+        command = match.group(1)
+        assert command == f"/agent ={name}"
+        app._run_slash_command(command + " follow receipt")
+        for _ in range(40):
+            await pilot.pause()
+            if session.prompts:
+                break
+        assert app._agent_form is None
+        assert session.active_agent == name
+        assert session.prompts[-1] == "follow receipt"

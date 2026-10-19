@@ -21514,9 +21514,18 @@ class OperatorApp(App[None]):
             # later turns, not merely "is active"), and borrow /team's "ready"
             # idiom so the two surfaces read as siblings. Plain wording, no
             # em dashes. /agent clear detaches it again.
+            # The receipt must suggest an invokable literal name, using the
+            # same one-leading-`=` grammar as the picker and attach parser.
+            resolved_name = str(resolved)
+            escaped = (
+                f"={resolved_name}"
+                if resolved_name.casefold() in {word for word, _help in agent_subcommand_rows()}
+                or resolved_name.startswith("=")
+                else resolved_name
+            )
             notice(
                 f"agent {resolved} is ready and now governs this session's replies. "
-                f"Send a request with /agent {resolved} <message>, or /agent clear to detach."
+                f"Send a request with /agent {escaped} <message>, or /agent clear to detach."
             )
             return
         # `_submit_prompt` writes the user row (the message is what the newly
@@ -25613,6 +25622,16 @@ class OperatorApp(App[None]):
         already exists for "the user is done with this card": it discards the
         aside and hands back the main-chat draft it borrowed.
         """
+        if self._agent_form is not None:
+            # A form draft belongs to its editor, not the conversation's exit
+            # ladder. Repeated Ctrl+C must not turn a discard question into an
+            # implicit yes or arm a later process exit behind that question.
+            self._last_interrupt_at = 0.0
+            if self._exit_hint is not None:
+                self._transcript_view().remove_block(self._exit_hint)
+                self._exit_hint = None
+            self._agent_form.action_cancel_request(keep_confirm=True)
+            return
         if self._sidebar_navigation.requested_id:
             self._sidebar_navigation.cancel()
             return

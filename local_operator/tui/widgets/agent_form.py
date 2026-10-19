@@ -231,8 +231,12 @@ class AgentFormPage(Vertical):
     def action_previous_field(self) -> None:
         self._focus(-1)
 
-    def action_cancel_request(self) -> None:
+    def action_cancel_request(self, *, keep_confirm: bool = False) -> None:
         if self._confirm:
+            # Esc may back out of the question; a repeated interrupt must leave
+            # it owning the keyboard rather than silently changing the answer.
+            if keep_confirm:
+                return
             self._confirm = False
             self._question.display = False
             if self._restore is not None:

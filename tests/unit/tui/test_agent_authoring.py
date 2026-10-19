@@ -108,3 +108,19 @@ def test_edit_clearing_instructions_refuses():
         build_agent_plan(initial, replace(initial, instructions=""), ()).error_field
         == "instructions"
     )
+
+
+@pytest.mark.parametrize("changes", [{}, {"label": "New label"}])
+def test_unchanged_unconfigured_effort_is_preserved_by_omission(changes):
+    initial = AgentDraft(name="historic", instructions="Help.", effort="hi")
+    plan = build_agent_plan(initial, replace(initial, **changes), ())
+    assert not plan.error_code
+    assert plan.changes == changes
+    assert "effort" not in plan.changes
+
+
+def test_changed_unconfigured_effort_is_still_refused():
+    initial = AgentDraft(name="historic", instructions="Help.", effort="hi")
+    plan = build_agent_plan(initial, replace(initial, effort="med"), ())
+    assert plan.error_code == "invalid_effort"
+    assert plan.changes == {}
