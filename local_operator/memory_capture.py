@@ -146,25 +146,25 @@ _CONTEXT_LOCATORS = 8
 _WORD = re.compile(
     r"(?:[^\W\d_]{2,}" r"|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff])"
 )
-#: One whitespace token that is ENTIRELY locator material, used by the residue
-#: test. The token view is deliberate: rounds 2-4 showed a span grammar cannot
-#: decide where a spaced path ends without breaking its neighbour
-#: (`C:\Program Files\app` vs `C:\repo\app is the build root`). Removing every
-#: locator token and judging what REMAINS makes prose the only thing that can
-#: keep a candidate alive; the boundary between path and prose no longer decides
-#: the verdict.
-_LOCATOR_TOKEN = re.compile(
-    r".*[\\/].*"
-    r"|mailto:.*"
-    r"|(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/.*)?"
-    r"|[\w.+-]{1,64}@[\w.-]{1,255}\.[A-Za-z]{2,24}"
-    r"|(?=[0-9a-fA-F]{7,12}\Z)[0-9a-fA-F]*\d[0-9a-fA-F]*",
+#: A bare host and a short hex id are locator tokens the shared ``_LOCATOR``
+#: grammar does not own (that grammar is pinned byte-identical to
+#: ``compaction/mine.py``). Everything else is classified by structure below.
+_HOST = re.compile(r"(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}", re.IGNORECASE)
+_HOST_WITH_PATH = re.compile(r"(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}/.*", re.IGNORECASE)
+_HEX = re.compile(r"(?=[0-9a-fA-F]{7,12}\Z)[0-9a-fA-F]*\d[0-9a-fA-F]*")
+#: Where a locator STARTS a new address rather than continuing the current one.
+#: This is what keeps `C:\repo\app to C:\repo\out` prose (`to` is followed by
+#: a new drive root) while `C:\Program Files (x86)\app` is a path (`Files` is
+#: followed by a continuation token).
+_ABSOLUTE_LOCATOR = re.compile(
+    r"(?:[A-Za-z]:[\\/]|\\\\|/|~/|\.\.?/|[A-Za-z][A-Za-z0-9+.-]{1,31}://|mailto:)",
     re.IGNORECASE,
 )
-#: A plain FINAL token that can be the last segment of a spaced path
-#: (`C:\Program Files`). Only path-ish words qualify: lowercase prose after a
-#: path stays knowledge (`C:\repo\app done` is a fact).
-_PATH_TAILISH = re.compile(r"(?:[A-Z][\w.-]*|[\w.-]*[._0-9-][\w.-]*)")
+#: A plain token that can be the last segment of a spaced path. Titlecase words
+#: (`Files`, `Folder`, `App`) and parenthesised segments (`(x86)`); NOT all-caps
+#: acronyms (`OK`, `VS`), hyphenated prose (`read-only`) or lowercase words
+#: (`done`, `Minerva` starts uppercase but is guarded by the preceding leaf).
+_PATH_TAILISH = re.compile(r"(?:[A-Z][a-z][\w]*|\([A-Za-z0-9._-]+\))")
 
 
 class CaptureRows(list[dict[str, Any]]):
@@ -485,8 +485,55 @@ def _without_prompt(source: str) -> str:
 
 
 def _is_locator_token(token: str) -> bool:
-    """Whether one whitespace token is entirely locator material."""
-    return bool(_LOCATOR_TOKEN.fullmatch(token) or _LOCATOR.fullmatch(token))
+    """Whether one whitespace token is entirely locator material.
+
+    A slash INSIDE a word is not a path: `TCP/IP` and `and/or` are prose, while
+    `Last/app` (a path continuation), `fix/memory-capture` (a ref) and
+    `src/foo` (a known root) are locators. That distinction is structural, not
+    a list of exception literals (QA NIT).
+    """
+    if _LOCATOR.fullmatch(token):
+        return True
+    if "\\" in token:
+        return True
+    if _ABSOLUTE_LOCATOR.match(token):
+        return True
+    if _HOST.fullmatch(token) or _HEX.fullmatch(token):
+        return True
+    if "/" in token:
+        segments = token.split("/")
+        return bool(
+            len(segments) > 2
+            or "." in token
+            or "-" in token
+            or (segments[0][:1].isupper() and not segments[0].isupper())
+        )
+    return False
+
+
+def _is_continuation_token(token: str) -> bool:
+    """A locator that continues the current path instead of starting a new one."""
+    if not _is_locator_token(token):
+        return False
+    if _ABSOLUTE_LOCATOR.match(token):
+        return False
+    if _HOST.fullmatch(token) or token.lower().startswith("mailto:"):
+        return False
+    if _HOST_WITH_PATH.fullmatch(token):
+        return False
+    return True
+
+
+def _path_leaf_is_titled(token: str) -> bool:
+    r"""Whether the last segment of a path token starts uppercase.
+
+    `C:\Program` + `Files` is a spaced directory; `C:\repo\app` + `Minerva`
+    is a path followed by prose. The leaf's case is the only structural signal
+    that distinguishes them without a dictionary, and it is used ONLY for a
+    final run with no following separator (see `_substantive`).
+    """
+    leaf = re.split(r"[\\/]", token.rstrip("\\/"))[-1]
+    return bool(leaf) and leaf[:1].isupper() and not leaf.isupper()
 
 
 def _substantive(body: str) -> bool:
@@ -498,38 +545,67 @@ def _substantive(body: str) -> bool:
     the build root` are the same prefix). Token-by-token removal has no such
     boundary to get wrong: a body that is only paths/hosts/ids leaves no prose
     and is refused; a body with either side of a path in it leaves its sentence
-    and is admitted. `_WORD` is the same script-agnostic test used elsewhere.
+    and is admitted.
 
-    The one continuation rule is for a spaced path's final segment
-    (`C:\Program Files`), which carries no separator of its own: a path-ish
-    final token right after a locator is part of that locator. Lowercase prose
-    there (`C:\repo\app done`) stays knowledge, because discarding knowledge is
-    the worse error.
+    A plain run between a locator and a CONTINUATION token
+    (`C:\Program Files (x86)\app`: `Files` then `(x86)\app`) is part of the
+    path, however many words it contains. A run followed by a NEW absolute
+    locator, or reaching end-of-body, is prose unless it is the last segment of
+    a spaced path: the preceding leaf is Titlecase and every word in the run is
+    path-shaped (`C:\Program Files`). Lowercase prose there
+    (`C:\repo\app done`, `C:\repo\app OK`, `C:\repo\app Minerva`) stays
+    knowledge, because discarding knowledge is the worse error.
+
+    Multi-token locator forms (`branch <ref>`, `thread: <ref>`, and the
+    `secret <NAME>` reference) are marked by running the shared ``_LOCATOR``
+    grammar over the BODY and skipping every token it covers. That is derived
+    from the grammar itself, not a hand-mirrored label list: a future reference
+    family added to ``_LOCATOR`` is refused here without another special case
+    (QA round 5, Q-F1).
     """
+    token_matches = list(re.finditer(r"\S+", body))
+    tokens = [match.group() for match in token_matches]
+    cleaned = [token.strip("()[]{}<>,;:!?\"'`").rstrip(".") for token in tokens]
+    covered = bytearray(len(body))
+    for match in _LOCATOR.finditer(body):
+        covered[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
+    locator = [
+        sum(covered[match.start() : match.end()]) >= len(cleaned[i])
+        or _is_locator_token(cleaned[i])
+        for i, match in enumerate(token_matches)
+    ]
     kept: list[str] = []
-    tokens = body.split()
-    previous_locator = False
     index = 0
     while index < len(tokens):
-        token = tokens[index]
-        cleaned = token.strip("()[]{}<>,;:!?\"'`")
-        if _is_locator_token(cleaned):
-            previous_locator = True
+        if locator[index]:
             index += 1
             continue
-        if cleaned.lower() in ("branch", "thread") and index + 1 < len(tokens):
-            # `_LOCATOR` owns the two-token `branch <ref>` form; mirror it here
-            # so a bare reference does not leave the label behind as prose.
-            if re.fullmatch(r"[\w./-]{3,128}", tokens[index + 1]):
-                previous_locator = True
-                index += 2
-                continue
-        if previous_locator and index == len(tokens) - 1 and _PATH_TAILISH.fullmatch(cleaned):
-            index += 1
+        run_end = index
+        while run_end < len(tokens) and not locator[run_end]:
+            run_end += 1
+        left = cleaned[index - 1] if index > 0 and locator[index - 1] else None
+        right = (
+            cleaned[run_end]
+            if run_end < len(tokens)
+            and locator[run_end]
+            and _is_continuation_token(cleaned[run_end])
+            else None
+        )
+        if left is not None and right is not None:
+            index = run_end
             continue
-        kept.append(token)
-        previous_locator = False
-        index += 1
+        if (
+            left is not None
+            and run_end == len(tokens)
+            and _path_leaf_is_titled(left)
+            and all(
+                _PATH_TAILISH.fullmatch(item.strip(".,;:!?\"'`")) for item in tokens[index:run_end]
+            )
+        ):
+            index = run_end
+            continue
+        kept.extend(tokens[index:run_end])
+        index = run_end
     return bool(_WORD.search(" ".join(kept)))
 
 
