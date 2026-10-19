@@ -597,9 +597,9 @@ def fold(
             relayed = _first(events, ask_id, EVENT_RELAYED)
             if relayed is None:
                 continue
-            record = _relay_record(ask_id, relayed, events, session_id=session_id)
-            if record is not None:
-                records.append(record)
+            relay_row = _relay_record(ask_id, relayed, events, session_id=session_id)
+            if relay_row is not None:
+                records.append(relay_row)
             continue
         answered = _first(events, ask_id, EVENT_ANSWERED)
         declined = _first(events, ask_id, EVENT_DECLINED)
