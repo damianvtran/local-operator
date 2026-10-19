@@ -78,8 +78,8 @@ from typing import Any, Mapping
 from local_operator.evaluation.record_frames import RecordFrames
 from local_operator.session.store_failures import SPACE_ERRNOS
 
-# Binary frames belong in the artifact store. Large TEXT is never truncated:
-# exceptional lines carry a machine-readable size warning for evidence readers.
+# Annotation threshold, NOT an enforced size limit. Evidence (including an
+# unpublishable inline image) is never discarded just to fit a journal line.
 MAX_RECORD_LINE_BYTES = 256 * 1024
 
 #: The seal's reserved margin, pre-allocated at open and kept until the seal
@@ -360,6 +360,12 @@ class RecordSink:
         failure sentence NAMES -- so a reader gets either a clean cut or a
         stated torn tail, never a silent one: the property that makes a
         partial record analyzable instead of a void.
+
+        MAX_RECORD_LINE_BYTES is only a size-annotation threshold, not an
+        enforced limit. Oversized text, other media and image blocks retained
+        inline after projection failures are written intact with an explicit
+        record_oversized annotation; image fallback reasons are recorded beside
+        the event rather than changing its original content.
         """
 
         if self._closed:
@@ -370,14 +376,16 @@ class RecordSink:
                 bytes_written=self._offset,
             )
         try:
+            self._frames.fallbacks.clear()
             document = self._frames.project({"kind": kind, **payload})
+            if self._frames.fallbacks:
+                document["record_image_fallbacks"] = list(self._frames.fallbacks)
             line = json.dumps(document, ensure_ascii=False, default=str).encode("utf-8") + b"\n"
             if len(line) > MAX_RECORD_LINE_BYTES:
-                # Do not lose long text, arguments or errors to a size cap. A
-                # reader can distinguish intentional oversized evidence from
-                # an accidental recurrence of embedded binary frame growth.
+                # This is a size annotation, not a guard or cap: inline image
+                # fallbacks, other media, text and arguments remain lossless.
                 document["record_oversized"] = {
-                    "reason": "non_image_payload_exceeds_limit",
+                    "reason": "projected_record_exceeds_annotation_threshold",
                     "limit_bytes": MAX_RECORD_LINE_BYTES,
                     "unflagged_bytes": len(line),
                 }
