@@ -2802,11 +2802,11 @@ def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
     seed, read as "nothing chosen" instead of as a choice relative to the model
     the conversation happened to boot on (review round 2, M5).
 
-    Deliberately computed against the spec the row RESOLVES TO, not against the
-    spec that row is about to be clamped into for display: a row naming ``max``
-    for a route whose ladder stops at ``high`` must keep ``max`` as the choice
-    even though the spec carries the clamp. The clamp is the level IN FORCE; the
-    row is what was ASKED FOR.
+    Computed against the spec the row resolves to. Its level may have been
+    CLAMPED for display by the caller, but only its SEED is read here, and the
+    clamp does not move that seed: a row naming ``max`` for a route whose ladder
+    stops at ``high`` keeps ``max`` as the choice while the spec carries the
+    clamp. The clamp is the level IN FORCE; the row is what was ASKED FOR.
     """
     # ``None`` means the row stored NO level (a ladderless selection, or one
     # written before the field carried a choice). It is never read as "use the
@@ -26359,9 +26359,12 @@ class Session:
         # stale.
         spec = self._spec_for_route(selector, effort)
         if spec is None:
-            # The target cannot be resolved, so the row's level is still the
-            # best evidence — compared against the only spec in hand.
-            self._chosen_effort = _chosen_level_from(effort, self._model)
+            # The row is DROPPED and the session stays on the birth model, so a
+            # level recorded for a model this host cannot resolve says nothing
+            # about the conversation it is actually on. Keeping it would let a
+            # withdrawal on the vanished model ride switches here as a phantom
+            # choice (review round 3, M6).
+            self._chosen_effort = None
             logger.warning("dropping unresolvable persisted model selection: %r", selector)
             self._selection_needs_initial_write = True
             self._model_migration_notice = True
@@ -26391,8 +26394,9 @@ class Session:
         # withdrawal row now stores the TARGET's seed, so comparing it to the
         # BIRTH model's default read that seed as a choice whenever the two
         # models seeded different levels — and the withdrawn level then rode the
-        # next switch. The fallback for a legacy row (no effort field) is the
-        # level the birth spec carried, which is what the carry would use.
+        # next switch. A row with no stored level is no choice at all; a birth
+        # default still reaches switches through the spec, not through this
+        # field.
         self._chosen_effort = _chosen_level_from(effort, spec)
         # A restored row IS the user's earlier explicit choice, so a config
         # default edited after the resume must not override it either.
