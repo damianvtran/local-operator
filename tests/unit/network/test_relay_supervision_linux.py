@@ -285,11 +285,12 @@ def test_service_action_drives_systemctl_when_a_unit_is_there(
     )
 
     assert relay.service_action("restart")["ok"] is True
-    assert seen == [
-        ("restart", relay.SYSTEMD_UNIT),
-        ("is-enabled", relay.SYSTEMD_UNIT),
-        ("is-active", relay.SYSTEMD_UNIT),
-    ]
+    # ONE MANAGER CALL, NOT THREE. Durability is read through
+    # ``linger_enabled``/the unit file, not through a second service-state
+    # query: the update path's proven-move restart also runs this arm, and its
+    # exact-call contract forbids extra ``is-enabled``/``is-active`` probes
+    # (``test_refresh_unit_restarts_exactly_once_on_a_proven_move``).
+    assert seen == [("restart", relay.SYSTEMD_UNIT)]
 
 
 def test_a_restart_that_replaces_nothing_is_not_ok(

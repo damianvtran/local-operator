@@ -7691,12 +7691,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         if not check.get("ok") and check["class"] == "supervision"
     ]
     degraded = bool(payload_failures or supervision_failures)
-    healthy = not link_failures and bool(payload.get("identity_present", True))
+    link_ok = not link_failures
+    healthy = link_ok and bool(payload.get("identity_present", True))
     answer: dict[str, Any] = {
         **payload,
         "checks": checks,
         "ok": healthy,
-        "link_ok": healthy,
+        "link_ok": link_ok,
         "degraded": degraded,
         "payload_failures": payload_failures,
     }

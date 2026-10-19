@@ -12234,12 +12234,18 @@ class RelayServer:
                         "reachable": link is not None,
                         "reason": reason,
                         "link_state": state,
-                        "remote_relay": "running" if link is not None else (
-                            "not_listening" if state == "relay_down" else "unknown"
+                        "remote_relay": (
+                            "running"
+                            if link is not None
+                            else ("not_listening" if state == "relay_down" else "unknown")
                         ),
                         "attempts": [
-                            {"endpoint": attempt.endpoint, "connected": attempt.connected,
-                             "detail": attempt.detail, "latency_ms": attempt.latency_ms}
+                            {
+                                "endpoint": attempt.endpoint,
+                                "connected": attempt.connected,
+                                "detail": attempt.detail,
+                                "latency_ms": attempt.latency_ms,
+                            }
                             for attempt in attempts
                         ],
                         "endpoints": list(member.endpoints),
@@ -13749,8 +13755,13 @@ def supervision_state() -> dict[str, Any]:
     from a diagnostic and never install or start a service as a side effect.
     """
     state: dict[str, Any] = {
-        "platform": "none", "unit": "", "installed": False,
-        "enabled": False, "active": False, "linger": None, "persistent": False,
+        "platform": "none",
+        "unit": "",
+        "installed": False,
+        "enabled": False,
+        "active": False,
+        "linger": None,
+        "persistent": False,
     }
     try:
         supervisor = supervisors.supervisor()
