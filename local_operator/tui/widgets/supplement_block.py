@@ -325,6 +325,7 @@ class SupplementBlock(TranscriptBlock):
 
     def _remember_file(self, uri: str, raw: str) -> None:
         from pathlib import Path
+
         from local_operator.tui.file_viewer import file_identity
 
         try:
@@ -472,8 +473,11 @@ class SupplementBlock(TranscriptBlock):
             if url.startswith("file:"):
                 opener = getattr(self.app, "open_transcript_file", None)
                 if opener is not None:
-                    opener(url, source_path=self._painted_links.get(url, ""),
-                           expected=self._painted_identities.get(url))
+                    opener(
+                        url,
+                        source_path=self._painted_links.get(url, ""),
+                        expected=self._painted_identities.get(url),
+                    )
                     event.stop()
                 return
             super().on_click(event)

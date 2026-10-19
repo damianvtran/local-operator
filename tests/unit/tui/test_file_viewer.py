@@ -1,17 +1,30 @@
 """The viewer bounds bytes before decoding and never follows an untrusted path."""
+
 from pathlib import Path
 
 import pytest
 
 from local_operator.tui.file_viewer import (
-    MAX_BYTES, MAX_LINES, ViewerError, read_document, viewer_kind,
+    MAX_BYTES,
+    MAX_LINES,
+    ViewerError,
+    read_document,
+    viewer_kind,
 )
 
 
-@pytest.mark.parametrize(("name", "kind"), [
-    ("a.py", "code"), ("a.md", "markdown"), ("a.txt", "text"), ("a.html", "code"),
-    ("a.csv", "text"), ("a.pdf", None), ("a.png", None),
-])
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("a.py", "code"),
+        ("a.md", "markdown"),
+        ("a.txt", "text"),
+        ("a.html", "code"),
+        ("a.csv", "text"),
+        ("a.pdf", None),
+        ("a.png", None),
+    ],
+)
 def test_kind(name: str, kind: str | None) -> None:
     assert viewer_kind(Path(name)) == kind
 
@@ -51,6 +64,7 @@ def test_escape_and_changed_snapshot(tmp_path: Path) -> None:
 
 def test_refuses_non_regular_files_before_open(tmp_path: Path, monkeypatch) -> None:
     import os
+
     from local_operator.tui import file_viewer
 
     if not hasattr(os, "mkfifo"):
@@ -82,6 +96,7 @@ def test_refuses_symlink_escape_and_executable(tmp_path: Path, monkeypatch) -> N
 @pytest.mark.asyncio
 async def test_actual_reader_cancellation_closes_descriptor(tmp_path: Path, monkeypatch) -> None:
     import asyncio
+
     from local_operator.tui import file_viewer
 
     (tmp_path / "large.txt").write_bytes(b"x" * MAX_BYTES)
@@ -92,6 +107,7 @@ async def test_actual_reader_cancellation_closes_descriptor(tmp_path: Path, monk
         handle = original(*args, **kwargs)
         handles.append(handle)
         return handle
+
     monkeypatch.setattr(file_viewer.os, "fdopen", capture)
     task = asyncio.create_task(file_viewer.read_document_async("large.txt", cwd=tmp_path))
     await asyncio.sleep(0)
@@ -112,6 +128,7 @@ def test_view_is_tui_only_and_path_completion_has_no_reference_sigil() -> None:
     assert token and token.query == "nested/a"
     assert file_completion_token("/view nested/a", 0) is None
     from local_operator.session.frontend_state import _FRONTEND_LOCAL_SLASHES
+
     assert "view" in _FRONTEND_LOCAL_SLASHES
 
 
@@ -129,6 +146,7 @@ def test_unreadable_and_unsupported_refusals(tmp_path: Path, monkeypatch) -> Non
         read_document("report.pdf", cwd=tmp_path)
     (tmp_path / "private.txt").write_text("private")
     import os
+
     original = os.open
 
     def denied(path, *args, **kwargs):
@@ -142,13 +160,17 @@ def test_unreadable_and_unsupported_refusals(tmp_path: Path, monkeypatch) -> Non
             read_document("private.txt", cwd=tmp_path)
 
 
-@pytest.mark.parametrize("filename", [
-    r"C:\Users\Test\report with spaces # 20%.txt",
-    r"\\server\share\folder name\report # %20.txt",
-    r"\\localhost\share\report.txt",
-])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        r"C:\Users\Test\report with spaces # 20%.txt",
+        r"\\server\share\folder name\report # %20.txt",
+        r"\\localhost\share\report.txt",
+    ],
+)
 def test_windows_uri_roundtrip_uses_drive_and_unc_authority(filename: str) -> None:
     from pathlib import PureWindowsPath
+
     from local_operator.tui.link_targets import file_uri_to_path
 
     original = PureWindowsPath(filename)
@@ -168,6 +190,7 @@ def test_native_uri_roundtrip_decodes_once(tmp_path: Path) -> None:
 
 def test_absolute_home_path_has_a_cross_drive_safe_spelling(tmp_path, monkeypatch) -> None:
     import os
+
     from local_operator.tui.link_targets import file_affordance_spelling
 
     home = tmp_path / "home"
@@ -176,8 +199,10 @@ def test_absolute_home_path_has_a_cross_drive_safe_spelling(tmp_path, monkeypatc
     original.write_text("allowed on another drive")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     with monkeypatch.context() as patch:
+
         def cross_drive(*args):
             raise ValueError("different drives")
+
         patch.setattr(os.path, "relpath", cross_drive)
         assert file_affordance_spelling(str(original), cwd=tmp_path) == "~/allowed.txt"
         assert read_document(str(original), cwd=tmp_path).text == "allowed on another drive"
@@ -199,6 +224,7 @@ def test_reader_works_without_optional_posix_open_flags(tmp_path: Path, monkeypa
 async def test_external_opener_is_argv_safe_and_reaps_on_cancel(tmp_path, monkeypatch) -> None:
     import asyncio
     import sys
+
     from local_operator.tui import attachments
 
     children = []
@@ -210,17 +236,30 @@ async def test_external_opener_is_argv_safe_and_reaps_on_cancel(tmp_path, monkey
         return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
-    monkeypatch.setattr(attachments, "opener_argv", lambda path: [
-        sys.executable, "-c", "import sys;sys.exit(0 if sys.argv[1].endswith('.txt') else 1)",
-        path,
-    ])
+    monkeypatch.setattr(
+        attachments,
+        "opener_argv",
+        lambda path: [
+            sys.executable,
+            "-c",
+            "import sys;sys.exit(0 if sys.argv[1].endswith('.txt') else 1)",
+            path,
+        ],
+    )
     dangerous_name = str(tmp_path / "file; touch NEVER_CREATED.txt")
     assert await attachments.open_path_quietly(dangerous_name)
     assert not (tmp_path / "NEVER_CREATED.txt").exists()
     assert children[0].returncode == 0
-    monkeypatch.setattr(attachments, "opener_argv", lambda path: [
-        sys.executable, "-c", "import time;time.sleep(60)", path,
-    ])
+    monkeypatch.setattr(
+        attachments,
+        "opener_argv",
+        lambda path: [
+            sys.executable,
+            "-c",
+            "import time;time.sleep(60)",
+            path,
+        ],
+    )
     task = asyncio.create_task(attachments.open_path_quietly(dangerous_name))
     for _ in range(40):
         if len(children) == 2:

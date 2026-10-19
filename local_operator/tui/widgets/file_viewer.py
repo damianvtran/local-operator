@@ -4,6 +4,7 @@ Unlike an editor, this page cannot write and never interprets HTML. Rich's
 Markdown and Syntax renderers are local presentation only. One scroll owner
 clamps every movement, including arrows, just like the other full-page modes.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,10 +24,13 @@ from local_operator.i18n.keys import tui_viewer as msg
 from local_operator.i18n.text import tr
 from local_operator.tui.attachments import open_path_quietly
 from local_operator.tui.file_viewer import (
-    Document, Identity, ViewerError, lexer_for, read_document_async,
+    Document,
+    Identity,
+    ViewerError,
+    lexer_for,
+    read_document_async,
 )
 from local_operator.tui.widgets.move_picker import _truncate_head
-
 
 _t = tr("tui.viewer")
 
@@ -57,11 +61,16 @@ class FileViewer(Vertical, can_focus=True):
     """
     BINDINGS = [
         Binding("escape", "dismiss", show=False, priority=True),
-        Binding("w", "wrap", show=False), Binding("r", "reload", show=False),
-        Binding("y", "copy_path", show=False), Binding("o", "open_external", show=False),
-        Binding("up", "move('up')", show=False), Binding("down", "move('down')", show=False),
-        Binding("left", "move('left')", show=False), Binding("right", "move('right')", show=False),
-        Binding("home", "move('home')", show=False), Binding("end", "move('end')", show=False),
+        Binding("w", "wrap", show=False),
+        Binding("r", "reload", show=False),
+        Binding("y", "copy_path", show=False),
+        Binding("o", "open_external", show=False),
+        Binding("up", "move('up')", show=False),
+        Binding("down", "move('down')", show=False),
+        Binding("left", "move('left')", show=False),
+        Binding("right", "move('right')", show=False),
+        Binding("home", "move('home')", show=False),
+        Binding("end", "move('end')", show=False),
         Binding("pageup", "move('pageup')", show=False),
         Binding("pagedown", "move('pagedown')", show=False),
     ]
@@ -106,8 +115,12 @@ class FileViewer(Vertical, can_focus=True):
         try:
             document = await read_document_async(self.raw, cwd=self.cwd, expected=self.expected)
         except ViewerError as exc:
-            errors = {"changed": msg.changed, "binary": msg.binary,
-                      "unsupported": msg.unsupported, "unreadable": msg.unreadable}
+            errors = {
+                "changed": msg.changed,
+                "binary": msg.binary,
+                "unsupported": msg.unsupported,
+                "unreadable": msg.unreadable,
+            }
             self.document = None
             self.query_one(".viewer-content", Static).update("")
             self.query_one(".viewer-status", Static).update(_t(errors[str(exc)]()))
@@ -155,8 +168,12 @@ class FileViewer(Vertical, can_focus=True):
             renderable = Markdown(doc.text)
         elif doc.kind == "code":
             renderable = Syntax(
-                doc.text, lexer_for(doc.path), line_numbers=True, word_wrap=self.wrapped,
-                theme="ansi_dark", background_color="default",
+                doc.text,
+                lexer_for(doc.path),
+                line_numbers=True,
+                word_wrap=self.wrapped,
+                theme="ansi_dark",
+                background_color="default",
             )
         else:
             renderable = Text(doc.text, no_wrap=not self.wrapped, overflow="fold")
@@ -173,7 +190,8 @@ class FileViewer(Vertical, can_focus=True):
         self.wrapped = not self.wrapped
         self._paint_document()
         self.query_one(".viewer-status", Static).update(
-            _t(msg.truncated()) if self.document and self.document.truncated
+            _t(msg.truncated())
+            if self.document and self.document.truncated
             else _t(msg.wrap_on() if self.wrapped else msg.wrap_off())
         )
 
@@ -184,14 +202,20 @@ class FileViewer(Vertical, can_focus=True):
         elif direction == "end":
             body.scroll_to(x=body.max_scroll_x, y=body.max_scroll_y, animate=False)
         else:
-            dx, dy = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0),
-                      "pageup": (0, -body.size.height),
-                      "pagedown": (0, body.size.height)}[direction]
+            dx, dy = {
+                "up": (0, -1),
+                "down": (0, 1),
+                "left": (-1, 0),
+                "right": (1, 0),
+                "pageup": (0, -body.size.height),
+                "pagedown": (0, body.size.height),
+            }[direction]
             body.scroll_relative(x=dx, y=dy, animate=False)
 
     def action_copy_path(self) -> None:
         candidate = (
-            Path.home() / self.raw[1:].lstrip("/") if self.raw.startswith("~")
+            Path.home() / self.raw[1:].lstrip("/")
+            if self.raw.startswith("~")
             else self.cwd / self.raw
         )
         path = str(self.document.path) if self.document else str(candidate)
@@ -215,13 +239,16 @@ class FileViewer(Vertical, can_focus=True):
         # Recheck even after a successful preview: a path may have changed while
         # the reader was inspecting it. The OS is never given shell text.
         from local_operator.tui.link_targets import (
-            file_affordance, file_affordance_spelling, file_uri_to_path,
+            file_affordance,
+            file_affordance_spelling,
+            file_uri_to_path,
         )
 
         spelling = file_affordance_spelling(self.raw, cwd=self.cwd)
         uri = file_affordance(spelling, cwd=self.cwd)
         ok = uri is not None and await open_path_quietly(file_uri_to_path(uri))
         self.query_one(".viewer-status", Static).update(
-            _t(msg.open_failed()) if not ok
+            _t(msg.open_failed())
+            if not ok
             else _t(msg.truncated()) if self.document and self.document.truncated else ""
         )

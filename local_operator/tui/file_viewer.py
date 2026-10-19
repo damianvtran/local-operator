@@ -6,6 +6,7 @@ to read its replacement. No parser, extraction, network request or write belongs
 on this path. The async worker yields between bounded local reads and owns its
 file descriptor directly, so cancellation cannot strand a ``to_thread`` reader.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,8 +15,11 @@ import stat
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
+
 from local_operator.tui.link_targets import (
-    file_affordance, file_affordance_spelling, file_uri_to_path,
+    file_affordance,
+    file_affordance_spelling,
+    file_uri_to_path,
 )
 
 MAX_BYTES = 1024 * 1024
@@ -24,12 +28,31 @@ CHUNK_BYTES = 64 * 1024
 Identity = tuple[int, int, int, int]
 
 _CODE = {
-    ".py": "python", ".js": "javascript", ".jsx": "jsx", ".ts": "typescript",
-    ".tsx": "tsx", ".json": "json", ".jsonl": "json", ".yaml": "yaml",
-    ".yml": "yaml", ".toml": "toml", ".html": "html", ".htm": "html",
-    ".css": "css", ".scss": "scss", ".xml": "xml", ".sql": "sql",
-    ".rs": "rust", ".go": "go", ".java": "java", ".c": "c", ".h": "c",
-    ".cpp": "cpp", ".rb": "ruby", ".swift": "swift", ".kt": "kotlin",
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "jsx",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".json": "json",
+    ".jsonl": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".xml": "xml",
+    ".sql": "sql",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".rb": "ruby",
+    ".swift": "swift",
+    ".kt": "kotlin",
 }
 TEXT_SUFFIXES = frozenset({".txt", ".text", ".log", ".rst", ".csv", ".tsv"})
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
@@ -125,8 +148,9 @@ def _read_steps(
     if len(rows) > MAX_LINES:
         truncated = True
         bounded = b"".join(rows[:MAX_LINES])
-    return Document(path, bounded.decode("utf-8", errors="replace"), kind, info.st_size,
-                    truncated, identity)
+    return Document(
+        path, bounded.decode("utf-8", errors="replace"), kind, info.st_size, truncated, identity
+    )
 
 
 def read_document(raw: str, *, cwd: Path, expected: Identity | None = None) -> Document:
@@ -138,9 +162,7 @@ def read_document(raw: str, *, cwd: Path, expected: Identity | None = None) -> D
             return done.value
 
 
-async def read_document_async(
-    raw: str, *, cwd: Path, expected: Identity | None = None
-) -> Document:
+async def read_document_async(raw: str, *, cwd: Path, expected: Identity | None = None) -> Document:
     steps = _read_steps(raw, cwd=cwd, expected=expected)
     try:
         while True:

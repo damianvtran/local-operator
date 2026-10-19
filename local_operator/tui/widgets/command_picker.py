@@ -57,13 +57,9 @@ from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
 from local_operator.sigils import SlashContext, is_boundary, split_token
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import (
-    ArgumentChoice,
-    SlashCommand,
-    file_completion_token as at_token,
-    match_choices,
-    match_commands,
-)
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.autocomplete import file_completion_token as at_token
+from local_operator.tui.autocomplete import match_choices, match_commands
 
 # The project has exactly ONE cell-accurate truncator and it lives in
 # tool_card. Importing it across widget modules is deliberate: a local copy is

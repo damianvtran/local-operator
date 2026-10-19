@@ -4,6 +4,7 @@ Usage: .venv/bin/python scripts/file_viewer_shot.py <scratch-evidence-directory>
 Frames are PR evidence, never committed. The fixture session is synthetic; only
 its boot protocol is faked, not the app, production CSS, routing or viewer.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,18 +25,28 @@ async def capture(output: Path) -> None:
     fixtures = Path.home() / "viewer-fixtures"
     fixtures.mkdir(parents=True, exist_ok=True)
     specimens = {
-        "text": ("notes.txt", (
-            "Local file preview\n\nA read-only page keeps the draft and transcript intact. "
-            "Long plain-text paragraphs wrap to the viewport, including at narrow widths.\n"
-        ) * 3),
-        "code": ("example.py", '# Bounded preview: source stays local\n'
-                 'def describe(path: str) -> str:\n'
-                 '    return "preview: " + path  # ' + "long source line " * 7 + '\n\n'
-                 'print(describe("report.txt"))\n' * 18),
-        "markdown": ("guide.md", "# Local document\n\n**Read-only preview**, not an editor.\n\n"
-                     "- Keeps the conversation draft\n- Never writes the source\n"
-                     "- Reload explicitly to read changes\n\n## Limits\n\n"
-                     "Text is bounded before decoding.\n\n```python\nprint('safe preview')\n```\n"),
+        "text": (
+            "notes.txt",
+            (
+                "Local file preview\n\nA read-only page keeps the draft and transcript intact. "
+                "Long plain-text paragraphs wrap to the viewport, including at narrow widths.\n"
+            )
+            * 3,
+        ),
+        "code": (
+            "example.py",
+            "# Bounded preview: source stays local\n"
+            "def describe(path: str) -> str:\n"
+            '    return "preview: " + path  # ' + "long source line " * 7 + "\n\n"
+            'print(describe("report.txt"))\n' * 18,
+        ),
+        "markdown": (
+            "guide.md",
+            "# Local document\n\n**Read-only preview**, not an editor.\n\n"
+            "- Keeps the conversation draft\n- Never writes the source\n"
+            "- Reload explicitly to read changes\n\n## Limits\n\n"
+            "Text is bounded before decoding.\n\n```python\nprint('safe preview')\n```\n",
+        ),
         "truncated": ("large.txt", "A bounded line in a large document.\n" * 20_005),
         "binary": ("binary.txt", b"not a text file\x00payload"),
         "missing": ("missing.txt", None),
@@ -54,9 +65,9 @@ async def capture(output: Path) -> None:
                 await pilot.pause()
                 if app._session is not None:
                     break
-            app._append_block(UserBlock(
-                "Inspect the generated report without leaving the conversation."
-            ))
+            app._append_block(
+                UserBlock("Inspect the generated report without leaving the conversation.")
+            )
             app._editor().load_text("draft kept while viewing")
             await pilot.pause()
             # A delayed local read makes the real loading frame reproducible;
@@ -96,18 +107,28 @@ async def capture(output: Path) -> None:
                 await pilot.pause()
             # Same callout immediately before and after its real click route.
             block = SupplementBlock(
-                {"state": "done", "files": [
-                    {"path": name, "name": name,
-                     "size_bytes": (fixtures / name).stat().st_size}
-                    for name in ("guide.md", "notes.txt", "example.py")],
-                 "components": [], "anchor": "synthetic-viewer-answer", "version": 1},
-                cwd=str(fixtures), hyperlinks=True,
+                {
+                    "state": "done",
+                    "files": [
+                        {"path": name, "name": name, "size_bytes": (fixtures / name).stat().st_size}
+                        for name in ("guide.md", "notes.txt", "example.py")
+                    ],
+                    "components": [],
+                    "anchor": "synthetic-viewer-answer",
+                    "version": 1,
+                },
+                cwd=str(fixtures),
+                hyperlinks=True,
             )
             app._append_block(block)
             await pilot.pause()
             uri = (fixtures / "guide.md").as_uri()
-            hits = [(x, y) for y in range(block.size.height) for x in range(block.size.width)
-                    if block.link_at(x, y) == uri]
+            hits = [
+                (x, y)
+                for y in range(block.size.height)
+                for x in range(block.size.width)
+                if block.link_at(x, y) == uri
+            ]
             if not hits:
                 raise RuntimeError("fixture did not paint a file hyperlink")
             save_capture(app, output / f"callout-before-{grid}.svg")
@@ -116,8 +137,10 @@ async def capture(output: Path) -> None:
             await settled(pilot, app)
             await pilot.pause()
             save_capture(app, output / f"callout-after-{grid}.svg")
-            print(f"{grid}: text/code/markdown/truncated/binary/missing/empty "
-                  "+ callout before/after")
+            print(
+                f"{grid}: text/code/markdown/truncated/binary/missing/empty "
+                "+ callout before/after"
+            )
 
 
 if __name__ == "__main__":

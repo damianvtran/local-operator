@@ -17962,8 +17962,17 @@ class OperatorApp(App[None]):
     #: the handler never runs, while the marks it lists are on disk in front of
     #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/view", "/sidebar", "/help", "/settings", "/hub", "/resume",
-         "/notifications"}
+        {
+            "/copy",
+            "/links",
+            "/view",
+            "/sidebar",
+            "/help",
+            "/settings",
+            "/hub",
+            "/resume",
+            "/notifications",
+        }
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -59465,6 +59474,7 @@ class OperatorApp(App[None]):
 
     def _open_file_viewer(self, raw: str, *, expected: Any = None) -> None:
         from pathlib import Path
+
         from local_operator.tui.widgets.file_viewer import FileViewer
 
         self._close_projects_view()
@@ -59498,7 +59508,8 @@ class OperatorApp(App[None]):
         restore = self._file_viewer_focus_restore
         self._file_viewer_focus_restore = None
         target = (
-            restore if restore is not None and restore.is_attached and restore.display
+            restore
+            if restore is not None and restore.is_attached and restore.display
             else self._editor()
         )
         target.focus()
@@ -59541,6 +59552,7 @@ class OperatorApp(App[None]):
 
         path = file_uri_to_path(checked)
         from pathlib import Path
+
         from local_operator.tui.file_viewer import file_identity, viewer_kind
 
         if expected is not None:
@@ -59551,6 +59563,7 @@ class OperatorApp(App[None]):
             if changed:
                 from local_operator.i18n.keys import tui_viewer as viewer_msg
                 from local_operator.i18n.text import tr
+
                 notice(tr("tui.viewer")(viewer_msg.changed()), "warning")
                 return
         if viewer_kind(Path(path)) is not None:

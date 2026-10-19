@@ -1,4 +1,5 @@
 """Real OperatorApp/CSS tests for read-only page routing and lifecycle."""
+
 from __future__ import annotations
 
 import asyncio
@@ -108,14 +109,22 @@ async def test_callout_click_routes_supported_and_unsupported(tmp_path, monkeypa
         for extra in ("extra1.txt", "extra2.txt"):
             (tmp_path / extra).write_text("neighbor")
         block = SupplementBlock(
-            {"state": "done", "files": [{"path": p, "name": p}
-             for p in (name, "extra1.txt", "extra2.txt")], "components": []},
-            cwd=str(tmp_path), hyperlinks=True,
+            {
+                "state": "done",
+                "files": [{"path": p, "name": p} for p in (name, "extra1.txt", "extra2.txt")],
+                "components": [],
+            },
+            cwd=str(tmp_path),
+            hyperlinks=True,
         )
         app._append_block(block)
         await pilot.pause()
-        hits = [(x, y) for y in range(block.size.height) for x in range(block.size.width)
-                if block.link_at(x, y) == path.as_uri()]
+        hits = [
+            (x, y)
+            for y in range(block.size.height)
+            for x in range(block.size.width)
+            if block.link_at(x, y) == path.as_uri()
+        ]
         assert hits, "the real compositor did not paint the file hyperlink"
         revealed = AsyncMock()
         browser = AsyncMock()
@@ -126,8 +135,7 @@ async def test_callout_click_routes_supported_and_unsupported(tmp_path, monkeypa
         # Textual also dispatches inherited on_click handlers on this widget;
         # stopping bubbling alone did not keep file URIs out of the browser.
         browser.assert_not_awaited()
-        assert not any("only http and https" in notice.text()
-                       for notice in app.query(NoticeBlock))
+        assert not any("only http and https" in notice.text() for notice in app.query(NoticeBlock))
         if preview:
             page = await settled(pilot, app)
             assert page.document is not None and page.document.kind == "markdown"
@@ -178,6 +186,7 @@ async def test_close_cancels_the_reader_and_reload_cancels_previous(tmp_path, mo
             await asyncio.Event().wait()
         finally:
             exits += 1
+
     monkeypatch.setattr("local_operator.tui.widgets.file_viewer.read_document_async", blocked)
     app = make_app(tmp_path)
     async with app.run_test(size=(60, 24)) as pilot:
@@ -221,11 +230,14 @@ async def test_path_completion_preserves_command_and_nested_directory(tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name,data,message", [
-    ("binary.txt", b"bad\x00payload", "Cannot preview a binary file"),
-    ("missing.txt", None, "Cannot read this file"),
-    ("report.pdf", b"%PDF", "no inline preview"),
-])
+@pytest.mark.parametrize(
+    "name,data,message",
+    [
+        ("binary.txt", b"bad\x00payload", "Cannot preview a binary file"),
+        ("missing.txt", None, "Cannot read this file"),
+        ("report.pdf", b"%PDF", "no inline preview"),
+    ],
+)
 async def test_refusals_remain_visible_on_wrap_key(tmp_path, monkeypatch, name, data, message):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     if data is not None:
@@ -244,7 +256,8 @@ async def test_refusals_remain_visible_on_wrap_key(tmp_path, monkeypatch, name, 
 
 @pytest.mark.asyncio
 async def test_long_path_header_keeps_leaf_metadata_and_footer_at_narrow_width(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     deep = tmp_path / ("long-parent-" * 8) / ("another-folder-" * 6)

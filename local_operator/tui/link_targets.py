@@ -71,7 +71,6 @@ Three rules, each stated once:
 
 from __future__ import annotations
 
-import nturl2path
 import os
 import re
 import stat as stat_mod
@@ -80,6 +79,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
+
+import nturl2path
 
 #: What a URL begins with, in ONE literal: the guard that decides what may
 #: reach the browser and the finder that decides what is offered are then the
