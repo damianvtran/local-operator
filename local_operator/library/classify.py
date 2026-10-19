@@ -344,7 +344,11 @@ def classify(name: str, mime: str | None = None) -> Classification:
         kind = _MIME_KIND.get(mime.split(";", 1)[0].strip().lower())
     if kind is None:
         kind = "other"
-    return Classification(kind=kind, category=_KIND_CATEGORY[kind], content_type=content_type(name, mime))
+    return Classification(
+        kind=kind,
+        category=_KIND_CATEGORY[kind],
+        content_type=content_type(name, mime),
+    )
 
 
 def content_type(name: str, mime: str | None = None) -> str:
