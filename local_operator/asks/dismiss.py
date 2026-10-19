@@ -12,8 +12,19 @@ the architect's E1).
 
 WHAT IT ACCEPTS (D6, design §15): a TIMED-OUT ask, and an OPEN one — the cold
 session is exactly "no agent work is running", the only state in which an open ask
-may be dismissed. Nothing here starts, wakes or injects: the agent hears at its
-next real run.
+may be dismissed. Nothing HERE starts, wakes or injects; the agent hears at the
+next boot of a runtime. THAT BOOT COSTS A TURN, stated plainly: any engage
+(including a warm-up that only opens the conversation) reconciles and delivers
+``ask-response-<id>`` into an idle runtime with no pending abort, which runs ONE
+paid turn — the same cost §14 already accepted for a timed-out ask's notice. Only
+a STOPPED live runtime holds the row without a turn (D2).
+
+THE OWNER-CHECK -> APPEND -> WAKE-CANCEL WINDOW now applies to open asks too: a
+runtime that boots in that gap can republish the wake list with
+``ask-timeout-<id>`` still in it. Harmless: the fold ignores that fire for a
+dismissed ask (``notice_owed`` needs a dismissal at/after the deadline, and the
+runtime's reconcile delivers the response row instead), so at worst a stale row
+fires once and delivers nothing.
 
 THREE PROPERTIES MAKE WRITING FROM HERE SAFE, and each one is a check below:
 

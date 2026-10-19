@@ -1574,7 +1574,7 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
 
    | owning session | open-ask dismissal | what the agent gets |
    |---|---|---|
-   | cold (no runtime) | accepted, boots nothing (`dismiss_cold`) | the response row at its next real run |
+   | cold (no runtime) | accepted, boots nothing (`dismiss_cold`) | the response row at the next boot, which runs ONE paid turn (as §14) |
    | runtime up, **stopped** | accepted, buys no turn (D2) | the response row at its next turn |
    | runtime up, **not stopped** (idle or mid-turn) | **refused**, nothing written | nothing; reply in chat, or the agent uses `ask_withdraw` |
    | any, ask `timed_out` | unchanged (§14) | unchanged |
@@ -1586,7 +1586,7 @@ deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine
    (any question carrying a `question_id`) stay timed-out-only. The refusal is
    `render.DISMISS_AGENT_RUNNING`: "the agent is still running — reply in chat to settle this ask, or
    stop the session first and dismiss it then." **Cost:** on a running session a stale open ask still
-   cannot be closed from its card. **What would change it:** a request for live dismissal, which would
+   cannot be closed from its card. **Cold-boot cost:** the dismissal itself boots nothing, but ANY later engage (even a warm-up) delivers the row into an idle runtime and runs one paid turn — the same cost §14 accepted for a timed-out ask's notice; only a stopped live runtime holds the row turn-free. **Mixed versions:** an older runtime folding a pre-deadline dismissal computes neither `response_owed` nor `notice_owed`, so the agent is not told until a new runtime reads the log. **What would change it:** a request for live dismissal, which would
    also need the row to join a live turn (steering, §2.3).
 6. **Refusals.** `render.dismiss_refusal(record, agent_running=)` replaces the lapsed-only rule:
    `open`/`timed_out` accepted (open subject to D6 and the bridge rule); `dismissed` →

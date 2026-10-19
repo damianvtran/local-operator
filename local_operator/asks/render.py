@@ -395,7 +395,7 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
 
 
 #: The refusal an OPEN-ask dismissal gets while the agent is working (D6, design
-#: §15). Dismissal is "hear at the next real run": it never starts, wakes or
+#: §15). Dismissal is "hear at the next boot": it never starts, wakes or
 #: injects into running work, so it is offered only on a cold or STOPPED session.
 #: On a running one the operator's route is the conversation itself, where the
 #: agent is already reading.
@@ -403,6 +403,10 @@ DISMISS_AGENT_RUNNING = (
     "the agent is still running — reply in chat to settle this ask, "
     "or stop the session first and dismiss it then."
 )
+
+#: A dismissal aimed at a LATE ask: ``refusal_copy`` accepts a late ask (it can be
+#: answered again), but dismissing one is a different act and the answer is in.
+DISMISS_ALREADY_ANSWERED = "this ask was already answered."
 
 #: An unknown ``reason`` on a dismissal, refused before anything is written.
 DISMISS_BAD_REASON = "reason must be 'answered_in_chat' or 'moot'."
@@ -462,7 +466,7 @@ def dismiss_refusal(
     if status == store.STATUS_LATE:
         # ``refusal_copy`` accepts a late ask (it can be answered again); a
         # dismissal of one is a different act, and the answer is already in.
-        return "this ask was already answered."
+        return DISMISS_ALREADY_ANSWERED
     return refusal_copy(record)
 
 
