@@ -279,6 +279,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/network/credentials/mcp_state.py": (
+        2,
+        "``MCP_AUTH_FILENAME``/``MCP_AUTH_LOCK_FILENAME`` ('mcp_auth.json' and its "
+        "sidecar lock): the per-network durable credential EVIDENCE under "
+        "``<config>/network/credentials/<network_id>/``. Machine-local state about "
+        "which sign-in this device must recover, beside the placement document, "
+        "never an entry of a session directory and never copied to a peer",
+    ),
     "local_operator/team_bridge/connector/lock.py": (
         1,
         "``CONNECTOR_LOCK_NAME`` ('connector.lock'): the machine-wide connector "
