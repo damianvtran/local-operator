@@ -968,6 +968,13 @@ def _live_model_updates(
 ) -> dict[str, Any]:
     """The model pair a restored checkpoint must NOT be allowed to keep.
 
+    ``checkpoint_model`` is the spec the ROW's reading was measured on, which is
+    the row's ``effective_model`` — its SELECTED slot names the model the user
+    chose, and in a fallback session the two differ while only one of them
+    served the requests the tokens came from. Callers pass
+    ``effective_model or selected_model``, the same slot pair
+    ``refresh_from_session`` resolves (QA round 2, Q3).
+
     A checkpoint is written at a turn end, so its ``selected_model`` /
     ``effective_model`` describe the runtime that WROTE it. They were the one
     live field ``_restored_state`` left standing, so a headless owner's FIRST
@@ -988,9 +995,10 @@ def _live_model_updates(
     answer available (the fallback the ``cwd`` fixup documents).
 
     THE CONTEXT READING IS THE MODEL'S TOO, and the pair above is what decides
-    it: ``context_tokens`` was measured on the model the row NAMES, so when the
-    restore lands on a different ``(provider, model_id)`` that numerator and its
-    window describe a model that is not about to run. Left in place they made
+    it: ``context_tokens`` was measured on the model the row's ``effective_model``
+    NAMES — the one that served those calls — so when the restore lands on a
+    different ``(provider, model_id)`` that numerator and its window describe a
+    model that is not about to run. Left in place they made
     the first frame name one model and divide another model's reading by its
     window — the ``attached.py`` cold pair refused exactly this pairing while
     this path published it (review round 1, M1 = QA round 1, Q2). The reading is
@@ -7460,8 +7468,13 @@ class FrontendStateStore:
                 # WHAT THIS RUNTIME RUNS IS NOT THE CHECKPOINT'S TO DECIDE
                 # either, and this pair is the field the rule above was still
                 # missing: the row names the model the previous runtime ran, and
-                # the owner's own spec is the one its requests use.
-                **_live_model_updates(session, state.selected_model),
+                # the owner's own spec is the one its requests use. The
+                # comparison slot is the row's EFFECTIVE model, not its
+                # selected one: that is the model the row's ``context_tokens``
+                # were measured on, so gating on ``selected_model`` dropped a
+                # still-serving model's reading whenever a fallback had been in
+                # force when the row was written (QA round 2, Q3).
+                **_live_model_updates(session, state.effective_model or state.selected_model),
             }
         )
 

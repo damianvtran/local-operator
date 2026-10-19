@@ -2299,13 +2299,17 @@ def test_a_restored_frame_keeps_the_checkpoints_context_reading() -> None:
     half is ``selected_model``: it must move to the live spec, and that is the
     assertion that fails on ``main``.
 
-    The BOUNDARY half is the state-level pair. ``context_window`` /
-    ``context_tokens`` are the reading the CONVERSATION was measured at, so a
-    live spec that resolved a different window for the SAME model (here
-    200_000 against the row's 1_000_000) must not retroactively re-measure
-    them — and neither may the spend or the receipt. The gate is model
-    IDENTITY, not a window mismatch: a restore onto a different ``(provider,
-    model_id)`` drops the reading instead
+    The BOUNDARY half is the state-level pair, and it is a FIRST-FRAME claim:
+    the restore does not retroactively re-measure the reading it installs.
+    ``context_window`` / ``context_tokens`` are the reading the CONVERSATION was
+    measured at, so a live spec that resolved a different window for the SAME
+    model (here 200_000 against the row's 1_000_000) is not applied to the
+    restored fields — and neither is the spend or the receipt. One
+    ``refresh_from_session`` afterwards publishes the LIVE window (402_000 /
+    200_000), which is what the cross-model docstring below means by first frame
+    and later frames agreeing: they agree after that refresh, not before it. The
+    gate for keeping the reading at all is model IDENTITY, not a window
+    mismatch: a restore onto a different ``(provider, model_id)`` drops it
     (``test_a_cross_model_restore_does_not_carry_the_old_models_reading``).
     """
     stored = _state(context_tokens=402_000, context_window=1_000_000, cumulative_parent_cost=1.25)
@@ -2374,6 +2378,100 @@ def test_a_cross_model_restore_does_not_carry_the_old_models_reading() -> None:
     assert restored.context_window == 200_000
     assert restored.cumulative_parent_cost == 1.25
     assert restored.last_usage == stored.last_usage
+
+
+def test_a_restore_onto_the_selected_model_drops_a_fallback_written_reading() -> None:
+    """The gate's slot: the row's SELECTED model is not the one that measured it.
+
+    A checkpoint written while a fallback served carries a SELECTED spec naming
+    the model the user had chosen and an EFFECTIVE spec naming the one that
+    actually ran — and ``context_tokens`` / ``context_window`` were measured on
+    the latter. Restoring that row onto a runtime where the selected model is
+    serving again puts the live effective spec back on the SELECTED model's
+    name, so gating the reading on the row's ``selected_model`` matched two
+    specs that described different runs and published 402_000 tokens against a
+    1_050_000 window beside a spec naming opus: the cross-model pairing this
+    fix exists to refuse, 201% on the meter while the live model's window is
+    200_000 (review round 2, m1 = QA round 2, Q3).
+    """
+    pinned = FrontendModelSpec.model_validate(
+        {
+            **_spec(200_000).model_dump(),
+            "provider": "anthropic",
+            "model_id": "claude-opus-5",
+            "reasoning_effort": "high",
+        }
+    )
+    fallback = FrontendModelSpec.model_validate(_spec(1_050_000).model_dump())
+    stored = _state(
+        selected_model=pinned,
+        effective_model=fallback,
+        context_tokens=402_000,
+        context_window=1_050_000,
+    )
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(stored),
+        model=pinned,
+        effective_model=pinned,
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.selected_model is not None
+    assert restored.selected_model.model_id == "claude-opus-5"
+    assert restored.context_tokens is None
+    assert restored.context_is_estimate is None
+    assert restored.context_window == 200_000
+
+
+def test_a_pinned_fallback_restore_keeps_its_serving_models_reading() -> None:
+    """The other direction: the same serving model keeps its reading.
+
+    A pinned-fallback restore is the shape QA round 2's Q3 measured as an
+    over-drop. The row was written under a pin whose fallback served the calls
+    (selected opus, effective gpt at 1_050_000); the successor restores the same
+    pin and the same fallback, so its live EFFECTIVE spec names exactly the
+    model the 137_501 tokens were measured on. Gating on the row's
+    ``selected_model`` compared that reading against opus, refused it, and the
+    first frame painted ``—`` for a reading that was still the serving model's.
+    The window asserted here is the serving model's own, so the numerator and
+    the denominator describe one run.
+    """
+    pinned = FrontendModelSpec.model_validate(
+        {
+            **_spec(200_000).model_dump(),
+            "provider": "anthropic",
+            "model_id": "claude-opus-5",
+            "reasoning_effort": "high",
+        }
+    )
+    fallback = FrontendModelSpec.model_validate(_spec(1_050_000).model_dump())
+    stored = _state(
+        selected_model=pinned,
+        effective_model=fallback,
+        context_tokens=137_501,
+        context_window=1_050_000,
+    )
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(stored),
+        model=pinned,
+        effective_model=fallback,
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.selected_model is not None
+    assert restored.selected_model.model_id == "claude-opus-5"
+    assert restored.effective_model is not None
+    assert restored.effective_model.model_id == "gpt-5.6-sol"
+    assert restored.context_tokens == 137_501
+    assert restored.context_is_estimate is False
+    # The denominator is the window the tokens were measured against, and the
+    # live effective spec resolves the same one: the pairing is honest.
+    assert restored.context_window == 1_050_000
+    assert restored.effective_model.context_window == 1_050_000
 
 
 def test_a_host_with_no_model_of_its_own_restores_the_checkpoints_spec() -> None:
