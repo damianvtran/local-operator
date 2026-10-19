@@ -984,9 +984,7 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
     # avoid.
     replaced = root.joinpath(*below)
     budget = scratchpad_budget_bytes()
-    held, truncated = _pad_bytes_below(
-        root, replaced, budget, SCRATCHPAD_BUDGET_SCAN_ENTRIES
-    )
+    held, truncated = _pad_bytes_below(root, replaced, budget, SCRATCHPAD_BUDGET_SCAN_ENTRIES)
     if truncated:
         # The walk stopped counting, so the pad is refused on the SHAPE of what
         # it holds rather than on its size: 20,000 entries is a tree.

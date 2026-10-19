@@ -1,86 +1,86 @@
 {
   "wire.settings.asks.description": {
-    "note": "Says the setting applies immediately everywhere (terminal UI, desktop app, phone). Do not imply a restart.",
     "role": "settings section description",
-    "tone": "plain, precise"
+    "tone": "plain, precise",
+    "note": "Says the setting applies immediately everywhere (terminal UI, desktop app, phone). Do not imply a restart."
   },
   "wire.settings.asks.title": {
-    "note": "Section heading for the queued-question settings. 'Ask' is the product noun for a question an agent queues for the user; keep it short and consistent with the ask bar/list vocabulary.",
     "role": "settings section title",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "Section heading for the queued-question settings. 'Ask' is the product noun for a question an agent queues for the user; keep it short and consistent with the ask bar/list vocabulary."
   },
   "wire.settings.asks_lapsed_visible_for.choice.1h.description": {
-    "note": "Measured from the ask's deadline, not from when it was asked.",
     "role": "dropdown choice description",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "Measured from the ask's deadline, not from when it was asked."
   },
   "wire.settings.asks_lapsed_visible_for.choice.1h.label": {
-    "note": "A duration; use the locale's natural form for one hour.",
     "role": "dropdown choice label",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "A duration; use the locale's natural form for one hour."
   },
   "wire.settings.asks_lapsed_visible_for.choice.24h.description": {
-    "note": "Measured from the ask's deadline.",
     "role": "dropdown choice description",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "Measured from the ask's deadline."
   },
   "wire.settings.asks_lapsed_visible_for.choice.24h.label": {
-    "note": "A duration of 24 hours (not 'one day'): the four choices read as a ladder.",
     "role": "dropdown choice label",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "A duration of 24 hours (not 'one day'): the four choices read as a ladder."
   },
   "wire.settings.asks_lapsed_visible_for.choice.7d.description": {
-    "note": "Measured from the ask's deadline; '(default)' marks the shipped value, keep it.",
     "role": "dropdown choice description",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "Measured from the ask's deadline; '(default)' marks the shipped value, keep it."
   },
   "wire.settings.asks_lapsed_visible_for.choice.7d.label": {
-    "note": "A duration of 7 days.",
     "role": "dropdown choice label",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "A duration of 7 days."
   },
   "wire.settings.asks_lapsed_visible_for.choice.at_expiry.description": {
-    "note": "Short gloss beside the choice.",
     "role": "dropdown choice description",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "Short gloss beside the choice."
   },
   "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label": {
-    "note": "The ask disappears the moment its deadline passes.",
     "role": "dropdown choice label",
-    "tone": "plain"
+    "tone": "plain",
+    "note": "The ask disappears the moment its deadline passes."
   },
   "wire.settings.asks_lapsed_visible_for.help": {
-    "maxCells": 58,
-    "note": "Shown as '<help> · default: 7d' on the settings page's 74-cell detail line at 80 columns; keep the help within 58 cells so the default clause fits. Display only: hiding never answers or deletes the ask.",
     "role": "help text",
-    "tone": "plain, precise"
+    "tone": "plain, precise",
+    "maxCells": 58,
+    "note": "Shown as '<help> · default: 7d' on the settings page's 74-cell detail line at 80 columns; keep the help within 58 cells so the default clause fits. Display only: hiding never answers or deletes the ask."
   },
   "wire.settings.asks_lapsed_visible_for.label": {
-    "maxCells": 29,
-    "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer.",
     "role": "settings row label",
-    "tone": "plain"
-  },
-  "wire.settings.session_scratchpad.description": {
-    "note": "Says the cap applies to each session's own scratch area and is checked per write, not at launch. Do not imply a restart.",
-    "role": "settings section description",
-    "tone": "plain, precise"
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer."
   },
   "wire.settings.session_scratchpad.title": {
-    "maxCells": 12,
-    "note": "Section heading for the scratchpad size cap. 'Scratchpad' is the product noun for a session's own scratch area (scratchpad://); keep it one word.",
     "role": "settings section title",
-    "tone": "plain"
+    "tone": "plain",
+    "maxCells": 12,
+    "note": "Section heading for the scratchpad size cap. 'Scratchpad' is the product noun for a session's own scratch area (scratchpad://); keep it one word."
   },
-  "wire.settings.session_scratchpad_max_bytes.help": {
-    "note": "Carries both bounds and the default because the page paints help but not min/max. Units are bytes; use the binary prefixes MiB/GiB, not MB/GB.",
-    "role": "settings help text",
-    "tone": "plain, precise"
+  "wire.settings.session_scratchpad.description": {
+    "role": "settings section description",
+    "tone": "plain, precise",
+    "note": "Says the cap applies to each session's own scratch area and is checked per write, not at launch. Do not imply a restart."
   },
   "wire.settings.session_scratchpad_max_bytes.label": {
-    "maxCells": 24,
-    "note": "Row label; 24 cells fits the settings page's label budget. It is a ceiling on total bytes one session's scratchpad may hold, not a per-file limit.",
     "role": "numeric setting label",
-    "tone": "plain"
+    "tone": "plain",
+    "maxCells": 24,
+    "note": "Row label; 24 cells fits the settings page's label budget. It is a ceiling on total bytes one session's scratchpad may hold, not a per-file limit."
+  },
+  "wire.settings.session_scratchpad_max_bytes.help": {
+    "role": "settings help text",
+    "tone": "plain, precise",
+    "note": "Carries both bounds and the default because the page paints help but not min/max. Units are bytes; use the binary prefixes MiB/GiB, not MB/GB."
   }
 }

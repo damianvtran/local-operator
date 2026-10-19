@@ -2074,9 +2074,7 @@ def run_delegated_pass(
         # pad is content-reclaimable as soon as it is dead. Parent directories
         # are never in this pool (``_scan.delegated``), which is what keeps the
         # user's own conversations audit-only.
-        content_pool = [
-            cand for cand in scan.delegated if cand.path.name not in removed_names
-        ]
+        content_pool = [cand for cand in scan.delegated if cand.path.name not in removed_names]
         if content_only is not None:
             # The preview's own set (review F4): an apply reclaims from exactly
             # the pads the operator was shown, never a pad that became eligible

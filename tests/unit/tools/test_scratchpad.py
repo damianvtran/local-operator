@@ -1123,9 +1123,7 @@ def test_a_configured_cap_wins_over_the_constant(tmp_path: Path, monkeypatch) ->
     assert scratchpad_module.scratchpad_budget_bytes() == 64 * 1024 * 1024
 
 
-def test_an_unusable_configured_cap_falls_back_to_the_constant(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_an_unusable_configured_cap_falls_back_to_the_constant(tmp_path: Path, monkeypatch) -> None:
     """A text value is invalid, and the constant (which the fixtures patch) is
     the answer — this is what keeps every existing budget test in control."""
     monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 12345)

@@ -8319,9 +8319,7 @@ async def test_reads_and_shrinks_still_run_on_an_over_cap_pad(tmp_path, monkeypa
     assert not (pad / "build").exists()
 
 
-def test_a_browser_screenshot_destination_under_the_pad_is_checked(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_browser_screenshot_destination_under_the_pad_is_checked(tmp_path, monkeypatch) -> None:
     """The screenshot path takes an ordinary filesystem path, so the pad policy
     must run on it explicitly — an absolute destination into ``scratchpad/``
     otherwise wrote a PNG the next ``write`` would have refused."""

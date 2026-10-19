@@ -2607,7 +2607,7 @@
     {
       "locale": "fr",
       "namespace": "cli.sessions_help",
-      "source_sha256": "cba53d2393157b88894850c4d6a9666349868844108dd518cebcccd7d0e2cc3e",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
       "translator": {
         "agent": "coder",
         "model": "deepseek/deepseek-flash",
