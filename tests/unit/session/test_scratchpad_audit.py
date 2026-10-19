@@ -169,6 +169,7 @@ def test_the_walk_is_bounded_and_marks_truncation(tmp_path: Path, monkeypatch) -
     pad = _pad(_session(tmp_path, "wide"))
     for index in range(5):
         (pad / f"f{index}.dat").write_bytes(b"x" * 4096)
+    full = _subtree(pad)
     monkeypatch.setattr(audit_module, "AUDIT_MAX_ENTRIES", 3)
 
     audit = audit_scratchpads(tmp_path / "sessions", cap=1 << 30)
@@ -176,7 +177,12 @@ def test_the_walk_is_bounded_and_marks_truncation(tmp_path: Path, monkeypatch) -
 
     assert row.truncated is True
     assert audit.truncated == 1
-    assert row.bytes <= _subtree(pad)
+    # n4c: this can FAIL in the direction that matters — the walk stops AT the
+    # cap and its bytes are strictly below the full subtree. The previous
+    # ``<=`` assertion passed against a walk that counted nothing.
+    assert row.entries == 3
+    assert row.bytes == sum((pad / f"f{index}.dat").stat().st_blocks * 512 for index in range(3))
+    assert row.bytes < full
 
 
 def test_the_json_shape_carries_every_row_and_the_cap(tmp_path: Path) -> None:
@@ -195,3 +201,49 @@ def test_the_json_shape_carries_every_row_and_the_cap(tmp_path: Path) -> None:
     assert row["origin"] == "subagent"
     assert row["shapes"][0]["path"] == "build"
     assert row["shapes"][0]["bytes"] > 0
+
+
+def test_a_non_pointer_git_file_is_labelled_and_never_printed_raw(
+    tmp_path: Path,
+) -> None:
+    """Review m3: a malformed ``.git`` file can be multi-line; the TEXT row must
+    be one line with a label, while ``--json`` keeps the raw body as evidence."""
+    from local_operator.session.scratchpad_audit import pointer_display
+
+    pad = _pad(_session(tmp_path, "not-pointer"))
+    (pad / "tree").mkdir()
+    (pad / "tree" / ".git").write_text("not a pointer\nline two\n", encoding="utf-8")
+
+    audit = audit_scratchpads(tmp_path / "sessions", cap=1 << 30)
+    [row] = audit.pads
+    [marker] = row.git_markers
+
+    assert marker.status == "not a gitdir pointer"
+    assert marker.target == "not a pointer\nline two"
+    assert pointer_display(marker) == "(not a gitdir pointer)"
+    assert "\n" not in pointer_display(marker)
+    assert row.as_dict()["git_markers"][0]["target"] == "not a pointer\nline two"
+
+
+def test_an_unreadable_git_file_says_so_instead_of_printing_an_empty_arrow(
+    tmp_path: Path,
+) -> None:
+    from local_operator.session.scratchpad_audit import pointer_display
+
+    pad = _pad(_session(tmp_path, "unreadable-pointer"))
+    (pad / "tree").mkdir()
+    pointer = pad / "tree" / ".git"
+    pointer.write_text("gitdir: /shared/.git/worktrees/x\n", encoding="utf-8")
+    pointer.chmod(0)
+
+    try:
+        audit = audit_scratchpads(tmp_path / "sessions", cap=1 << 30)
+    finally:
+        pointer.chmod(0o600)
+
+    [row] = audit.pads
+    [marker] = row.git_markers
+
+    assert marker.status == "unreadable"
+    assert marker.target == ""
+    assert pointer_display(marker) == "(unreadable)"

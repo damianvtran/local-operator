@@ -69,19 +69,25 @@ Left in their tree, this is litter they cannot tell apart from output.
   That is where the output is wanted and can be rebuilt from the commit rather
   than carried as bytes. A pad is the wrong home for it both ways: it is
   billed to a disk shared with every other session, and it ends with the
-  session. **This rule is enforced at the TOOLS, and the shell channel is
-  CHECKED AFTER THE FACT.** `write` and `edit` carry their payload inline and
-  are refused before the write; `bash` and the `eval` kernel get this pad as a
-  path (`$LOCAL_OPERATOR_SCRATCHPAD`) and are never refused — so a
-  `pnpm install`, a `cargo build` or a redirect into the pad still succeeds —
-  but a command that names the pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its path, or a
-  leading `~/`, `$HOME/` or `${HOME}/` spelling of it) carries a `[scratch]`
-  line when it took the pad over its budget or entry cap, or put a refused name
-  in it — whether the command spelled the name or copied it in. A copied name
-  is judged as the copy WOULD have created it: the check reads the command,
-  not the disk, so a copy whose source is missing still reports. The `eval`
-  kernel gets the budget and entry-cap line only. It reports; it cannot undo
-  what a shell has already put there.
+  session. **This rule is enforced at the TOOLS, and the shell is refused
+  BEFORE IT RUNS when it would ADD bytes to an over-cap pad.** `write` and
+  `edit` carry their payload inline and are refused before the write. A `bash`
+  command that would create a path under a pad already over its configured cap
+  is stopped before the child exists; the ordinary absolute/two-spelling forms
+  and `cd "<pad>" && …` are resolved, and a rename wholly inside the pad or a
+  `mkdir -p` of an existing directory still runs because it adds no bytes.
+  **KNOWN MISS: a destination assembled from an arbitrary shell variable
+  (`D="$PAD/x"; mkdir "$D"`) is not resolved before the child exists** — the
+  after-the-fact line still reports what it left behind, so treat this as the
+  backstop rather than complete shell coverage. Reads and shrinks (`ls`, `rm`)
+  always run. A command that names the pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its
+  path, or a leading `~/`, `$HOME/` or `${HOME}/` spelling of it) also carries
+  the `[scratch]` line when it ran and left the pad over its budget or entry
+  cap, or put a refused name in it — whether it spelled the name or copied it
+  in. A copied name is judged as the copy WOULD have created it: the check
+  reads the command, not the disk, so a copy whose source is missing still
+  reports. The `eval` kernel gets the budget and entry-cap line only; Python
+  creations there cannot be attributed to a position in a command.
 - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
   has no text to return, so the reader refuses it as text. (`bash mktemp -d`
   with NO template lands in `$TMPDIR`, the per-user temp directory; a template
@@ -209,10 +215,12 @@ and no viewer. One file per subject; subdirectories are free
   `read` call that continues it.
 - A pad is capped THREE times, because it is disk shared with every other
   session on the machine and is reclaimed only when its session ends: a SINGLE
-  write at 32 MiB (33,554,432 bytes); the whole pad at 256 MiB (268,435,456
-  bytes), past which every write is refused whatever filled it — no list of
-  names knows every shape of build tree, so the last rule is the pad's own
-  total; and, as a tree rather than a pad, a folder holding over 20,000 entries.
+  write at 32 MiB (33,554,432 bytes); the whole pad at the configured cap —
+  `session.scratchpad.max_bytes`, default 256 MiB (268,435,456 bytes), 16 MiB
+  to 8 GiB — past which every write that ADDS bytes is refused whatever filled
+  it; no list of names knows every shape of build tree, so the last rule is the
+  pad's own total; and, as a tree rather than a pad, a folder holding over
+  20,000 entries.
   Overwriting the file that took the pad over DOES still work — a replaced file
   is not counted twice, and with nothing here deleting anything that is the only
   way back under. Reading is deliberately NOT gated, so a pad written before

@@ -2088,6 +2088,20 @@ def run_delegated_pass(
         while content_position < len(content_pool):
             if should_stop is not None and should_stop():
                 break
+            # THE WALL-CLOCK STOP, once per pad (review m5). The pool is now
+            # every reapable delegated session, so a steady-state sweep can walk
+            # thousands of pads; the old deadline check only ran at a batch
+            # boundary (100 removals or 100 failures), which a store with little
+            # reclaimable content never reaches. The record pass's batch gate
+            # stays as the failure-window arm below; this is what actually bounds
+            # the sweep in wall time.
+            # ``content_position`` guards the PROGRESS guarantee the batch gate
+            # exists for: a pass with a spent budget still completes one pad, so
+            # a tiny budget can never loop forever reclaiming nothing. Every
+            # later pad re-checks, which is the once-per-pad bound (review m5).
+            if deadline is not None and time.monotonic() > deadline and content_position:
+                result.content_budget_exhausted = True
+                break
             if (
                 deadline is not None
                 and time.monotonic() > deadline

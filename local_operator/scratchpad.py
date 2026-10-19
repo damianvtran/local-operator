@@ -824,8 +824,11 @@ def scratchpad_footprint(root: Path, budget: int | None = None) -> tuple[int, bo
     """``(bytes, over budget, truncated)`` for the pad at ``root``.
 
     The READER side of the content policy: the write tools REFUSE the material
-    before it lands (:func:`check_scratchpad_write`), while the shell channels —
-    which run after the fact and cannot refuse anything — report through this.
+    before it lands (:func:`check_scratchpad_write`). The shell has both arms —
+    the pre-execution refusal in ``tools.builtin._bash_pad_precheck`` stops a
+    CREATING command on an over-cap pad before the child exists, and this
+    footprint is what the after-the-fact channel uses for a command that ran
+    anyway (a read, a shrink, a destination the scan could not resolve).
     Both thresholds and the comparison are the write path's own
     (:func:`scratchpad_budget_bytes`, :data:`SCRATCHPAD_BUDGET_SCAN_ENTRIES`),
     so the line a shell result carries cannot disagree with the refusal the next

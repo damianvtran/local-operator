@@ -571,7 +571,7 @@
   "wire.settings.session_scratchpad.description": "एक सत्र का अपना स्क्रैच क्षेत्र कितना रख सकता है। सीमा हर लेखन पर जाँची जाती है और तुरंत लागू होती है।",
   "wire.settings.session_scratchpad.title": "स्क्रैचपैड",
   "wire.settings.session_scratchpad_max_bytes.help": "एक सत्र का स्क्रैचपैड कितने बाइट रख सकता है: 16 MiB से 8 GiB तक। डिफ़ॉल्ट 256 MiB।",
-  "wire.settings.session_scratchpad_max_bytes.label": "स्क्रैचपैड आकार सीमा",
+  "wire.settings.session_scratchpad_max_bytes.label": "स्क्रैचपैड आकार सीमा (बाइट)",
   "wire.settings.shell_environment.description": "एजेंट के चलाए कमांड को क्या दिखता है। हर सत्र में एक बार तय होता है, इसलिए यहाँ बदलाव अगले लॉन्च पर लागू होगा और चल रहे सत्र को कमज़ोर नहीं कर सकता।",
   "wire.settings.shell_environment.title": "एजेंट शेल",
   "wire.settings.shell_environment_exclude.help": "खाली = कुछ नहीं हटाया जाता। ऐसे नाम जो एजेंट के चलाए कमांड को किसी भी मोड में कभी नहीं दिए जाते — सत्र क्रेडेंशियल स्टोर के अपने इंजेक्शन समेत, यानी किसी वेरिएबल को सीधे मना करने का यही तरीक़ा है। सिर्फ़ bash और eval के चिल्ड्रन पर लागू; MCP सर्वर और हार्नेस की अपनी प्रक्रियाएँ इसके दायरे में नहीं आतीं।",
