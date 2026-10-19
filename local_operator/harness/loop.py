@@ -5054,7 +5054,7 @@ class AgentLoop:
                             ToolExecutionEndEvent(
                                 tool_call_id=nested.id,
                                 tool_name=name,
-                                result=result,
+                                result=self._span_stripped_result(result, context),
                                 duration_s=result.duration_s,
                                 is_error=True,
                             )
@@ -5112,7 +5112,7 @@ class AgentLoop:
                         ToolExecutionEndEvent(
                             tool_call_id=nested.id,
                             tool_name=name,
-                            result=result,
+                            result=self._span_stripped_result(result, context),
                             duration_s=result.duration_s,
                             is_error=result.is_error,
                         )
@@ -5366,7 +5366,7 @@ class AgentLoop:
                     ToolExecutionEndEvent(
                         tool_call_id=item.call.id,
                         tool_name=item.tool.name if item.tool is not None else item.call.name,
-                        result=result,
+                        result=self._span_stripped_result(result, context),
                         duration_s=result.duration_s,
                         is_error=result.is_error,
                     )
@@ -5782,7 +5782,7 @@ class AgentLoop:
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
                                 tool_name=item.tool.name,
-                                result=result,
+                                result=self._span_stripped_result(result, context),
                                 # Both halves, like the three sibling emitters.
                                 # `duration_s` has no validator ORing it with
                                 # `result.duration_s` the way `_sync_error_flag`
@@ -6079,6 +6079,43 @@ class AgentLoop:
             )
             context.messages.append(message)
             new_messages.append(message)
+
+    @staticmethod
+    def _span_stripped_result(result: ToolResult, context: LoopContext) -> ToolResult:
+        """The copy a LIVE ``ToolExecutionEndEvent`` may carry (LOH-28 R3-1).
+
+        ``_append_results`` redacts the model's copy later, but the event is
+        emitted from the raw result and read by the TUI, the attached client
+        and the operator API. The identifier span's per-session token is
+        protocol, not content: a live reader must never see it (nor a PUA
+        marker), so the event gets a plain-text copy with every own span
+        resolved to its content. The raw result is left untouched for the
+        existing redaction path, which stays the single writer of the
+        model-visible text.
+        """
+        store = getattr(getattr(context, "tool_context", None), "variables", None)
+        strip = getattr(store, "strip_identifier_spans", None)
+        if not callable(strip):
+            return result
+
+        def scrub(value: Any) -> Any:
+            if isinstance(value, str):
+                return strip(value)
+            if isinstance(value, dict):
+                return {key: scrub(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(scrub(item) for item in value)
+            return value
+
+        content: list[Content] = []
+        for item in result.content:
+            value = getattr(item, "text", None)
+            content.append(
+                item.model_copy(update={"text": strip(value)}) if isinstance(value, str) else item
+            )
+        return result.model_copy(update={"content": content, "details": scrub(result.details)})
 
     @staticmethod
     async def _redact_content(
