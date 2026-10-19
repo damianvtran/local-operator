@@ -812,6 +812,26 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
     ),
+    # PREVIEW, and its own section, LIVE — all three are decisions, not defaults.
+    #
+    # LIVE is honest: the switch is read from ``config.yml`` on every capability
+    # negotiation (``server.features.feature_flags`` ->
+    # ``remote_compute.is_enabled``), so an edit withdraws or shows the remote
+    # affordance at the next negotiation with no relaunch and no ``/new``.
+    #
+    # Its own section rather than a row under ``network``: scope is uniform
+    # within a section by construction, and every ``network.*`` key there is
+    # read once when the relay starts (that section's description says so).
+    # Filing a live switch under a "takes effect: new launch" header is exactly
+    # the painted lie this registry's split sections exist to prevent. It is
+    # also a different promise from the relay's: that section configures how
+    # peers reach this machine, this one says where the user's work may run.
+    Section(
+        "remote_compute",
+        _t(_ws.remote_compute_title()),
+        Scope.LIVE,
+        _t(_ws.remote_compute_description()),
+    ),
     # The Aida keys. Scope LIVE, with the caveats stated in the description
     # rather than hidden behind a dishonest label: the pause flag is delivered
     # to every live process by the config watcher on its 2 s tick (that IS the
@@ -5642,6 +5662,31 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.asks_lapsed_visible_for_choice_7d_label()),
                 _t(_ws.asks_lapsed_visible_for_choice_7d_description()),
             ),
+        ),
+    ),
+    # -- remote compute -----------------------------------------------------
+    # The preview switch. OFF by default because turning it on moves the user's
+    # work to Radient-hosted compute: a preview that began switched on would
+    # send the first task off the machine before anyone asked for it. The real
+    # default lives beside the reader as ``DEFAULT_REMOTE_COMPUTE_ENABLED`` and
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins the two
+    # together.
+    #
+    # BOOL with the same choice descriptions every other switch carries: the row
+    # has to say what OFF means ("local only"), because a switch that names only
+    # its ON state leaves the user guessing whether remote work is refused or
+    # merely not offered.
+    Setting(
+        key="remote_compute.enabled",
+        path=("remote_compute", "enabled"),
+        section="remote_compute",
+        label=_t(_ws.remote_compute_enabled_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_ws.remote_compute_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.remote_compute_enabled_choice_true_description()),
+            _t(_ws.remote_compute_enabled_choice_false_description()),
         ),
     ),
 )

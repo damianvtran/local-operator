@@ -39,6 +39,7 @@ def feature_flags() -> dict[str, Any]:
     # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
     # ``tunnels.report`` per request).
     from local_operator.references import at_references_enabled
+    from local_operator.remote_compute import is_enabled as remote_compute_enabled
 
     return {
         "auth": 1,
@@ -937,5 +938,17 @@ def feature_flags() -> dict[str, Any]:
         # mid-turn adopt control only when this key is present, so an older
         # backend keeps today's disabled state.
         "aside_adopt_queue": 1,
+        # REMOTE COMPUTE (preview): the affordance that offers to run work on
+        # Radient-hosted compute. CONDITIONAL, because unlike every build fact
+        # above this one must not be advertised while it is switched off: the
+        # bit is what a renderer gates its remote destination on, and a client
+        # that saw it on an install whose owner has not opted in would offer to
+        # send that owner's work off the device. It follows the LIVE setting
+        # (``remote_compute.is_enabled`` reads ``config.yml`` per call, the way
+        # ``references`` follows its kill switch), so disabling withdraws the
+        # affordance at the next negotiation, not the next restart.
+        # Absent ⇒ no remote destination and no request to build — the
+        # pre-feature state, not a degraded one.
+        **({"remote_compute": 1} if remote_compute_enabled() else {}),
         **({"references": 1} if at_references_enabled() else {}),
     }
