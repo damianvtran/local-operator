@@ -917,6 +917,54 @@ def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
     return overrides
 
 
+def _restored_model_field(value: Any) -> Any:
+    """One live spec, in the restored field's own type.
+
+    ``model_copy`` does not validate, so the ``ModelSpec``-to-wire validator on
+    ``selected_model``/``effective_model`` does not run on this path — the same
+    reason the receipt fixup beside the call site has to hand over a validated
+    object rather than a dump. The dump is therefore re-validated into
+    ``FrontendModelSpec`` HERE, which is the shape ``refresh_from_session``'s
+    constructor call lands on the live path, so both stores hold the same type
+    and not merely the same values.
+    """
+    if isinstance(value, ModelSpec):
+        return FrontendModelSpec.model_validate(value.model_dump(mode="json"))
+    return value
+
+
+def _live_model_updates(session: Any) -> dict[str, Any]:
+    """The model pair a restored checkpoint must NOT be allowed to keep.
+
+    A checkpoint is written at a turn end, so its ``selected_model`` /
+    ``effective_model`` describe the runtime that WROTE it. They were the one
+    live field ``_restored_state`` left standing, so a headless owner's FIRST
+    frame named the level the PREVIOUS runtime ran while ``session.model`` — the
+    level its requests, every later frame and the effort picker's entity list
+    read — named the one it had actually restored: the desktop chip painted
+    "High" over a session running "medium" until some unrelated refresh
+    happened to republish the pair (Defect B, session ddd673e63db8).
+
+    The checkpoint's spec is stale for exactly the reason its ``cwd`` is (see
+    the call site): a successor's own spec is authoritative for what it runs.
+    The projection is ``refresh_from_session``'s — ``session.model``, and
+    ``effective_model or selected`` — so the first frame a restarted owner
+    publishes and every frame after it cannot disagree about the running level.
+
+    An empty dict for a host that exposes no model at all: a reduced facade and
+    a test double have none, and there the checkpoint's spec is still the only
+    answer available (the fallback the ``cwd`` fixup documents).
+    """
+    selected = getattr(session, "model", None)
+    if selected is None:
+        return {}
+    effective = getattr(session, "effective_model", None) or selected
+    return {
+        "selected_model": _restored_model_field(selected),
+        "effective_model": _restored_model_field(effective),
+    }
+
+
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
     """Fields a restored checkpoint must NOT be allowed to carry across a fork.
 
@@ -7352,6 +7400,11 @@ class FrontendStateStore:
                     else state.loop
                 ),
                 **_inherited_identity_fixups(state, session_id),
+                # WHAT THIS RUNTIME RUNS IS NOT THE CHECKPOINT'S TO DECIDE
+                # either, and this pair is the field the rule above was still
+                # missing: the row names the model the previous runtime ran, and
+                # the owner's own spec is the one its requests use.
+                **_live_model_updates(session),
             }
         )
 

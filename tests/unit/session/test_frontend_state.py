@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     ModelSpec,
+    StreamEndEvent,
     SubagentProgressEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
@@ -49,6 +50,10 @@ from local_operator.session.frontend_state import (
     closing_state_overrides,
     sync_wire_payload,
 )
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+
+from .test_session import ScriptedStream
 
 
 def _spec(window: int = 1_000_000) -> ModelSpec:
@@ -2160,6 +2165,178 @@ def test_a_host_with_no_directory_of_its_own_restores_the_checkpoints() -> None:
     restored = FrontendStateStore.from_checkpoint(_owner_over("s1", stored)).state
 
     assert restored.cwd == "/evidence/before"
+
+
+# ---------------------------------------------------------------------------
+# Defect B: the model pair a RESTARTED owner publishes is the one it RUNS.
+#
+# A checkpoint is written at a turn end by the runtime that wrote it, and
+# restoring its ``selected_model``/``effective_model`` verbatim made a headless
+# successor's FIRST frame name the PREVIOUS runtime's level: the desktop chip
+# painted "High" over a session running "medium" (session ddd673e63db8) until
+# an unrelated refresh happened to republish the pair. ``_restored_state``
+# re-stamps everything a checkpoint cannot decide for its successor — epoch,
+# sequence, cwd, loop, identity — and the model pair is the same class of field.
+# ---------------------------------------------------------------------------
+
+#: The model the effort tests below boot on: a real ladder, so the level is a
+#: choice rather than the only value the spec admits.
+_BOOT_MODEL = ModelSpec(
+    provider="anthropic",
+    model_id="claude-opus-5",
+    context_window=200_000,
+    reasoning=True,
+    reasoning_effort="medium",
+    reasoning_default_effort="medium",
+    reasoning_efforts=("low", "medium", "high"),
+)
+
+
+def _headless_owner(tmp_path) -> Session:
+    """A session with NO frontend: the host that restores from a checkpoint.
+
+    ``has_ui=False`` is the whole point — it is what selects
+    ``FrontendStateStore.from_checkpoint`` over ``from_session``
+    (``session.py``, the store construction), so this is the surface the defect
+    was reported on rather than a reconstruction of it.
+    """
+    return Session(
+        model=_BOOT_MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+        has_ui=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_headless_restore_publishes_the_level_the_session_runs(tmp_path) -> None:
+    """The reported symptom, end to end on a real ``Session``.
+
+    The checkpoint is written at ``high``; the newest selection row (the birth
+    row, ``medium``) is what a restart restores, so the successor RUNS medium.
+    Its first frame used to say high.
+    """
+    owner = _headless_owner(tmp_path)
+    await owner._persist_selected_model()
+    owner.set_model(_BOOT_MODEL.model_copy(update={"reasoning_effort": "high"}))
+    owner.refresh_frontend_state()
+    written = owner._frontend_state_store.state
+    await owner._transcript.append_custom(
+        "frontend_state_checkpoint_v1",
+        {"checkpoint_id": "cp-effort", "state": written.model_dump(mode="json")},
+    )
+    assert written.selected_model is not None
+    assert written.selected_model.reasoning_effort == "high"
+    await owner.dispose()
+
+    resumed = _headless_owner(tmp_path)
+    first = resumed._frontend_state_store.state
+
+    # The divergence this pins: the row says high, the restored session runs the
+    # level its selection row names.
+    assert resumed.model.reasoning_effort == "medium"
+    assert first.selected_model is not None and first.effective_model is not None
+    assert first.selected_model.reasoning_effort == resumed.model.reasoning_effort
+    assert first.effective_model.reasoning_effort == resumed.model.reasoning_effort
+    await resumed.dispose()
+
+
+def test_a_restored_frame_names_the_model_the_session_will_run() -> None:
+    """Not only the level: a provider or id change reaches the first frame too.
+
+    ``refresh_from_session`` publishes ``session.model`` and
+    ``effective_model or selected``; the restore has to land on the same pair,
+    or the two disagree about which model is about to serve.
+    """
+    stored = _state()  # openai/gpt-5.6-sol @ high
+    live = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        context_window=200_000,
+        reasoning_effort="low",
+    )
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(stored),
+        model=live,
+        effective_model=live,
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    selected = restored.selected_model
+    effective = restored.effective_model
+    assert selected is not None and effective is not None
+    for spec in (selected, effective):
+        assert (spec.provider, spec.model_id, spec.reasoning_effort) == (
+            "anthropic",
+            "claude-opus-5",
+            "low",
+        )
+    # The field's own type, not the live object: ``model_copy`` does not
+    # validate, and a raw ``ModelSpec`` in a ``FrontendModelSpec`` slot is the
+    # kind of drift only a serializing path notices.
+    assert isinstance(selected, FrontendModelSpec)
+
+    # ``effective_model or selected``: a host with no separate effective spec
+    # publishes the selected one, exactly as the live refresh does.
+    bare = SimpleNamespace(session_id="s1", _transcript=_CheckpointTranscript(stored), model=live)
+    assert FrontendStateStore.from_checkpoint(bare).state.effective_model == (
+        FrontendStateStore.from_checkpoint(bare).state.selected_model
+    )
+
+
+def test_a_restored_frame_keeps_the_checkpoints_context_reading() -> None:
+    """The projection is the MODEL fields only — the boundary of this change.
+
+    The state-level ``context_window`` is the window the checkpoint's
+    ``context_tokens`` were measured against, and the restore's own rules for it
+    (``attached.py``'s cold pair) read the raw row, not this store. So a live
+    spec with a different window must not move it, and neither may the spend or
+    the receipt pair.
+    """
+    stored = _state(context_tokens=402_000, context_window=1_000_000, cumulative_parent_cost=1.25)
+    live = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        context_window=200_000,
+        reasoning_effort="low",
+    )
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(stored),
+        model=live,
+        effective_model=live,
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.selected_model is not None
+    assert restored.selected_model.context_window == 200_000
+    assert restored.context_window == 1_000_000
+    assert restored.context_tokens == 402_000
+    assert restored.context_is_estimate is False
+    assert restored.cumulative_parent_cost == 1.25
+    assert restored.last_usage == stored.last_usage
+
+
+def test_a_host_with_no_model_of_its_own_restores_the_checkpoints_spec() -> None:
+    """The fallback half, the twin of the ``cwd`` test above.
+
+    A reduced facade and a test double expose no ``model``; there the row's own
+    spec is still the only answer available and must not be blanked.
+    """
+    stored = _state()
+
+    restored = FrontendStateStore.from_checkpoint(_owner_over("s1", stored)).state
+
+    assert restored.selected_model is not None
+    stored_selected = stored.selected_model
+    assert stored_selected is not None
+    assert restored.selected_model.provider == stored_selected.provider
+    assert restored.selected_model.reasoning_effort == stored_selected.reasoning_effort
 
 
 def test_a_checkpoint_cannot_pin_occupancy_below_the_journals_newest_receipt() -> None:
