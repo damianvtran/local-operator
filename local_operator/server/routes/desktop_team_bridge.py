@@ -86,7 +86,10 @@ _CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
 #: rule is a conservative charset rather than a re-implementation of the
 #: server's mint.
 _MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
-_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+#: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
+#: because that module rides the httpx boot path this file must not pull at
+#: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
+_ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
 
 
 class _Strict(BaseModel):
