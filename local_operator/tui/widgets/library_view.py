@@ -196,8 +196,16 @@ class _RailItem:
 
 @dataclass
 class _FormState:
-    """The metadata form's values, held by the page rather than the store."""
+    """The metadata form's values, held by the page rather than the store.
 
+    ``asset_id`` is the form's IDENTITY, captured when it opened. The cursor is
+    a viewport position, not an identity: an in-flight reload can replace or
+    reorder the rows while the form is up, and resolving the cursor again at
+    save time would write these fields to whichever asset happened to land
+    under it (review round 1, B1).
+    """
+
+    asset_id: str = ""
     name: str = ""
     description: str = ""
     tags: str = ""
@@ -293,6 +301,12 @@ class LibraryView(Vertical):
             placeholder=_t(_k.form_name_placeholder()),
             id="library-view-name",
             classes="library-view-form-input",
+            # A form opens to be EDITED, not replaced wholesale. Textual's
+            # default selects the whole value on focus, which both repainted
+            # the filename as pale-on-pale-blue in the light ramp and made the
+            # first keystroke destroy a name the reader only meant to append
+            # to (design round 1).
+            select_on_focus=False,
         )
         self._description = TextArea(
             id="library-view-description", classes="library-view-form-description"
@@ -301,6 +315,7 @@ class LibraryView(Vertical):
             placeholder=_t(_k.form_tags_placeholder()),
             id="library-view-tags",
             classes="library-view-form-input",
+            select_on_focus=False,
         )
         self._form_hint = Static("", classes="library-view-form-hint", markup=False)
         self._form_error = Static("", classes="library-view-form-error", markup=False)
@@ -322,6 +337,7 @@ class LibraryView(Vertical):
         self._hint_sort = _hint("s", self.action_cycle_sort)
         self._hint_filter = _hint("f", self.action_focus_rail)
         self._hint_librarian = _hint("L", self.action_open_librarian)
+        self._hint_reload = _hint("r", self.action_reload)
         self._hint_back = _hint("esc", self.action_leave)
         self._hint_save = _hint("enter", self.action_save_form)
         self._hint_cancel = _hint("esc", self.action_cancel_form)
@@ -335,6 +351,7 @@ class LibraryView(Vertical):
             self._hint_sort,
             self._hint_filter,
             self._hint_librarian,
+            self._hint_reload,
             self._hint_save,
             self._hint_cancel,
             self._hint_back,
@@ -344,7 +361,8 @@ class LibraryView(Vertical):
     # -- composition -------------------------------------------------------
 
     def compose(self):  # type: ignore[override]
-        yield Horizontal(self._title, self._search, classes="library-view-title-row")
+        self._title_row = Horizontal(self._title, self._search, classes="library-view-title-row")
+        yield self._title_row
         yield self._rule
         # The right column owns both faces: detail/preview by default, the
         # metadata form while it is open. The form must not be a fourth row
@@ -355,7 +373,7 @@ class LibraryView(Vertical):
             yield self._list
             with Vertical(classes="library-view-right") as right:
                 yield self._detail
-                with Vertical(classes="library-view-form") as form:
+                with VerticalScroll(classes="library-view-form") as form:
                     yield Static(_t(_k.form_name()), classes="library-view-form-label")
                     yield self._name_input
                     yield Static(_t(_k.form_description()), classes="library-view-form-label")
@@ -385,7 +403,7 @@ class LibraryView(Vertical):
         # The EVENT's size, not `self.size`: a resize event is delivered before
         # the widget's own layout box is updated, and painting the hint ladder
         # against the stale width dropped four verbs at 86 columns (measured).
-        self._paint_all(width=event.size.width)
+        self._paint_all(width=event.size.width, height=event.size.height)
         # Then ONE pass after the containers settle. The first pass sees the
         # new PAGE width but the OLD column widths (the rail it just hid still
         # owned cells), so the rows were truncated for a 23-cell list and the
@@ -519,7 +537,7 @@ class LibraryView(Vertical):
 
     # -- painting ----------------------------------------------------------
 
-    def _paint_all(self, *, width: int | None = None) -> None:
+    def _paint_all(self, *, width: int | None = None, height: int | None = None) -> None:
         # A worker can answer before ``compose`` has produced the columns when
         # the host called `start` first. The `on_mount` pass repaints, so
         # dropping this one frame costs nothing and paints nothing into a
@@ -527,7 +545,8 @@ class LibraryView(Vertical):
         if not self.is_attached or not hasattr(self, "_columns"):
             return
         page_width = width or self.size.width or 80
-        self._layout(page_width)
+        page_height = height or self.size.height or self.screen.size.height or 24
+        self._layout(page_width, page_height)
         self._paint_title()
         self._paint_rail()
         self._paint_list()
@@ -535,7 +554,7 @@ class LibraryView(Vertical):
         self._paint_status()
         self._paint_hints(page_width)
 
-    def _layout(self, width: int | None = None) -> None:
+    def _layout(self, width: int | None = None, height: int | None = None) -> None:
         """Resolve the three-column ladder against the page width.
 
         The rail goes first (90), then the detail column (80), and the detail
@@ -544,6 +563,12 @@ class LibraryView(Vertical):
         than the form being squeezed into 40 cells beside a 20-cell list.
         """
         width = width or self.size.width or 80
+        # `action_edit_metadata` enters the form before the page's own box has
+        # necessarily been resolved, so `self.size.height` can still be zero
+        # at that call. The SCREEN is the available height either way; without
+        # this fallback a 120x34 form was misread as a short page and lost its
+        # title (measured in the round-1 re-capture).
+        height = height or self.size.height or self.screen.size.height or 24
         narrow_rail = width < RAIL_MIN_WIDTH
         narrow_detail = width < DETAIL_MIN_WIDTH
         self._rail.display = not narrow_rail
@@ -557,6 +582,21 @@ class LibraryView(Vertical):
             self._right.styles.width = (
                 "36" if width >= DETAIL_WIDE_WIDTH else str(DETAIL_NARROW_WIDTH)
             )
+        # A SHORT page with the form open has no rows to spare: at 60x20 under
+        # a multi-line composer the columns region was ONE row high, and no
+        # scroll container can reveal a field through a one-row viewport (UX
+        # round 1, U2). The form is the subject while it is open, so the
+        # page's title, rule and standing footer yield their rows to it. The
+        # hints stay (save/cancel are the actions) but lose their lead-in.
+        # The page's own box (25 rows at 120x34 once the dock is subtracted)
+        # is the budget, not the SCREEN height: 25 rows fit the 15-row form
+        # beside the title and rule. Only genuinely short pages trade the
+        # chrome for form rows.
+        short_form = self._form_open and height < 22
+        self._title_row.display = not short_form
+        self._rule.display = not short_form
+        self._status.display = not short_form
+        self._hints.set_class(short_form, "library-view-hints-short")
 
     def _paint_title(self) -> None:
         payload = self._payload or {}
@@ -623,7 +663,7 @@ class LibraryView(Vertical):
         if payload.get("state") == "error":
             self._paint_message(
                 _t(_k.error_title()),
-                str(payload.get("error") or _t(_k.unknown())),
+                f"{payload.get('error') or _t(_k.unknown())}  {_t(_k.error_retry())}",
                 tone="danger",
             )
             return
@@ -739,9 +779,16 @@ class LibraryView(Vertical):
 
     def _paint_detail(self) -> None:
         row = self.selected()
+        selected_id = str(row.get("id") or "") if row is not None else ""
+        # A preview is an asset's CONTENT, not the pane's decoration. Once the
+        # selection is a different asset (or none), the old bytes are no longer
+        # what the heading names — clear them, including a still-loading
+        # placeholder. A late worker result is dropped by `_show_preview`'s
+        # own id check below.
+        if self._preview_for is not None and self._preview_for != selected_id:
+            self._remove_preview()
         if row is None:
             self._detail_canvas.update(Text())
-            self._remove_preview()
             return
         text = Text()
         text.append(
@@ -909,6 +956,27 @@ class LibraryView(Vertical):
                 self._hint_sort: None,
                 self._hint_filter: None,
                 self._hint_librarian: None,
+                self._hint_reload: None,
+            }
+        elif (self._payload or {}).get("state") == "error":
+            # The error state's ONE action is retry. Leaving the navigation
+            # verbs on the row both buries the recovery and overflowed `esc
+            # back` at 120 columns when retry was added to every state
+            # (measured in the round-1 re-capture).
+            labels = {
+                self._hint_reload: "" if compact else _t(_k.hint_retry()),
+                self._hint_back: "" if compact else _t(_k.hint_back()),
+                self._hint_move: None,
+                self._hint_open: None,
+                self._hint_preview: None,
+                self._hint_edit: None,
+                self._hint_ask: None,
+                self._hint_search: None,
+                self._hint_sort: None,
+                self._hint_filter: None,
+                self._hint_librarian: None,
+                self._hint_save: None,
+                self._hint_cancel: None,
             }
         else:
             labels = {
@@ -927,6 +995,7 @@ class LibraryView(Vertical):
                 self._hint_librarian: (
                     None if very_narrow else ("" if compact else _t(_k.hint_librarian()))
                 ),
+                self._hint_reload: None,
                 self._hint_save: None,
                 self._hint_cancel: None,
                 self._hint_back: "" if compact else _t(_k.hint_back()),
@@ -1194,7 +1263,8 @@ class LibraryView(Vertical):
             return
         self._notice("")
         self._remove_preview()
-        self._preview_for = str(row.get("id"))
+        asset_id = str(row.get("id") or "")
+        self._preview_for = asset_id
         self._preview_host.mount(
             Static(_t(_k.preview_loading()), classes="library-view-preview-note")
         )
@@ -1202,10 +1272,15 @@ class LibraryView(Vertical):
 
     @work(exclusive=True, group="library-preview")
     async def _preview_worker(self, row: Mapping[str, Any]) -> None:
+        asset_id = str(row.get("id") or "")
         result = await asyncio.to_thread(self._read_preview, row)
-        if not self.is_attached or self._preview_for != str(row.get("id")):
+        # Both checks: the page may be gone, and the SELECTION may have moved
+        # while the bytes were being read. The token is cleared by
+        # `_paint_detail` on a selection change, so a late A result cannot
+        # paint under B.
+        if not self.is_attached or self._preview_for != asset_id:
             return
-        self._show_preview(result)
+        self._show_preview(result, asset_id)
 
     def _read_preview(self, row: Mapping[str, Any]) -> dict[str, Any]:
         """Resolve and read one preview payload off the loop. Never raises."""
@@ -1252,8 +1327,10 @@ class LibraryView(Vertical):
         resolved = library_service.resolve_content(self._config_dir, str(row.get("id") or ""))
         return Path(resolved.path)
 
-    def _show_preview(self, result: Mapping[str, Any]) -> None:
-        if not self.is_attached:
+    def _show_preview(self, result: Mapping[str, Any], asset_id: str) -> None:
+        # The worker already checked; this is the same guard at the PAINT
+        # boundary, so any other caller of this seam cannot skip it.
+        if not self.is_attached or self._preview_for != asset_id:
             return
         self._remove_preview(keep_pending=True)
         if result.get("error"):
@@ -1375,7 +1452,10 @@ class LibraryView(Vertical):
             self._paint_rail()
             self.focus()
             return
-        if event.input is self._tags_input and self._form_open:
+        if event.input in (self._name_input, self._tags_input) and self._form_open:
+            # The footer advertises `enter save` for the whole form; the name
+            # field is the first control focus lands on, so Enter there must
+            # do what the hint says rather than nothing (UX round 1, U3).
             self.action_save_form()
 
     # -- metadata form -----------------------------------------------------
@@ -1389,12 +1469,18 @@ class LibraryView(Vertical):
         tags = [tag for tag in list(row.get("tags") or []) if isinstance(tag, Mapping)]
         names = [str(tag.get("name")) for tag in tags if tag.get("name")]
         self._form = _FormState(
+            asset_id=str(row.get("id") or ""),
             name=str(row.get("name") or row.get("derived_name") or ""),
             description=str(row.get("description") or ""),
             tags=", ".join(names),
         )
         self._form_open = True
         self._layout()
+        # A previous edit may have left the scroll container at its bottom.
+        # The next form opens on its FIRST field, not wherever the last one
+        # was abandoned; focus alone did not move a container whose offset
+        # survived the close (measured in the U2 draft re-capture).
+        self._form_block.scroll_to(y=0, animate=False)
         self._name_input.value = self._form.name
         self._description.text = self._form.description
         self._tags_input.value = self._form.tags
@@ -1432,24 +1518,38 @@ class LibraryView(Vertical):
             )
             self._paint_form()
             return
-        row = self.selected()
-        if row is None:
-            self.action_cancel_form()
+        if not self._form.asset_id:
+            self._form.error = _t(_k.form_asset_gone())
+            self._paint_form()
+            return
+        # Resolve by the id captured at OPEN, never by the cursor. The row may
+        # still be on the page (a reload kept it) or not (it vanished from the
+        # filtered set); in the second case the edit is refused rather than
+        # retargeted at whatever row now sits under the cursor (round 1, B1).
+        target = next(
+            (item for item in self.rows() if str(item.get("id") or "") == self._form.asset_id),
+            None,
+        )
+        if target is None:
+            self._form.error = _t(_k.form_asset_gone())
+            self._paint_form()
             return
         self._form.error = ""
         self._form.saving = True
         self._paint_form()
-        self._save_worker(row, names, self._form.name, self._form.description)
+        self._save_worker(self._form.asset_id, names, self._form.name, self._form.description)
 
     @work(exclusive=True, group="library-save")
     async def _save_worker(
         self,
-        row: Mapping[str, Any],
+        asset_id: str,
         names: Sequence[str],
         name: str,
         description: str,
     ) -> None:
-        result = await asyncio.to_thread(self._save_blocking, row, list(names), name, description)
+        result = await asyncio.to_thread(
+            self._save_blocking, asset_id, list(names), name, description
+        )
         if not self.is_attached:
             return
         self._form.saving = False
@@ -1457,7 +1557,7 @@ class LibraryView(Vertical):
             self._form.error = str(result.get("error"))
             self._paint_form()
             return
-        saved = str(row.get("name") or row.get("id") or "")
+        saved = name.strip() or asset_id
         self._form_open = False
         self._layout()
         self._notice(_t(_k.form_saved(name=saved)), "info")
@@ -1465,9 +1565,8 @@ class LibraryView(Vertical):
         self._reload()
 
     def _save_blocking(
-        self, row: Mapping[str, Any], names: list[str], name: str, description: str
+        self, asset_id: str, names: list[str], name: str, description: str
     ) -> dict[str, Any]:
-        asset_id = str(row.get("id") or "")
         try:
             store = library_metadata.MetadataStore(self._config_dir)
             tag_ids = [str(store.create_tag(tag)["id"]) for tag in names]

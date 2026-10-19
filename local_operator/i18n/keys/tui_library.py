@@ -143,6 +143,10 @@ def error_body(*, error: str) -> Msg:
     return Msg("tui.library.error_body", {"error": error})
 
 
+def error_retry() -> Msg:
+    return Msg("tui.library.error_retry", {})
+
+
 def error_title() -> Msg:
     return Msg("tui.library.error_title", {})
 
@@ -165,6 +169,10 @@ def footer_organized(*, count: str) -> Msg:
 
 def footer_paused() -> Msg:
     return Msg("tui.library.footer_paused", {})
+
+
+def form_asset_gone() -> Msg:
+    return Msg("tui.library.form_asset_gone", {})
 
 
 def form_cancel() -> Msg:
@@ -253,6 +261,10 @@ def hint_open() -> Msg:
 
 def hint_preview() -> Msg:
     return Msg("tui.library.hint_preview", {})
+
+
+def hint_retry() -> Msg:
+    return Msg("tui.library.hint_retry", {})
 
 
 def hint_save() -> Msg:

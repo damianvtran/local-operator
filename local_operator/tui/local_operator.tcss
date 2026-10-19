@@ -2347,9 +2347,21 @@ Screen.settings #input-dock #prompt-chevron {
     height: auto;
 }
 
+/* SCROLLABLE, not clipped: at 60x20 the six label rows, three controls and
+ * the hint are taller than the region the page can give them, and the last
+ * field (tags) fell off the bottom with no way to reach it. A form is a
+ * sequence of fields, so it scrolls; focus traversal reveals each one. */
 .library-view-form {
     width: 1fr;
     height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
 }
 
 /* `height: 2` with one row of lead-in: Textual's box model makes `height: 1`
@@ -2385,6 +2397,35 @@ Screen.settings #input-dock #prompt-chevron {
     background: $lo-tint-select;
 }
 
+/* Selection and caret are COMPONENTS, not the input's own ink. Textual's
+ * stock pair is `$input-selection-*`, and on the light ramp that measured
+ * #e0e0e0 on #9bc3e3 = 1.41:1 — design round 1 D1: a filename a user is
+ * about to replace was unreadable. This takes the SAME pair the projects
+ * form and composer already use (`fg` ink on the `edge` selected-prose
+ * ground; surface ink on the `fg` caret step), measured there across all 35
+ * registered themes rather than re-derived here. Scoped to the Library form
+ * so no unrelated surface changes. */
+.library-view-form-input > .input--selection,
+.library-view-form-description > .text-area--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
+.library-view-form-input > .input--cursor,
+.library-view-form-description > .text-area--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+/* D2: the search field has no persistent label, so its placeholder is the
+ * affordance. The stock `$text-disabled` measured 2.66:1 (light) / 3.54:1
+ * (dark); muted is 7.18 / 8.62 at the same size. */
+.library-view-search > .input--placeholder,
+.library-view-form-input > .input--placeholder,
+.library-view-form-description > .text-area--placeholder {
+    color: $lo-muted;
+}
+
 /* Same zero-content-box trap as the labels above. */
 .library-view-form-hint,
 .library-view-form-error {
@@ -2402,6 +2443,13 @@ Screen.settings #input-dock #prompt-chevron {
     height: 2;
     width: 1fr;
     padding: 1 0 0 0;
+}
+
+/* On a short page the form owns the rows: the footer keeps its keys and drops
+ * the lead-in row so save/cancel stay on screen (UX round 1, U2). */
+.library-view-hints-short {
+    height: 1;
+    padding: 0;
 }
 
 
