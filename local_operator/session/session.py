@@ -2794,22 +2794,29 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
 def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
     """The CONVERSATION-chosen level a journal row implies, or ``None``.
 
-    ``level`` is the row's own ``effort`` field; ``None`` (a legacy row, or one
-    written before this field carried a choice) falls back to the spec the
-    caller constructed. Either way the answer is only a CHOICE when it differs
-    from the model's own seed — the same ``reasoning_effort !=
-    reasoning_default_effort`` contract ``_carried_effort`` reads, and the one
-    ``_remember_effort_choice`` maintains live.
+    ``level`` is the row's own ``effort`` field. The answer is a CHOICE only
+    when it differs from the TARGET model's own seed — the same
+    ``reasoning_effort != reasoning_default_effort`` contract ``_carried_effort``
+    reads, and the one ``_normalise_effort_choice`` states live. Comparing
+    against the target is what makes a withdrawal row, which stores the target's
+    seed, read as "nothing chosen" instead of as a choice relative to the model
+    the conversation happened to boot on (review round 2, M5).
 
-    Deliberately computed against the spec being constructed, NOT against the
-    spec a row is about to be clamped into: a row naming ``max`` for a route
-    whose ladder stops at ``high`` must keep ``max`` as the choice even though
-    the spec it resolves to carries the clamp. That asymmetry is the whole
-    point — the clamp is the level IN FORCE, the row is what was ASKED FOR.
+    Deliberately computed against the spec the row RESOLVES TO, not against the
+    spec that row is about to be clamped into for display: a row naming ``max``
+    for a route whose ladder stops at ``high`` must keep ``max`` as the choice
+    even though the spec carries the clamp. The clamp is the level IN FORCE; the
+    row is what was ASKED FOR.
     """
-    candidate = level or getattr(spec, "reasoning_effort", None)
-    if not candidate:
+    # ``None`` means the row stored NO level (a ladderless selection, or one
+    # written before the field carried a choice). It is never read as "use the
+    # spec's level": on a restore the spec's level can be a CLAMP, and treating
+    # a clamp as the choice is the defect this helper exists to avoid (review
+    # round 1, M1a). A birth-default level still reaches switches through the
+    # spec (`_carried_effort`); it is not a conversation choice.
+    if not level:
         return None
+    candidate = level
     if candidate == getattr(spec, "reasoning_default_effort", None):
         return None
     return candidate
@@ -26339,12 +26346,10 @@ class Session:
             self._boot_selector = saved.boot_selector
         self._selection_needs_initial_write = not saved.authoritative or saved.recovered
         self._model_migration_notice = saved.recovered
-        # The CONVERSATION's choice, recovered from the row itself. Done before
-        # the no-op early return below, because a row equal to the birth spec is
-        # exactly the ordinary resumed case and it must still seed the choice
-        # the failover carry and the journal write read afterwards.
-        self._chosen_effort = _chosen_level_from(effort, self._model)
         if selector == self.model_label and effort == self._model.reasoning_effort:
+            # The row names this very spec, so the birth spec IS the target and
+            # its own seed is the right comparison.
+            self._chosen_effort = _chosen_level_from(effort, self._model)
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -26354,6 +26359,9 @@ class Session:
         # stale.
         spec = self._spec_for_route(selector, effort)
         if spec is None:
+            # The target cannot be resolved, so the row's level is still the
+            # best evidence — compared against the only spec in hand.
+            self._chosen_effort = _chosen_level_from(effort, self._model)
             logger.warning("dropping unresolvable persisted model selection: %r", selector)
             self._selection_needs_initial_write = True
             self._model_migration_notice = True
@@ -26368,9 +26376,9 @@ class Session:
             # stops at ``high`` while the wire's membership re-check silently
             # sent nothing — the loss-of-depth-under-a-status-band failure
             # ``resolve_effort_in``'s own docstring exists to prevent (QA round
-            # 1, Q-1). The CHOICE is already held in ``_chosen_effort`` above;
-            # only the level IN FORCE is clamped here, and a later switch to a
-            # model that can express it carries the choice again.
+            # 1, Q-1). Only the level IN FORCE is clamped here; the CHOICE is
+            # recovered from the row against the TARGET spec below, and a later
+            # switch to a model that can express it carries the choice again.
             spec = spec.model_copy(
                 update={
                     "reasoning_effort": resolve_effort_in(
@@ -26379,6 +26387,13 @@ class Session:
                 }
             )
         self._model = spec
+        # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
+        # withdrawal row now stores the TARGET's seed, so comparing it to the
+        # BIRTH model's default read that seed as a choice whenever the two
+        # models seeded different levels — and the withdrawn level then rode the
+        # next switch. The fallback for a legacy row (no effort field) is the
+        # level the birth spec carried, which is what the carry would use.
+        self._chosen_effort = _chosen_level_from(effort, spec)
         # A restored row IS the user's earlier explicit choice, so a config
         # default edited after the resume must not override it either.
         self._explicit_model_choice = True

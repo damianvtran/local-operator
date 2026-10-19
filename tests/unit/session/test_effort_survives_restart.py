@@ -241,6 +241,45 @@ async def test_a_restored_row_is_clamped_while_the_choice_is_held(tmp_path):
     await session.dispose()
 
 
+@pytest.mark.asyncio
+async def test_a_withdrawal_row_is_not_a_choice_on_another_model(tmp_path):
+    """A withdrawal stores the TARGET's seed; the comparison must be the target's.
+
+    Review round 2, M5. The row below is what `/effort auto` on
+    ``deepseek/deepseek-flash`` writes: its own seed ``high``. The session was
+    constructed on a model whose default is ``None`` (carrying the configured
+    ``max``), so comparing the row to the BIRTH spec read ``high`` as a choice
+    the user never made — and that choice rode the next switch.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    directory = tmp_path / "sess"
+    seeded = Transcript(directory)
+    await seeded.append_custom(
+        "selected_model",
+        {
+            "version": 2,
+            "selector": "deepseek/deepseek-flash",
+            "effort": "high",
+            "boot": "openai/gpt-6.1-sol",
+        },
+    )
+    birth = build_model_spec("openai", "gpt-6.1-sol").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session = Session(
+        model=birth,
+        stream_fn=NotifyingStream(),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    assert session.model.model_id == "deepseek-flash"
+    assert session.model.reasoning_effort == "high"  # in force
+    assert session.chosen_effort is None, "a withdrawal row became a choice"
+    await session.dispose()
+
+
 def test_the_cold_band_clamps_the_saved_level_too(tmp_path_factory):
     """The first painted frame agrees with the warm restore (Q-1)."""
     from local_operator.session.cold_model import resolve_saved_model
