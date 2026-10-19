@@ -214,12 +214,34 @@ def test_a_section_with_no_judgeable_prose_is_counted_not_silent_ok_zero(store):
         "www.example.com/path",
         "mailto:ops@example.com",
         "MAILTO:ops@example.com",
+        "/srv/app",
+        "/Users/First Last/app",
     ],
 )
 def test_adjacent_locator_shapes_are_context_not_facts(body):
     """MINOR 1: a candidate that IS a locator shape is context, not a fact."""
     rows = extract("## Progress\n- " + body)
     assert list(rows) == [] and rows.skipped == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        r"C:\repo\app is the build root",
+        r"C:\Users\First Last\repo\app is where we deploy from",
+        r"\\server\share is the evidence root",
+        r"C:\Program Files\app is installed for all users",
+        r"\\server\share\dir is where evidence lives",
+        "/srv/app is the build root",
+        "/Users/First Last/repo/app is where we deploy from",
+    ],
+)
+def test_a_leading_locator_plus_prose_is_knowledge(body):
+    """B1: a path that starts the body must not swallow the prose after it."""
+    rows = extract("## Key Decisions\n- " + body)
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == ["decision"]
+    assert rows.skipped == 0
 
 
 @pytest.mark.parametrize(
