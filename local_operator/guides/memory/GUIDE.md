@@ -131,14 +131,21 @@ move exists (global); session and the other scopes consolidate in place.
 
 ## Compaction and mobility
 
-A concurrent deterministic scan captures bounded safe locators (paths, URLs,
-contacts, thread/PR references and secret names). Context-full additionally
-reuses semantic sections of its existing summary. Snapcompact still makes **no
-model-summary call**, but its pass now carries a bounded, tier-ranked digest of
-the material it drops (operator asks, decisions, identifiers), and capture reads
-that digest too — so retained asks and decisions become session facts instead of
-aging out with the frames. Automatic capture remains best-effort: explicitly
-retain goals and decisions anyway. No extra inference call or model fork is made.
+A concurrent deterministic scan captures **knowledge first**: it reads the semantic
+sections a compaction summary is asked to emit (`Goal`, `Key Decisions`, `Progress`,
+`Critical Context`) and heading sections in the transcript itself, and stores their
+bullets/prose as session facts tagged `goal`/`decision`/`progress`/`context`. Paths,
+URLs and ids are supporting detail, not facts: they are attached to a captured
+section fact as `— context: …` and never stored on their own. A transcript that is
+nothing but URLs and paths therefore yields zero facts. This is reversible with
+`memory.capture.locators` (default **off**), which re-enables only that context arm;
+existing rows are never migrated or deleted. Context-full additionally reuses
+semantic sections of its existing summary. Snapcompact still makes **no model-summary
+call**, but its pass now carries a bounded, tier-ranked digest of the material it
+drops (operator asks, decisions, identifiers), and capture reads that digest too —
+retained asks and decisions become session facts; identifiers follow the same
+context-only rule. Automatic capture remains best-effort: explicitly retain goals and
+decisions anyway. No extra inference call or model fork is made.
 Capture cannot block compaction;
 its terminal hint arrives at the next ordinary provider boundary and never
 wakes a session. A crash between commit and capture is retried idempotently.
@@ -151,8 +158,8 @@ rewrite agents/MCP definitions, not newly enrolled readers. Non-admin/old peers
 fail closed. Offline peers catch up; retained concurrent conflicts are inspectable.
 No live-peer interoperability claim follows from isolated loopback tests.
 
-Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
-`.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
+Settings: `memory.enabled`, `.capture`, `.capture.locators`, `.suggest`,
+`network.memory.enabled`, `.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
 for policy, quotas and peer exclusions. Human inspection/correction uses
 `lop memory` / `/memory`: list, show, search, move, edit, forget, status, inspect and
 consolidate. Rows print
