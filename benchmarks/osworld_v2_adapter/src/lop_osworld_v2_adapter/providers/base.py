@@ -40,6 +40,15 @@ GUEST_COMMAND_TIMEOUT_S = 90.0
 # ``tests/unit/evaluation/runner/test_run_episode_infra.py`` binds the pair.
 DEFAULT_ACTION_DELAY_S = 3.0
 
+
+class GuestServerRecovered(RuntimeError):
+    """Stop this batch and obtain a fresh observation before accepting more input.
+
+    Earlier statements may have applied; a failed request can be ambiguous.
+    The adapter must not replay either part against its pre-restart binding.
+    """
+
+
 # Transport margin between OUR socket deadline and the GUEST's own subprocess
 # deadline, and the reason the two must be ordered rather than merely close.
 #

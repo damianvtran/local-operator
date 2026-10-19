@@ -53,6 +53,7 @@ from local_operator.network.credentials.types import (
     Holder,
     credential_key_for_mcp,
     credential_key_for_provider,
+    credential_key_for_secret,
     peer_int,
 )
 
@@ -869,15 +870,23 @@ def placement_entries_for(
     *,
     provider: str = "",
     mcp_url: str = "",
+    secret: str = "",
     root: Path | None = None,
 ) -> tuple[str, CredentialPlacementEntry] | None:
-    """The placement entry for a provider or an MCP server URL, if this device has one.
+    """The placement entry for a provider, an MCP server URL or a store secret.
 
     The MCP path's lookup: ``mcp/manager.py`` knows a server URL and nothing else,
     so the key is built here rather than at the call site — one spelling of
-    ``mcp:<url>`` for the whole slice.
+    ``mcp:<url>`` for the whole slice. ``secret`` is the class-2 sibling, used by
+    readiness to decide whether a peer's missing reference has a share behind it
+    (copy remedy) or no source anywhere (set-it-here remedy).
     """
-    key = credential_key_for_mcp(mcp_url) if mcp_url else credential_key_for_provider(provider)
+    if secret:
+        key = credential_key_for_secret(secret)
+    elif mcp_url:
+        key = credential_key_for_mcp(mcp_url)
+    else:
+        key = credential_key_for_provider(provider)
     from local_operator.network import store
 
     for record in store.list_networks(root):

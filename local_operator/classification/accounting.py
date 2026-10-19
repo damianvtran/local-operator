@@ -189,8 +189,22 @@ def _cost_source(vendor: str) -> str:
     return COST_SOURCE_SERVER if vendor == "radient" else COST_SOURCE_PROVIDER
 
 
+def _with_note(note: str, detail: str) -> str:
+    """Prepend the routing note to a row's own detail, keeping the evidence.
+
+    ``note`` is empty on the ordinary path, so the historical detail is returned
+    untouched — the zero-peer and first-leg rows stay byte-identical. When both
+    exist the note leads (it is the operator-facing fact: this row is a fallback)
+    and the row's own detail follows, because dropping it would lose evidence a
+    reconciler already depends on.
+    """
+    if not note:
+        return detail
+    return f"{note}; {detail}" if detail else note
+
+
 def answered_record(
-    response: DecisionResponse, *, posts: int, requested_model: str = ""
+    response: DecisionResponse, *, posts: int, requested_model: str = "", note: str = ""
 ) -> ChannelSpendRecord:
     """The row for a leg that answered: the vendor's own figure, or unknown.
 
@@ -225,6 +239,7 @@ def answered_record(
     # semantics, so a later reconciler can still see that the wire said
     # ``jev-1.13.0`` while the money was grouped under ``jev-1.13``.
     detail = f"vendor-model={response.model}" if response.model != billed_model else ""
+    detail = _with_note(note, detail)
     return ChannelSpendRecord(
         record_id=new_record_id(CLASSIFICATION_CHANNEL),
         ts_ms=now_ms(),
@@ -242,7 +257,7 @@ def answered_record(
 
 
 def failed_record(
-    vendor: str, model: str, error: BaseException, *, posts: int
+    vendor: str, model: str, error: BaseException, *, posts: int, note: str = ""
 ) -> ChannelSpendRecord:
     """The row for a leg attempt that raised instead of answering.
 
@@ -272,11 +287,13 @@ def failed_record(
         unit=CALL_UNIT,
         amount_micro=None,
         status=status,
-        detail=detail,
+        detail=_with_note(note, detail),
     )
 
 
-def interrupted_record(vendor: str, model: str, *, posts: int) -> ChannelSpendRecord:
+def interrupted_record(
+    vendor: str, model: str, *, posts: int, note: str = ""
+) -> ChannelSpendRecord:
     """The row for an attempt we abandoned (timeout, dispose, cancel) mid-request.
 
     ``cancelled`` with no amount: counted as an attempt, and — unlike a refused
@@ -292,7 +309,7 @@ def interrupted_record(vendor: str, model: str, *, posts: int) -> ChannelSpendRe
         unit=CALL_UNIT,
         amount_micro=None,
         status=STATUS_CANCELLED,
-        detail=DETAIL_INTERRUPTED,
+        detail=_with_note(note, DETAIL_INTERRUPTED),
     )
 
 
