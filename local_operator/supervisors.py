@@ -481,7 +481,16 @@ def linger_enabled() -> bool:
     binary = shutil.which("loginctl")
     if binary is None:
         return False
-    user = os.environ.get("USER") or str(os.getuid())
+    user = os.environ.get("USER")
+    if not user:
+        # `getuid` is POSIX-only. This function is reached from the Linux arm,
+        # but the cross-platform probe reads every module on Windows and a bare
+        # attribute access here is a real import-time hazard if a future caller
+        # widens the path. An absent uid is "cannot ask", not a crash.
+        getuid = getattr(os, "getuid", None)
+        user = str(getuid()) if getuid is not None else ""
+    if not user:
+        return False
     try:
         result = subprocess.run(  # noqa: S603 — fixed argv, no shell
             [binary, "show-user", user, "-p", "Linger"],

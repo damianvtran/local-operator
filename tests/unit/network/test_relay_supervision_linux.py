@@ -1276,6 +1276,19 @@ def test_linger_state_reads_loginctl_without_mutating_it(monkeypatch, stdout, ex
     assert calls == [["/usr/bin/loginctl", "show-user", "synthetic-user", "-p", "Linger"]]
 
 
+def test_linger_without_a_user_or_getuid_is_unproven(monkeypatch) -> None:
+    """A platform with neither `USER` nor `getuid` cannot be asked; it must not crash.
+
+    The cross-platform probe's static pass rejects an unguarded `os.getuid` on
+    Windows, where the attribute does not exist. This cell pins the runtime half:
+    absent both facts, durability is unproven rather than an AttributeError.
+    """
+    monkeypatch.setattr(supervisors.shutil, "which", lambda name: "/usr/bin/loginctl")
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delattr(supervisors.os, "getuid", raising=False)
+    assert supervisors.linger_enabled() is False
+
+
 def test_supervision_state_without_a_supervisor_is_not_persistent(monkeypatch) -> None:
     """A host without a manager cannot claim durability."""
     monkeypatch.setattr(supervisors, "supervisor", lambda: None)
