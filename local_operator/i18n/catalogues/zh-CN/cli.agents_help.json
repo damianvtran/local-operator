@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "管理智能体",
+  "cli.agents_help.list": "列出所有智能体",
+  "cli.agents_help.list_page": "显示的页码（默认：1）",
+  "cli.agents_help.list_perpage": "每页智能体数量（默认：10）",
+  "cli.agents_help.create": "创建智能体",
+  "cli.agents_help.create_name": "要创建的智能体名称",
+  "cli.agents_help.delete": "删除智能体（本地按名称，Radient按ID）",
+  "cli.agents_help.delete_name": "要在本地删除的智能体名称",
+  "cli.agents_help.delete_id": "要从Radient删除的智能体ID",
+  "cli.agents_help.delete_org": "从此组织的工作区而非公共hub删除智能体（Agent Hub组织共享；需先运行`lop login radient`）",
+  "cli.agents_help.push": "将智能体push（上传）至Radient；`--org`和`--hub-id`通过预览/确认流程push（退出码：0已发布，1错误，2仅预览且有待处理更改，3已拒绝，130已取消）",
+  "cli.agents_help.push_name": "要push至Radient的智能体名称",
+  "cli.agents_help.push_id": "要push至Radient的智能体ID（显式覆盖）",
+  "cli.agents_help.push_org": "发布到此组织的工作区而非公共hub（Agent Hub组织共享；需先运行`lop login radient`）",
+  "cli.agents_help.push_hub_id": "用本地智能体重新发布（覆盖）此hub条目（先检查个人信息引用）；需要--name（--id是本地ID）",
+  "cli.agents_help.pull": "从Radient pull（下载）智能体",
+  "cli.agents_help.pull_id": "要从Radient pull的智能体ID",
+  "cli.agents_help.pull_org": "从此组织的工作区而非公共hub pull（Agent Hub组织共享；需先运行`lop login radient`）",
+  "cli.agents_help.sync": "将已安装的starter和从hub pull的智能体更新至最新文本",
+  "cli.agents_help.sync_name": "仅同步此名称的已安装配置",
+  "cli.agents_help.sync_all": "同步所有已安装的starter和从hub pull的智能体（未指定--name时的默认行为）"
+}

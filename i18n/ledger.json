@@ -2508,6 +2508,1374 @@
       },
       "status": "passed",
       "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 21 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 4 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 64 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 20 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 9 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 5 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 20 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 11 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 11 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 17 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 12 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 12 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 5 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 2 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 2 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 2 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 19 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 1 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 15 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 5 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 6 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 5 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 7 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 1 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 7 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 5 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 9 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "81b18d3d6b7e10419262b2ea97a4dfc423779be6d82b872dbf04209704c2bfe3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 46 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 9 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 34 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 6 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 17 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 76 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 1 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 4 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 17 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 44 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.analytics",
+      "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 98 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.app",
+      "source_sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 46 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.authoring",
+      "source_sha256": "d1a49c668d1049700396c33b7af3c905d0f02b30a2cbf55aab7ea91b40c36cb4",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 40 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.hub_links",
+      "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 56 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.import",
+      "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 87 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.library",
+      "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 108 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.notices",
+      "source_sha256": "2eaf4097197ee0257cfcf7d9d0f450e06fb496db67a92edb21e6f6b1122aaef1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 29 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects",
+      "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 97 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 35 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.review",
+      "source_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 73 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 61 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.small",
+      "source_sha256": "7cd74d45ada43efceba846a9c5d29a0aa90e0567e1f137778300e1742a6adfec",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 121 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Audit passed: 7/7 keys; other-only plurals; …… per guide; widths ≤en except 个-classifier +2; esc/spacing ruled; no findings; deepseek-flash fallback. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. Preserved 10 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 7 new keys. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.usage",
+      "source_sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 21 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. Preserved 30 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 0 new keys. 2 preserved value(s) corrected after independent audit. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 2 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 8 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.agents",
+      "source_sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 44 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.auth",
+      "source_sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 12 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "30312c2052a41da6f580f00dce8daf9babbc0b25c0462c1f2658817cd51f391c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 83 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.files",
+      "source_sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 11 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.media",
+      "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 20 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Initial ordinary full12 audit 4af46d845e1c, deepseek/deepseek-flash, 2026-10-11, passed0 stands for unchanged inline_credentials. SP c3516b7d9054, openai/gpt-6.1-sol, 2026-10-12 read 11/12: inline_credentials unreadable on ordinary read, NOT semantically rereviewed; found 1 MAJOR credential key name vs secret. Independent 2-value delta recheck 2e5edde0be0b, openai/gpt-6.1-sol, 2026-10-12 passed0: credential key-name fix; target sha256 315a6d60c19c99f5bb1b065b902e3510a22ee22e316017e0d988ccf381b12948 verified locally. Both rounds retained; all unchanged bytes identical to backed-up predecessor per recheck report; no new whole-file signoff. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit 17/17 passed0 BLOCKER/MAJOR; 1 MINOR profile 配置档 ambiguity accepted, no translation change; 13-key/15-case visibility render sample passed. Translator and independent auditor openai/gpt-6.1-sol, 2026-10-12; target sha256 afe5a5d81a9f60309d6d9575f3da6d09858e3041f1c7833da613f8e44997c238 verified locally. Supersedes old empty-source approval at snapshot 56d7a2cf3a: source ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356, 3 bytes {}+LF, passed0/no message content, translator deepseek/deepseek-flash, auditor openai/gpt-6.1-sol, 2026-10-11 (fallback disclosed). New approval covers populated source; runtime samples are not full CLI/lifecycle E2E. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 2 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.memory",
+      "source_sha256": "8732c8a8ab1572a39bf81ff94d80c8ea02f146d7da933db6eb41ee3c73062a00",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 15 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. Preserved 752 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 48 new keys. 3 preserved value(s) corrected after independent audit. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "9e785003bab2f7c01f32bae9b2cb114a240a82bac509c05bc55266585a41241d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 9 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "failed",
+        "findings": 0
+      },
+      "status": "failed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Preserved 51 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 1 new key wire.slash.hub. Full audit coverage 51/52: wire.slash.credential is unreadable under ordinary tool-output redaction and was NOT extracted, reread or bypassed; the 51 readable values and the new hub key are clean (0 findings). Namespace WITHHELD at 51/52; status failed until an approved security disposition covers the unreadable value. Independent auditor i18n-auditor openai/gpt-6.1-sol, 2026-10-19."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 2 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-19. 5 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
     }
   ]
 }
