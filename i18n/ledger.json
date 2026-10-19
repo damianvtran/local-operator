@@ -2511,6 +2511,101 @@
     },
     {
       "locale": "es",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": []
+      },
+      "status": "passed",
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": []
+      },
+      "status": "passed",
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": []
+      },
+      "status": "passed",
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": []
+      },
+      "status": "passed",
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": []
+      },
+      "status": "passed",
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
+    },
+    {
+      "locale": "es",
       "namespace": "wire.settings",
       "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
       "translator": {
@@ -2622,215 +2717,6 @@
       },
       "status": "passed",
       "note": "Independent delta recheck by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19, at e6684b09e0: I1 (récupérez meant retrieve, not delete) resolved with supprimez uniquement; verified build/cache, jamais les transcriptions, jamais vos conversations, --dry-run retained, French grammar/glossary and U+202F before the semicolon. Git diff 0b208b2159..e6684b09e0 is that one line; earlier compatible audit evidence applies. Zero unresolved blocker/major; no accepted MINOR. Certifies the requested delta composed with prior independent audits; earlier unsupported fallback claim corrected."
-    },
-    {
-      "locale": "es",
-      "namespace": "wire.settings",
-      "source_sha256": "3e6273eb69a05f0a5450dbd254c536a5276054fee593d5ec2d4a0b25e0bcf50d",
-      "translator": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19"
-      },
-      "auditor": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "4-key session.scratchpad.max_bytes delta (section title/description, row label/help) translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
-    },
-    {
-      "locale": "fr",
-      "namespace": "wire.settings",
-      "source_sha256": "3e6273eb69a05f0a5450dbd254c536a5276054fee593d5ec2d4a0b25e0bcf50d",
-      "translator": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19"
-      },
-      "auditor": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "4-key session.scratchpad.max_bytes delta (section title/description, row label/help) translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
-    },
-    {
-      "locale": "hi",
-      "namespace": "wire.settings",
-      "source_sha256": "3e6273eb69a05f0a5450dbd254c536a5276054fee593d5ec2d4a0b25e0bcf50d",
-      "translator": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19"
-      },
-      "auditor": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "4-key session.scratchpad.max_bytes delta (section title/description, row label/help) translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
-    },
-    {
-      "locale": "ru",
-      "namespace": "wire.settings",
-      "source_sha256": "3e6273eb69a05f0a5450dbd254c536a5276054fee593d5ec2d4a0b25e0bcf50d",
-      "translator": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19"
-      },
-      "auditor": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "4-key session.scratchpad.max_bytes delta (section title/description, row label/help) translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
-    },
-    {
-      "locale": "vi",
-      "namespace": "wire.settings",
-      "source_sha256": "3e6273eb69a05f0a5450dbd254c536a5276054fee593d5ec2d4a0b25e0bcf50d",
-      "translator": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19"
-      },
-      "auditor": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "4-key session.scratchpad.max_bytes delta (section title/description, row label/help) translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
-    },
-    {
-      "locale": "fr",
-      "namespace": "cli.sessions_help",
-      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
-      "translator": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19"
-      },
-      "auditor": {
-        "agent": "coder",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-19",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "1-key --scratchpads-only help line translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
-    },
-    {
-      "locale": "es",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
-        "result": "passed",
-        "findings": []
-      },
-      "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
-    },
-    {
-      "locale": "fr",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
-        "result": "passed",
-        "findings": []
-      },
-      "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
-    },
-    {
-      "locale": "hi",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
-        "result": "passed",
-        "findings": []
-      },
-      "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
-    },
-    {
-      "locale": "ru",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
-        "result": "passed",
-        "findings": []
-      },
-      "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
-    },
-    {
-      "locale": "vi",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
-        "result": "passed",
-        "findings": []
-      },
-      "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off."
     }
   ]
 }
