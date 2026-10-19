@@ -31,10 +31,22 @@ auditor (never the same agent) passes them before the ledger row ships.
 Placeholders, ICU syntax and plural arms are preserved exactly; RTL locales
 follow the direction rules in their style guide.
 
-The coverage gate (`tests/unit/i18n/test_language_manifest.py`) fails on any
-missing `(locale, namespace)` pair not listed in
-`i18n/coverage-allowance.json`. That allowance is **shrink-only**: translate a
-pair, remove it; add a pair only with a reason.
+The coverage gate (`tests/unit/i18n/test_language_manifest.py`) checks the
+exact missing key IDs per `(locale, namespace)` recorded in
+`i18n/coverage-allowance.json`. A newly missing key — including one added to a
+namespace that was already incomplete — fails until it is translated. A listed
+key that is no longer missing fails until its entry is removed, so the
+allowance only shrinks.
+
+Adding an allowance entry is a **reviewed decision**, never a way to ship
+untranslated copy. Every entry must name an `owner` (a session/lane or person)
+and a `payoff` (a ticket reference or ISO date by which it must be gone), and
+the PR must say why the copy cannot be translated now. The gate makes new
+untranslated copy fail by default, and `python scripts/i18n/check.py` also
+fails when the allowance grows relative to the pull request base, naming each
+added key. A file edit can still add an entry, but it becomes a red check that
+must be consciously overridden; reviewers must reject allowance growth that is
+not tied to a real plan.
 
 HOWTO: [`docs/I18N.md`](docs/I18N.md). Contract:
 [`docs/design/i18n.md`](docs/design/i18n.md). `local_operator/i18n/data/shipped.json`

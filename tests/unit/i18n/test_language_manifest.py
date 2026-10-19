@@ -6,17 +6,18 @@ changed key must be translated into; this module fails when a language in that
 manifest is missing a key that exists in English.
 
 The repository is not fully translated today, so ``i18n/coverage-allowance.json``
-records the missing ``(locale, namespace)`` pairs with a reason each. The
-allowance is SHRINK-ONLY, mirroring ``i18n/baseline.json``'s ceilings: a newly
-missing pair fails until it is translated or deliberately added with a reason,
-and a listed pair that has become complete fails until its entry is removed.
+records the exact missing key IDs for each ``(locale, namespace)`` pair, with a
+reason each. The allowance is SHRINK-ONLY, mirroring ``i18n/baseline.json``'s
+ceilings: any missing key not listed fails until it is translated or
+deliberately added with a reason, and any listed key that is no longer missing
+fails until it is removed.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -29,7 +30,7 @@ ALLOWANCE = REPO / "i18n" / "coverage-allowance.json"
 STYLE_GUIDES = REPO / "i18n" / "style-guides"
 SCHEMA = 1
 _LANGUAGE_FIELDS = {"code", "native", "english", "dir", "status"}
-_ALLOWANCE_FIELDS = {"locale", "namespace", "reason"}
+_ALLOWANCE_FIELDS = {"locale", "namespace", "reason", "owner", "payoff", "missing"}
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -48,18 +49,40 @@ def _languages(manifest: dict[str, Any]) -> list[dict[str, str]]:
     return languages
 
 
-def _allowance_pairs(allowance: dict[str, Any]) -> set[tuple[str, str]]:
+def _allowance_map(allowance: dict[str, Any]) -> dict[tuple[str, str], set[str]]:
+    """The allowance as ``(locale, namespace) -> exact missing key IDs``.
+
+    The key list is the whole point of the entry: a pair-level allowance would
+    silently admit a new English key added to a namespace that was already
+    incomplete. Entries are therefore sorted, duplicate-free and namespace
+    scoped so the file stays reviewable and a key cannot be smuggled into the
+    wrong pair. An empty list is invalid: a pair with no missing keys is
+    complete and must be removed.
+    """
     assert allowance.get("schema") == SCHEMA, f"{ALLOWANCE}: unsupported schema"
     entries = allowance.get("pairs")
     assert isinstance(entries, list), f"{ALLOWANCE}: pairs must be a list"
-    pairs: set[tuple[str, str]] = set()
+    listed: dict[tuple[str, str], set[str]] = {}
     for entry in entries:
         assert set(entry) == _ALLOWANCE_FIELDS, f"{ALLOWANCE}: bad fields in {entry!r}"
         assert entry["reason"].strip(), f"{ALLOWANCE}: {entry!r} has no reason"
+        assert entry["owner"].strip(), f"{ALLOWANCE}: {entry!r} has no owner"
+        assert entry["payoff"].strip(), f"{ALLOWANCE}: {entry!r} has no payoff"
         pair = (entry["locale"], entry["namespace"])
-        assert pair not in pairs, f"{ALLOWANCE}: duplicate pair {pair!r}"
-        pairs.add(pair)
-    return pairs
+        assert pair not in listed, f"{ALLOWANCE}: duplicate pair {pair!r}"
+        missing = entry["missing"]
+        assert isinstance(missing, list), f"{ALLOWANCE}: {pair!r} missing must be a list"
+        assert missing, f"{ALLOWANCE}: {pair!r} has no missing keys; remove the complete entry"
+        assert all(
+            isinstance(key, str) and key for key in missing
+        ), f"{ALLOWANCE}: {pair!r} has a non-string or empty key"
+        assert len(set(missing)) == len(missing), f"{ALLOWANCE}: {pair!r} has duplicate keys"
+        assert missing == sorted(missing), f"{ALLOWANCE}: {pair!r} keys are not sorted"
+        assert all(
+            key.startswith(pair[1] + ".") for key in missing
+        ), f"{ALLOWANCE}: {pair!r} lists a key outside its namespace"
+        listed[pair] = set(missing)
+    return listed
 
 
 def _english_messages() -> dict[str, dict[str, str]]:
@@ -80,8 +103,8 @@ def _checked_pairs(languages: list[dict[str, str]]) -> set[tuple[str, str]]:
     }
 
 
-def _missing_pairs(languages: list[dict[str, str]]) -> set[tuple[str, str]]:
-    """Pairs where a target locale lacks at least one English key.
+def _missing_keys(languages: list[dict[str, str]]) -> dict[tuple[str, str], set[str]]:
+    """Actual missing key IDs per ``(locale, namespace)``.
 
     An absent locale directory and an absent namespace file are both all-missing;
     a present file is compared key-by-key so a partial translation still counts
@@ -89,7 +112,7 @@ def _missing_pairs(languages: list[dict[str, str]]) -> set[tuple[str, str]]:
     """
     english = _english_messages()
     present_locales = set(catalogues.locales())
-    missing: set[tuple[str, str]] = set()
+    missing: dict[tuple[str, str], set[str]] = {}
     for language in languages:
         locale = language["code"]
         if language["status"] == "source":
@@ -99,27 +122,43 @@ def _missing_pairs(languages: list[dict[str, str]]) -> set[tuple[str, str]]:
             if not expected:
                 continue
             got = catalogues.load_catalogue(locale, namespace) if namespace in carried else {}
-            if set(expected) - set(got):
-                missing.add((locale, namespace))
+            absent = set(expected) - set(got)
+            if absent:
+                missing[(locale, namespace)] = absent
     return missing
 
 
-def _gate(
-    languages: list[dict[str, str]], allowance: dict[str, Any]
-) -> tuple[set[tuple[str, str]], set[tuple[str, str]], set[tuple[str, str]]]:
-    """Return ``(unlisted missing, complete allowance entries, unknown entries)``.
+class GateResult(NamedTuple):
+    """Key-level findings: ``(locale, namespace, key)`` sets plus unknown pairs."""
 
-    ``complete`` is restricted to pairs the gate actually checks, so an entry
-    naming a removed locale/namespace is reported as ``unknown`` instead of
-    masquerading as complete.
+    unlisted: set[tuple[str, str, str]]
+    stale: set[tuple[str, str, str]]
+    unknown: set[tuple[str, str]]
+
+
+def _gate(languages: list[dict[str, str]], allowance: dict[str, Any]) -> GateResult:
+    """Compare the allowance's exact key sets with what the tree actually carries.
+
+    ``stale`` is restricted to pairs the gate actually checks, so an entry naming
+    a removed locale/namespace is reported as ``unknown`` instead of masquerading
+    as a key that has been translated.
     """
-    missing = _missing_pairs(languages)
-    allowed = _allowance_pairs(allowance)
+    actual = _missing_keys(languages)
+    listed = _allowance_map(allowance)
     checked = _checked_pairs(languages)
-    unlisted = missing - allowed
-    unknown = allowed - checked
-    complete = (allowed & checked) - missing
-    return unlisted, complete, unknown
+    unknown = set(listed) - checked
+    unlisted = {
+        (locale, namespace, key)
+        for (locale, namespace), keys in actual.items()
+        for key in keys - listed.get((locale, namespace), set())
+    }
+    stale = {
+        (locale, namespace, key)
+        for (locale, namespace), keys in listed.items()
+        if (locale, namespace) in checked
+        for key in keys - actual.get((locale, namespace), set())
+    }
+    return GateResult(unlisted, stale, unknown)
 
 
 def test_manifest_is_schema_versioned_and_matches_the_runtime_list() -> None:
@@ -156,16 +195,18 @@ def test_every_manifest_language_has_a_style_guide() -> None:
 
 def test_every_missing_key_is_covered_by_the_shrink_only_allowance() -> None:
     languages = _languages(_json(MANIFEST))
-    unlisted, complete, unknown = _gate(languages, _json(ALLOWANCE))
-    assert not unlisted, (
-        "Untranslated (locale, namespace) pairs are missing from "
-        f"i18n/coverage-allowance.json: {sorted(unlisted)}. Translate them into every "
-        "language in i18n/languages.json, or add each pair with a reason."
+    result = _gate(languages, _json(ALLOWANCE))
+    assert not result.unlisted, (
+        "Untranslated (locale, namespace, key) entries are missing from "
+        f"i18n/coverage-allowance.json: {sorted(result.unlisted)}. Translate each key "
+        "into every language in i18n/languages.json, or record the debt with a reason."
     )
-    assert not complete, f"Complete allowance pairs must be removed: {sorted(complete)}"
-    assert not unknown, (
+    assert not result.stale, (
+        "Allowance keys that are no longer missing must be removed: " f"{sorted(result.stale)}"
+    )
+    assert not result.unknown, (
         "i18n/coverage-allowance.json names pairs that do not exist in the manifest "
-        f"or English catalogues: {sorted(unknown)}"
+        f"or English catalogues: {sorted(result.unknown)}"
     )
 
 
@@ -184,43 +225,111 @@ _LANGUAGES = [
 ]
 
 
-def _allowance(*pairs: tuple[str, str]) -> dict[str, Any]:
+def _allowance(*entries: tuple[str, str, list[str]]) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "pairs": [
-            {"locale": locale, "namespace": namespace, "reason": "synthetic control"}
-            for locale, namespace in pairs
+            {
+                "locale": locale,
+                "namespace": namespace,
+                "reason": "synthetic control",
+                "owner": "synthetic lane",
+                "payoff": "2026-12-31",
+                "missing": missing,
+            }
+            for locale, namespace, missing in entries
         ],
     }
 
 
-def test_gate_fails_on_a_new_missing_pair(synthetic_catalogues: Path) -> None:
+def test_gate_fails_on_a_new_missing_key(synthetic_catalogues: Path) -> None:
     (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
-    assert _gate(_LANGUAGES, _allowance()) == ({("fr", "demo")}, set(), set())
+    result = _gate(_LANGUAGES, _allowance())
+    assert result.unlisted == {("fr", "demo", "demo.title")}
+    assert not result.stale and not result.unknown
 
 
-def test_gate_accepts_an_allowanced_missing_pair(synthetic_catalogues: Path) -> None:
+def test_gate_accepts_an_allowanced_missing_key(synthetic_catalogues: Path) -> None:
     (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
-    assert _gate(_LANGUAGES, _allowance(("fr", "demo"))) == (set(), set(), set())
+    result = _gate(_LANGUAGES, _allowance(("fr", "demo", ["demo.title"])))
+    assert result == GateResult(set(), set(), set())
 
 
-def test_gate_rejects_an_allowance_entry_that_has_become_complete(
+def test_gate_rejects_a_new_key_in_an_already_incomplete_namespace(
+    synthetic_catalogues: Path,
+) -> None:
+    """The reviewer's discriminating control at unit level.
+
+    The pair is already allowanced as incomplete, so a pair-level gate would
+    pass; only the key-level set comparison can see the newly added English key.
+    """
+    en = synthetic_catalogues / "en" / "demo.json"
+    en.write_text(json.dumps({"demo.title": "Title"}))
+    allowance = _allowance(("fr", "demo", ["demo.title"]))
+    en.write_text(json.dumps({"demo.title": "Title", "demo.new": "New"}))
+    result = _gate(_LANGUAGES, allowance)
+    assert result.unlisted == {("fr", "demo", "demo.new")}
+    assert not result.stale and not result.unknown
+
+
+def test_gate_rejects_an_allowance_key_that_is_no_longer_missing(
     synthetic_catalogues: Path,
 ) -> None:
     (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
     (synthetic_catalogues / "fr" / "demo.json").write_text(json.dumps({"demo.title": "Titre"}))
-    unlisted, complete, unknown = _gate(_LANGUAGES, _allowance(("fr", "demo")))
-    assert (unlisted, complete, unknown) == (set(), {("fr", "demo")}, set())
+    result = _gate(_LANGUAGES, _allowance(("fr", "demo", ["demo.title"])))
+    assert result.stale == {("fr", "demo", "demo.title")}
+    assert not result.unlisted and not result.unknown
 
 
 def test_gate_rejects_an_unknown_allowance_entry(synthetic_catalogues: Path) -> None:
     (synthetic_catalogues / "en" / "demo.json").write_text(json.dumps({"demo.title": "Title"}))
-    unlisted, complete, unknown = _gate(_LANGUAGES, _allowance(("de", "demo")))
-    assert (unlisted, complete, unknown) == ({("fr", "demo")}, set(), {("de", "demo")})
+    result = _gate(_LANGUAGES, _allowance(("de", "demo", ["demo.title"])))
+    assert result.unlisted == {("fr", "demo", "demo.title")}
+    assert result.unknown == {("de", "demo")}
+    assert not result.stale
 
 
 def test_allowance_requires_a_reason(synthetic_catalogues: Path) -> None:
-    allowance = _allowance(("fr", "demo"))
+    allowance = _allowance(("fr", "demo", ["demo.title"]))
     allowance["pairs"][0]["reason"] = "  "
     with pytest.raises(AssertionError, match="has no reason"):
-        _allowance_pairs(allowance)
+        _allowance_map(allowance)
+
+
+@pytest.mark.parametrize("field", ["owner", "payoff"])
+def test_allowance_requires_owner_and_payoff(field: str, synthetic_catalogues: Path) -> None:
+    allowance = _allowance(("fr", "demo", ["demo.title"]))
+    allowance["pairs"][0][field] = "  "
+    with pytest.raises(AssertionError, match=f"has no {field}"):
+        _allowance_map(allowance)
+
+
+@pytest.mark.parametrize(
+    ("missing", "match"),
+    [
+        ([], "no missing keys"),
+        (["demo.title", "demo.title"], "duplicate keys"),
+        (["demo.title", "demo.alt"], "not sorted"),
+        (["other.title"], "outside its namespace"),
+    ],
+)
+def test_allowance_rejects_malformed_missing_lists(missing: list[str], match: str) -> None:
+    allowance = _allowance(("fr", "demo", missing))
+    with pytest.raises(AssertionError, match=match):
+        _allowance_map(allowance)
+
+
+def test_allowance_rejects_a_duplicate_pair() -> None:
+    allowance = _allowance(
+        ("fr", "demo", ["demo.one"]),
+        ("fr", "demo", ["demo.two"]),
+    )
+    with pytest.raises(AssertionError, match="duplicate pair"):
+        _allowance_map(allowance)
+
+
+def test_allowance_growth_reports_only_added_key_ids(i18n_check) -> None:
+    base = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one", "demo.two"]}]}
+    assert i18n_check.allowance_growth(base, head) == {("fr", "demo", "demo.two")}
