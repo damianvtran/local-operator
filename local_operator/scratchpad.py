@@ -644,6 +644,7 @@ def scratchpad_budget_bytes() -> int:
         return SCRATCHPAD_TOTAL_BUDGET_BYTES
     return max(SCRATCHPAD_MAX_BYTES_FLOOR, min(SCRATCHPAD_MAX_BYTES_CEILING, configured))
 
+
 #: How many directory entries the budget walk visits before it stops and refuses
 #: anyway. The walk runs on EVERY write and its input is a tree the caller may have
 #: filled by accident, so it must be BOUNDED — and the bound is an entry count

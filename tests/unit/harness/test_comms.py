@@ -3513,6 +3513,32 @@ def test_a_child_whose_transcript_vanished_is_not_resumable(tmp_path) -> None:
     assert row.detail == "no transcript on disk"
 
 
+def test_a_child_whose_directory_was_reaped_reports_gone(tmp_path) -> None:
+    """The retention pass removes whole session directories; the roster must
+    answer with the existing clean ``gone`` row rather than raise or advertise
+    a resume of nothing. This is the shape a parent reaches after its child's
+    record was reaped, and the one the module docstring promises (accepted
+    trade-off: a resumed ancient parent gets "gone").
+    """
+    import shutil
+
+    comms, jobs, _child, _parent = wire()
+    session_dir = tmp_path / "reaped"
+    session_dir.mkdir()
+    comms.attach("job-1", FakeChild(), session_dir)
+    comms.detach("job-1")
+    shutil.rmtree(session_dir)
+    # The job row was swept with the record (the reaped-directory case), which
+    # lands the status on the ``gone`` fallback.
+    del jobs.jobs["job-1"]
+
+    [row] = comms.roster()
+
+    assert row.status == "gone"
+    assert row.resumable is False
+    assert row.detail == "no transcript on disk"
+
+
 def test_the_roster_and_the_nodes_keep_insertion_order() -> None:
     """Launch order is the roster's contract: the model says "the last one".
 

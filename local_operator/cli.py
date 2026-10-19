@@ -4997,6 +4997,31 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             payload["scratchpads_only"] = True
         print(_json.dumps(payload, indent=2))
 
+    if scratchpads_only and args.dry_run:
+        # ONLY the audit and the content plan: the record halves are not part of
+        # this mode, and printing them would offer rows it will never apply.
+        moment = time.time()
+        with file_logging():
+            preview = run_delegated_pass(
+                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+            )
+        audit = audit_scratchpads(root / "sessions")
+        if args.json:
+            emit_json(
+                CleanupResult(dry_run=True, skipped="not run (--scratchpads-only)"),
+                preview,
+                outcome="dry-run",
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 0
+        _print_scratchpads(audit)
+        print()
+        print("== Scratchpad content ==")
+        _print_content(preview, "would reclaim")
+        print(f"nothing was removed (dry run); the record of real removals is {record_path}")
+        return 0
+
     if scratchpads_only and not args.dry_run:
         # CONTENT ONLY. The parent class and the record pass are not called at
         # all, which is the whole point: an operator can reclaim cache-shaped

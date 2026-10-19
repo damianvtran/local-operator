@@ -415,7 +415,7 @@ def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) ->
     out = capsys.readouterr().out
     assert "scratchpad content: would reclaim 1 pad(s)" in out
     assert "(1 stale output)" in out
-    assert "content-kid-01" in out and "(stale output past the window; 1 entry)" in out
+    assert "content-kid-01" in out and "(stale output; 1 entry)" in out
     assert big.exists(), "a dry run removes nothing"
 
 
