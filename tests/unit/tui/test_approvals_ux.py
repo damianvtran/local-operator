@@ -843,6 +843,11 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # from the completion path, which is the `/login` line this sits on the
         # other side of.
         "delete": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/aida`, whose shape this command mirrors: bare
+        # `/librarian` reports status (or opens the pinned conversation), and
+        # the space offers the package's verb list (`open`, `status`, `pause`,
+        # `resume`, `run`) — the handler refuses anything else with that list.
+        "librarian": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`: bare `/project` LISTS (the listing is the
         # receipt), and the space opens the reserved subcommand vocabulary
         # (`PROJECT_SUBCOMMANDS`) — the words the route validates and the picker
