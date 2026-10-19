@@ -43,6 +43,11 @@ carries that session id as origin provenance (the server stores it and never
 returns it); a runtime with no endpoint refuses every channel op rather than
 acting as a human. Neither message bodies nor session ids are ever logged here.
 
+REFUSALS, one line each: ``not_permitted`` for ``decide``; ``invalid_request``
+for unknown ops, malformed ``channel_id``, bad history bounds/limits, and
+invalid member shapes; ``no_agent_endpoint`` when a channel op has no owner
+endpoint; ``*_failed`` when the transport does not confirm.
+
 THE RUNTIME BUNDLE is declared on ``ToolContext`` (``bridge_runtime``): a
 session that has no bridge runtime — unsigned, disabled, or not the designated
 session — never advertises this tool at all (the same createIf shape ``wake``
@@ -53,6 +58,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -129,13 +135,7 @@ class BridgeRuntime:
 
 
 class ChannelMemberParams(BaseModel):
-    """One invited member of a new group/channel (contract §2's member shape).
-
-    ``endpoint_id`` is required by the server for an agent member and refused
-    for a human one, so the tool only forwards it when set. ``display_label``
-    is the only name that crosses the wire; an empty label is normalized by
-    the server, never here.
-    """
+    """One invited member: an agent names its endpoint, a human must not."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -146,8 +146,7 @@ class ChannelMemberParams(BaseModel):
 
 
 class BridgeToolParams(BaseModel):
-    """The tool's argument schema. ``extra="forbid"`` so a hallucinated ``op``
-    (``decide``) is a validation error, not an ignored field."""
+    """Bridge args; ``extra="forbid"`` makes a hallucinated field a refusal."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -185,6 +184,12 @@ class BridgeToolParams(BaseModel):
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
+
+
+#: The conversation id family, shared with the desktop routes' S-RSA-5 guard:
+#: a model-supplied id is interpolated upstream, so a value that could reshape
+#: the path (``#``, ``..``, slashes) is refused BEFORE any client call.
+_CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -249,6 +254,18 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
 
     op = str(args.get("op") or "")
+    # The decide word gets its OWN refusal, before ANY gate, so an endpoint-less
+    # runtime that invents it still hears the §10.3 sentence rather than a
+    # channel-identity refusal (the schema also omits it).
+    if op == "decide":
+        return _error(
+            "decisions are made by the human through the ask queue — this tool has "
+            "no decide authority (contract §10.3, #125)",
+            code="not_permitted",
+        )
+    if op and op not in BRIDGE_OPS:
+        return _error(f"unknown bridge op {op!r}", code="invalid_request")
+
     # CHANNEL IDENTITY, before the gates: these ops act as an AGENT member,
     # and a runtime with no owner endpoint has no agent identity to act as.
     # This is a refusal, never a fallback to the human lane — and it only
@@ -284,15 +301,6 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         admit_soon(runtime)
         return _error(refusal["error"], code=refusal["code"])
 
-    # The decide word gets its OWN refusal, before schema validation, so the
-    # refusal names the rule rather than reading as a typo (the schema also
-    # omits it — belt and braces against a model that invents the op).
-    if op == "decide":
-        return _error(
-            "decisions are made by the human through the ask queue — this tool has "
-            "no decide authority (contract §10.3, #125)",
-            code="not_permitted",
-        )
     try:
         params = BridgeToolParams(**args)
     except Exception as failure:  # pydantic ValidationError, kept dependency-free
@@ -421,7 +429,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             member.kind == "agent" and not member.endpoint_id.strip() for member in params.members
         ):
             return _error("an agent member needs its endpoint_id")
+        # The server keys a member by endpoint when present, ignoring kind, so a
+        # human entry carrying the actor endpoint would collide with (and be
+        # promoted into) the creator agent row. Refuse it at the boundary.
+        if any(member.kind == "human" and member.endpoint_id.strip() for member in params.members):
+            return _error("a human member must not carry an endpoint_id")
         body: dict[str, Any] = {
+            "tenant_id": runtime.tenant_id,
             "kind": params.kind,
             "members": _channel_members_with_creator(params.members, runtime.owner),
         }
@@ -456,8 +470,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         }
 
     if params.op == "channel_post":
-        if not params.channel_id.strip():
-            return _error("channel_post needs channel_id")
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("channel_post needs a conversation id (bcv_…)")
         if not params.body.strip():
             return _error("channel_post needs non-empty body")
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
@@ -466,7 +481,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         client_ref = str(uuid.uuid4())
         try:
             result = await runtime.client.conversation_send(
-                params.channel_id.strip(),
+                channel_id,
                 client_ref=client_ref,
                 text=params.body,
                 tenant_id=runtime.tenant_id,
@@ -480,14 +495,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             message = {}
         message_id = str(message.get("id") or "")
         seq = message.get("seq")
-        content = f"posted to {params.channel_id.strip()}: message {message_id or '?'}"
+        content = f"posted to {channel_id}: message {message_id or '?'}"
         if isinstance(seq, int):
             content += f" at seq {seq}"
         return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
 
     if params.op == "channel_history":
-        if not params.channel_id.strip():
-            return _error("channel_history needs channel_id")
+        channel_id = params.channel_id.strip()
+        if _CONVERSATION_ID.fullmatch(channel_id) is None:
+            return _error("channel_history needs a conversation id (bcv_…)")
         if params.before_seq is not None and params.after_seq is not None:
             return _error(
                 "channel_history takes at most one of before_seq/after_seq "
@@ -497,7 +513,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error(f"channel_history limit must be 1..{CONVERSATION_PAGE_MAX}")
         try:
             result = await runtime.client.conversation_messages(
-                params.channel_id.strip(),
+                channel_id,
                 tenant_id=runtime.tenant_id,
                 limit=int(params.limit),
                 before_seq=params.before_seq,
@@ -515,8 +531,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
         }
 
-    # The closed set is enforced by the schema; this names the intent for a
-    # future op a reviewer might add above without re-reading the contract.
+    # The decide/unknown refusals above run before the gates; this later return
+    # is the schema-valid op that lost its branch — a programmer error, not a
+    # model input.
     return _error(
         f"unknown bridge op {params.op!r}",
         code="invalid_request",
@@ -586,12 +603,9 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Read and answer organization messages: take_up fetches the screened body "
-            "(verified against body_sha256), ack claims (working) or releases (done) it, "
-            "send/reply post. Channels: list conversations, create a group/channel as "
-            "this session's agent, post to a channel and read its history. Deciding a "
-            "request is the human’s, through the ask queue — this tool cannot approve "
-            "or deny."
+            "Team Bridge: take_up/ack delivered messages, send/reply, and channel ops "
+            "(channels, channel_create, channel_post, channel_history) as this session's "
+            "agent. This tool cannot approve or deny — that is the human's ask queue."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
