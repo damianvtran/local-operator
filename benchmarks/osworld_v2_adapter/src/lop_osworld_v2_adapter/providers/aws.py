@@ -906,6 +906,7 @@ class AwsProvider:
             )
             return guest_supervisor.ReceiptResult("read_failed", recovery_exhausted=True)
 
+        receipt_failure = "receipt_read_failed"
         for attempt in range(2):
             try:
                 result = self._run_guest_command(
@@ -941,7 +942,12 @@ class AwsProvider:
                     },
                 )
                 return guest_supervisor.ReceiptResult("new_restart")
-            except Exception:
+            except Exception as error:
+                receipt_failure = (
+                    "systemd_generation_disagreement"
+                    if isinstance(error, guest_supervisor.GenerationMismatch)
+                    else "receipt_read_failed"
+                )
                 if attempt == 0:
                     self._sleep(0.1)
         self._write_supervisor_evidence(
@@ -953,6 +959,7 @@ class AwsProvider:
                 "records_withheld": False,
                 "read_attempts": 2,
                 "cause": "supervisor receipt unavailable",
+                "receipt_failure": receipt_failure,
                 "failed_action_delivery": delivery,
                 "remaining_batch": "not_sent",
                 "records": self._supervisor_records,

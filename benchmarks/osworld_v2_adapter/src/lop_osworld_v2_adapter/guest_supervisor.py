@@ -17,6 +17,10 @@ from typing import Any, Literal, Sequence
 from lop_osworld_v2_adapter import guest_disk
 
 
+class GenerationMismatch(ValueError):
+    """systemd observed a restart that the guest capture history cannot prove."""
+
+
 @dataclass(frozen=True)
 class ReceiptResult:
     """Only a complete verified read may authorize input on an existing binding."""
@@ -38,15 +42,20 @@ record = {'restart': time.time_ns(), 'unit': unit,
           'service_result': os.environ.get('SERVICE_RESULT', 'unknown'),
           'stderr_tail': '', 'journal_tail_status': 'pending'}
 try:
-    records = json.loads(path.read_text())['records']
+    history = json.loads(path.read_text())
+    records = history['records']
+    captured = history['captured_exits']
+    if not isinstance(records, list) or type(captured) is not int or captured < 0:
+        raise ValueError('invalid capture history')
 except (OSError, ValueError, KeyError, TypeError):
-    records = []
-if not isinstance(records, list):
-    records = []
+    # Never invent a new baseline after corruption: the report must retain a
+    # detectable disagreement with systemd, not bless a restarted process.
+    history, records, captured = {}, [], 0
 records = (records + [record])[-4:]
+history.update(schema_version=1, records=records, captured_exits=captured + 1)
 def persist():
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps({'schema_version': 1, 'records': records}))
+    tmp.write_text(json.dumps(history))
     tmp.replace(path)
 # The exit status is authoritative and cheap; persist it BEFORE asking a
 # potentially overloaded journal. Even a timed-out journal must not hide death.
@@ -91,7 +100,7 @@ if not re.fullmatch(r'[A-Za-z0-9_.-]+\.service', unit):
 props = dict(line.split('=', 1) for line in run('systemctl', 'show', unit,
     '-p', 'MainPID', '-p', 'ExecStart', '-p', 'ExecStartPre', '-p', 'ExecStartPost',
     '-p', 'ExecStop', '-p', 'ExecStopPost', '-p', 'StandardError', '-p', 'StandardOutput',
-    '-p', 'Type', '-p', 'LoadState'
+    '-p', 'Type', '-p', 'LoadState', '-p', 'NRestarts', '-p', 'ActiveEnterTimestampMonotonic'
     ).splitlines())
 if props.get('MainPID') != str(pid) or 'main.py' not in props.get('ExecStart', ''):
     raise RuntimeError('service does not exclusively own action server')
@@ -102,6 +111,10 @@ if props.get('Type') == 'oneshot':
     raise RuntimeError('oneshot action-server service cannot be supervised')
 if props.get('LoadState') != 'loaded':
     raise RuntimeError('action-server service is not loaded')
+if (not props.get('NRestarts', '').isdigit() or
+        not props.get('ActiveEnterTimestampMonotonic', '').isdigit() or
+        int(props['ActiveEnterTimestampMonotonic']) <= 0):
+    raise RuntimeError('systemd restart generation is unavailable')
 root = pathlib.Path('/var/lib/lop-action-supervisor')
 capture = root / 'capture.py'
 path = pathlib.Path('/etc/systemd/system') / (unit + '.d') / '90-lop-supervisor.conf'
@@ -133,14 +146,17 @@ receipt = root / (unit + '.json')
 try:
     if not receipt.exists():
         with receipt.open('x') as out:
-            json.dump({'schema_version': 1, 'records': []}, out)
+            json.dump({'schema_version': 1, 'records': [], 'captured_exits': 0,
+                       'baseline_nrestarts': int(props['NRestarts']),
+                       'baseline_active_enter': int(props['ActiveEnterTimestampMonotonic'])}, out)
     if created:
         run('systemctl', 'daemon-reload')
     effective = dict(line.split('=', 1) for line in run('systemctl', 'show', unit,
         '-p', 'Type', '-p', 'LoadState', '-p', 'Restart', '-p', 'KillMode',
         '-p', 'ExecStopPost', '-p', 'ProtectSystem', '-p', 'ReadOnlyPaths',
         '-p', 'InaccessiblePaths', '-p', 'RootDirectory', '-p', 'RootImage',
-        '-p', 'StartLimitBurst', '-p', 'StartLimitIntervalUSec', '-p', 'RestartUSec'
+        '-p', 'StartLimitBurst', '-p', 'StartLimitIntervalUSec', '-p', 'RestartUSec',
+        '-p', 'RestartPreventExitStatus', '-p', 'ExitType'
         ).splitlines())
     if effective.get('Type') == 'oneshot':
         raise RuntimeError('oneshot action-server service cannot be supervised')
@@ -148,6 +164,12 @@ try:
         raise RuntimeError('action-server service is not loaded')
     if effective.get('Restart') != 'always':
         raise RuntimeError('effective Restart is not always')
+    # Refuse rather than clear existing exclusions: their original intent is
+    # unknown, and Restart=always cannot override this native policy veto.
+    if effective.get('RestartPreventExitStatus', '').strip():
+        raise RuntimeError('unit has RestartPreventExitStatus exclusions')
+    if effective.get('ExitType', 'main') != 'main':
+        raise RuntimeError('unit uses ExitType=cgroup')
     if (effective.get('KillMode') != 'process' or
             effective.get('StartLimitBurst') != '3' or
             effective.get('StartLimitIntervalUSec') != '1h' or
@@ -170,8 +192,19 @@ print(json.dumps({'unit': unit, 'installed': True}))
 """
 
 REPORT_SOURCE = r"""
-import pathlib, sys
-print((pathlib.Path('/var/lib/lop-action-supervisor') / (sys.argv[1] + '.json')).read_text())
+import json, pathlib, subprocess, sys
+unit = sys.argv[1]
+# This view exists even when our capture helper cannot write (ENOSPC/EROFS).
+# Read systemd FIRST: a concurrent restart then makes the envelope disagree or
+# the HTTP read fail, rather than authorizing input from a stale empty history.
+props = dict(line.split('=', 1) for line in subprocess.check_output(
+    ['systemctl', 'show', unit, '-p', 'NRestarts', '-p', 'ActiveEnterTimestampMonotonic'],
+    text=True, timeout=2).splitlines())
+path = pathlib.Path('/var/lib/lop-action-supervisor') / (unit + '.json')
+history = json.loads(path.read_text())
+history['systemd_nrestarts'] = int(props['NRestarts'])
+history['systemd_active_enter'] = int(props['ActiveEnterTimestampMonotonic'])
+print(json.dumps(history))
 """
 
 
@@ -213,6 +246,23 @@ def receipt_records(output: str) -> list[dict[str, Any]]:
     records = value.get("records")
     if not isinstance(records, list):
         raise ValueError("invalid supervisor records")
+    counters = ("baseline_nrestarts", "captured_exits", "systemd_nrestarts")
+    timestamps = ("baseline_active_enter", "systemd_active_enter")
+    if any(type(value.get(key)) is not int or value[key] < 0 for key in counters):
+        raise ValueError("invalid systemd restart counters")
+    if any(type(value.get(key)) is not int or value[key] <= 0 for key in timestamps):
+        raise ValueError("invalid systemd activation timestamps")
+    captured = value["captured_exits"]
+    # NRestarts counts systemd's automatic restart jobs, independently of our
+    # helper. A successful report of an old empty file cannot hide a failed
+    # first write. Timestamp comparison also catches starts with no counter
+    # advance (e.g. a manual restart/reset), which cannot be safely correlated.
+    if (
+        value["systemd_nrestarts"] - value["baseline_nrestarts"] != captured
+        or len(records) != min(captured, 4)
+        or (value["systemd_active_enter"] == value["baseline_active_enter"]) != (captured == 0)
+    ):
+        raise GenerationMismatch("systemd generation and capture history disagree")
     for record in records:
         if (
             not isinstance(record, dict)

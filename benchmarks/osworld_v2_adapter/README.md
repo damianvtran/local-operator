@@ -30,8 +30,11 @@ server. Discovery follows only the command's `/proc` ancestry and cgroup;
 MainPID must be the server itself, stderr must already go to the journal, and
 services with desktop-affecting start/stop hooks are refused. The effective
 systemd configuration is verified after reload and on idempotent re-entry:
-oneshot/unloaded units, an overridden restart policy or capture hook, and
-service sandboxes that could prevent diagnostic writes are refused. Shell/session-scope
+oneshot/unloaded units, an overridden restart policy or capture hook, nonempty
+`RestartPreventExitStatus` exclusions, `ExitType=cgroup`, and service sandboxes
+that could prevent diagnostic writes are refused. Existing exit-status exclusions
+are not erased: their intent is unknown. Successful installation requires the
+effective `RestartPreventExitStatus` to be empty and `ExitType` to be `main`. Shell/session-scope
 launches and unsupported guests remain unchanged. No SSH, SSM or new credentials
 are used; privilege escalation is the existing guest-preparation ladder.
 
@@ -50,8 +53,17 @@ process's `EXIT_CODE`, `EXIT_STATUS` (including signal names), `SERVICE_RESULT`
 and a bounded journal tail in `/var/lib/lop-action-supervisor/<unit>.json`.
 The exit fields are written before querying the journal; a journal failure retains
 them and marks `journal_tail_status: unavailable`. The file is an initialized
-`schema_version: 1` envelope containing `records`, so a verified empty history is
-distinct from a missing, malformed or unreadable receipt. Only four records and 4096 tail characters per record are retained. This helper
+`schema_version: 1` envelope containing `records`, the installation's
+`baseline_nrestarts` / `baseline_active_enter`, and a total `captured_exits` count.
+Reports independently query systemd's `NRestarts` and
+`ActiveEnterTimestampMonotonic` and include them as `systemd_nrestarts` /
+`systemd_active_enter`. A valid empty history proves no restart only when the
+manager's generation still matches that baseline. A counter/history mismatch or
+an activation change without a capture forces a fresh binding and records
+`receipt_unavailable` with `receipt_failure: systemd_generation_disagreement`.
+Thus ENOSPC/EROFS before the helper's first write cannot silently authorize input
+against the old screen. Manual restarts/counter resets that cannot be correlated
+also fail closed; this mechanism never resets systemd's counters. Only four records and 4096 tail characters per record are retained. This helper
 writes harness diagnostics only; it does not touch desktop or task paths.
 
 Before each action and observation the adapter checks for a new restart receipt.

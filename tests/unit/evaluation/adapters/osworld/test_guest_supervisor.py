@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import base64
 import builtins
+import contextlib
+import errno
+import io
 import json
 import subprocess
 import sys
@@ -42,6 +45,18 @@ from tests.unit.evaluation.adapters.osworld.test_aws_provider import (  # noqa: 
 )
 
 
+def _envelope(records: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "records": records,
+        "captured_exits": len(records),
+        "baseline_nrestarts": 0,
+        "baseline_active_enter": 100,
+        "systemd_nrestarts": len(records),
+        "systemd_active_enter": 200 if records else 100,
+    }
+
+
 def _script_guest(
     tmp_path: Path,
     *,
@@ -59,6 +74,8 @@ def _script_guest(
         "StandardError": "journal",
         "Type": "simple",
         "LoadState": "loaded",
+        "NRestarts": "0",
+        "ActiveEnterTimestampMonotonic": "100",
     }
     properties.update(props or {})
     calls: list[Any] = []
@@ -79,6 +96,8 @@ def _script_guest(
                 "StartLimitBurst": "3",
                 "StartLimitIntervalUSec": "1h",
                 "RestartUSec": "1s",
+                "RestartPreventExitStatus": "",
+                "ExitType": "main",
                 **(effective_props or {}),
             }
         return "\n".join(k + "=" + v for k, v in result.items())
@@ -109,6 +128,11 @@ def test_install_is_idempotent_and_cannot_restart_or_kill_desktop(tmp_path: Path
     install()
     assert sum(args[1] == "daemon-reload" for args in calls) == 1
     assert sum("Restart" in args for args in calls) == 2
+    assert all(
+        "RestartPreventExitStatus" in args and "ExitType" in args
+        for args in calls
+        if "Restart" in args
+    )
     assert not any(
         args[1] in {"restart", "start", "stop", "kill", "reset-failed"} for args in calls
     )
@@ -333,7 +357,7 @@ def test_recovery_record_contains_cause_and_stderr(
             "_run_guest_command",
             lambda *a, **k: guest_disk.CommandResult(
                 0,
-                "escalation=agentless\n" + json.dumps({"schema_version": 1, "records": [record]}),
+                "escalation=agentless\n" + json.dumps(_envelope([record])),
                 "",
             ),
         )
@@ -384,7 +408,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if '/var/lib/lop-action-supervisor' in str(body['command']):
-            baseline = '{"schema_version": 1, "records": []}'
+            baseline = json.dumps({'schema_version': 1, 'records': [], 'captured_exits': 0,
+                'baseline_nrestarts': 0, 'baseline_active_enter': 100,
+                'systemd_nrestarts': 0, 'systemd_active_enter': 100})
             output = 'escalation=agentless\n'
             output += report.read_text() if report.exists() else baseline
         else:
@@ -447,6 +473,11 @@ async def test_real_server_process_dies_restarts_and_next_batch_continues(
                 json.dumps(
                     {
                         "schema_version": 1,
+                        "captured_exits": 1,
+                        "baseline_nrestarts": 0,
+                        "baseline_active_enter": 100,
+                        "systemd_nrestarts": 1,
+                        "systemd_active_enter": 200,
                         "records": [
                             {
                                 "restart": 999,
@@ -504,6 +535,10 @@ async def test_real_server_process_dies_restarts_and_next_batch_continues(
         ({"LoadState": "error"}, "action-server service is not loaded"),
         ({"ProtectSystem": "strict"}, "service sandbox may block supervisor capture"),
         ({"KillMode": "control-group"}, "effective supervisor restart policy was overridden"),
+        ({"RestartPreventExitStatus": "SIGKILL"}, "unit has RestartPreventExitStatus exclusions"),
+        ({"RestartPreventExitStatus": "SIGSEGV"}, "unit has RestartPreventExitStatus exclusions"),
+        ({"RestartPreventExitStatus": "9 11"}, "unit has RestartPreventExitStatus exclusions"),
+        ({"ExitType": "cgroup"}, "unit uses ExitType=cgroup"),
     ],
 )
 def test_effective_configuration_is_verified_and_new_dropin_rolled_back(
@@ -579,7 +614,7 @@ def _restart_record() -> dict[str, Any]:
 
 def _receipt(records: list[dict[str, Any]]) -> guest_disk.CommandResult:
     return guest_disk.CommandResult(
-        0, "escalation=agentless\n" + json.dumps({"schema_version": 1, "records": records}), ""
+        0, "escalation=agentless\n" + json.dumps(_envelope(records)), ""
     )
 
 
@@ -743,3 +778,112 @@ async def test_statement_three_restart_interrupts_batch_and_rebinds_before_next_
         assert reads == 4  # Three per-action reads, then one BEFORE the fresh frame.
         await provider.execute(["new_binding_input()"], settle=False)
         assert len(input_posts) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write_errno", [errno.ENOSPC, errno.EROFS])
+@pytest.mark.parametrize("nrestarts", [0, 1])
+async def test_failed_first_capture_write_cannot_hide_generation_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_errno: int, nrestarts: int
+) -> None:
+    """Run the shipped capture AND report; the manager view outlives a failed write."""
+    root = tmp_path / "var/lib/lop-action-supervisor"
+    root.mkdir(parents=True)
+    path = root / "action-server.service.json"
+    baseline = _envelope([])
+    baseline.update(baseline_nrestarts=7, systemd_nrestarts=7)
+    path.write_text(json.dumps(baseline))
+    native = {"NRestarts": 7, "ActiveEnterTimestampMonotonic": 100}
+    events = []
+    generation = 1
+    real_write = Path.write_text
+
+    def unwritable(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == root / "action-server.service.tmp":
+            raise OSError(write_errno, "synthetic capture storage failure")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", unwritable)
+
+    def execute_source(source: str) -> str:
+        def show(*args: Any, **kwargs: Any) -> str:
+            assert args[0][:3] == ["systemctl", "show", "action-server.service"]
+            return "\n".join(f"{key}={value}" for key, value in native.items())
+
+        modules = {
+            "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
+            "os": SimpleNamespace(
+                environ={"EXIT_CODE": "killed", "EXIT_STATUS": "KILL", "SERVICE_RESULT": "signal"}
+            ),
+            "subprocess": SimpleNamespace(check_output=show),
+            "sys": SimpleNamespace(argv=["-c", "action-server.service"]),
+        }
+        real_import = builtins.__import__
+
+        def importer(name: str, *args: Any, **kwargs: Any) -> Any:
+            return modules[name] if name in modules else real_import(name, *args, **kwargs)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exec(source, {"__builtins__": {**vars(builtins), "__import__": importer}})
+        return output.getvalue()
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            nonlocal generation
+            if "/var/lib/lop-action-supervisor" in str(argv):
+                return guest_disk.CommandResult(
+                    0, "escalation=agentless\n" + execute_source(guest_supervisor.REPORT_SOURCE), ""
+                )
+            events.append(("input", generation))
+            if len(events) == 2:
+                # The old process exited after input two; the helper runs but
+                # cannot persist even its first record. The manager still sees
+                # a new activation, with or without an automatic restart count.
+                with pytest.raises(OSError) as raised:
+                    execute_source(guest_supervisor.CAPTURE_SOURCE)
+                assert raised.value.errno == write_errno
+                assert json.loads(path.read_text())["records"] == []
+                native.update(NRestarts=7 + nrestarts, ActiveEnterTimestampMonotonic=200)
+                generation = 2
+            return guest_disk.CommandResult(0, "", "")
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        old_frame = provider._env._get_obs
+
+        def frame() -> Any:
+            events.append(("screen", generation))
+            return old_frame()
+
+        monkeypatch.setattr(provider._env, "_get_obs", frame)
+        adapter, _ = _adapter(monkeypatch)
+        adapter._provider = provider
+        result = await adapter.execute(_params(_click(111), _click(222), _click(333)))
+        assert events == [("input", 1), ("input", 1), ("screen", 2)]
+        assert result.observation.observation_id == "obs-2"
+        assert provider._supervisor_restart is None
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["receipt_unavailable"] is True
+        assert evidence["read_failed"] is True
+        assert evidence["receipt_failure"] == "systemd_generation_disagreement"
+        assert evidence["read_attempts"] == 2
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"systemd_nrestarts": 2},  # One newer restart is missing, despite a valid older record.
+        {"systemd_nrestarts": 0},  # Counter reset/manual start cannot be correlated.
+        {"systemd_active_enter": 100},  # An exit record cannot describe the still-old activation.
+    ],
+)
+def test_restart_history_must_agree_with_independent_systemd_view(changes: dict[str, int]) -> None:
+    history = _envelope([_restart_record()])
+    history.update(changes)
+    with pytest.raises(guest_supervisor.GenerationMismatch):
+        guest_supervisor.receipt_records("escalation=agentless\n" + json.dumps(history))
