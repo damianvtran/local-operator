@@ -53,6 +53,10 @@ MAX_LIMIT: Final = 200
 MAX_QUERY_CHARS: Final = 256
 
 TAG_MODES: Final = ("all", "any")
+#: What the listing is for. ``all`` is the whole catalog; ``final`` is what the
+#: operator actually kept — a highlight or a generated artifact — and excludes
+#: scratch files that were merely mentioned or created in a conversation.
+SCOPES: Final = ("all", "final")
 SESSION_ID_SHAPE: Final = re.compile(r"^[a-f0-9]{12}$")
 
 THUMB_MAX_WIDTH: Final = 480
@@ -101,6 +105,8 @@ class Query:
     #: The same filter as a comma list, for a conversation picker that offers
     #: several at once. ``session`` stays because the frozen design names it.
     session_ids: frozenset[str] = frozenset()
+    #: ``all`` (default, the API contract) or ``final`` (the UI's default view).
+    scope: str = "all"
     sort: str = "recent"
     order: str | None = None
     limit: int = DEFAULT_LIMIT
@@ -125,6 +131,7 @@ class Query:
             "favorite": self.favorite,
             "session": self.session,
             "session_ids": sorted(self.session_ids),
+            "scope": self.scope,
             "sort": self.sort,
             "order": self.effective_order,
         }
@@ -342,6 +349,8 @@ def _counts(assets: list[library_index.Asset]) -> dict[str, dict[str, int]]:
 
 
 def _matches(asset: library_index.Asset, row: dict[str, Any], query: Query) -> bool:
+    if query.scope == "final" and not (asset.highlighted or asset.origin_group == "generated"):
+        return False
     if query.categories and asset.category not in query.categories:
         return False
     if query.kinds and asset.kind not in query.kinds:
@@ -437,6 +446,21 @@ def empty_listing(state: str = "ready") -> dict[str, Any]:
     }
 
 
+def _scoped_tags(
+    tags: list[dict[str, Any]], tag_map: dict[str, list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    """Tag vocabulary of the scoped asset set, with counts within that scope.
+
+    ``MetadataStore.list_tags`` counts every asset in the store, so a final
+    listing would otherwise advertise tags only scratch assets carry.
+    """
+    used: dict[str, int] = {}
+    for asset_tags in tag_map.values():
+        for tag in asset_tags:
+            used[tag["id"]] = used.get(tag["id"], 0) + 1
+    return [{**tag, "count": used[tag["id"]]} for tag in tags if tag["id"] in used]
+
+
 def list_assets(
     config_dir: str | Path,
     query: Query,
@@ -451,6 +475,13 @@ def list_assets(
     catalog = library_index.build_catalog(config, budget_s=budget_s, home=home)
     store = MetadataStore(config)
     all_assets = catalog.assets
+    if query.scope == "final":
+        # Narrow BEFORE any metadata work: a final listing must not materialise
+        # rows (or count/tag) for scratch files the operator never kept. The
+        # catalog still indexes everything, so scope=all and get_asset work.
+        all_assets = [
+            asset for asset in all_assets if asset.highlighted or asset.origin_group == "generated"
+        ]
     # Materialise a row per asset once, in one transaction: metadata writes
     # (tags, chat, edit history) key on ``assets.asset_id``, and a list request
     # is the first place most assets are ever seen. BEFORE the revision is read
@@ -512,10 +543,14 @@ def list_assets(
         "state": catalog.state,
         "revision": revision,
         "total": len(filtered),
-        # Counts are catalog-wide on purpose: the filter rail must not empty
-        # itself while the user is narrowing a search.
+        # Counts are wide within the request's scope on purpose: the filter rail
+        # must not empty itself while the user is narrowing a search.
         "counts": _counts(all_assets),
-        "tags": store.list_tags(),
+        "tags": (
+            _scoped_tags(store.list_tags(), tag_map)
+            if query.scope == "final"
+            else store.list_tags()
+        ),
         "rows": [row for _asset, row in page],
         "next_cursor": _cursor(query, revision, offset + query.limit) if more else None,
         "cursor_reset": reset,
@@ -860,6 +895,7 @@ __all__ = [
     "MAX_LIMIT",
     "ORDERS",
     "Query",
+    "SCOPES",
     "SORTS",
     "TAG_MODES",
     "THUMB_MAX_WIDTH",

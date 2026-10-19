@@ -5,8 +5,18 @@ from typing import Any
 
 from local_operator.library import identity, service
 from local_operator.library.metadata import MetadataStore
+from local_operator.session.attachments import cache_media
 
-from ._fixtures import OTHER, SESSION, config_root, session, user_row, write_rows
+from ._fixtures import (
+    OTHER,
+    SESSION,
+    config_root,
+    image_rows,
+    png,
+    session,
+    user_row,
+    write_rows,
+)
 
 
 def listing(root: Path, query: service.Query) -> dict[str, Any]:
@@ -278,3 +288,91 @@ def test_a_read_miss_refreshes_once_for_a_just_indexed_asset(tmp_path, monkeypat
     monkeypatch.setattr(library_index, "_visible_sessions", boom)
     thumb = service.thumbnail(root, image_id, 120)
     assert thumb.path.is_file()
+
+
+def test_scope_final_keeps_generated_and_highlighted_assets(tmp_path, monkeypatch) -> None:
+    """The operator's kept set: generated artifacts and highlights, no scratch.
+
+    A final listing narrows BEFORE metadata materialisation, so total, counts
+    and the tag vocabulary describe only the rows it may show.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    block = cache_media(png(), "image/png", kind="image", name="cat.png")
+    assert block and block.attachment
+    session(root, SESSION, image_rows("g1", 1, block.attachment))
+
+    mentioned = tmp_path / "mentioned.txt"
+    mentioned.write_text("x")
+    session(root, OTHER, [user_row("u1", 2, f"look at {mentioned}")])
+
+    scratch = tmp_path / "scratch.txt"
+    scratch.write_text("x")
+    session(root, "111111111111", write_rows("w1", 3, scratch))
+
+    kept = tmp_path / "kept.md"
+    kept.write_text("# kept")
+    rows = write_rows("w2", 4, kept)
+    rows.append(
+        {
+            "id": "s1",
+            "ts": 5,
+            "type": "custom",
+            "payload": {
+                "kind": "custom",
+                "custom_type": "supplement_v1",
+                "details": {
+                    "anchor": "turn-1",
+                    "version": 1,
+                    "state": "done",
+                    "files": [{"path": str(kept), "name": "kept.md", "kind": "markdown"}],
+                },
+            },
+        }
+    )
+    session(root, "222222222222", rows)
+
+    all_list = listing(root, service.Query())
+    final = listing(root, service.Query(scope="final"))
+    all_names = {row["name"] for row in all_list["rows"]}
+    final_names = {row["name"] for row in final["rows"]}
+    assert all_names == {"cat.png", "mentioned.txt", "scratch.txt", "kept.md"}
+    assert final_names == {"cat.png", "kept.md"}
+    assert (all_list["total"], final["total"]) == (4, 2)
+    assert final["counts"]["origin_group"] == {"generated": 1, "created": 1}
+    assert all_list["counts"]["origin_group"] == {
+        "generated": 1,
+        "created": 2,
+        "mentioned": 1,
+    }
+
+    store = MetadataStore(root)
+    keep_tag = store.create_tag("keep")
+    scratch_tag = store.create_tag("scratch")
+    by_name = {row["name"]: row["id"] for row in all_list["rows"]}
+    service.set_tags(root, by_name["cat.png"], [keep_tag["id"]])
+    service.set_tags(root, by_name["scratch.txt"], [scratch_tag["id"]])
+    final = listing(root, service.Query(scope="final"))
+    assert [tag["name"] for tag in final["tags"]] == ["keep"]
+    assert final["tags"][0]["count"] == 1
+    assert {tag["name"] for tag in listing(root, service.Query())["tags"]} == {
+        "keep",
+        "scratch",
+    }
+
+    first = service.list_assets(root, service.Query(scope="final", limit=1))
+    assert len(first["rows"]) == 1 and first["next_cursor"]
+    second = service.list_assets(
+        root, service.Query(scope="final", limit=1, cursor=first["next_cursor"])
+    )
+    assert len(second["rows"]) == 1 and second["cursor_reset"] is False
+    assert {first["rows"][0]["id"]}.isdisjoint({second["rows"][0]["id"]})
+
+    # A cursor is bound to its scope; reusing an all-scope cursor for final is
+    # a client error, exactly like any other changed query.
+    all_first = service.list_assets(root, service.Query(limit=1))
+    try:
+        service.list_assets(root, service.Query(scope="final", cursor=all_first["next_cursor"]))
+    except service.InvalidCursor:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("a cursor minted for another scope must be refused")
