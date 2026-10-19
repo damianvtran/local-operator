@@ -9382,13 +9382,28 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             for (server_name, key), devices in sorted(grants.items())
             if server_name == name
         ]
+        ref_names = names_by_server.get(name) or []
         status = states.get(name) or {}
+        # A CONFIGURED SERVER WITH NO STATUS ROW AT ALL still gets an answer: a
+        # row absent from the pass means it did not describe this name (a
+        # config/name mismatch, or an unreadable store), and a bare "unknown"
+        # with an empty reason told the operator nothing. ONLY ABSENCE is
+        # replaced — an honest "unknown" the pass actually produced (an
+        # unreadable secret store) is a fact and stays.
+        state = str(status.get("state") or "")
+        reason = str(status.get("reason") or "")
+        if not status:
+            if shape == "oauth":
+                state, reason = "needs_operator_login", "no sign-in found here or on a shared device"
+            elif ref_names:
+                state, reason = "missing_source", f"missing {', '.join(ref_names[:4])}"
+            else:
+                state, reason = "synced", ""
         # A MEMBER ROW IS ONE THIS DEVICE OWNS NOTHING OF. Its answer comes from
         # the credential-status pass (which refs resolve, whose sign-in it
         # borrows, why it is down); the owner-side notes below describe SHARES
         # and would say "no eligible member holds this server yet" about a server
         # this device in fact holds a share of.
-        ref_names = names_by_server.get(name) or []
         # Not owned here is necessary but not sufficient: an OWNER row for a
         # server it has no grant for yet reads ``needs_operator_login``, and
         # turning that into a member row would suppress the owner-side note that
@@ -9414,9 +9429,10 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             "skipped": _dedupe_skip_rows(
                 [row for row in skipped_rows if row.get("server") == name]
             ),
-            # The SAME status the page renders (design §5); names and states only.
-            "state": str(status.get("state") or "unknown"),
-            "reason": str(status.get("reason") or ""),
+            # The SAME status the page renders (design §5), OVERRIDDEN by what
+            # this run's validation actually proved. Names and states only.
+            "state": state,
+            "reason": reason,
         }
         if member_row:
             # The machine surface gets the presence flags too: "set" is the fact
@@ -9424,6 +9440,19 @@ def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
             row["ref_states"] = [dict(item) for item in status_refs]
         if name in member:
             row["member"] = member[name]
+            verdict = _validation_state(member[name])
+            if verdict is not None:
+                proved_state, proved_reason = verdict
+                if proved_state == "not_yet_synced" and state == "needs_operator_login":
+                    # A tokenless grant on a server nothing has ever signed in
+                    # to: "never signed in" is the precise answer, and the grant
+                    # attempt adds nothing a person can act on.
+                    pass
+                else:
+                    row["state"] = proved_state
+                    # On success the status reason ("borrows from <owner>") is
+                    # still the useful sentence; a failure's own sentence wins.
+                    row["reason"] = proved_reason or row["reason"]
         if member_row:
             row["note"] = ""
         elif shape == "oauth" and not key_rows and not row["skipped"]:
@@ -9524,9 +9553,11 @@ def _member_repair_receipt(
     and run ONCE per key; a revoked or missing placement is reported, never
     retried, because the only remedy is on the owner's side.
 
-    Nothing here touches a value: ``credential_sync_pull`` writes the copy inside
-    the relay process and answers ``{ok, state, code}``, and ``credential_grant``
-    answers a grant detail (or a refusal) that is never printed.
+    No value is stored, printed or carried in a receipt. ``credential_sync_pull``
+    writes the copy inside the relay process and answers ``{ok, state, code}``;
+    ``credential_grant`` answers a grant detail (or a refusal), of which this
+    function reads only ``kind`` and whether ``access_token`` is non-empty — the
+    token itself is never kept, printed or logged.
     """
     from local_operator.mcp.credentials import credential_source
     from local_operator.network.credentials import mcp_state
@@ -9646,14 +9677,39 @@ def _member_repair_receipt(
                         provider="mcp-oauth",
                     )
                 except MeshRefusal as exc:
-                    receipt["grant"] = {"ok": False, "code": exc.code}
+                    receipt["grant"] = {
+                        "ok": False,
+                        "code": exc.code,
+                        "owner": str(getattr(_entry, "owner_device", "") or ""),
+                        "owner_name": str(getattr(_entry, "owner_device_name", "") or ""),
+                    }
                 except Exception as exc:  # noqa: BLE001 — reported, not raised
-                    receipt["grant"] = {"ok": False, "code": _refusal_code(exc)}
+                    receipt["grant"] = {
+                        "ok": False,
+                        "code": _refusal_code(exc),
+                        "owner": str(getattr(_entry, "owner_device", "") or ""),
+                        "owner_name": str(getattr(_entry, "owner_device_name", "") or ""),
+                    }
                 else:
-                    ok = str(detail.get("kind") or "") == "grant"
+                    # A GRANT WITH NO TOKEN IS NOT A SUCCESS (measured: gitlab
+                    # rendered "synced" beside a status pass that said no sign-in
+                    # existed). The broker answered the shape but handed over
+                    # nothing that could open a connection, so the validation
+                    # proved the borrow does NOT work; the code says why.
+                    ok = str(detail.get("kind") or "") == "grant" and bool(
+                        str(detail.get("access_token") or "").strip()
+                    )
+                    code = "" if ok else str(detail.get("code") or "")
+                    if not ok and not code:
+                        code = "no_token"
                     receipt["grant"] = {
                         "ok": ok,
-                        "code": "" if ok else str(detail.get("code") or "refused"),
+                        "code": code,
+                        # The owner the borrow went to. The status reason has to
+                        # NAME the device a person must sign in on, and the relay
+                        # answer carries no such field.
+                        "owner": str(getattr(_entry, "owner_device", "") or ""),
+                        "owner_name": str(getattr(_entry, "owner_device_name", "") or ""),
                     }
                     if ok:
                         mcp_state.record(
@@ -9664,6 +9720,12 @@ def _member_repair_receipt(
                             owner_name=str(getattr(_entry, "owner_device_name", "") or ""),
                             root=root,
                         )
+                # THE FAILURE IS PERSISTED, not only printed. ``/mcp`` and the
+                # catalog read ``credential_status``, not this row, so without
+                # this write they would keep saying "synced — borrows from X"
+                # for a share the broker just refused (design §5: one function,
+                # every surface).
+                _persist_failed_validation(root, network_id, oauth_key, receipt["grant"])
         out[name] = receipt
     return out
 
@@ -9684,6 +9746,75 @@ def _dedupe_skip_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         seen.add(identity)
         out.append(row)
     return out
+
+
+def _persist_failed_validation(
+    root: Path, network_id: str, key: str, grant: Mapping[str, Any]
+) -> None:
+    """Write a failed validation into the durable, value-free evidence document.
+
+    The status vocabulary differs from the CLI's: an unreachable owner is stored
+    as ``unavailable`` (the evidence word set) and rendered as ``not_yet_synced``.
+    An unclassified code writes nothing — a vague newer answer must not replace a
+    precise older one (the same rule ``client._remember_evidence`` follows).
+    ``mcp_state.record`` never raises: a bookkeeping failure must not fail a repair.
+    """
+    from local_operator.network.credentials import mcp_state
+
+    if not grant or grant.get("ok"):
+        return
+    code = str(grant.get("code") or "")
+    state = mcp_state.state_for_code(code)
+    if not state and code in ("unavailable", "owner_unreachable"):
+        state = "unavailable"
+    if not state:
+        return
+    mcp_state.record(
+        network_id,
+        key,
+        state=state,
+        code=code,
+        owner_device=str(grant.get("owner") or ""),
+        owner_name=str(grant.get("owner_name") or ""),
+        root=root,
+    )
+
+
+def _validation_state(receipt: Mapping[str, Any]) -> tuple[str, str] | None:
+    """The row state the member VALIDATION proved, or ``None`` when it ran not.
+
+    WHY THIS OUTRANKS THE STATUS PASS: the status pass answers from stores and a
+    holder row — it can say "synced, borrows from X" for a share whose owner just
+    refused the refresh (verified on cloud-node-1: cloudflare and minerva-qa
+    rendered ``synced`` while ``member.grant`` said ``interactive_required``).
+    A validation that actually asked the broker is the newer, stronger fact, so
+    a failed one may NEVER render ``synced``.
+    """
+    grant = receipt.get("grant") if isinstance(receipt, Mapping) else None
+    if not isinstance(grant, Mapping) or not grant:
+        return None
+    owner = str(grant.get("owner_name") or grant.get("owner") or "")
+    who = owner or "the owner"
+    code = str(grant.get("code") or "")
+    if grant.get("ok"):
+        # A validation that succeeded is a BORROW, and saying whose sign-in it
+        # used is the useful sentence; the status pass may still be answering
+        # "no sign-in found" from before the borrow (gitlab did exactly that).
+        return ("synced", f"borrows from {owner}" if owner else "")
+    if code == "no_token":
+        return ("not_yet_synced", "the broker returned a grant with no token")
+    if code in ("interactive_required", "refresh_failed"):
+        return ("expired", f"{who}: sign in again")
+    if code in ("not_a_holder", "not_a_member", "revoked", "member_not_active"):
+        return ("revoked", f"{who}: access was revoked; ask its owner for a new share")
+    if code in ("unavailable", "owner_offline", "owner_unreachable"):
+        return (
+            "not_yet_synced",
+            f"the owner is unreachable{' (' + owner + ')' if owner else ''}; try again later",
+        )
+    # AN UNCLASSIFIED FAILURE IS NEVER "synced". It is also not a verdict about
+    # the credential: say the share has not been proved to work, with the code.
+    return ("not_yet_synced", f"not yet synced ({code})" if code else "not yet synced")
 
 
 def _render_mcp_credential_row(row: Mapping[str, Any]) -> str:

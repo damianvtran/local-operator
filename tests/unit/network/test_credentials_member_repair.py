@@ -399,14 +399,107 @@ def test_a_successful_member_validation_records_synced_with_the_owner(
 
     def relay_answer(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any]:
         if op == "credential_grant":
-            return {"kind": "grant"}
+            # A REAL grant carries the token it just minted; a shape-only reply
+            # is the failed validation the gitlab test pins.
+            return {"kind": "grant", "access_token": "granted-bearer"}
         return {"ok": True, "state": "synced", "code": ""}
 
     monkeypatch.setattr(net_cli, "_relay_answer", relay_answer)
     servers = [{"name": "linear", "url": url, "refs": [], "shape": "oauth"}]
     receipt = net_cli._member_repair_receipt(root, servers)
-    assert receipt["linear"]["grant"] == {"ok": True, "code": ""}
+    grant = receipt["linear"]["grant"]
+    assert grant["ok"] is True and grant["code"] == ""
+    assert grant["owner_name"] == "macbook"
 
     entry = mcp_state.load(NETWORK, root)[key]
     assert entry["state"] == "synced"
     assert entry["owner_name"] == "macbook"
+
+
+def test_a_refused_member_validation_persists_the_verdict_for_every_surface(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI row is not enough: ``/mcp`` reads ``server_states``.
+
+    A refused borrow must be written to the evidence document, or the very next
+    status pass says "synced — borrows from macbook" again even though nothing
+    was proved to work (measured on cloud-node-1).
+    """
+    from types import SimpleNamespace
+
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+    from local_operator.mcp.credential_status import server_states
+    from local_operator.network import cli as net_cli
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    url = "https://cloudflare.test/mcp"
+    key = credential_key_for_mcp(url)
+    store.save(_record(), root)
+    _place(root, key, kind="mcp-rotating")
+    monkeypatch.setattr(
+        "local_operator.network.identity.load",
+        lambda *a, **k: SimpleNamespace(device_id=SELF, name="laptop"),
+    )
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, **fields: {"kind": "refusal", "code": "interactive_required"},
+    )
+
+    receipt = net_cli._member_repair_receipt(
+        root, [{"name": "cloudflare", "url": url, "refs": [], "shape": "oauth"}]
+    )
+    assert receipt["cloudflare"]["grant"]["ok"] is False
+    assert receipt["cloudflare"]["grant"]["owner_name"] == "macbook"
+
+    evidence = mcp_state.load(NETWORK, root)[key]
+    assert evidence["state"] == "expired"
+    assert evidence["code"] == "interactive_required"
+
+    rows = server_states(
+        str(root),
+        base=root,
+        configs={
+            "cloudflare": MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth")),
+        },
+    )
+    assert rows["cloudflare"]["state"] == "expired", rows
+    assert "macbook" in rows["cloudflare"]["reason"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"kind": "grant", "access_token": ""},
+        {"kind": "grant"},
+    ],
+)
+def test_a_grant_with_no_token_is_a_failed_validation(
+    root: Path, monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any]
+) -> None:
+    """gitlab: ``kind: grant`` with nothing to serve must never be ``synced``."""
+    from types import SimpleNamespace
+
+    from local_operator.network import cli as net_cli
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    url = "https://gitlab.test/mcp"
+    key = credential_key_for_mcp(url)
+    store.save(_record(), root)
+    _place(root, key, kind="mcp-rotating")
+    monkeypatch.setattr(
+        "local_operator.network.identity.load",
+        lambda *a, **k: SimpleNamespace(device_id=SELF, name="laptop"),
+    )
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(reply))
+
+    receipt = net_cli._member_repair_receipt(
+        root, [{"name": "gitlab", "url": url, "refs": [], "shape": "oauth"}]
+    )
+    grant = receipt["gitlab"]["grant"]
+    assert grant["ok"] is False
+    assert grant["code"] == "no_token"
+    # No durable verdict is invented: there is nothing a person can act on.
+    assert key not in mcp_state.load(NETWORK, root)

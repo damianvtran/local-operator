@@ -737,3 +737,204 @@ def test_a_member_row_names_the_owner_when_the_borrow_is_expired(
     assert row["state"] == "expired", row
     assert "macbook" in row["reason"], row["reason"]
     assert row["note"] == ""
+
+
+def test_a_failed_member_validation_never_renders_synced(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cloud-node-1's blocker: a live holder row + a refused borrow read ``synced``.
+
+    The status pass saw the share and said "borrows from damians-MacBook-Pro";
+    the validation had just been REFUSED with ``interactive_required``. A failed
+    grant is the newer fact and must win — the row says the owner must sign in
+    again, never that the server is synced.
+    """
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    _write_config(
+        root,
+        {"cloudflare": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
+    )
+    network_store.save(_record(), root)
+    _seed_peer_shares(root, [credential_key_for_mcp(URL)])
+    monkeypatch.setattr(
+        net_cli,
+        "_member_repair_receipt",
+        lambda *a, **k: {
+            "cloudflare": {
+                "pulled": [],
+                "error": "",
+                "grant": {
+                    "ok": False,
+                    "code": "interactive_required",
+                    "owner": DRIVE,
+                    "owner_name": "damians-MacBook-Pro",
+                },
+            }
+        },
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["member"]["grant"]["ok"] is False
+    assert row["state"] == "expired", row
+    assert "damians-MacBook-Pro" in row["reason"], row["reason"]
+    assert "sign in again" in row["reason"], row["reason"]
+
+
+def test_a_configured_server_with_no_grant_is_never_unknown(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gitlab: no grant anywhere must read "needs operator login", not "unknown"."""
+    _write_config(
+        root,
+        {"gitlab": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
+    )
+    network_store.save(_record(), root)
+
+    rc, payload = _run(capsys, "--repair")
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["state"] == "needs_operator_login", row
+    assert row["reason"], "an empty reason is not an answer"
+
+    # ...and the same when the status pass does not describe the name at all:
+    # the row must still not fall back to a bare ``unknown``.
+    monkeypatch.setattr(net_cli, "_credential_states", lambda *a, **k: {})
+    rc, payload = _run(capsys, "--repair")
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["state"] == "needs_operator_login", row
+    assert row["reason"]
+
+
+def test_a_tokenless_grant_never_reads_synced(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gitlab on the node: ``member.grant.ok`` was true with no token present.
+
+    The row may keep a status's ``needs_operator_login`` (the precise answer for
+    a server nothing has signed in to), but a live holder row must not survive a
+    tokenless reply as ``synced``.
+    """
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    _write_config(
+        root,
+        {"gitlab": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
+    )
+    network_store.save(_record(), root)
+    _seed_peer_shares(root, [credential_key_for_mcp(URL)])
+    monkeypatch.setattr(
+        net_cli,
+        "_member_repair_receipt",
+        lambda *a, **k: {
+            "gitlab": {
+                "pulled": [],
+                "error": "",
+                "grant": {"ok": False, "code": "no_token", "owner": DRIVE},
+            }
+        },
+    )
+
+    rc, payload = _run(capsys, "--repair")
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["state"] != "synced", row
+    assert row["state"] == "not_yet_synced", row
+    assert "no token" in row["reason"], row["reason"]
+
+    # A server NOTHING has signed in to keeps the status's precise answer: the
+    # failed grant attempt must not downgrade "never signed in" to "not synced".
+    monkeypatch.setattr(
+        net_cli,
+        "_credential_states",
+        lambda *a, **k: {
+            "gitlab": {
+                "state": "needs_operator_login",
+                "reason": "no sign-in found here or on a shared device",
+                "owner": "",
+                "shape": "oauth",
+                "refs": [],
+            }
+        },
+    )
+    rc, payload = _run(capsys, "--repair")
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["state"] == "needs_operator_login", row
+    assert "no sign-in" in row["reason"]
+
+
+def test_an_empty_refused_grant_keeps_the_more_precise_status(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gitlab: an empty grant must not flatten "never signed in" into "not synced"."""
+    _write_config(
+        root,
+        {"gitlab": {"type": "http", "url": URL, "auth": {"type": "oauth"}}},
+    )
+    network_store.save(_record(), root)
+    monkeypatch.setattr(
+        net_cli,
+        "_member_repair_receipt",
+        lambda *a, **k: {
+            "gitlab": {
+                "pulled": [],
+                "error": "",
+                "grant": {"ok": False, "code": "refused", "owner": DRIVE},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        net_cli,
+        "_credential_states",
+        lambda *a, **k: {
+            "gitlab": {
+                "state": "needs_operator_login",
+                "reason": "no sign-in found here or on a shared device",
+                "owner": "",
+                "shape": "oauth",
+                "refs": [],
+            }
+        },
+    )
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0
+    row = payload["servers"][0]
+    assert row["state"] == "needs_operator_login", row
+    assert "no sign-in" in row["reason"]
+
+
+def test_a_reference_server_with_no_status_row_still_repairs(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The non-OAuth fallback: it reads ``ref_names`` and must not crash.
+
+    Review B3: the fallback referenced ``ref_names`` before its assignment, so a
+    reference-only server with no status row killed ``--repair`` outright.
+    """
+    _write_config(
+        root,
+        {
+            "notes": {
+                "type": "stdio",
+                "command": "/bin/echo",
+                "env": {"GHOST_TOKEN": "${GHOST_TOKEN}"},
+            }
+        },
+    )
+    network_store.save(_record(), root)
+    monkeypatch.setattr(net_cli, "_credential_states", lambda *a, **k: {})
+
+    rc, payload = _run(capsys, "--repair")
+
+    assert rc == 0, payload
+    row = payload["servers"][0]
+    assert row["refs"] == ["GHOST_TOKEN"]
+    assert row["state"] == "missing_source", row
+    assert "GHOST_TOKEN" in row["reason"]
