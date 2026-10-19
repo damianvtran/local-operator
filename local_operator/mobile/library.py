@@ -284,13 +284,13 @@ def set_tags_payload(
     try:
         # One write path, as on every other Library surface: the service resolves
         # the id (an unknown one is a 404, not a new metadata row), ensures the
-        # asset row exists and applies the store's own tag rules. Returning the
-        # row's tags keeps this route's shape stable for the phone, which is the
-        # only consumer of ``{"tags": ...}``.
-        row = library_service.set_tags(
+        # asset row exists and applies the store's own tag rules. The answer is
+        # the refreshed ROW, the same shape the desktop route serves: the app's
+        # schema reads ``libraryAsset`` from this response, and a tag envelope
+        # would make it re-read for values this call already has.
+        return library_service.set_tags(
             config_dir, asset_id, raw, primary=primary, actor="user"
         )
-        return {"tags": row["tags"]}
     except library_service.AssetNotFound as error:
         raise LibraryRouteError(404, "library_asset_not_found") from error
     except TagRefused as error:

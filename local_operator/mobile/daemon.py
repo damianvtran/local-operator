@@ -8071,10 +8071,11 @@ def build_app(daemon: MobileDaemon):
             methods=["DELETE"],
         ),
         # -- library -------------------------------------------------------
-        # Static segments precede the ``{asset_id}`` routes so ``tags`` and
-        # ``facets`` are never parsed as an id (the id grammar would 404 them,
-        # but a route that reaches the handler is one place fewer to explain).
-        Route("/api/library", api_library_list),
+        # Asset routes live under ``/api/library/assets``; the vocabulary routes
+        # (``facets``, ``tags``) are its siblings. The Expo client's schemas
+        # already name this shape, so the relay follows it rather than growing a
+        # second spelling for the same catalog.
+        Route("/api/library/assets", api_library_list),
         Route("/api/library/facets", api_library_facets),
         Route("/api/library/tags", api_library_tags),
         Route("/api/library/tags", api_library_tag_create, methods=["POST"]),
@@ -8084,25 +8085,25 @@ def build_app(daemon: MobileDaemon):
             api_library_tag_merge,
             methods=["POST"],
         ),
-        Route("/api/library/{asset_id:str}", api_library_detail),
-        Route("/api/library/{asset_id:str}", api_library_patch, methods=["PATCH"]),
+        Route("/api/library/assets/{asset_id:str}", api_library_detail),
+        Route("/api/library/assets/{asset_id:str}", api_library_patch, methods=["PATCH"]),
         Route(
-            "/api/library/{asset_id:str}/tags",
+            "/api/library/assets/{asset_id:str}/tags",
             api_library_set_tags,
-            methods=["POST"],
+            methods=["PUT"],
         ),
         Route(
-            "/api/library/{asset_id:str}/chat",
+            "/api/library/assets/{asset_id:str}/chat",
             api_library_chat,
-            methods=["POST"],
+            methods=["PUT"],
         ),
         Route(
-            "/api/library/{asset_id:str}/chat",
+            "/api/library/assets/{asset_id:str}/chat",
             api_library_chat_clear,
             methods=["DELETE"],
         ),
-        Route("/api/library/{asset_id:str}/bytes", api_library_bytes),
-        Route("/api/library/{asset_id:str}/thumb", api_library_thumb),
+        Route("/api/library/assets/{asset_id:str}/bytes", api_library_bytes),
+        Route("/api/library/assets/{asset_id:str}/thumb", api_library_thumb),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),

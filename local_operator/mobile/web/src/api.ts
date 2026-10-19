@@ -883,7 +883,7 @@ function libraryParams(query: LibraryQuery): string {
 
 export function getLibrary(query: LibraryQuery = {}): Promise<LibraryListing> {
 	const encoded = libraryParams(query);
-	return request(`/api/library${encoded ? `?${encoded}` : ""}`);
+	return request(`/api/library/assets${encoded ? `?${encoded}` : ""}`);
 }
 
 export function getLibraryFacets(): Promise<LibraryFacets> {
@@ -891,14 +891,14 @@ export function getLibraryFacets(): Promise<LibraryFacets> {
 }
 
 export function getLibraryAsset(assetId: string): Promise<LibraryAsset> {
-	return request(`/api/library/${encodeURIComponent(assetId)}`);
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}`);
 }
 
 export function patchLibraryAsset(
 	assetId: string,
 	fields: Partial<Pick<LibraryAsset, "name" | "description" | "favorite" | "locked" | "archived">>,
 ): Promise<LibraryAsset> {
-	return request(`/api/library/${encodeURIComponent(assetId)}`, {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}`, {
 		method: "PATCH",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(fields),
@@ -940,9 +940,9 @@ export function setLibraryTags(
 	assetId: string,
 	tagIds: string[],
 	primary: string | null = null,
-): Promise<{ tags: LibraryTag[] }> {
-	return request(`/api/library/${encodeURIComponent(assetId)}/tags`, {
-		method: "POST",
+): Promise<LibraryAsset> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/tags`, {
+		method: "PUT",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ tag_ids: tagIds, primary }),
 	});
@@ -952,23 +952,23 @@ export function linkLibraryChat(
 	assetId: string,
 	sessionId: string,
 ): Promise<{ chat: LibraryChatLink }> {
-	return request(`/api/library/${encodeURIComponent(assetId)}/chat`, {
-		method: "POST",
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/chat`, {
+		method: "PUT",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ session_id: sessionId }),
 	});
 }
 
 export function unlinkLibraryChat(assetId: string): Promise<{ ok: boolean; cleared: boolean }> {
-	return request(`/api/library/${encodeURIComponent(assetId)}/chat`, { method: "DELETE" });
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/chat`, { method: "DELETE" });
 }
 
 /** The preview URL for one asset. `download` flips the relay's disposition. */
 export function libraryBytesUrl(assetId: string, download = false): string {
 	const suffix = download ? "?download=1" : "";
-	return `/api/library/${encodeURIComponent(assetId)}/bytes${suffix}`;
+	return `/api/library/assets/${encodeURIComponent(assetId)}/bytes${suffix}`;
 }
 
 export function libraryThumbUrl(assetId: string, width = 480): string {
-	return `/api/library/${encodeURIComponent(assetId)}/thumb?w=${width}`;
+	return `/api/library/assets/${encodeURIComponent(assetId)}/thumb?w=${width}`;
 }
