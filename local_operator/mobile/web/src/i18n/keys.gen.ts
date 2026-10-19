@@ -827,6 +827,12 @@ export type MessageParams = {
   "wire.settings.providers_openrouter_zdr.label": undefined;
   "wire.settings.query_budget.description": undefined;
   "wire.settings.query_budget.title": undefined;
+  "wire.settings.remote_compute.description": undefined;
+  "wire.settings.remote_compute.title": undefined;
+  "wire.settings.remote_compute_enabled.choice.false.description": undefined;
+  "wire.settings.remote_compute_enabled.choice.true.description": undefined;
+  "wire.settings.remote_compute_enabled.help": undefined;
+  "wire.settings.remote_compute_enabled.label": undefined;
   "wire.settings.retired.description": undefined;
   "wire.settings.retired.title": undefined;
   "wire.settings.retry_basedelayms.help": undefined;
