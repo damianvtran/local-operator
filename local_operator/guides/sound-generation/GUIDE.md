@@ -102,7 +102,13 @@ login picks them up at the NEXT session start.
 - Output is **MP3 only** (no WAV). Radient serves a signed URL the harness
   downloads immediately (24 h life — nobody should rely on the URL later);
   the artifact is the attached copy, not the URL.
-- The generated duration comes from the provider, never derived client-side.
+- **The duration is a property of the bytes, not of the provider's response.**
+  It is derived at artifact creation from the same decode the waveform peaks
+  use (`audiogen.peaks.compute_duration`). A provider that states one
+  (Radient) is a cross-check: a disagreement is logged with the digest and the
+  bytes win. A provider that states none (ElevenLabs, OpenAI) still yields a
+  duration, because a sound record with no length renders with **no player at
+  all** — a generated clip the user cannot play, and no error to explain it.
 - A busy platform answers the submit with "Audio generation is busy right
   now." (`audio_rate_limited`); the harness retries that a few times with
   backoff, then reports it as a busy—not a quota—failure. A job that hits a

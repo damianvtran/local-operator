@@ -82,6 +82,7 @@ from local_operator.audiogen.models import (
     sound_effect_request_body,
     voiceover_request_body,
 )
+from local_operator.audiogen.peaks import compute_duration
 from local_operator.audiogen.pricing import sound_effect_estimate, voiceover_estimate
 from local_operator.clients._http import APIError
 from local_operator.imagegen.media import download_asset
@@ -1117,9 +1118,16 @@ async def run_elevenlabs(
                 data=data,
                 content_type=content_type,
                 source_url="",
-                # The vendor returns the REQUESTED output format and states no
-                # facts beyond it; duration is never derived client-side
-                # (frozen rule), so it stays None on a BYOK leg.
+                # THE DURATION COMES FROM THE BYTES (design: a length is a
+                # property of the clip, not of the vendor's response shape).
+                # ElevenLabs returns the requested FORMAT and states no facts
+                # beyond it, so reading a duration field here would have left
+                # this leg null forever - and a null duration is what makes a
+                # sound record render with NO PLAYER: a generated clip the user
+                # cannot play, with no error to explain it. Decoded with the
+                # same guarded engine the waveform peaks use; undecodable bytes
+                # keep the old None rather than failing the generation.
+                duration_s=compute_duration(data),
                 format="mp3" if content_type == BYOK_MEDIA_TYPE else None,
                 sample_rate_hz=44100 if spec.direction == "voiceover" else None,
                 bitrate_kbps=128 if spec.direction == "voiceover" else None,
@@ -1205,6 +1213,10 @@ async def run_openai(
                 data=data,
                 content_type=content_type,
                 source_url="",
+                # Derived from the bytes for the same reason as the ElevenLabs
+                # leg above: OpenAI states no duration, and a record without one
+                # cannot draw a player.
+                duration_s=compute_duration(data),
                 format="mp3",
                 voicing_notes=_byok_voicing_notes(attempt),
             )
