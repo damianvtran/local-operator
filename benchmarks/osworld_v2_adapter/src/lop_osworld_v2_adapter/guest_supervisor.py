@@ -21,6 +21,19 @@ class GenerationMismatch(ValueError):
     """systemd observed a restart that the guest capture history cannot prove."""
 
 
+class SupervisorOutputUnparseable(ValueError):
+    """The captured guest output carried no JSON payload to parse.
+
+    WHY A NAMED FAILURE. The setup evidence records only the exception's TYPE
+    name, never its text, because the text can carry a password prompt. A bare
+    ``JSONDecodeError`` said nothing about WHAT failed, so the episode read as
+    "supervision unavailable" with no way to tell a guest that printed noise
+    from a guest that printed nothing. This name is fixed vocabulary and never
+    contains guest text. It subclasses ``ValueError`` because that is what the
+    ``json`` module raised here before, so no caller changes meaning.
+    """
+
+
 @dataclass(frozen=True)
 class ReceiptResult:
     """Only a complete verified read may authorize input on an existing binding."""
@@ -234,8 +247,36 @@ def report_command(unit: str, password: str) -> Sequence[str]:
 
 
 def parse_output(output: str) -> object:
-    # The escalation ladder prints one metadata line before the command output.
-    return json.loads(output.split("\n", 1)[1])
+    """Extract the guest's JSON payload from a captured escalation output.
+
+    WHY A SCAN, NOT A FIXED OFFSET. The escalation ladder captures the
+    command's combined stdout+stderr and prefixes one metadata line
+    (``escalation=agentless>supplied``), but the captured text is more than
+    the payload: ``sudo -S`` writes its ``[sudo] password for user:`` prompt
+    to stderr, and a guest MOTD, locale notice or warning lands the same way.
+    Reading a fixed offset after the first newline therefore handed
+    ``json.loads`` a prompt line plus the payload and raised
+    ``JSONDecodeError``, so the supervisor never installed and the episode ran
+    unsupervised. Scanning for the first position that decodes as a JSON
+    object is identical for the clean case and tolerates a preamble, a prompt
+    line, a payload spanning several lines and trailing noise.
+
+    The first decodable object wins: the payload is the guest's own stdout
+    JSON, and guest text printed before it is never quoted into evidence, so a
+    failure raises the named error instead of echoing what was captured.
+    """
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(output):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(output, index)
+        except ValueError:
+            # Not a JSON object (or not one that starts here): keep looking.
+            continue
+        return value
+    raise SupervisorOutputUnparseable("supervisor output contained no JSON object")
 
 
 def receipt_records(output: str) -> list[dict[str, Any]]:

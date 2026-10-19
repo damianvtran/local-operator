@@ -567,6 +567,122 @@ def test_idempotent_install_reverifies_effective_restart_without_rewriting(tmp_p
     assert sum("Restart" in args for args in calls) == 2
 
 
+def test_parse_output_reads_the_clean_single_line_payload() -> None:
+    """The clean case must stay what the old fixed offset read."""
+
+    captured = (
+        'escalation=agentless>supplied\n{"installed": true, "unit": "action-server.service"}\n'
+    )
+    assert guest_supervisor.parse_output(captured) == json.loads(captured.split("\n", 1)[1])
+    assert guest_supervisor.parse_output(captured) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_survives_the_sudo_prompt_before_the_payload() -> None:
+    """The captured form that broke the install: sudo's prompt is on stderr."""
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        "[sudo] password for user:\n"
+        '{"unit": "action-server.service", "installed": true}\n'
+    )
+    assert guest_supervisor.parse_output(captured) == {
+        "unit": "action-server.service",
+        "installed": True,
+    }
+
+
+def test_parse_output_reads_a_payload_spanning_several_lines() -> None:
+    captured = (
+        "escalation=none\n"
+        "{\n"
+        '  "unit": "action-server.service",\n'
+        '  "installed": true\n'
+        "}\n"
+    )
+    assert guest_supervisor.parse_output(captured) == {
+        "unit": "action-server.service",
+        "installed": True,
+    }
+
+
+def test_parse_output_ignores_noise_after_the_payload() -> None:
+    captured = (
+        "escalation=agentless\n"
+        '{"installed": true, "unit": "action-server.service"}\n'
+        "systemd: unit reloaded\n"
+    )
+    assert guest_supervisor.parse_output(captured) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_reads_a_payload_with_no_metadata_line() -> None:
+    captured = '{"installed": true, "unit": "action-server.service"}\n'
+    assert guest_supervisor.parse_output(captured) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_without_json_raises_a_named_failure_that_quotes_no_guest_text() -> None:
+    captured = (
+        "escalation=agentless>supplied\n"
+        "[sudo] password for user:\n"
+        "sudo: 1 incorrect password attempt\n"
+    )
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured)
+    assert type(failure.value).__name__ == "SupervisorOutputUnparseable"
+    assert str(failure.value) == "supervisor output contained no JSON object"
+    # The captured text can carry a credential prompt; it is never quoted.
+    assert "password" not in str(failure.value)
+    assert "incorrect password attempt" not in str(failure.value)
+    # A ValueError is what the json module raised here before, so every
+    # caller's handler keeps its meaning.
+    assert isinstance(failure.value, ValueError)
+
+
+def test_receipt_records_survive_the_sudo_prompt_before_the_payload() -> None:
+    """The report path shares the parser, so it shares the tolerance."""
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        "[sudo] password for user:\n" + json.dumps(_envelope([_restart_record()])) + "\n"
+    )
+    records = guest_supervisor.receipt_records(captured)
+    assert [record["exit_status"] for record in records] == ["KILL"]
+
+
+def test_setup_evidence_names_the_unparseable_output_instead_of_a_json_decode_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup evidence must say WHAT failed, and never quote the guest."""
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+
+        def command(*args: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            return guest_disk.CommandResult(
+                0,
+                "escalation=agentless>supplied\n" "[sudo] password for user:\n" "not json at all\n",
+                "",
+            )
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["installed"] is False
+        assert report["status"] == "supervision unavailable"
+        assert report["cause"] == "SupervisorOutputUnparseable"
+        assert report["cause"] != "JSONDecodeError"
+        assert "password" not in json.dumps(report)
+
+
 def test_capture_preserves_exit_status_when_journal_times_out(tmp_path: Path) -> None:
     root = tmp_path / "var/lib/lop-action-supervisor"
     root.mkdir(parents=True)
@@ -645,11 +761,11 @@ async def test_receipt_read_failure_retries_once_and_never_posts_stale_input(
                 return guest_disk.CommandResult(0, "", "")
             if failure == "empty_list":
                 return guest_disk.CommandResult(0, "escalation=agentless\n[]", "")
-            # A real planted restart with a warning before JSON must NOT become
-            # "no restart" merely because parsing the receipt failed.
-            return guest_disk.CommandResult(
-                0, "sudo warning\n" + _receipt([_restart_record()]).stdout, ""
-            )
+            # A guest warning with NO receipt behind it: the read fails
+            # closed, so a restart that really happened can never be read
+            # as "no restart". A warning in FRONT of a real receipt is the
+            # tolerated case below, not a read failure.
+            return guest_disk.CommandResult(0, "sudo warning\nnot a receipt\n", "")
 
         monkeypatch.setattr(provider, "_run_guest_command", command)
         if failure == "scrub_exception":
@@ -666,6 +782,44 @@ async def test_receipt_read_failure_retries_once_and_never_posts_stale_input(
         assert evidence["receipt_unavailable"] is True
         assert evidence["read_failed"] is True
         assert evidence["read_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_behind_a_guest_warning_is_read_and_its_restart_is_not_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preamble before the payload must not hide a restart that really happened.
+
+    The old parser read a fixed offset after the metadata line, so a warning
+    line in front of the receipt JSON made the whole read fail. The receipt
+    then looked unreadable instead of reporting the restart it carried, which
+    is the same blindness the supervisor was merged to remove.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        calls = []
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            calls.append(argv)
+            assert "/var/lib/lop-action-supervisor" in str(argv), "stale input was posted"
+            return guest_disk.CommandResult(
+                0, "sudo warning\n" + _receipt([_restart_record()]).stdout, ""
+            )
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        with pytest.raises(GuestServerRecovered):
+            await provider.execute(["must_not_post()", "nor_this()"])
+        assert len(calls) == 1
+        # The planted restart was READ, never quietly reported as "no restart".
+        assert provider._supervisor_restart == 42
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["recovered"] is True
+        assert evidence["read_failed"] is False
+        assert evidence["receipt_unavailable"] is False
 
 
 @pytest.mark.asyncio
