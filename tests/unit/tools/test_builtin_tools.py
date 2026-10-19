@@ -8320,6 +8320,349 @@ async def test_reads_and_shrinks_still_run_on_an_over_cap_pad(tmp_path, monkeypa
     assert not (pad / "build").exists()
 
 
+@pytest.mark.asyncio
+async def test_a_running_command_is_killed_when_the_pad_crosses_the_cap(
+    tmp_path, monkeypatch
+) -> None:
+    """The incident this bounds: a build that STARTED under the cap grew the pad
+    to multiple GB in one command, and the after-the-fact line reported it only
+    once the bytes were on disk. The watchdog must stop the process group during
+    the run, leave the pad bounded near the cap, and never let the command's
+    completion marker look like success.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True, exist_ok=True)
+    _pad_cap_config(tmp_path, monkeypatch, 1024)
+
+    result = await tools["bash"].execute(
+        "bash-pad-watchdog",
+        {
+            # 20 x 1 KiB at 0.2 s intervals: unmodified this leaves ~20 KiB, so
+            # the kill at the 1 s tick is what keeps the pad near the 1 KiB cap.
+            "command": (
+                "i=0; while [ $i -lt 20 ]; do "
+                'head -c 1024 /dev/zero >> "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"; '
+                "i=$((i+1)); sleep 0.2; done; echo LOOP-DONE"
+            ),
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "SCRATCHPAD CAP EXCEEDED" in result.text
+    assert "LOOP-DONE" not in result.text, "the process group must be stopped mid-run"
+    held = sum(p.stat().st_blocks * 512 for p in pad.rglob("*") if p.is_file())
+    # The 1 s tick plus one 1 KiB write per 0.2 s allocates at most 8 KiB before
+    # the kill; the unmodified command would finish around 20 KiB.
+    assert 1024 <= held < 16 * 1024, held
+    assert result.details is not None
+    assert result.details["scratchpad_cap_exceeded"] is True
+    assert result.details["scratchpad_cap_bytes"] == 1024
+    assert result.details["scratchpad_held_bytes"] >= 1024
+
+
+@pytest.mark.asyncio
+async def test_a_background_command_is_stopped_at_the_pad_cap(tmp_path, monkeypatch) -> None:
+    """The detached loop bounds the same way, and its job row carries the same
+    head and structured details instead of looking like a normal completion.
+    ``_detached`` owns the process after a ``background=True`` handoff (or a
+    steering interruption), so a guard only on the foreground loop would leave
+    the exact long build this fixes free to fill the pad.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir(exist_ok=True)
+    pad = tmp_path / "sessions" / "sess-pad" / "scratchpad"
+    pad.mkdir(parents=True, exist_ok=True)
+    _pad_cap_config(tmp_path, monkeypatch, 1024)
+    recorder = RecordingApproval(True)
+    manager = AsyncJobManager()
+    context = _RecordingContext(
+        cwd=str(workspace),
+        session_id="scratchpad-bg-test",
+        scratchpad_dir=str(pad),
+        request_approval=recorder,
+        recorder=recorder,
+        jobs=manager,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["bash"].execute(
+        "bash-pad-watchdog-bg",
+        {
+            "command": (
+                "i=0; while [ $i -lt 20 ]; do "
+                'head -c 1024 /dev/zero >> "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"; '
+                "i=$((i+1)); sleep 0.2; done; echo LOOP-DONE"
+            ),
+            "background": True,
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+    assert result.is_error is False, result.text
+    job_id = str((result.details or {})["job_id"])
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 20
+    job = manager.get(job_id)
+    while job is not None and job.status == "running" and loop.time() < deadline:
+        await asyncio.sleep(0.1)
+        job = manager.get(job_id)
+    try:
+        assert job is not None and job.status != "running", "background job never settled"
+        assert "SCRATCHPAD CAP EXCEEDED" in (job.result_text or "")
+        assert "LOOP-DONE" not in (job.result_text or "")
+        assert "continues in the background" not in (job.result_text or "")
+        details = job.latest_details or {}
+        assert details["scratchpad_cap_exceeded"] is True
+        assert details["scratchpad_cap_bytes"] == 1024
+        assert details["scratchpad_held_bytes"] >= 1024
+        # Bounded, not merely stopped: without the kill the loop's 20 x 1 KiB
+        # writes allocate ~20 KiB, so 16 KiB separates the two outcomes.
+        held = sum(p.stat().st_blocks * 512 for p in pad.rglob("*") if p.is_file())
+        assert 1024 <= held < 16 * 1024, held
+    finally:
+        await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_never_touches_the_pad_pays_no_walk(tmp_path, monkeypatch) -> None:
+    """The arming gate: a command that neither names the pad nor runs with cwd
+    inside it must not pay the spawn walk or any later tick, so a long pytest or
+    git run is untouched. The probe records and raises, so an armed call would
+    also be visible in the failure across `_pad_tick`.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    calls: list[object] = []
+
+    def _probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("the pad must not be walked for an unrelated command")
+
+    monkeypatch.setattr(builtin_module, "scratchpad_footprint", _probe)
+    # Longer than PAD_TICK_S: the test covers BOTH the spawn walk and every
+    # tick, not just the spawn.
+    result = await tools["bash"].execute(
+        "bash-no-pad-walk", {"command": "sleep 1.5", "timeout": 30}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert calls == []
+
+
+def test_the_watchdog_arms_on_a_pad_naming_command_or_a_pad_cwd(tmp_path) -> None:
+    """The other half of the gate: both reachable shapes arm it. A command that
+    spells the pad (any accepted spelling) and a command whose cwd is inside the
+    pad are the two ways relative writes reach the pad, and both must be watched.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    pad = tmp_path / "pad"
+    pad.mkdir()
+    assert builtin_module._pad_watch_armed("true", str(tmp_path), pad) is False
+    assert (
+        builtin_module._pad_watch_armed(
+            'echo x > "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"', str(tmp_path), pad
+        )
+        is True
+    )
+    assert builtin_module._pad_watch_armed("pwd", str(pad / "sub"), pad) is True
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_pad_disarms_the_watchdog_and_the_command_runs(
+    tmp_path, monkeypatch
+) -> None:
+    """A start-walk failure is "unknown", never a tool failure: the watchdog is
+    disarmed and the command runs normally. The second probe call is the
+    post-hoc line's, which returns a normal reading.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    calls: list[object] = []
+
+    def _probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise OSError("pad unreadable right now")
+        return 0, False, False
+
+    monkeypatch.setattr(builtin_module, "scratchpad_footprint", _probe)
+    result = await tools["bash"].execute(
+        "bash-pad-unreadable",
+        {"command": 'echo ran "$LOCAL_OPERATOR_SCRATCHPAD"', "timeout": 30},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "ran " in result.text
+    assert len(calls) == 2, "spawn probe (raised) + post-hoc probe only"
+
+
+@pytest.mark.asyncio
+async def test_a_cwd_relative_command_gets_the_post_hoc_line(tmp_path, monkeypatch) -> None:
+    """The widened mention gate: a command running INSIDE the pad can grow it
+    through a relative path without naming it. It must still get the
+    after-the-fact line when the result is over cap.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pad = tmp_path / "pad"
+    pad.mkdir()
+    _pad_cap_config(tmp_path, monkeypatch, 1024)
+    recorder = RecordingApproval(True)
+    context = _RecordingContext(
+        cwd=str(pad),
+        session_id="scratchpad-cwd-posthoc",
+        scratchpad_dir=str(pad),
+        request_approval=recorder,
+        recorder=recorder,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["bash"].execute(
+        "bash-pad-cwd-posthoc",
+        {"command": "head -c 4096 /dev/zero > grow.dat", "timeout": 30},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert (pad / "grow.dat").exists()
+    assert "[scratch]" in result.text
+    assert "over its" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_live_cap_change_applies_to_a_running_command(tmp_path, monkeypatch) -> None:
+    """``session.scratchpad.max_bytes`` is LIVE: a command that started under a
+    generous cap must be judged against the value in the config at the tick, not
+    the one snapshotted at spawn. The config file is rewritten mid-run; the kill
+    line and details must carry the new cap.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    _pad_cap_config(tmp_path, monkeypatch, 1_000_000)
+    config_file = tmp_path / "cap-config" / "config.yml"
+
+    task = asyncio.ensure_future(
+        tools["bash"].execute(
+            "bash-pad-live-cap",
+            {
+                "command": (
+                    "i=0; while [ $i -lt 20 ]; do "
+                    'head -c 1024 /dev/zero >> "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"; '
+                    "i=$((i+1)); sleep 0.5; done; echo LOOP-DONE"
+                ),
+                "timeout": 30,
+            },
+            None,
+            None,
+            context,
+        )
+    )
+    await asyncio.sleep(1.2)
+    config_file.write_text(
+        "values:\n  session:\n    scratchpad:\n      max_bytes: 1024\n", encoding="utf-8"
+    )
+    result = await task
+
+    assert result.is_error is True
+    assert "SCRATCHPAD CAP EXCEEDED" in result.text
+    assert "LOOP-DONE" not in result.text
+    assert result.details is not None
+    assert result.details["scratchpad_cap_bytes"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_command_on_an_over_cap_pad_is_not_killed(tmp_path, monkeypatch) -> None:
+    """The recovery path, in the counterexample shape: removing ONE entry while
+    a smaller large entry remains leaves the cap-truncated walk reading a HIGHER
+    lower bound than at spawn even though the pad shrank. An over-cap pad is
+    disarmed at spawn, so the command sleeps past the first tick untouched and
+    the remaining bytes stay put.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk-small.dat").write_bytes(b"x" * 4096)
+    (pad / "bulk-large.dat").write_bytes(b"x" * 16384)
+    # Cap under the large entry but over neither: the pad is over cap both at
+    # spawn (small + large) and after the small one is removed (large alone).
+    large_held = (pad / "bulk-large.dat").stat().st_blocks * 512
+    cap = large_held - 1
+    _pad_cap_config(tmp_path, monkeypatch, cap)
+
+    result = await tools["bash"].execute(
+        "bash-pad-cleanup",
+        {
+            "command": f'rm -f "{pad}/bulk-small.dat"; sleep 1.5; echo cleaned',
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "cleaned" in result.text
+    assert not (pad / "bulk-small.dat").exists()
+    assert (pad / "bulk-large.dat").exists(), "the untouched entry must remain"
+    from local_operator import scratchpad as scratchpad_module
+
+    _held, still_over, _ = scratchpad_module.scratchpad_footprint(pad, cap)
+    assert still_over is True, "the pad must remain over cap for the counterexample shape"
+
+
+@pytest.mark.asyncio
+async def test_an_over_cap_pad_disarms_the_watchdog_before_the_first_tick(
+    tmp_path, monkeypatch
+) -> None:
+    """Start-over disarms: the spawn measurement is the ONLY live sample. The
+    command names the pad and sleeps past a tick, so an armed watchdog would
+    add a third probe call; the two recorded are the spawn walk and the
+    post-hoc line every pad-naming result carries.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    calls: list[object] = []
+
+    def _over_cap_probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 4096, True, False
+
+    monkeypatch.setattr(builtin_module, "scratchpad_footprint", _over_cap_probe)
+    result = await tools["bash"].execute(
+        "bash-pad-overcap-disarm",
+        {
+            "command": 'rm -f "$LOCAL_OPERATOR_SCRATCHPAD/none"; sleep 1.5; echo cleaned',
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "SCRATCHPAD CAP EXCEEDED" not in result.text
+    assert "cleaned" in result.text
+    assert len(calls) == 2, f"expected spawn + post-hoc only, got {len(calls)} probes"
+
+
 def test_a_browser_screenshot_destination_under_the_pad_is_checked(tmp_path, monkeypatch) -> None:
     """The screenshot path takes an ordinary filesystem path, so the pad policy
     must run on it explicitly — an absolute destination into ``scratchpad/``
