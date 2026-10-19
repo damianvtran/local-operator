@@ -5213,7 +5213,10 @@ def _cmd_install(args: argparse.Namespace) -> int:
             else str(result.get("error") or "relay installation failed")
         ),
     }
-    return _emit(args, payload, [*payload["steps"], payload["message"]])
+    lines = [*payload["steps"], payload["message"]]
+    if ok and result.get("persistent") is False:
+        lines.append("durability: restart-on-boot is not configured; enable linger on this device")
+    return _emit(args, payload, lines)
 
 
 def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
@@ -7614,6 +7617,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             {
                 "check": "supervision",
                 "class": "supervision",
+                "observed": {"addressable": supervision.get("addressable", False)},
                 "ok": persistent,
                 "detail": (
                     "relay restart-on-boot is configured"
@@ -7627,7 +7631,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     for check in checks:
         check["class"] = (
             "payload"
-            if check.get("check") == "credential_repair"
+            if check.get("check") in {"credential_repair", "credential_sync"}
             else "supervision" if check.get("check") == "supervision" else "link"
         )
     # THE ROW'S OWN WORDS, NOT ITS FIELD (round 24, Q-R24-2). This used to render
@@ -7700,6 +7704,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "link_ok": link_ok,
         "degraded": degraded,
         "payload_failures": payload_failures,
+        "supervision_failures": supervision_failures,
     }
     if not healthy:
         answer["code"] = "unhealthy"
@@ -7709,7 +7714,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         answer["code"] = "degraded"
         message = "link healthy"
         if payload_failures:
-            message += "; credential repair needed: " + "; ".join(payload_failures)
+            message += "; credential checks need attention: " + "; ".join(payload_failures)
         if supervision_failures:
             message += "; " + "; ".join(supervision_failures)
         answer["message"] = message

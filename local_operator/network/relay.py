@@ -912,17 +912,24 @@ def peer_link_state(
     """
     if link is not None:
         return "reachable"
-    if reason in ("no_endpoint", "not_a_member"):
-        return reason
-    if reason.startswith(DETAIL_NOT_ATTEMPTED):
-        return "not_attempted"
-    if any(attempt.connected for attempt in attempts):
+    connected = any(attempt.connected for attempt in attempts)
+    # A socket can answer just as our listing budget expires. That is evidence
+    # of a dial, not evidence that the peer rejected a handshake never started.
+    # Once a probe has connected, _ensure_link_with_probe either returns a
+    # link, returns the explicit budget-not-attempted stage, or runs dial's
+    # handshake and gets a refusal. A later network's metadata must not erase
+    # that completed attempt, even when its reason becomes `no_endpoint`.
+    if connected and not reason.startswith(HANDSHAKE_NOT_ATTEMPTED):
         return "handshake_refused"
-    if any(
+    if not connected and any(
         attempt.detail == f"{CONNECT_FAILED_PREFIX}ConnectionRefusedError" for attempt in attempts
     ):
         return "relay_down"
-    return "address_unreachable" if attempts else "not_attempted"
+    if any(attempt.detail != DETAIL_NOT_ATTEMPTED for attempt in attempts):
+        return "address_unreachable"
+    if reason in ("no_endpoint", "not_a_member"):
+        return reason
+    return "not_attempted"
 
 
 def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
@@ -9403,7 +9410,11 @@ class RelayServer:
         return link, reason
 
     def _ensure_link_with_probe(
-        self, device_id: str, *, probe_timeout_s: float | None = None
+        self,
+        device_id: str,
+        *,
+        probe_timeout_s: float | None = None,
+        network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
         """``_ensure_link`` plus WHY it failed, for a surface that must say so.
 
@@ -9437,6 +9448,10 @@ class RelayServer:
         cap = PROBE_CONNECT_TIMEOUT_S if deadline is not None else self.settings.handshake_timeout_s
         reason = "not_a_member"
         for record in store.list_networks(self.root):
+            # Peer table rows belong to one network. Session callers deliberately
+            # omit the filter and may use any active membership for this device.
+            if network_id is not None and record.network_id != network_id:
+                continue
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
@@ -12223,7 +12238,7 @@ class RelayServer:
                     link, reason, attempts = None, NOT_ATTEMPTED_REASON, []
                 else:
                     link, reason, attempts = self._ensure_link_with_probe(
-                        member.device_id, probe_timeout_s=remaining
+                        member.device_id, probe_timeout_s=remaining, network_id=record.network_id
                     )
                 state = peer_link_state(link, reason, attempts)
                 peers.append(
@@ -13363,12 +13378,14 @@ def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     from local_operator import launchd
 
     steps: list[str] = []
+    durability: dict[str, Any] = {"linger": None, "persistent": False}
     if not _plist_is_addressable():
         # R6: say why, in the operator's terms. The launchd guard's own wording
         # ("is not the LaunchAgent the real home owns") is correct and about
         # launchd; the person reading this is running a redirected HOME and needs
         # to know it is expected and what to do instead.
         return {
+            **durability,
             "ok": False,
             "steps": steps,
             "reason": "isolated_home",
@@ -13384,13 +13401,14 @@ def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     plist_path().parent.mkdir(parents=True, exist_ok=True)
     if not dry_run:
         plist_path().write_bytes(plistlib.dumps(render_plist(port)))
+        durability["persistent"] = _launchd_boot_persistent()
     steps.append(f"wrote {plist_path()}")
     if dry_run:
         steps.append("dry run: skipped load and verification")
-        return {"ok": True, "steps": steps}
+        return {**durability, "ok": True, "steps": steps}
     reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
     if not reloaded.ok:
-        return {"ok": False, "steps": steps, "error": str(reloaded.detail)[:300]}
+        return {**durability, "ok": False, "steps": steps, "error": str(reloaded.detail)[:300]}
     steps.append("loaded the LaunchAgent")
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -13399,9 +13417,15 @@ def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
         # a live hand-started relay passed as a successful install.
         if _answers_as_service():
             steps.append("the relay answered its local control socket as the unit's own process")
-            return {"ok": True, "steps": steps}
+            return {
+                **durability,
+                "ok": True,
+                "steps": steps,
+                "persistent": _launchd_boot_persistent(),
+            }
         time.sleep(0.5)
     return {
+        **durability,
         "ok": False,
         "steps": steps,
         "error": f"the relay did not answer within 20s; see {log_path()}",
@@ -13417,6 +13441,7 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     "answers" for the old process would claim a supervision it does not have.
     """
     steps: list[str] = []
+    durability: dict[str, Any] = {"linger": False, "persistent": False}
     unit = systemd_path()
     unit.parent.mkdir(parents=True, exist_ok=True)
     if not dry_run:
@@ -13424,9 +13449,10 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     steps.append(f"wrote {unit}")
     if dry_run:
         steps.append("dry run: skipped enable and verification")
-        return {"ok": True, "steps": steps}
+        return {**durability, "ok": True, "steps": steps}
     if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
         return {
+            **durability,
             "ok": False,
             "steps": steps,
             "reason": "isolated_home",
@@ -13442,15 +13468,18 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
     # spawns one. Best-effort — a refusal must not fail the install.
     if supervisors.enable_linger():
         steps.append("enabled lingering so the relay survives logout and reboot")
+    durability["linger"] = supervisors.linger_enabled()
     supervisors.systemctl_user("daemon-reload")
     enabled = supervisors.systemctl_user("enable", "--now", SYSTEMD_UNIT)
     if enabled.returncode:
         return {
+            **durability,
             "ok": False,
             "steps": steps,
             "reason": "enable_failed",
             "error": supervisors.translate_systemctl_error(enabled.stderr),
         }
+    durability["persistent"] = unit.exists() and bool(durability["linger"])
     steps.append(f"enabled the systemd user service ({SYSTEMD_UNIT})")
     deadline = time.time() + 20
     last_state = "unknown"
@@ -13459,11 +13488,12 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
         last_state = (active.stdout or active.stderr or "").strip() or "unknown"
         if last_state == "active" and _answers_as_service():
             steps.append("the relay answered its local control socket as the unit's own process")
-            return {"ok": True, "steps": steps}
+            return {**durability, "ok": True, "steps": steps}
         if last_state == "failed":
             break
         time.sleep(0.5)
     return {
+        **durability,
         "ok": False,
         "steps": steps,
         "reason": "not_serving",
@@ -13747,6 +13777,15 @@ def _service_port() -> int:
     return DEFAULT_PORT
 
 
+def _launchd_boot_persistent() -> bool:
+    """Only a readable RunAtLoad plist proves boot activation, not its filename."""
+    try:
+        with plist_path().open("rb") as plist:
+            return plistlib.load(plist).get("RunAtLoad") is True
+    except (OSError, ValueError, TypeError, AttributeError, plistlib.InvalidFileException):
+        return False
+
+
 def supervision_state() -> dict[str, Any]:
     """Best-effort, read-only durability evidence, separate from wire health.
 
@@ -13755,6 +13794,7 @@ def supervision_state() -> dict[str, Any]:
     from a diagnostic and never install or start a service as a side effect.
     """
     state: dict[str, Any] = {
+        "addressable": False,
         "platform": "none",
         "unit": "",
         "installed": False,
@@ -13768,6 +13808,9 @@ def supervision_state() -> dict[str, Any]:
         if supervisor == supervisors.SYSTEMCTL:
             state.update(platform="systemd", unit=SYSTEMD_UNIT, linger=False)
             state["installed"] = systemd_path().exists()
+            state["addressable"] = supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT)
+            if not state["addressable"]:
+                return state
             # Each query is independent: a missing bus must not hide the unit
             # file or prevent the remaining read-only evidence from being read.
             for key, command in (("enabled", "is-enabled"), ("active", "is-active")):
@@ -13781,7 +13824,10 @@ def supervision_state() -> dict[str, Any]:
         elif supervisor == supervisors.LAUNCHCTL:
             state.update(platform="launchd", unit=LABEL)
             state["installed"] = plist_path().exists()
-            state["persistent"] = state["installed"]
+            state["addressable"] = _plist_is_addressable()
+            if not state["addressable"]:
+                return state
+            state["persistent"] = _launchd_boot_persistent()
             state["enabled"] = state["installed"]
             state["active"] = _launchctl("print", f"{_domain()}/{LABEL}").returncode == 0
     except Exception:  # noqa: BLE001 — diagnostics must survive unavailable supervisors
@@ -14447,6 +14493,10 @@ def _service_action_launchd(action: str) -> dict[str, Any]:
     refused = _launchd_guard(action)
     if refused is not None:
         return refused
+    if action in ("start", "restart") and not plist_path().exists():
+        # The same advertised repair must work on a fresh host, where there is
+        # no job to kickstart yet. The installer verifies the managed process.
+        return _install_launchd()
     if action in ("start", "restart") and plist_path().exists():
         printed = _launchctl("print", f"{_domain()}/{LABEL}")
         if printed.returncode != 0:
@@ -14461,6 +14511,17 @@ def _service_action_launchd(action: str) -> dict[str, Any]:
         result = _launchctl("kickstart", "-k", f"{_domain()}/{LABEL}")
     ok = result.returncode == 0
     return {"ok": ok, "error": "" if ok else result.stderr.strip()[:300]}
+
+
+def _systemd_enablement_present() -> bool:
+    """The on-disk enablement proof, without adding manager calls on restart.
+
+    Update-path restarts have an exact-call contract; checking the default
+    target's symlink preserves it while refusing to mistake a unit file for
+    boot enablement. A broken link does not prove usable enablement.
+    """
+    link = systemd_path().parent / "default.target.wants" / SYSTEMD_UNIT
+    return link.is_symlink() and link.exists()
 
 
 def _service_action_systemd(action: str) -> dict[str, Any]:
@@ -14485,25 +14546,26 @@ def _service_action_systemd(action: str) -> dict[str, Any]:
         # ``enable --now`` already started the current build, so both start and
         # restart are done here; a restart has no older process to replace.
         #
-        # DURABILITY IS READ WITHOUT QUERYING SERVICE STATE. A full
-        # ``supervision_state()`` here would add ``is-enabled``/``is-active`` to
-        # every start and restart, including the update path's proven-move
-        # restart, whose exact-call contract is a test. The two facts this
-        # result needs are the unit file and linger; both are cheap and neither
-        # claims what the unit is doing right now.
-        linger = supervisors.linger_enabled()
+        # The installer just enabled the unit; do not add state queries to the
+        # update restart path, whose exact manager-call contract stays intact.
         return {
             "ok": True,
             "error": "",
-            "linger": linger,
-            "persistent": systemd_path().exists() and linger,
+            "linger": bool(installed.get("linger", False)),
+            "persistent": bool(installed.get("persistent", False)),
         }
+    enabled = _systemd_enablement_present()
+    if action == "start" and not enabled:
+        # `start` is the advertised durability repair, not merely a one-shot
+        # launch. Restart intentionally never changes enablement during updates.
+        enable = supervisors.systemctl_user("enable", SYSTEMD_UNIT)
+        enabled = enable.returncode == 0
     result = supervisors.systemctl_user(action, SYSTEMD_UNIT)
     ok = result.returncode == 0
     linger = supervisors.linger_enabled()
     return {
         "linger": linger,
-        "persistent": systemd_path().exists() and linger,
+        "persistent": systemd_path().exists() and enabled and linger,
         "ok": ok,
         "error": "" if ok else supervisors.translate_systemctl_error(result.stderr)[:300],
     }

@@ -2846,7 +2846,7 @@ def test_doctor_separates_link_and_payload_failures(monkeypatch, capsys, link_fa
     if link_failed:
         assert "synthetic handshake rejected" in result["message"]
     else:
-        assert result["message"].startswith("link healthy; credential repair needed:")
+        assert result["message"].startswith("link healthy; credential checks need attention:")
     net_cli._cmd_doctor(Namespace(json=False, peer=""))
     human = capsys.readouterr().out
     assert "FAIL credential_repair" in human
@@ -2890,3 +2890,45 @@ def test_status_warns_only_for_a_running_nonpersistent_relay(
     net_cli._cmd_status(Namespace(json=False))
     human = capsys.readouterr().out
     assert ("durability: not supervised" in human) is (not persistent)
+
+
+def test_credential_sync_failure_degrades_payload_not_link(monkeypatch, capsys):
+    """Sync confirmation is credential payload health, not a transport failure."""
+    checks = [{"check": "credential_sync", "ok": False, "detail": "holder confirmation missing"}]
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_call",
+        lambda *a, **k: {
+            "identity_present": True,
+            "checks": checks,
+        },
+    )
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] and result["link_ok"] and result["degraded"]
+    assert result["code"] == "degraded"
+    assert result["checks"][0]["class"] == "payload"
+    assert "credential checks need attention" in result["message"]
+    assert result["supervision_failures"] == []
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_install_receipt_carries_durability_and_warns_when_it_is_missing(
+    monkeypatch, capsys, persistent
+):
+    """A successful installation must not hide failed linger repair."""
+    monkeypatch.setattr(
+        relay,
+        "install",
+        lambda: {
+            "ok": True,
+            "steps": [],
+            "linger": persistent,
+            "persistent": persistent,
+        },
+    )
+    assert net_cli._cmd_install(Namespace(json=True)) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["persistent"] is persistent and result["linger"] is persistent
+    assert net_cli._cmd_install(Namespace(json=False)) == 0
+    assert ("durability:" in capsys.readouterr().out) is (not persistent)

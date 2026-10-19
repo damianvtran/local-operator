@@ -17,6 +17,7 @@ manager.
 
 from __future__ import annotations
 
+import plistlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1213,6 +1214,7 @@ def test_supervision_state_requires_unit_enabled_and_linger(
         unit = _unit(linux_host)
         unit.parent.mkdir(parents=True, exist_ok=True)
         unit.write_text("(unit)\n")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
     calls = []
 
     def systemctl(*args, **kwargs):
@@ -1224,6 +1226,7 @@ def test_supervision_state_requires_unit_enabled_and_linger(
     state = relay.supervision_state()
     assert state == {
         "platform": "systemd",
+        "addressable": True,
         "unit": relay.SYSTEMD_UNIT,
         "installed": installed,
         "enabled": enabled,
@@ -1291,20 +1294,159 @@ def test_supervision_state_survives_an_unavailable_user_bus(linux_host, monkeypa
     assert not state["enabled"] and not state["active"] and not state["persistent"]
 
 
+@pytest.mark.parametrize("run_at_load", [False, True])
 @pytest.mark.parametrize("loaded", [False, True])
 def test_launchd_persistence_follows_the_installed_run_at_load_plist(
-    monkeypatch, tmp_path, loaded
+    monkeypatch, tmp_path, loaded, run_at_load
 ) -> None:
     """Launchd boot persistence is distinct from whether the job is loaded now."""
     plist = tmp_path / "relay.plist"
-    plist.write_text("synthetic plist")
+    plist.write_bytes(plistlib.dumps({"RunAtLoad": run_at_load}))
     monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
     monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: True)
     monkeypatch.setattr(relay, "_domain", lambda: "gui/synthetic")
     monkeypatch.setattr(
         relay, "_launchctl", lambda *a: SimpleNamespace(returncode=0 if loaded else 1)
     )
     state = relay.supervision_state()
     assert state["platform"] == "launchd" and state["installed"]
-    assert state["persistent"] and state["active"] is loaded
+    assert state["persistent"] is run_at_load and state["active"] is loaded
     assert state["linger"] is None
+
+
+def test_start_enables_a_disabled_unit_once_but_restart_does_not(linux_host, monkeypatch):
+    """Start repairs boot enablement without extra calls on update restarts."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True)
+    unit.write_text("unit")
+    monkeypatch.setattr(relay, "_systemd_guard", lambda action: None)
+    calls = []
+
+    def systemctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    started = relay._service_action_systemd("start")
+    assert started["ok"] and started["persistent"]
+    assert calls == [("enable", relay.SYSTEMD_UNIT), ("start", relay.SYSTEMD_UNIT)]
+    calls.clear()
+    restarted = relay._service_action_systemd("restart")
+    assert restarted["ok"] and not restarted["persistent"]
+    assert calls == [("restart", relay.SYSTEMD_UNIT)]
+    wants = unit.parent / "default.target.wants"
+    wants.mkdir()
+    (wants / relay.SYSTEMD_UNIT).symlink_to(unit)
+    calls.clear()
+    assert relay._service_action_systemd("start")["persistent"]
+    assert calls == [("start", relay.SYSTEMD_UNIT)]
+
+
+@pytest.mark.parametrize("action", ["start", "restart"])
+def test_launchd_missing_plist_installs_instead_of_kickstarting(monkeypatch, tmp_path, action):
+    """The advertised repair creates the missing boot job on macOS too."""
+    monkeypatch.setattr(relay, "_launchd_guard", lambda action: None)
+    monkeypatch.setattr(relay, "plist_path", lambda: tmp_path / "missing.plist")
+    calls = []
+    monkeypatch.setattr(
+        relay,
+        "_install_launchd",
+        lambda: calls.append("install")
+        or {
+            "ok": True,
+            "linger": None,
+            "persistent": True,
+        },
+    )
+    monkeypatch.setattr(relay, "_launchctl", lambda *a: pytest.fail("kickstarted missing job"))
+    assert relay._service_action_launchd(action)["persistent"]
+    assert calls == ["install"]
+
+
+@pytest.mark.parametrize("platform", ["systemd", "launchd"])
+def test_supervision_redirected_home_never_queries_a_live_manager(monkeypatch, tmp_path, platform):
+    """Reading another HOME's file cannot authorize a query of the real manager."""
+    unit = tmp_path / "unit"
+    unit.write_bytes(plistlib.dumps({"RunAtLoad": True}))
+    monkeypatch.setattr(
+        supervisors,
+        "supervisor",
+        lambda: (supervisors.SYSTEMCTL if platform == "systemd" else supervisors.LAUNCHCTL),
+    )
+    monkeypatch.setattr(relay, "systemd_path", lambda: unit)
+    monkeypatch.setattr(relay, "plist_path", lambda: unit)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: False)
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: False)
+    monkeypatch.setattr(supervisors, "systemctl_user", lambda *a, **k: pytest.fail("live manager"))
+    monkeypatch.setattr(relay, "_launchctl", lambda *a: pytest.fail("live manager"))
+    state = relay.supervision_state()
+    assert state["installed"] and not state["addressable"]
+    assert not state["enabled"] and not state["active"] and not state["persistent"]
+
+
+def test_invalid_launchd_plist_never_claims_boot_persistence(monkeypatch, tmp_path):
+    """An unparseable file is not proof of RunAtLoad."""
+    plist = tmp_path / "bad.plist"
+    plist.write_text("broken")
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: True)
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(relay, "_domain", lambda: "gui/synthetic")
+    monkeypatch.setattr(relay, "_launchctl", lambda *a: SimpleNamespace(returncode=0))
+    state = relay.supervision_state()
+    assert state["active"] and not state["persistent"]
+
+
+@pytest.mark.parametrize("linger", [False, True])
+def test_systemd_install_receipt_reports_actual_linger(linux_host, monkeypatch, linger):
+    """Enable success cannot silently stand in for successful linger repair."""
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(relay, "render_systemd", lambda port: "synthetic unit")
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: linger)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: linger)
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0,
+            stdout="active",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(relay, "_answers_as_service", lambda: True)
+    result = relay._install_systemd()
+    assert result["ok"] and result["linger"] is linger and result["persistent"] is linger
+
+
+def test_launchd_install_receipt_reports_run_at_load(monkeypatch, tmp_path):
+    """Installer JSON keeps boot durability explicit on the launchd arm too."""
+    from local_operator import launchd
+
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: True)
+    monkeypatch.setattr(relay, "plist_path", lambda: tmp_path / "relay.plist")
+    monkeypatch.setattr(relay, "render_plist", lambda port: {"RunAtLoad": True})
+    monkeypatch.setattr(launchd, "reload_job", lambda **kwargs: SimpleNamespace(ok=True))
+    monkeypatch.setattr(relay, "_answers_as_service", lambda: True)
+    result = relay._install_launchd()
+    assert result["ok"] and result["persistent"] and result["linger"] is None
+
+
+def test_enabled_unit_start_uses_its_symlink_without_reenabling(linux_host, monkeypatch):
+    """An existing enablement link is sufficient proof without manager reads."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True)
+    unit.write_text("unit")
+    wants = unit.parent / "default.target.wants"
+    wants.mkdir()
+    (wants / relay.SYSTEMD_UNIT).symlink_to(unit)
+    monkeypatch.setattr(relay, "_systemd_guard", lambda action: None)
+    calls = []
+
+    def systemctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    assert relay._service_action_systemd("start")["persistent"]
+    assert calls == [("start", relay.SYSTEMD_UNIT)]

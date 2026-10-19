@@ -950,3 +950,101 @@ def test_peer_table_preserves_every_declared_endpoint_attempt(monkeypatch, tmp_p
         link,
         "" if held else "unreachable",
     )
+
+
+@pytest.mark.parametrize(
+    ("reason", "attempts", "expected"),
+    [
+        (
+            "no_endpoint",
+            [
+                relay.CandidateAttempt(
+                    "a:1", False, f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError"
+                )
+            ],
+            "relay_down",
+        ),
+        (
+            "not_a_member",
+            [relay.CandidateAttempt("a:1", False, f"{relay.CONNECT_FAILED_PREFIX}TimeoutError")],
+            "address_unreachable",
+        ),
+        (
+            relay.NOT_ATTEMPTED_REASON,
+            [
+                relay.CandidateAttempt(
+                    "a:1", False, f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError"
+                )
+            ],
+            "relay_down",
+        ),
+        (
+            relay.handshake_not_attempted_reason("a:1"),
+            [relay.CandidateAttempt("a:1", True, "ok")],
+            "address_unreachable",
+        ),
+        ("no_endpoint", [relay.CandidateAttempt("a:1", True, "ok")], "handshake_refused"),
+        (
+            relay.handshake_refused_reason(ConnectionError()),
+            [
+                relay.CandidateAttempt(
+                    "a:1", False, f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError"
+                ),
+                relay.CandidateAttempt("b:1", True, "ok"),
+            ],
+            "handshake_refused",
+        ),
+        (
+            "no_endpoint",
+            [relay.CandidateAttempt("a:1", False, relay.DETAIL_NOT_ATTEMPTED)],
+            "no_endpoint",
+        ),
+    ],
+)
+def test_link_state_prefers_actual_dials_to_later_network_metadata(reason, attempts, expected):
+    """A later empty membership must not erase the earlier dial's evidence."""
+    assert relay.peer_link_state(None, reason, attempts) == expected
+
+
+def test_peer_status_attempts_are_scoped_to_each_rows_network(monkeypatch, tmp_path):
+    """One device in two networks must not leak the other row's address evidence."""
+    from types import SimpleNamespace
+
+    records = []
+    for index in range(2):
+        member = SimpleNamespace(
+            device_id="d_peer",
+            name="peer",
+            active=True,
+            endpoints=[f"network-{index}.invalid:4097"],
+            last_seen_at=0,
+            suspect=False,
+        )
+        records.append(
+            SimpleNamespace(
+                network_id=f"n_{index}",
+                self_device_id="d_self",
+                member=lambda device, member=member: member,
+                active_members=lambda member=member: [member],
+            )
+        )
+    monkeypatch.setattr(relay.store, "list_networks", lambda root: records)
+    server = object.__new__(relay.RelayServer)
+    server.root = tmp_path
+    server.settings = SimpleNamespace(handshake_timeout_s=1)
+    monkeypatch.setattr(server, "_link_for", lambda device: None)
+
+    def probe(endpoints, **kwargs):
+        attempts = [
+            relay.CandidateAttempt(endpoint, False, f"{relay.CONNECT_FAILED_PREFIX}TimeoutError")
+            for endpoint in endpoints
+        ]
+        return relay.CandidateProbe(None, "", attempts, True, "unreachable")
+
+    monkeypatch.setattr(relay, "probe_candidates", probe)
+    rows = server.peer_status()
+    assert len(rows) == 2
+    for row in rows:
+        assert [attempt["endpoint"] for attempt in row["attempts"]] == row["endpoints"]
+    _, _, all_attempts = server._ensure_link_with_probe("d_peer")
+    assert len(all_attempts) == 2
