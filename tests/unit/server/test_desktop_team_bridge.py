@@ -507,8 +507,8 @@ class FakeClient:
         )
         return self._answer("conversation_consent")
 
-    async def conversation_join(self, conversation_id: str, *, access=None):
-        FakeClient.behavior["last_join"] = conversation_id
+    async def conversation_join(self, conversation_id: str, *, tenant_id=None, access=None):
+        FakeClient.behavior["last_join"] = (conversation_id, tenant_id)
         return self._answer("conversation_join")
 
     async def conversation_leave(self, conversation_id: str, *, access=None):
@@ -2494,6 +2494,23 @@ async def test_conversation_send_forwards_the_text_and_key(api):
         "tenant_id": "tnt_1",
         "agent_label": None,
     }
+
+
+async def test_conversation_join_forwards_the_tenant(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/join",
+        json={"tenant_id": "tnt_2"},
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_join"] == ("bcv_abc12345", "tnt_2")
+
+
+async def test_conversation_join_without_a_body_defaults_to_the_single_org(api):
+    client, _root, _d = api
+    response = await client.post("/v1/desktop/team-bridge/conversations/bcv_abc12345/join")
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_join"][1] is None
 
 
 async def test_conversation_read_forwards_the_notify_policy(api):
