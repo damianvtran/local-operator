@@ -575,6 +575,129 @@ def _run_bounded(
     return {name: results.get(name, ("timeout", None)) for name in calls}
 
 
+# Only numeric counters and booleans leave this probe. Free-form process lists,
+# environments and kernel logs can contain task content or credentials.
+HEALTH_PROBE_SOURCE = """
+import json, os
+from pathlib import Path
+v = os.statvfs('/')
+m = {}
+for line in Path('/proc/meminfo').read_text().splitlines():
+    key, value = line.split(':', 1)
+    if key in ('MemTotal', 'MemAvailable', 'SwapTotal', 'SwapFree'):
+        m[key] = int(value.split()[0]) * 1024
+listening = False
+for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+    for line in Path(name).read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[1].split(':')[-1] == '1388' and fields[3] == '0A':
+            listening = True
+print(json.dumps(dict(disk_free_bytes=v.f_bavail*v.f_frsize,
+                     disk_total_bytes=v.f_blocks*v.f_frsize,
+                     action_server_alive=listening, **m)))
+"""
+_HEALTH_FIELDS = frozenset(
+    ("disk_free_bytes", "disk_total_bytes", "MemTotal", "MemAvailable", "SwapTotal", "SwapFree")
+)
+
+
+def capture_guest_health(
+    ec2: Any,
+    instance_id: str,
+    cache_root: Path | None,
+    run_command: Callable[..., Any],
+    *,
+    budget_s: float = 4.0,
+) -> dict[str, Any]:
+    """Capture one bounded, read-only health snapshot after failed readiness.
+
+    The command uses the existing guest transport, not an invented SSH or SSM
+    credential. A dead action server therefore yields ``guest-unreachable``;
+    that is not evidence that the VM died or that a restart is possible. AWS
+    state and each probe status survive separately so missing permissions or a
+    broken diagnostics channel never replace the original execution failure.
+    """
+    record: dict[str, Any] = {"schema_version": 1, "cause": "readiness check failed"}
+    try:
+        import time
+
+        deadline = time.monotonic() + budget_s
+        outcome = _run_bounded(
+            {"instance": lambda: ec2.describe_instances(InstanceIds=[instance_id])},
+            max(0.0, deadline - time.monotonic()),
+        )["instance"]
+        record["instance_probe"] = outcome[0]
+        state = "unknown"
+        if outcome[0] == "ok":
+            instances = [
+                instance
+                for reservation in outcome[1].get("Reservations", [])
+                for instance in reservation.get("Instances", [])
+                if instance.get("InstanceId") == instance_id
+            ]
+            if instances:
+                candidate = instances[0].get("State", {}).get("Name")
+                if candidate in (
+                    "pending",
+                    "running",
+                    "stopping",
+                    "stopped",
+                    "shutting-down",
+                    "terminated",
+                ):
+                    state = candidate
+            else:
+                state = "absent"
+        record["instance_state"] = state
+        if state in ("terminated", "shutting-down", "absent", "stopped", "stopping"):
+            record["cause"] = f"instance lost ({state})"
+        elif state == "running":
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining > 0:
+                probe = _run_bounded(
+                    {
+                        "guest": lambda: run_command(
+                            ["python3", "-c", HEALTH_PROBE_SOURCE], timeout=remaining
+                        )
+                    },
+                    remaining,
+                )["guest"]
+                record["guest_probe"] = probe[0]
+                record["cause"] = "instance running; guest unreachable"
+                if probe[0] == "ok" and probe[1].returncode != 0:
+                    record["guest_probe"] = "command_failed"
+                if probe[0] == "ok" and probe[1].returncode == 0:
+                    data = json.loads(probe[1].stdout)
+                    # No arbitrary guest strings are persisted, even on malformed output.
+                    counters = {
+                        key: data[key]
+                        for key in _HEALTH_FIELDS
+                        if type(data.get(key)) is int and data[key] >= 0
+                    }
+                    if type(data.get("action_server_alive")) is bool:
+                        counters["action_server_alive"] = data["action_server_alive"]
+                    record["guest"] = counters
+                    record["cause"] = "instance running; guest probe answered"
+                    if data.get("action_server_alive") is False:
+                        record["cause"] = "instance running; action service down"
+                    elif counters.get("disk_free_bytes") == 0:
+                        record["cause"] = "instance running; guest disk full"
+    except Exception:
+        # Evidence is optional. Never propagate a diagnostics failure into the
+        # action outcome, and never stringify an exception carrying a command.
+        record["diagnostics_status"] = "error"
+        logger.warning("guest health capture failed")
+    try:
+        if cache_root is not None:
+            _write_atomic(
+                cache_root / "guest-health-execute.json",
+                json.dumps(record, indent=2, sort_keys=True).encode("utf-8"),
+            )
+    except Exception:
+        logger.warning("guest health evidence write failed")
+    return record
+
+
 def _console_output_record(
     outcome: tuple[str, Any], known_values: tuple[str, ...]
 ) -> dict[str, Any]:

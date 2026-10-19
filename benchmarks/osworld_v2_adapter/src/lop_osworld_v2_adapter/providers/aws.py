@@ -1547,7 +1547,21 @@ class AwsProvider:
                         )
                         message = guest_loss.describe_failed_action(index, verdict)
                         if ready is False:
-                            message += "; guest down: readiness check failed; no transport retry"
+                            cause = "readiness check failed"
+                            try:
+                                if self._instance_id is not None:
+                                    health = guest_loss.capture_guest_health(
+                                        self._clients.ec2,
+                                        self._instance_id,
+                                        self._cache_root,
+                                        self._run_guest_command,
+                                    )
+                                    cause = health["cause"]
+                            except Exception:
+                                # Keep the original delivery verdict even if a
+                                # diagnostics hook itself violates fail-open.
+                                logger.warning("guest health capture failed unexpectedly")
+                            message += f"; guest down: {cause}; no transport retry"
                         raise GuestExecutionError(message, delivery=verdict.delivery) from None
                 else:
                     # The last failed attempt raises above; falling through
