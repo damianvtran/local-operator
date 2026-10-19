@@ -222,6 +222,29 @@ async def one_poll(app: OperatorApp, pilot: Any) -> None:
     await pilot.pause()
 
 
+async def poll_until(
+    app: OperatorApp, pilot: Any, ready: Callable[[], bool], description: str
+) -> None:
+    """Drive admission until its state is published, not for an assumed poll count.
+
+    A settled refresh need not have discovered live owners yet, and no prefetch
+    worker exists to await until those rows become admissible. The deadline is
+    only a deadlock backstop; neither elapsed time nor poll count means success.
+    """
+    try:
+        async with asyncio.timeout(DEADLOCK_GUARD_S):
+            while not ready():
+                await one_poll(app, pilot)
+    except TimeoutError as exc:
+        live = {entry.id: entry.row.live_state for entry in app._session_sidebar.visible_entries}
+        raise AssertionError(
+            f"sidebar never ready: {description}; visible live states={live!r}; "
+            f"parked={list(app._sidebar_presentations)!r}; "
+            f"refresh pending={app._sidebar_refresh_pending}; "
+            f"prefetch active={app._sidebar_prefetch is not None}"
+        ) from exc
+
+
 async def one_switch(app: OperatorApp, sid: str) -> None:
     await asyncio.wait_for(app._sidebar_navigation.select(sid), DEADLOCK_GUARD_S)
     connection = app._interaction.connection_task
@@ -339,11 +362,25 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
             app._set_sidebar_open(True)
             assert app._sidebar_timer is not None
             app._sidebar_timer.pause()  # the test drives polls so cycles are countable
-            # (1) Prewarm fills the cache up to the bound over a few polls.
-            for _ in range(bound + 2):
-                await one_poll(app, pilot)
-                if len(app._sidebar_presentations) >= bound:
-                    break
+            # Catalog liveness arrives asynchronously: a completed refresh is
+            # not proof that every owner is eligible for speculative admission.
+            await poll_until(
+                app,
+                pilot,
+                lambda: set(ids).issubset(
+                    entry.id
+                    for entry in app._session_sidebar.visible_entries
+                    if entry.row.live_state
+                ),
+                f"catalog reporting all expected live rows {ids!r}",
+            )
+            # (1) Prewarm must fill every free slot, not merely start a worker.
+            await poll_until(
+                app,
+                pilot,
+                lambda: len(app._sidebar_presentations) >= bound,
+                f"prewarm parking all {bound} free slots",
+            )
             assert len(app._sidebar_presentations) == bound, (
                 f"prewarm parked {len(app._sidebar_presentations)} of {bound} slots: "
                 "the guard must fill free slots, not disable speculation"
@@ -365,7 +402,12 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
             target = next(sid for sid in ids[1:] if sid not in parked)
             app._sidebar_navigation.intend(target)
             try:
-                await one_poll(app, pilot)
+                await poll_until(
+                    app,
+                    pilot,
+                    lambda: target in app._sidebar_presentations,
+                    f"prewarm parking intended row {target!r} at capacity",
+                )
             finally:
                 app._sidebar_navigation.intent_id = ""
             assert (
