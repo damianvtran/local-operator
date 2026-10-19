@@ -3354,12 +3354,14 @@ def effort_displacement(
     * ``note`` — the sentence a surface renders, composed HERE so the TUI, the
       desktop strip and any other client cannot word one fact three ways.
 
-    The sentence names the level in force and the level that returns with the
-    primary, which is the pair a user needs to decide whether to wait or
-    re-pick: ``Falls back to high while on anthropic/claude-sonnet-5-5
-    (chosen: max; returns with deepseek/deepseek-flash).`` A same-model route
-    (the quota walk can pin one model at a lower level) reads ``Running at
-    medium on openai/gpt-6.1-sol (chosen: high).``
+    The sentence names the level in force first and then the level that comes
+    back, which is the pair a user needs to decide whether to wait or re-pick:
+    ``Effort: high on anthropic/claude-sonnet-5-5; max resumes on
+    deepseek/deepseek-flash.`` Design review round 1 (D1) preferred this to the
+    first wording's ``returns with``, whose missing subject left the reader to
+    infer that the MODEL returns rather than the effort. A same-model route
+    (the quota walk can pin one model at a lower level) reads ``Effort: medium
+    on openai/gpt-6.1-sol; you chose high.``
     """
 
     def _level(spec: Any) -> str:
@@ -3404,11 +3406,11 @@ def effort_displacement(
     level_in_force = in_force or "the model's own default"
     if serving_label != selected_label:
         note = (
-            f"Falls back to {level_in_force} while on {serving_label} "
-            f"(chosen: {chosen_level}; returns with {selected_label})."
+            f"Effort: {level_in_force} on {serving_label}; "
+            f"{chosen_level} resumes on {selected_label}."
         )
     else:
-        note = f"Running at {level_in_force} on {serving_label} (chosen: {chosen_level})."
+        note = f"Effort: {level_in_force} on {serving_label}; you chose {chosen_level}."
     return {
         "chosen": chosen_level,
         "effective": in_force,

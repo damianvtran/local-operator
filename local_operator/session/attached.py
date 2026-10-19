@@ -42,6 +42,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    EFFORT_CHOICE_UNSET,
     EventHandler,
     HistoryDeltaEvent,
     ImageContent,
@@ -9200,7 +9201,13 @@ class AttachedSession:
             stale=stale,
         )
 
-    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: ModelSpec,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         old = self.model
         client = self._client
         if client is None:
@@ -9208,8 +9215,18 @@ class AttachedSession:
         self._require_owner_can_serve(model.provider)
         # /effort changes only the reasoning rung; /model changes identity.
         if (model.provider, model.model_id) == (old.provider, old.model_id):
-            effort = model.reasoning_effort or "auto"
-            asyncio.create_task(client.set_effort(effort))
+            if effort_choice is EFFORT_CHOICE_UNSET:
+                effort = model.reasoning_effort or "auto"
+                asyncio.create_task(client.set_effort(effort))
+            else:
+                # The decision rides the MODEL op rather than ``set_effort``
+                # because ``set_effort`` validates against the ladder and so
+                # cannot express a WITHDRAWAL; ``auto`` is the owner's word for
+                # "no level chosen" and ``set_model_effort`` accepts it.
+                chosen = "auto" if effort_choice is None else str(effort_choice)
+                asyncio.create_task(
+                    client.set_model(model.provider, model.model_id, effort=chosen)
+                )
         else:
             asyncio.create_task(client.set_model(model.provider, model.model_id))
 

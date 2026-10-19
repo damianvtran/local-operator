@@ -1285,8 +1285,8 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             "selected": "openrouter/anthropic/claude-sonnet-5-5",
             "serving": "openrouter/anthropic/claude-sonnet-5-5",
             "note": (
-                "Falls back to xhigh while on openrouter/anthropic/claude-sonnet-5-5 "
-                "(chosen: minimal; returns with openrouter/anthropic/claude-sonnet-5-5)."
+                "Effort: xhigh on openrouter/anthropic/claude-sonnet-5-5; "
+                "minimal resumes on openrouter/anthropic/claude-sonnet-5-5."
             ),
         },
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],

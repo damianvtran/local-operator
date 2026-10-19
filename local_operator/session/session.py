@@ -144,6 +144,7 @@ from local_operator.harness.subagent import (
     team_slot_name,
 )
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
     QUIET_TURN_KEY,
@@ -2812,6 +2813,22 @@ def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
     if candidate == getattr(spec, "reasoning_default_effort", None):
         return None
     return candidate
+
+
+def _normalise_effort_choice(choice: object) -> str | None:
+    """A caller's explicit effort decision as a storable level, or ``None``.
+
+    ``None``, an empty string and the ``auto`` sentinel all mean "no level
+    chosen" — ``auto`` is the value the pickers show for that state, and a
+    caller that sends it is withdrawing rather than naming a rung. Any other
+    string is kept EVEN WHEN it equals the model's seed: the caller said this
+    was a decision, and the seed comparison on RESTORE (``_chosen_level_from``)
+    is where the unavoidable ambiguity with a seeded spec is settled.
+    """
+    if not isinstance(choice, str):
+        return None
+    level = choice.strip().lower()
+    return None if level in ("", "auto") else level
 
 
 def _member_reasoning_effort(spec: ModelSpec, requested: str | None) -> str | None:
@@ -6405,7 +6422,13 @@ class Session:
         )
         return result
 
-    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: ModelSpec,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         """Swap the model spec, in force from the very next provider call.
 
         Not "from the next turn": the running turn picks it up too. A turn is a
@@ -6441,10 +6464,26 @@ class Session:
         re-selects the very model the fallback displaced, because that is the
         user reclaiming it. A knob change never withdraws — the user is adjusting
         the model that is serving them, fallback or not.
+
+        ``effort_choice`` is the OTHER decision this call can carry, and it is
+        deliberately a separate parameter rather than something inferred from
+        the spec's level. A spec level is three different things: a level the
+        caller CHOSE, a level a failover CARRY clamped into a narrower ladder,
+        or the model's own SEED. Inferring "chosen" from ``level !=
+        reasoning_default_effort`` recorded a clamp as the user's choice and
+        missed a withdrawal that did not move the level at all (review round 1,
+        M1/M3). So only a caller that KNOWS the answer passes it:
+        ``ServingSessionHandle.set_model_effort`` for an explicit level,
+        ``set_effort``, and the TUI's ``/effort``; ``None`` is the explicit
+        WITHDRAWAL (``/effort auto``), and omitting it leaves the conversation's
+        choice exactly as it was — which is what every model swap, adoption,
+        rehome and sampling override must do.
         """
+        previous_choice = self._chosen_effort
         previous = self._model
         self._model = model
-        self._remember_effort_choice(previous, model)
+        if effort_choice is not EFFORT_CHOICE_UNSET:
+            self._chosen_effort = _normalise_effort_choice(effort_choice)
         if previous.supports_images and not model.supports_images:
             # A genuine move onto a text-only model (same-model knob changes
             # copy the spec and cannot flip the capability): explain the
@@ -6465,7 +6504,7 @@ class Session:
                 withdraw = getattr(self._stream_fn, "withdraw_fallback", None)
                 if callable(withdraw):
                     withdraw()
-                self._journal_effort_if_selection_in_force(previous, model)
+                self._journal_effort_if_selection_changed(previous, model, previous_choice)
                 self.refresh_frontend_state()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
@@ -6502,7 +6541,7 @@ class Session:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
                     self._active_fallback = refreshed
-            self._journal_effort_if_selection_in_force(previous, model)
+            self._journal_effort_if_selection_changed(previous, model, previous_choice)
             self.refresh_frontend_state()
             return
         # A genuine model change is a SELECTION, and selections outlive the
@@ -6600,62 +6639,31 @@ class Session:
             )
         )
 
-    def _remember_effort_choice(self, previous: ModelSpec, model: ModelSpec) -> None:
-        """Track the reasoning level the CONVERSATION chose, not the model's.
-
-        A chosen level belongs to the user, not to the model they happened to be
-        on when they chose it — the rule ``_spec_with_chosen_effort`` already
-        states on the host side. The session needs the same fact because a
-        model that cannot express the level carries ``reasoning_effort=None``
-        on its spec, and a journal that recorded only the spec's level would
-        erase the choice the moment the conversation passed through the route.
-        The observed path: ``max`` chosen -> a switch onto an aggregator whose
-        listing supplied no ladder (spec level ``None``) -> a switch back to the
-        birth model, which then fell to that model's seed ``high``. Nobody had
-        asked for ``high``; the choice had simply been overwritten by a route
-        that could not hold it.
-
-        Updated only at the edges where a level is DECIDED:
-
-        * a same-pair move to a level that differs from the model's seed is a
-          CHOICE ("/effort max");
-        * a same-pair move back onto the seed is a WITHDRAWAL ("/effort auto"),
-          so the held choice is cleared — otherwise the next switch would
-          resurrect a level the user had explicitly dropped;
-        * a switch that lands on a non-seed level remembers that level (it is
-          either the choice being carried, or one the caller supplied);
-        * a switch that lands on the seed chooses NOTHING, so the held choice is
-          KEPT: that is exactly the ladder the target could not express, and the
-          whole point is that it should still be there on the way back.
-        """
-        same_pair = (previous.provider, previous.model_id) == (
-            model.provider,
-            model.model_id,
-        )
-        level = model.reasoning_effort
-        seeded = level == model.reasoning_default_effort
-        if same_pair:
-            if level == previous.reasoning_effort:
-                return
-            self._chosen_effort = None if seeded else level
-            return
-        if level and not seeded:
-            self._chosen_effort = level
-
     @property
     def chosen_effort(self) -> str | None:
         """The level this CONVERSATION chose, or ``None`` when nothing was chosen.
 
         Distinct from ``self.model.reasoning_effort``, which is the level the
         SELECTED model can express right now (a clamp, a seed, or ``None`` on a
-        model with no ladder). Read by the selection journal and by the
-        failover carry, so a trip through a route that cannot hold the level
-        cannot take the choice away.
+        model with no ladder). Set ONLY by a caller that states the decision —
+        ``set_model(effort_choice=...)`` — never inferred from the spec: a
+        change that INFERRED it from ``level != seed`` recorded a failover
+        CLAMP as the choice and could not see a withdrawal that changed no
+        level (review round 1, M1/M3).
         """
         return self._chosen_effort
 
-    def _journal_effort_if_selection_in_force(self, previous: ModelSpec, model: ModelSpec) -> None:
-        """Re-journal the selection when a knob change moves the effort.
+    def _journal_effort_if_selection_changed(
+        self, previous: ModelSpec, model: ModelSpec, previous_choice: str | None
+    ) -> None:
+        """Re-journal the selection when an effort DECISION moved it.
+
+        "Decision" covers both halves the row stores: the level the selected
+        model now expresses, and the level the CONVERSATION chose
+        (``effort_choice``). ``/effort auto`` can change only the second one
+        when the spec already sits on its seed, and the row must still be
+        rewritten — otherwise the withdrawn level comes back on the next
+        restart (review round 1, M3).
 
         The ``selected_model`` row carries an effort field, and ``/effort``
         takes ``set_model``'s same-pair early return and never reaches the
@@ -6683,11 +6691,13 @@ class Session:
 
         Bounded twice, and each bound is load-bearing:
 
-        - **Only an actual effort move.** A sampling-only override
+        - **Only an actual effort decision.** A sampling-only override
           (temperature / top_p, the server's ``ChatRequest.options`` path)
           rides ``set_model`` on the same pair too, and the journal stores no
           sampling — so re-journalling on those would append identical rows for
-          a change the row cannot even express.
+          a change the row cannot even express. The spec level and the chosen
+          level are compared SEPARATELY; a settled call that moved neither is
+          still skipped.
         - **Coalesced, not one append per keystroke.** ``/effort`` cycling
           (``shift+tab``) lands one write per SETTLED level: the writer
           snapshots the spec at write time, and a second change while a write
@@ -6696,7 +6706,15 @@ class Session:
           per level change, which is the price of the durability this row
           exists to provide.
         """
-        if previous.reasoning_effort == model.reasoning_effort:
+        # BOTH HALVES MOVE THE ROW: the level a model can express, and the
+        # level the CONVERSATION chose. ``/effort auto`` on a spec that is
+        # already at its seed changes only the second one, and an early return
+        # on the spec comparison alone left the withdrawn level in the row for
+        # the next restart to resurrect (review round 1, M3).
+        if (
+            previous.reasoning_effort == model.reasoning_effort
+            and previous_choice == self._chosen_effort
+        ):
             return
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
@@ -26340,6 +26358,26 @@ class Session:
             self._selection_needs_initial_write = True
             self._model_migration_notice = True
             return
+        if effort:
+            # A STORED LEVEL IS CLAMPED INTO THE LADDER, exactly as a live
+            # ``set_model_effort`` clamps it. ``spec_for_target`` deliberately
+            # trusts an EXPLICIT target effort verbatim (that is the failover
+            # driver's contract for a chain entry), so passing the row's level
+            # straight through would leave a rung this route does not offer on
+            # the spec. The band would then name ``max`` on a model whose ladder
+            # stops at ``high`` while the wire's membership re-check silently
+            # sent nothing — the loss-of-depth-under-a-status-band failure
+            # ``resolve_effort_in``'s own docstring exists to prevent (QA round
+            # 1, Q-1). The CHOICE is already held in ``_chosen_effort`` above;
+            # only the level IN FORCE is clamped here, and a later switch to a
+            # model that can express it carries the choice again.
+            spec = spec.model_copy(
+                update={
+                    "reasoning_effort": resolve_effort_in(
+                        spec.reasoning_efforts, spec.reasoning_default_effort, effort
+                    )
+                }
+            )
         self._model = spec
         # A restored row IS the user's earlier explicit choice, so a config
         # default edited after the resume must not override it either.
