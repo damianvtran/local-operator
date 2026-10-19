@@ -180,6 +180,10 @@ def response_text(
 
     status = str(record.get("status") or "")
     questions = list(record.get("questions") or [])
+    if status == "dismissed":
+        # NEVER through ``_ask_report``: a dismissal has no answers, and the report
+        # would render the absence as an empty answer (design §15).
+        return dismissed_text(record)
     answers = {
         str(k): [str(v) for v in (vals or [])] for k, vals in (record.get("answers") or {}).items()
     }
@@ -216,6 +220,43 @@ def response_text(
     if status == "late":
         return LATE_LEAD.format(deadline=_stamp(record.get("expires_at"))) + text
     return text
+
+
+#: What an OPEN-ask dismissal tells the agent (design §15, D1). One row per
+#: ``reason``; the secret variant names no value and says where else the credential
+#: may be found.
+DISMISSED_ANSWERED_IN_CHAT = (
+    "The user dismissed ask {ask_id}: they say it was settled in the conversation. "
+    "Take the answer from what was said in chat and do not ask again; there is no "
+    "need to call `ask_withdraw` for it (it would be refused). If the chat did not "
+    "settle it for you, say so in one line instead of re-asking."
+)
+DISMISSED_MOOT = (
+    "The user dismissed ask {ask_id} as no longer needed. Do not ask it again; carry "
+    "on without it and say in one line what you assumed."
+)
+DISMISSED_SECRET = (
+    "The user dismissed the credential ask {ask_id} without entering a value "
+    "({reason_label}). Do not run anything that needed it unless the conversation "
+    "says where the credential is, such as a stored secret."
+)
+#: The operator-facing label of each reason (design §3.2).
+DISMISS_REASON_LABELS = {
+    "answered_in_chat": "settled in chat",
+    "moot": "no longer needed",
+}
+
+
+def dismissed_text(record: Mapping[str, Any]) -> str:
+    """The ``ask_response`` text for an ask the operator dismissed before its deadline."""
+    from local_operator.asks import store
+
+    reason = store.normalize_dismiss_reason(record.get("dismissed_reason"))
+    ask_id = str(record.get("ask_id") or "")
+    if any(q.get("secret") for q in (record.get("questions") or ()) if isinstance(q, Mapping)):
+        return DISMISSED_SECRET.format(ask_id=ask_id, reason_label=DISMISS_REASON_LABELS[reason])
+    template = DISMISSED_ANSWERED_IN_CHAT if reason == "answered_in_chat" else DISMISSED_MOOT
+    return template.format(ask_id=ask_id)
 
 
 def _timeout_listing_line(question: Mapping[str, Any]) -> str:
@@ -353,23 +394,24 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
     return "this ask is no longer open."
 
 
-#: The refusal a DISMISSAL returns when the ask is not lapsed.
-#:
-#: ONE constant, read by both doors — ``AskQueue.dismiss`` when a runtime is live
-#: and :func:`local_operator.asks.dismiss.dismiss_cold` when there is none (fork A,
-#: §14). Each used to spell the sentence itself, and two wordings for one state
-#: would make a stale tap look like a different rule depending on which process
-#: answered it.
-#:
-#: WHY IT NAMES ONLY THE LAPSED CASE. :func:`refusal_copy` answers "why can I not
-#: ANSWER this", and it has a better sentence per state for that question. This
-#: op's question is "why can I not DISMISS this", and the answer for an OPEN,
-#: declined or answered ask is that the ask is still live — one sentence for all
-#: three, because the surface offered the button on a row that had already moved on
-#: and the user's act is the same either way. A DISMISSED ask is the one state that
-#: needs a different word, and it has its own below.
-DISMISS_NOT_LAPSED = "only a timed-out ask can be dismissed; it is still open."
+#: The refusal an OPEN-ask dismissal gets while the agent is working (D6, design
+#: §15). Dismissal is "hear at the next real run": it never starts, wakes or
+#: injects into running work, so it is offered only on a cold or STOPPED session.
+#: On a running one the operator's route is the conversation itself, where the
+#: agent is already reading.
+DISMISS_AGENT_RUNNING = (
+    "the agent is still running — reply in chat to settle this ask, "
+    "or stop the session first and dismiss it then."
+)
 
+#: An unknown ``reason`` on a dismissal, refused before anything is written.
+DISMISS_BAD_REASON = "reason must be 'answered_in_chat' or 'moot'."
+
+#: A team-bridge request carries another agent's question; its reply goes to that
+#: agent's channel, so it stays dismissible only once it has timed out (§3.5).
+DISMISS_BRIDGE_OPEN = (
+    "this request comes from another agent — it can be dismissed only after it has timed out."
+)
 
 #: What a DISMISSED ask answers when something is asked of it AGAIN (UX round 1,
 #: U3 = QA round 1, Q3 = agent review round 1, MINOR-4). ``DISMISS_NOT_LAPSED``
@@ -381,26 +423,47 @@ DISMISS_NOT_LAPSED = "only a timed-out ask can be dismissed; it is still open."
 DISMISS_ALREADY_DISMISSED = "you already dismissed this."
 
 
-def dismiss_refusal(record: Mapping[str, Any] | None) -> str:
+def dismiss_refusal(
+    record: Mapping[str, Any] | None,
+    *,
+    agent_running: bool = False,
+) -> str:
     """Why a dismissal was refused, or ``""`` when it is ACCEPTED.
 
     ``record`` is the FOLDED ask (``None`` when the log holds no such ask). The
-    decision is a property of the log rather than of the surface asking, which is
-    what lets the cold door hold a runtime-less session to exactly the rule a live
-    one applies — and why this is one function rather than two.
+    decision is a property of the log plus ONE runtime fact, which is what lets
+    the cold door hold a runtime-less session to exactly the rule a live one
+    applies — and why this is one function rather than two.
+
+    ``agent_running`` is that fact (D6, design §15): True when a runtime is up and
+    NOT stopped. The cold door has no runtime and passes False; the live door
+    passes what the session reports. It only matters for an OPEN ask — a timed-out
+    one is accepted on every door, as before.
     """
     from local_operator.asks import store
 
     if record is None:
         return refusal_copy(None)
     status = str(record.get("status") or "")
+    if status == store.STATUS_TIMED_OUT:
+        return ""
+    if status == store.STATUS_OPEN:
+        if any(
+            str(question.get("question_id") or "")
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        ):
+            return DISMISS_BRIDGE_OPEN
+        return DISMISS_AGENT_RUNNING if agent_running else ""
     if status == store.STATUS_DISMISSED:
-        # THE REPEAT TAP, above the lapsed-only rule: a dismissed ask is not a
-        # live one, and this is the sentence that says what the user did.
+        # THE REPEAT TAP: a dismissed ask is not a live one, and this is the
+        # sentence that says what the user did.
         return DISMISS_ALREADY_DISMISSED
-    if status != store.STATUS_TIMED_OUT:
-        return DISMISS_NOT_LAPSED
-    return ""
+    if status == store.STATUS_LATE:
+        # ``refusal_copy`` accepts a late ask (it can be answered again); a
+        # dismissal of one is a different act, and the answer is already in.
+        return "this ask was already answered."
+    return refusal_copy(record)
 
 
 #: The tool result an agent-side WITHDRAWAL returns (design §12). Written to the

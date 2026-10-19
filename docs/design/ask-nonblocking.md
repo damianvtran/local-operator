@@ -113,7 +113,7 @@ deadline through the existing wake engine. Approvals are untouched and keep bloc
 | `queued` | `expires_at, timeout_s, urgent, tool_call_id, questions[{id,question,options,multi,secret,persist,recommended}]` — written only by the owning runtime |
 | `answered` | `by:{surface}`, `answers{qid:[str]}` — secret answers hold **`[<key>]` only, never a value** |
 | `declined` | `by` — explicit "no answer / decide yourself" (today's Esc) |
-| `dismissed` | `by` — view-only removal of a timed-out ask; injects nothing OF ITS OWN, but never cancels a deadline notice the ask had not yet delivered (§14) |
+| `dismissed` | `by`, `reason?` (`answered_in_chat` \| `moot`, default `moot`) — the operator puts an ask away. A timed-out ask: view-only, injects nothing OF ITS OWN, never cancels a deadline notice not yet delivered (§14). An OPEN ask (§15): accepted only on a cold or stopped session, and owes an `ask-response-<id>` row |
 
 **Status is a pure fold of (events, now)** — no `timed_out` event, which removes the
 answer-vs-deadline race. The precedence is **total** (first match wins, so every
@@ -123,7 +123,7 @@ answer-vs-deadline race. The precedence is **total** (first match wins, so every
 |---|---|---|
 | 1 | an `answered` event exists with `at <= expires_at` | `answered` — a real in-window answer outranks every view action |
 | 2 | a `declined` event exists | `declined` — terminal-on-write |
-| 3 | a `dismissed` event exists | `dismissed` — terminal-on-write; the UI only offers dismiss on a `timed_out` ask, so it can never shadow an in-window `answered` |
+| 3 | a `dismissed` event exists | `dismissed` — terminal-on-write; a dismissal never shadows an in-window `answered` (rule 1 sits above it, and within one runtime the second write is refused). Since §15 it can be written on an `open` ask too |
 | 4 | an `answered` event exists, `at > expires_at`, and `now <= expires_at + 7 d` | `late` |
 | 5 | an `answered` event exists, `at > expires_at`, and `now > expires_at + 7 d` | `expired` |
 | 6 | no terminal event, `expires_at <= now <= expires_at + 7 d` | `timed_out` |
@@ -274,7 +274,7 @@ Reuse the wake/peer rail; add no new transport for the live case. New
 
 - **Messages — TWO custom types, not three.** `CustomMessage(custom_type="ask_response",
   attribution="user", id=f"ask-response-{ask_id}", details={ask_id, status, questions, answers,
-  at, text})` with **`status ∈ {answered, late, declined}`** — a decline is a response-shaped
+  at, text})` with **`status ∈ {answered, late, declined, dismissed}` (`dismissed` since §15: the operator put an OPEN ask away before its deadline)** — a decline is a response-shaped
   fact (the ask settled, a human decided) and reusing the type keeps one registration, one
   render branch and one `EntryKind`, exactly as the "any miss silently drops the row" rule
   wants; only its `text` and `status` differ. Plus `custom_type="ask_timeout"`,
@@ -290,9 +290,10 @@ Reuse the wake/peer rail; add no new transport for the live case. New
   activity), projection `mobile/projection.py` (GATE_TIMEOUT handled `:1293`), TUI
   `tui/session_presentation.py` (`:989-1011`, `:1239`), `harness/rows.py` copy (`:660`).
   Keep the legacy `GATE_TIMEOUT_CUSTOM_TYPE` ask arm rendering for old transcripts.
-- **Stopped-session rule.** `ask_response` in **all three** statuses is fresh human intent
+- **Stopped-session rule.** `ask_response` in **answered / late / declined** is fresh human intent
   (an answer, a late answer, or an explicit *decline* is a person deciding) → clears a sticky
-  abort like a typed prompt. `ask_timeout` is **not** intent → add to
+  abort like a typed prompt. **Amended (§15, 2026-10-19):** `status: dismissed` is the exception —
+  tidying an ask is not an instruction, so that row is stopped-work residue and buys no turn. `ask_timeout` is **not** intent → add to
   `_STOPPED_WORK_RESIDUE_TYPES` (`session.py:556`) so a timeout never buys a paid turn on a
   session the user just stopped.
 - **Batching/ordering.** One `reconcile` collects everything due, ordered by log seq
@@ -1416,14 +1417,15 @@ message answers it, withdraw it"). Track with the §9 text edits.
 
 ### 12.2 Open questions (FOR SYNC — Aida)
 
-1. **Whose half is "withdraw"? RESOLVED (Aida, 2026-10-05)** — the operator's own words settle it:
+1. **Whose half is "withdraw"? RESOLVED (Aida, 2026-10-05); the operator-side gap REPLACED by §15 (2026-10-19)** — the operator's own words settle it:
    both reasons above are AGENT-side. **The operator-side settle is a real but DIFFERENT gap**
    (`dismiss` being `timed_out`-only means a user cannot clear an OPEN ask — a UX gap, not the
    engine gap) and is **deferred out of this slice**: it rides the PR thread as `deferred — dismiss
    remains timed_out-only; widening it is a policy change with its own copy`, so it is not lost.
    (2026-10-16, §13: the user-side settle of a TIMED-OUT ask then came by its deadline, not by
    an op — `timed_out` left the outstanding set, so a lapsed ask no longer waits on the user.
-   The OPEN-ask gap above is unchanged.)
+   The OPEN-ask gap above is unchanged. 2026-10-19, §15: REPLACED — an OPEN ask is now
+   dismissible, narrowly, on a cold or stopped session.)
 2. **`/new`, session delete, or stop with open asks**: today they persist (durable by design,
    answerable from any surface). Proposal: no auto-withdraw; the operator can still answer or
    dismiss. Confirm.
@@ -1519,12 +1521,13 @@ wire and `INJECTING_STATUSES` are otherwise untouched.
    injects nothing — the case the narrowed `test_a_dismissed_ask_injects_nothing` now pins.
 
 **Why removing the deadline wake row is safe — the condition this rests on.** `ask-timeout-<id>` is
-how a deadline survives a runtime that does not exist: the supervisor engages a runtime for it. Only
-a timed-out ask can be dismissed, so its deadline has already passed and the row has nothing left to
-deliver except the boot itself; the notice it would have delivered is kept owed by the fold above.
-**If a dismissal is ever allowed BEFORE the deadline, removing the row becomes wrong**, because then
-the fire would be the only thing that delivers a notice for a live ask — that rule and this
-cancellation must change together.
+how a deadline survives a runtime that does not exist: the supervisor engages a runtime for it. For a
+timed-out ask, its deadline has already passed and the row has nothing left to deliver except the
+boot itself; the notice it would have delivered is kept owed by the fold above. (Amended by §15:
+this was once the ONLY reason. A dismissal before the deadline is now allowed, and the rule and the
+cancellation changed together, as this paragraph demanded: such a dismissal owes an
+`ask-response-<id>` row, which ANY boot's reconcile delivers, so the wake row's fire is no longer
+the only thing that tells the agent.)
 
 **Surfaces.** The phone's card loses the two lines that promised the engage ("the conversation is
 brought up to record it." and "bringing the session up to record the dismissal — this can take up to
@@ -1535,3 +1538,62 @@ which op still pays a dial.
 
 **Not addressed here.** A second COLD dismissal reads "you already declined this."
 (`render.refusal_copy`) — it predates this amendment and is left as it was.
+
+## 15. Amendment (2026-10-19): the operator can dismiss an OPEN ask
+
+**The gap.** §12.2 item 1 deferred it: "`dismiss` being `timed_out`-only means a user cannot clear
+an OPEN ask." The case that made it real: an ask went stale while its session was stopped, the user
+and the agent settled it in chat, and the card could not be closed. This section replaces that
+deferral, narrowly. Plan: `ask-dismiss-plan.md` (D1–D6); this PR is the engine, wire and design.
+
+**What changes.**
+
+1. `ask_dismiss` takes an optional `reason ∈ {answered_in_chat, moot}` (default `moot`; the same two
+   words `ask_withdraw` takes). It is validated at the wire (`mobile/types.py`), forwarded by every
+   hop (`daemon.py` cold and dial arms, `attach_client`, `attached`, `server`, `serving`,
+   `Session.dismiss_ask`, `AskQueue.dismiss`, `dismiss_cold`) and recorded on the event:
+   `{"kind":"dismissed","by":{"surface":…},"reason":…}`. It is additive: no `PROTOCOL_VERSION` bump,
+   and an older runtime ignores it.
+2. **D1 — timing decides the row, never the reason.** A dismissal stamped BEFORE `expires_at` (inside
+   the 7 d window) sets the new fold flag `response_owed`; `expected_row_ids` returns
+   `[ask-response-<id>]`; `delivered_hint` requires that row (any-row would let a deadline notice
+   that landed first read as "the agent was told"); `reconcile` delivers it like a decline's. The row
+   is the existing `ask_response` type with `details.status = "dismissed"`, `reason`, `by`, `at`.
+   Its text comes from `render.dismissed_text` per reason (and a secret variant that names no value),
+   never through `_ask_report`. A dismissal at or after the deadline is §14, untouched
+   (`notice_owed`). Accepted order, tested by name: a runtime writes `ask-timeout-<id>` at the
+   deadline, then a cold dismissal stamped before it lands — the agent reads both; `delivered` stays
+   false until the response row exists.
+3. **D2 — a dismissal receipt is stopped-work residue.** `_is_stopped_work_residue` treats an
+   `ask_response` with `details.status == "dismissed"` as residue: tidying an ask must not clear a
+   stop and restart work. A decline differs — it hands the decision back, and stays fresh intent.
+4. **D3 — the cold door still removes the deadline wake row**, on the grounds in §14's amended
+   paragraph. Cost: an idle cold asker no longer wakes at the deadline; if nothing starts it within
+   7 d the row lapses unread. Parked sessions keep their wake row, as before.
+5. **D6 — an OPEN ask is dismissible only when no agent work is running.**
+
+   | owning session | open-ask dismissal | what the agent gets |
+   |---|---|---|
+   | cold (no runtime) | accepted, boots nothing (`dismiss_cold`) | the response row at its next real run |
+   | runtime up, **stopped** | accepted, buys no turn (D2) | the response row at its next turn |
+   | runtime up, **not stopped** (idle or mid-turn) | **refused**, nothing written | nothing; reply in chat, or the agent uses `ask_withdraw` |
+   | any, ask `timed_out` | unchanged (§14) | unchanged |
+
+   "Stopped" is `Session.ask_agent_running() is False`: a stop is pending (`_abort_requested`) AND no
+   turn is in flight (`_is_streaming` false, `_turn_lock` free). Idle-vs-mid-turn is not a stable
+   distinction (an idle runtime can begin a turn at any moment), so the cut is "stopped or cold" vs
+   "running". A queue whose session cannot answer counts as running (fail closed). Team-bridge asks
+   (any question carrying a `question_id`) stay timed-out-only. The refusal is
+   `render.DISMISS_AGENT_RUNNING`: "the agent is still running — reply in chat to settle this ask, or
+   stop the session first and dismiss it then." **Cost:** on a running session a stale open ask still
+   cannot be closed from its card. **What would change it:** a request for live dismissal, which would
+   also need the row to join a live turn (steering, §2.3).
+6. **Refusals.** `render.dismiss_refusal(record, agent_running=)` replaces the lapsed-only rule:
+   `open`/`timed_out` accepted (open subject to D6 and the bridge rule); `dismissed` →
+   `DISMISS_ALREADY_DISMISSED`; `late` → "this ask was already answered."; the other settled states →
+   `refusal_copy`. `DISMISS_NOT_LAPSED` is retired: it would be false in every state it was returned for.
+7. **Audit receipt.** `harness.rows.ask_response_notice` gains a `dismissed` branch — "Dismissed by you
+   (phone) — settled in chat (ask a-1)" — instead of falling back to "Answered — delivering".
+
+**Not in this change.** The TUI `x` chooser, the phone `close…` row and the desktop receipt are
+separate PRs; until they ship no surface offers the new door, so nothing a user can reach changes.

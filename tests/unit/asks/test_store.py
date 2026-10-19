@@ -380,19 +380,69 @@ def test_a_dismissed_notice_is_not_owed_past_the_late_window():
     assert store.expected_row_ids(record) == []
 
 
-def test_a_dismissal_before_the_deadline_owes_nothing():
-    """Only a deadline that had ALREADY passed can leave a notice undelivered.
-
-    A hand-written log may carry a dismissal dated inside the window (no surface
-    offers one — ``AskQueue.dismiss`` refuses a non-lapsed ask — but the fold is
-    total, so it has to answer). Nothing was owed at that instant, and the
-    dismissal does not invent an owed notice.
-    """
+def test_a_dismissal_before_the_deadline_owes_a_response_row_not_a_notice():
+    """D1 (design §15): only a deadline that had ALREADY passed can leave a NOTICE
+    undelivered, so a pre-deadline dismissal owes the RESPONSE row instead —
+    timing decides, never the reason."""
     events = [_queued(at=BASE, timeout_s=3600), _dismissed(at=BASE + 1_000)]
     (record,) = store.fold(events, BASE + 2_000)
     assert record["status"] == store.STATUS_DISMISSED
     assert record["notice_owed"] is False
+    assert record["response_owed"] is True
+    assert record["delivered"] is False
+    assert store.expected_row_ids(record) == [store.response_row_id("a-1")]
+
+
+def test_the_response_row_clears_a_pre_deadline_dismissal():
+    events = [_queued(at=BASE, timeout_s=3600), _dismissed(at=BASE + 1_000)]
+    (record,) = store.fold(events, BASE + 2_000, present_ids=[store.response_row_id("a-1")])
+    assert record["delivered"] is True
+    assert record["response_owed"] is False
     assert store.expected_row_ids(record) == []
+
+
+def test_timeout_first_race_keeps_the_dismissal_owed():
+    """ACCEPTED ORDER (design §3.3): a runtime boots at the deadline and writes
+    ``ask-timeout-<id>``, then a cold dismissal STAMPED BEFORE the deadline lands.
+    Both rows are true; ``delivered`` must stay false until the response exists."""
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 119_000)]
+    now = BASE + 130_000
+    (record,) = store.fold(events, now, present_ids=[store.timeout_row_id("a-1")])
+    assert record["delivered"] is False
+    assert record["response_owed"] is True
+    assert store.expected_row_ids(record) == [store.response_row_id("a-1")]
+
+
+def test_a_post_deadline_dismissal_is_unchanged_by_the_response_rule():
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(events, BASE + 200_100)
+    assert record["response_owed"] is False
+    assert record["notice_owed"] is True
+    assert store.expected_row_ids(record) == [store.timeout_row_id("a-1")]
+
+
+def test_an_answer_inside_the_window_outranks_a_pre_deadline_dismissal():
+    answered = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_ANSWERED,
+        "ask_id": "a-1",
+        "at": BASE + 500,
+        "answers": {"q1": ["x"]},
+        "by": {"surface": "tui"},
+    }
+    events = [_queued(at=BASE, timeout_s=3600), answered, _dismissed(at=BASE + 1_000)]
+    (record,) = store.fold(events, BASE + 2_000)
+    assert record["status"] == store.STATUS_ANSWERED
+
+
+def test_a_dismissal_reason_defaults_to_moot_and_is_recorded():
+    bare = _dismissed(at=BASE + 1_000)
+    (record,) = store.fold([_queued(at=BASE, timeout_s=3600), bare], BASE + 2_000)
+    assert record["dismissed_reason"] == "moot"
+    chat = dict(bare, reason="answered_in_chat")
+    (record,) = store.fold([_queued(at=BASE, timeout_s=3600), chat], BASE + 2_000)
+    assert record["dismissed_reason"] == "answered_in_chat"
+    assert record["dismissed_by"] == {"surface": "phone"}
 
 
 def test_a_dismissed_notice_already_in_the_transcript_is_not_owed():
