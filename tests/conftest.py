@@ -405,6 +405,12 @@ _AMBIENT_VARS = (
     # feature, and the zero-footprint cells would pass for the wrong reason.
     # The aida conftest clears it for its own package; this scrubs it everywhere.
     "LOCAL_OPERATOR_NO_AIDA",
+    # The Librarian's kill switch (``librarian.state.ENV_DISABLE``) — the same
+    # escape-hatch class as Aida's above, with the same failure mode: every cell
+    # asserting her state, pause or organized count would silently drive a
+    # disabled install and pass for the wrong reason. Tests that exercise the
+    # disabled path set it deliberately with ``monkeypatch.setenv``.
+    "LOCAL_OPERATOR_NO_LIBRARIAN",
     # The startup shortcut's inheritance marker (``helpers.PATH_PRIMED_ENV``,
     # the bulk-resume lane's C1 cut): set by
     # ``setup_cross_platform_environment`` once a lineage has captured the
