@@ -1681,22 +1681,31 @@ a proxy rather than by the gate is a merge nobody checked.
 **And name the slow gate, because the fast gate is not the slow gate.** The
 `i18n` job runs two scripts — `scripts/i18n/generate.py --check` and
 `scripts/i18n/check.py` — and the second of them cannot see a class of debt
-that the unit test does see. `check.py` **skips a namespace a locale does
-not carry** and validates only the files that are present, demanding full key
+the unit test does see. `check.py` **skips a namespace a locale does not
+carry** and validates only the files that are present, demanding full key
 parity for each one it does find; the unit test in
 `tests/unit/i18n/test_language_manifest.py` compares **key-by-key** and
-treats an absent namespace as all-missing. So the two disagree about the
-same debt, and they disagree about its SIZE: `i18n/coverage-allowance.json`
-**records** 105 missing `wire.memory` entries (7 locale pairs x 15), the unit
-test **reports** the ones the allowance does not list (14 on the tree this
-was measured on — the two `wire.memory.capture.locators` keys across seven
-locales), and `check.py` reports **none** of it, because the namespace is
-absent from every locale and an absent namespace is skipped. **A green fast
-job is evidence of consistency, not of correctness**, and a count taken from
-one of those three is not interchangeable with a count from another. So the
-slow gate is the one that carries the assertion, and it is the one that has
-to be named in the authorisation — and the allowance's own rules, stated
-above, are what that slow gate enforces.
+treats an absent namespace as all-missing. Measured on `main` at
+`8497001139`: the fast gate **exits 0** and the slow gate **reports 52**
+unlisted entries — 14 of them the `wire.memory.capture.locators` pair across
+seven locales, 38 of them `tui.viewer`. And the three numbers about the same
+debt do not agree: the **coverage gate** (`i18n/coverage-allowance.json`,
+named above) **records** 105 missing `wire.memory` entries (7 locale pairs x
+15), the slow test **reports** the ones the allowance does not list, and the
+fast script reports **none** of it, because the namespace is absent from
+every locale and an absent namespace is skipped. **A green fast job is
+evidence of consistency, not of correctness**, and a count from one of those
+three is not interchangeable with a count from another.
+
+So the slow gate is the one that carries the assertion, and it is the one
+that has to be named in the authorisation — and the allowance's own rules,
+stated above, are what that slow gate enforces. Note what that makes the
+allowance load-bearing: a catalogue file that is **present and partial** is
+judged by both gates, the fast one demanding every key, the slow one only
+the missing ones — and the slow one passes only once the allowance has been
+**shrunk** to match, which is the shrink-only rule above. A partial
+translation is therefore not a state either gate can be asked about in
+isolation.
 
 **Read the mechanism before you write the trigger.** A trigger written from
 the shape of a fix you assumed is a trigger that waits on a signal which
