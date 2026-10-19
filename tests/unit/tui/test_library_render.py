@@ -50,12 +50,15 @@ def test_each_status_row_maps_to_its_own_query_field() -> None:
     assert (query.highlighted, query.organized, query.favorite) == (None, None, True)
 
 
-def test_a_tag_filters_by_name_and_toggles_off() -> None:
+def test_a_tag_filters_by_id_and_displays_its_name() -> None:
+    """QA round 1: the service compares tag IDs; the page paints names."""
     state = LibraryState()
-    state.select_tag("q3")
-    assert state.query().tag == "q3"
-    state.select_tag("q3")
+    state.select_tag("58e2791934", "q3")
+    assert state.query().tag == "58e2791934"
+    assert state.tag_label == "q3"
+    state.select_tag("58e2791934", "q3")
     assert state.query().tag is None
+    assert state.tag_label is None
 
 
 def test_search_is_trimmed_and_the_cursor_resets() -> None:

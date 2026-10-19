@@ -317,6 +317,51 @@ async def test_the_rail_filters_by_category_and_hides_below_ninety(calls) -> Non
 
 
 @pytest.mark.asyncio
+async def test_selecting_a_tag_queries_its_id_and_paints_its_name(monkeypatch) -> None:
+    """QA round 1: the rail's value is the service's tag id, not its label."""
+    recorded: list[library_service.Query] = []
+
+    def fake_list_assets(config_dir, query, **kwargs):
+        recorded.append(query)
+        payload = _payload()
+        if query.tag:
+            rows = [
+                row
+                for row in payload["rows"]
+                if any(str(tag.get("id")) == query.tag for tag in row.get("tags") or [])
+            ]
+            payload = {**payload, "rows": rows, "total": len(rows)}
+        return payload
+
+    monkeypatch.setattr(library_service, "list_assets", fake_list_assets)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: view._payload is not None)
+
+        index = next(
+            i
+            for i, item in enumerate(view._rail_items)
+            if item.kind == "tag" and item.label == "#q3"
+        )
+        view._rail_cursor = index
+        await pilot.press("f")
+        await pilot.press("enter")
+        await _settle(
+            pilot,
+            lambda: recorded[-1].tag == "t1" and [r["name"] for r in view.rows()] == ["chart.png"],
+        )
+
+        assert view.state.tag == "t1"
+        assert view.state.tag_label == "q3"
+        title = _text(view._title)
+        assert "#q3" in title
+        assert "#t1" not in title
+
+
+@pytest.mark.asyncio
 async def test_edit_metadata_collects_the_form_and_writes_through_the_service(
     calls, monkeypatch
 ) -> None:

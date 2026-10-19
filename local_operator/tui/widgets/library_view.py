@@ -607,7 +607,7 @@ class LibraryView(Vertical):
         if self.state.status:
             parts.append(self._status_label(self.state.status))
         if self.state.tag:
-            parts.append(f"#{self.state.tag}")
+            parts.append(f"#{self.state.tag_label or self.state.tag}")
         if self.state.q.strip():
             parts.append(self.state.q.strip())
         parts.append(_t(_k.sort_label(sort=self._sort_label(self.state.sort))))
@@ -1079,9 +1079,13 @@ class LibraryView(Vertical):
                 items.append(_RailItem("header", "", self._tag_category_label(group), None))
                 for tag in rows:
                     name = str(tag.get("name") or "")
-                    if not name:
+                    tag_id = str(tag.get("id") or "")
+                    # The rail's value is the ID the service compares; the
+                    # label is the name a reader sees. Sending the name made
+                    # every tag filter return zero rows (QA round 1).
+                    if not name or not tag_id:
                         continue
-                    items.append(_RailItem("tag", name, f"#{name}", int(tag.get("count") or 0)))
+                    items.append(_RailItem("tag", tag_id, f"#{name}", int(tag.get("count") or 0)))
         return items
 
     def _rail_active(self, item: _RailItem) -> bool:
@@ -1090,7 +1094,7 @@ class LibraryView(Vertical):
         if item.kind == "status":
             return self.state.status == item.value
         if item.kind == "tag":
-            return (self.state.tag or "").casefold() == item.value.casefold()
+            return self.state.tag == item.value
         return False
 
     def _rail_selectable(self, index: int) -> bool:
@@ -1127,7 +1131,7 @@ class LibraryView(Vertical):
         elif item.kind == "status":
             self.state.select_status(item.value)
         elif item.kind == "tag":
-            self.state.select_tag(item.value)
+            self.state.select_tag(item.value, item.label.removeprefix("#"))
         self._rail_focused = False
         self.focus()
         self._reload()
