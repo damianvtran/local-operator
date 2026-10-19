@@ -580,3 +580,24 @@ def test_payment_split_qualifies_total_and_child_money():
     assert "By basis:" not in text
     total_line = next(line for line in text.splitlines() if line.strip().startswith("Total "))
     assert "billed" not in total_line and "included" not in total_line
+
+
+def test_homogeneous_child_basis_note_does_not_repeat_money():
+    for basis, wide, narrow in (
+        ("subscription_api_equivalent", "included (API-equivalent)", "included"),
+        ("billed", "billed", "billed"),
+        ("estimated", "estimated", "estimated"),
+    ):
+        snapshot = combine(
+            [],
+            children=ChildrenSnapshot(total_micro=11620000, by_basis={basis: 11620000}),
+            tracked=True,
+        )
+        for width, label in ((100, wide), (65, narrow)):
+            text = rendered(
+                replace(runtime(), spend_channels=FrontendSpendChannels.model_validate(snapshot)),
+                width=width,
+            )
+            row = next(line for line in text.splitlines() if "subagents" in line)
+            assert row.count("$11.62") == 1, row
+            assert label in row, row

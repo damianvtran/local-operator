@@ -1085,7 +1085,8 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             body,
             "subagents · included in total",
             format_usd(child_micro),
-            notes=_payment_split_rungs(getattr(children, "by_basis", None)) or child_note,
+            notes=_payment_split_rungs(getattr(children, "by_basis", None), total_micro=child_micro)
+            or child_note,
         )
     for row in rows:
         amount = _as_micro(row.get("amount_micro"))
@@ -1400,10 +1401,19 @@ def _units_text(row: dict[str, Any]) -> str:
     return f"{units:g} {noun}"
 
 
-def _payment_split_rungs(basis: Any) -> tuple[str, ...]:
+def _payment_split_rungs(basis: Any, *, total_micro: int | None = None) -> tuple[str, ...]:
     """Only published buckets may qualify a total, including on narrow cards."""
     if not isinstance(basis, dict):
         return ()
+    # A homogeneous child already states its whole amount in the money cell.
+    # Repeating it in the note looks like a second charge. Only mixed children
+    # need amount-bearing notes to explain how that money divides.
+    nonzero = [(key, _as_micro(value)) for key, value in basis.items() if _as_micro(value)]
+    if total_micro is not None and len(nonzero) == 1 and nonzero[0][1] == total_micro:
+        key = nonzero[0][0]
+        return _basis_rungs(
+            [BASIS_NOT_TRACKED if key == NOT_TRACKED_MICRO else key], amount_known=True
+        )
     parts = []
     short = []
     labels = []
