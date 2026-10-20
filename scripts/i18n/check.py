@@ -626,35 +626,84 @@ def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     return ids
 
 
+def _base_catalogue(ref: str, locale: str, namespace: str) -> dict[str, str] | None:
+    """One locale's catalogue for one namespace at ``ref``, or ``None``.
+
+    ``None`` means the file does not exist there (the namespace is uncarried,
+    so every key is missing) or could not be read. Callers treat both the
+    same way: the key is not present at the base.
+    """
+    shown = _git(
+        "show",
+        f"{ref}:local_operator/i18n/catalogues/{locale}/{namespace}.json",
+    )
+    if shown.returncode != 0:
+        return None
+    try:
+        data = json.loads(shown.stdout)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def allowance_growth(
     base: dict[str, Any],
     head: dict[str, Any],
     *,
-    new_english_keys: set[str] | None = None,
+    ref: str | None = None,
+    base_english: set[str] | None = None,
+    inactive_locales: set[str] | None = None,
 ) -> set[tuple[str, str, str]]:
     """Added allowance entries that are growth in this change.
 
-    The shrink-only rule forbids landing new English copy and its allowance
-    debt in one change: that would launder untranslated copy. It does permit
-    recording debt the tree ALREADY had, but only in a change that adds no
-    English key at all. That asymmetry is the bypass-proof test: to launder,
-    an earlier PR would have had to land English copy with its debt
-    unrecorded — and that PR fails the manifest gate, so it cannot land. The
-    exemption is therefore unreachable from any state laundering could have
-    produced.
+    The shrink-only rule exists to stop untranslated copy being laundered
+    into the tree. An added entry is legitimate in exactly two cases:
 
-    ``new_english_keys`` is ``english_keys(head) - english_keys(base)``.
-    Empty means this change adds no English copy, so every added entry is
-    debt being recorded and none is growth. Non-empty means the change grows
-    English copy, so every added entry is growth and is returned.
-    ``None`` means the key sets could not be read; every added entry then
-    counts as growth (the pre-refinement behaviour), because an unverifiable
-    comparison must not weaken the ratchet.
+    1. **The debt was already real.** The ``(locale, namespace, key)`` was
+       genuinely missing at the base ref — the namespace was uncarried or
+       the key was absent — so this change only *records* what was already
+       true. Recording it is the whole point of the allowance: without it
+       the manifest gate is red about a fact it knows.
+    2. **The locale cannot carry a translation at all.** It has no catalogue
+       directory at the base ref, so a key it is missing is untranslatable
+       rather than untranslated. Refusing this would make the two gates
+       mutually unsatisfiable for every change that adds English copy — a
+       deadlock, not a ratchet.
+
+    Everything else is growth and must fail:
+
+    - a key that **is present** at base and missing at head: the change
+      deleted a translation to record debt, which is the reverse of the
+      rule (``translate-then-drop``);
+    - a new English key in an **active** locale: the copy is translatable,
+      so it must be translated rather than allowanced.
+
+    ``ref`` is the resolved base ref. ``None`` means the base tree could not
+    be read, so nothing is provably pre-existing and every added entry is
+    growth — an unverifiable comparison must not weaken the ratchet.
+    ``inactive_locales`` of ``None`` is treated as empty for the same
+    reason.
     """
     added = _allowance_ids(head) - _allowance_ids(base)
-    if new_english_keys is None or new_english_keys:
+    if not added:
+        return set()
+    if ref is None or base_english is None:
         return added
-    return set()
+    inactive = inactive_locales or set()
+    growth: set[tuple[str, str, str]] = set()
+    for locale, namespace, key in added:
+        if locale in inactive:
+            # Untranslatable at base: recording it is the only lawful act.
+            continue
+        if key not in base_english:
+            # New English copy. An active locale must translate it.
+            growth.add((locale, namespace, key))
+            continue
+        messages = _base_catalogue(ref, locale, namespace)
+        if messages is not None and key in messages:
+            # Present at base, missing at head: a translation was removed.
+            growth.add((locale, namespace, key))
+    return growth
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -764,6 +813,47 @@ def _english_keys_in_tree() -> set[str] | None:
     return keys
 
 
+def _inactive_locales_at_ref(ref: str) -> set[str] | None:
+    """Language codes that carry no catalogue directory at ``ref``.
+
+    A locale with no ``catalogues/<code>/`` at the base cannot hold a
+    translation there, so a key it is missing is untranslatable rather than
+    untranslated. Those are the only locales for which adding allowance debt
+    in a change that also grows English copy is legitimate (see
+    ``allowance_growth``).
+
+    Read from ``i18n/languages.json`` at the same ref, skipping the source
+    language. Returns ``None`` when the manifest cannot be read, so the
+    caller treats the set as empty and the exemption cannot widen by
+    accident.
+    """
+    shown = _git("show", f"{ref}:i18n/languages.json")
+    if shown.returncode != 0:
+        return None
+    try:
+        manifest = json.loads(shown.stdout)
+    except ValueError:
+        return None
+    languages = manifest.get("languages") if isinstance(manifest, dict) else None
+    if not isinstance(languages, list):
+        return None
+    inactive: set[str] = set()
+    for entry in languages:
+        if not isinstance(entry, dict):
+            return None
+        code = entry.get("code")
+        if not isinstance(code, str) or not code:
+            return None
+        if code == "en":
+            continue
+        listing = _git("ls-tree", "-r", "--name-only", ref, "--", f"local_operator/i18n/catalogues/{code}")
+        if listing.returncode != 0:
+            return None
+        if not listing.stdout.strip():
+            inactive.add(code)
+    return inactive
+
+
 def check_allowance_growth(base: str | None = None) -> list[str]:
     """Fail when HEAD adds missing-key entries relative to the base branch.
 
@@ -803,7 +893,14 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
             new_english: set[str] | None = None
         else:
             new_english = head_english - base_english
-        added = allowance_growth(base_data, head_data, new_english_keys=new_english)
+        inactive = _inactive_locales_at_ref(ref)
+        added = allowance_growth(
+            base_data,
+            head_data,
+            ref=None if new_english is None else ref,
+            base_english=base_english,
+            inactive_locales=inactive,
+        )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return [f"allowance growth: cannot compare allowances: {exc}"]
     if new_english is None:
