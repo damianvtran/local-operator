@@ -496,7 +496,7 @@
   "wire.settings.remote_compute.title": "Удалённые вычисления",
   "wire.settings.remote_compute_enabled.choice.false.description": "только локально",
   "wire.settings.remote_compute_enabled.choice.true.description": "удалённые запуски разрешены",
-  "wire.settings.remote_compute_enabled.help": "Предпросмотр: работа идёт на ресурсы Radient, привязана к одной меш-сети.",
+  "wire.settings.remote_compute_enabled.help": "Предпросмотр: работа идёт на ресурсы Radient и привязана к одной меш-сети.",
   "wire.settings.remote_compute_enabled.label": "Удалённые вычисления",
   "wire.settings.retired.description": "Ключи, которые читаются, но больше ничего не делают.",
   "wire.settings.retired.title": "Выведенные",
