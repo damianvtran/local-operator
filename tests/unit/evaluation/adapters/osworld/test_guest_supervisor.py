@@ -699,6 +699,53 @@ def test_parse_output_refuses_a_truncated_payload_whose_inner_object_is_wrong_sh
     assert str(failure.value) == "supervisor output contained no JSON object"
 
 
+def test_installed_unit_accepts_the_real_same_line_sudo_capture() -> None:
+    """Real sudo writes its prompt WITHOUT a newline; the payload shares the line.
+
+    Every other sudo fixture in this file puts a newline after the prompt, a
+    shape real sudo never produces when its input is a pipe (it prints
+    ``[sudo] password for user:`` and the command's own output follows on the
+    same line). A left-boundary rule therefore rejected the genuine capture and
+    re-created the unsupervised-episode defect this module fixes.
+    """
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        '[sudo] password for user: {"unit": "action-server.service", "installed": true}\n'
+    )
+    assert guest_supervisor.installed_unit(captured) == "action-server.service"
+
+
+def test_the_real_same_line_sudo_capture_installs_the_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: the provider records an installed unit for the real capture."""
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        capture = (
+            "escalation=agentless>supplied\n"
+            '[sudo] password for user: {"unit": "action-server.service", "installed": true}\n'
+        )
+        calls = []
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            calls.append(argv)
+            return guest_disk.CommandResult(0, capture, "")
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        provider._install_guest_supervisor(_plan())
+        assert len(calls) == 1
+        assert provider._supervisor_unit == "action-server.service"
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report == {
+            "installed": True,
+            "unit": "action-server.service",
+            "status": "supervised",
+        }
+
+
 def test_installed_unit_refuses_an_array_wrapped_object() -> None:
     """An array is not the install payload, even when it wraps one.
 
@@ -722,7 +769,12 @@ def test_installed_unit_refuses_an_object_nested_inside_a_larger_object() -> Non
 
 
 def test_installed_unit_refuses_a_multiline_member_of_another_object() -> None:
-    """Boundary detection must not rely on the member being on a shared line."""
+    """A member of another object is never top level, however it is spelled.
+
+    The outer object decodes whole and consumes the member, so the member is
+    never a candidate; the end-boundary rule would refuse it too, because a
+    ``}`` closes its container right after it.
+    """
 
     captured = (
         "escalation=x\n"
@@ -752,12 +804,39 @@ def test_parse_output_fails_closed_past_the_size_bound() -> None:
 
 
 def test_parse_output_wraps_decoder_recursion_in_the_named_failure() -> None:
-    """Deep nesting must not escape as a bare RecursionError."""
+    """Deep nesting must not escape as a bare RecursionError.
 
-    captured = "escalation=agentless\n" + '{"a":' * 4000 + "1" + "}" * 4000 + "\n"
+    The depth is past where the decoder provably recurses (measured: depth
+    8,000 decodes, 12,000 raises), and the fixture asserts that premise rather
+    than trusting it -- 4,000 decodes and would have passed for the wrong
+    reason.
+    """
+
+    nested = '{"a":' * 12000 + "1" + "}" * 12000
+    with pytest.raises(RecursionError):
+        json.JSONDecoder().raw_decode(nested, 0)
+    captured = "escalation=agentless\n" + nested + "\n"
     with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
         guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
     assert type(failure.value).__name__ == "SupervisorOutputUnparseable"
+
+
+def test_a_brace_heavy_journal_tail_still_parses() -> None:
+    """A legitimate receipt with thousands of brace pairs must not trip the bound.
+
+    Braces inside a decoded string value are not document candidates: the
+    decoded document is skipped whole. Counting them would spend the 32-candidate
+    budget on one 28 KB journal tail and refuse a perfectly good receipt.
+    """
+
+    record = dict(_restart_record())
+    record["stderr_tail"] = '{"frame": 1} ' * 2000
+    captured = (
+        "escalation=agentless\n[sudo] password for user: " + json.dumps(_envelope([record])) + "\n"
+    )
+    assert len(captured) > 20000, "fixture must be brace-heavy enough to matter"
+    records = guest_supervisor.receipt_records(captured)
+    assert [item["restart"] for item in records] == [42]
 
 
 def test_receipt_records_survive_the_sudo_prompt_before_the_payload() -> None:

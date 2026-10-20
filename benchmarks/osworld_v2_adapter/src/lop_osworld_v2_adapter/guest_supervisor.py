@@ -251,26 +251,27 @@ def report_command(unit: str, password: str) -> Sequence[str]:
 #: existed, a brace-dense 1 MB capture measured ~11 s against a sub-millisecond
 #: old parser. Real captures are ~20 KB (four 4 KB journal tails plus the
 #: envelope), so both bounds leave years of headroom and fail closed past them.
+#: The candidate count is TOP-LEVEL decode attempts, not raw ``{`` characters:
+#: a decoded document is skipped whole, so braces inside its string values (a
+#: journal tail is the common case) never spend the budget.
 _MAX_CAPTURE_CHARS = 256 * 1024
 _MAX_PAYLOAD_CANDIDATES = 32
 
 
-def _begins_a_document(output: str, index: int) -> bool:
-    """True when nothing but indentation precedes ``index`` on its line."""
-
-    cursor = index - 1
-    while cursor >= 0 and output[cursor] in " \t":
-        cursor -= 1
-    return cursor < 0 or output[cursor] == "\n"
-
-
 def _ends_a_document(output: str, end: int) -> bool:
-    """True when the decoded value is not immediately a MEMBER of a container.
+    """True when the decoded value is not a MEMBER of an enclosing container.
 
-    A member is followed by its container's own delimiter, so an array-wrapped
-    ``[{"installed": true, ...}]`` and an object nested in a larger object are
-    not top-level documents and must not be read as one. Trailing noise after a
-    real payload is ordinary text, so it passes here.
+    A member is followed by its container's own delimiter (``,``, ``]`` or
+    ``}``), so an array-wrapped ``[{"installed": true, ...}]`` and an object
+    nested in a larger object are not top-level documents and must not be read
+    as one. A real payload is followed by a line break, the end of the capture,
+    or ordinary trailing noise, so it passes here.
+
+    This is deliberately a RIGHT boundary only. Real ``sudo -S`` writes its
+    prompt WITHOUT a trailing newline when input is a pipe, so the genuine
+    capture is ``[sudo] password for user: {"unit": ..., "installed": true}``
+    on ONE line; requiring a line start would refuse the very payload this
+    module exists to read.
     """
 
     cursor = end
@@ -305,13 +306,16 @@ def parse_output(output: str, accept: Callable[[object], bool]) -> object:
     invariant next to that print), so its payload is the final document while
     sudo's prompt and guest warnings land before it.
 
-    WHY ONLY TOP-LEVEL DOCUMENTS. Decoding an inner object and accepting it
-    would let a guest-chosen fragment inside an array or a larger object stand
-    in for the payload -- e.g. ``[{"installed": true, "unit": "x.service"}]``
-    would install a unit the action server does not own, where the old parser
-    returned the list and the caller refused it. A candidate must therefore
-    begin a document (only indentation before it on its line) and end one (not
-    followed by a container delimiter).
+    WHY ONLY TOP-LEVEL DOCUMENTS, AND WHY THE BOUNDARY IS ON THE RIGHT. Decoding
+    an inner object and accepting it would let a guest-chosen fragment inside an
+    array or a larger object stand in for the payload -- e.g.
+    ``[{"installed": true, "unit": "x.service"}]`` would install a unit the
+    action server does not own, where the old parser returned the list and the
+    caller refused it. What distinguishes a payload is that nothing encloses it,
+    and that shows up AFTER it: a member is followed by its container's
+    delimiter. So a document is a candidate when it ends a document, which also
+    accepts the genuine same-line ``sudo`` capture. A left rule would reject
+    that capture, because real sudo writes its prompt without a newline.
 
     Only ``SupervisorOutputUnparseable`` (a ``ValueError``) escapes for an
     extraction failure: no expected top-level document, a capture past
@@ -327,13 +331,12 @@ def parse_output(output: str, accept: Callable[[object], bool]) -> object:
     found = False
     match: object = None
     candidates = 0
-    for index, char in enumerate(output):
-        if char != "{" or not _begins_a_document(output, index):
-            continue
+    index = output.find("{")
+    while index != -1:
         candidates += 1
         if candidates > _MAX_PAYLOAD_CANDIDATES:
             # Fail closed rather than keep buying work for a guest that keeps
-            # printing brace-led lines.
+            # printing brace-led text.
             raise SupervisorOutputUnparseable(
                 "supervisor output exceeded the parser candidate bound"
             )
@@ -342,11 +345,13 @@ def parse_output(output: str, accept: Callable[[object], bool]) -> object:
         except (ValueError, RecursionError):
             # Not a JSON object here, or nested past the interpreter's limit:
             # neither is a payload, and both must stay inside the named error.
+            index = output.find("{", index + 1)
             continue
-        if not _ends_a_document(output, end):
-            continue
-        if accept(value):
+        if _ends_a_document(output, end) and accept(value):
             found, match = True, value
+        # Skip the whole decoded document: a nested member is never a top-level
+        # document, and braces inside its strings must not spend the budget.
+        index = output.find("{", end)
     if not found:
         raise SupervisorOutputUnparseable("supervisor output contained no JSON object")
     return match
