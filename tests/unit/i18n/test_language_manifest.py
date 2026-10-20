@@ -553,3 +553,46 @@ def test_allowance_growth_permits_debt_when_the_namespace_was_uncarried(
         inactive_locales=set(),
     )
     assert got == set()
+
+
+def test_allowance_growth_rejects_new_english_for_a_newly_activated_locale(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A locale that gains its first catalogue cannot bank new English as debt.
+
+    ``inactive`` is computed at the base ref, so without intersecting it with
+    the locales that carry a catalogue at HEAD, a change could give an
+    uncarried locale its first namespace and record brand-new English there
+    with both gates green — bypassing "new English must be translated" via
+    the base-ref view of inactivity.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.new"]}]}
+    monkeypatch.setattr(i18n_check.catalogues, "locales", lambda: ("ur",))
+    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.existing"},
+        inactive_locales={"ur"},
+    )
+    assert got == {("ur", "demo", "demo.new")}
+
+
+def test_allowance_growth_still_permits_debt_for_a_locale_left_uncarried(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """The carve-out survives for a locale that is still uncarried at HEAD."""
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "zh-CN", "namespace": "demo", "missing": ["demo.new"]}]}
+    monkeypatch.setattr(i18n_check.catalogues, "locales", lambda: ("fr", "es"))
+    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.existing"},
+        inactive_locales={"ur", "zh-CN"},
+    )
+    assert got == set()
