@@ -18,6 +18,7 @@ live but not on replay regresses silently on resume.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,7 +35,12 @@ from local_operator.compaction.carry import (
     read_unresolved_asks,
     render_carried_tier,
 )
-from local_operator.harness.types import Message, ModelSpec, StreamEndEvent, StreamTextDelta
+from local_operator.harness.types import (
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+)
 from local_operator.memory import MemoryIdentity, MemoryStore
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -86,7 +92,7 @@ def _make_session(tmp_path: Path, monkeypatch, stream) -> Session:
     )
 
 
-def _queued(ask_id: str, question: str, *, created_at: int, expires_at: int) -> dict:
+def _queued(ask_id: str, question: str, *, created_at: int, expires_at: int) -> dict[str, object]:
     return {
         "ask_id": ask_id,
         "at": created_at,
@@ -97,7 +103,7 @@ def _queued(ask_id: str, question: str, *, created_at: int, expires_at: int) -> 
     }
 
 
-def _answered(ask_id: str, *, at: int) -> dict:
+def _answered(ask_id: str, *, at: int) -> dict[str, object]:
     return {
         "ask_id": ask_id,
         "at": at,
@@ -106,7 +112,7 @@ def _answered(ask_id: str, *, at: int) -> dict:
     }
 
 
-def _seed_asks(config_dir: Path, session_id: str, events: list[dict]) -> None:
+def _seed_asks(config_dir: Path, session_id: str, events: list[dict[str, object]]) -> None:
     directory = ask_store.session_dir(config_dir, session_id)
     for event in events:
         assert ask_store.append_event(directory, event) is True
@@ -132,7 +138,7 @@ def _carried_rows(messages) -> list[Message]:
     ]
 
 
-def _latest_compaction_payload(session: Session) -> dict:
+def _latest_compaction_payload(session: Session) -> dict[str, Any]:
     entries = [entry for entry in session._transcript.entries() if entry.type == "compaction"]
     assert entries, "the pass did not write a compaction marker"
     return entries[-1].payload
@@ -222,14 +228,13 @@ async def test_the_carried_tier_holds_across_thirty_one_passes(tmp_path, monkeyp
         # (one more row per pass), and it is what "does not grow unboundedly"
         # means here.
         assert len(live_blocks) == 1, f"pass {index}: live carried rows {len(live_blocks)}"
-        assert len(replayed_blocks) == 1, (
-            f"pass {index}: replay carried rows {len(replayed_blocks)}"
-        )
+        assert (
+            len(replayed_blocks) == 1
+        ), f"pass {index}: replay carried rows {len(replayed_blocks)}"
         # Not journalled: a stored copy replays twice on resume (the elision
         # notice's 6 -> 7,167 defect).
         assert not any(
-            entry.id.startswith(CARRIED_TIER_ID_PREFIX)
-            for entry in session._transcript.entries()
+            entry.id.startswith(CARRIED_TIER_ID_PREFIX) for entry in session._transcript.entries()
         ), f"pass {index}: the carried row was persisted"
         live_text = live_blocks[0].text
         replay_text = replayed_blocks[0].text
@@ -282,7 +287,7 @@ def test_the_ask_reader_is_live_and_count_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(ask_store, "now_ms", lambda: clock["now"])
     config = tmp_path / "config"
     directory = ask_store.session_dir(config, "sess")
-    events: list[dict] = []
+    events: list[dict[str, object]] = []
     for index in range(CARRIED_ASKS_LIMIT + 5):
         events.append(
             _queued(
@@ -387,9 +392,9 @@ def test_the_cut_walker_never_selects_the_carried_row():
     ]
     for keep in (10, 40, 100, 200, 400, 800):
         cut = find_cut_point(messages, keep)
-        assert cut is None or not is_carried_tier(messages[cut]), (
-            f"keep={keep}: the cut landed on the carried row at {cut}"
-        )
+        assert cut is None or not is_carried_tier(
+            messages[cut]
+        ), f"keep={keep}: the cut landed on the carried row at {cut}"
 
 
 def test_the_renderer_marks_the_row_as_harness_output():
@@ -408,16 +413,14 @@ def test_the_renderer_marks_the_row_as_harness_output():
     assert row is not None
     assert row.role == "user"
     assert is_rendered_injection(row)
-    assert row.provider_payload.get(RENDERED_INJECTION_KEY) is True
+    assert (row.provider_payload or {}).get(RENDERED_INJECTION_KEY) is True
     assert "[compaction carry]" in row.text
     assert "not the user's words" in row.text
     assert extract_preserved_user_turns([row], {row.id}) == []
 
 
 def _decision_store(tmp_path) -> MemoryStore:
-    return MemoryStore(
-        tmp_path / "config", MemoryIdentity("sess", "", ""), origin="device-test"
-    )
+    return MemoryStore(tmp_path / "config", MemoryIdentity("sess", "", ""), origin="device-test")
 
 
 @pytest.mark.parametrize("status", ["active", "candidate", "disputed"])
@@ -512,9 +515,7 @@ def test_a_fact_replaced_by_an_explicit_edge_is_not_carried(tmp_path):
     assert "OLD-DECISION" not in row.text
 
     # The documented reader agrees: the replaced fact is not searchable.
-    assert not [
-        item for item in store.search("OLD-DECISION") if item["body"] == "OLD-DECISION"
-    ]
+    assert not [item for item in store.search("OLD-DECISION") if item["body"] == "OLD-DECISION"]
 
 
 def test_the_persistence_guard_rejects_a_payload_flag_only_carried_row():
@@ -539,9 +540,7 @@ async def test_the_mobile_fold_injects_the_carried_tier(tmp_path):
         "SUMMARY",
         "kept-1",
         10,
-        carried_asks=[
-            {"id": "a-1", "question": "Proceed?", "created_at": _BASE_MS}
-        ],
+        carried_asks=[{"id": "a-1", "question": "Proceed?", "created_at": _BASE_MS}],
         carried_decisions=[{"body": "keep the helper", "tag": "decision"}],
     )
 
@@ -552,10 +551,12 @@ async def test_the_mobile_fold_injects_the_carried_tier(tmp_path):
         entry.payload["carried_asks"], entry.payload["carried_decisions"]
     )
     assert expected is not None
-    assert prefix[-1].text == expected.text
+    tail = prefix[-1]
+    assert isinstance(tail, Message)
+    assert tail.text == expected.text
 
 
-def test_the_wire_band_ruler_counts_the_carried_row():
+def test_the_wire_band_ruler_counts_the_carried_row(tmp_path):
     """The carried row is re-synthesized IN FRONT of the kept window, so the
     byte-aware cut must price it in its fixed prefix. Without this the band's
     arithmetic undercounts by the block on every pass."""
@@ -601,7 +602,10 @@ def test_the_wire_band_ruler_counts_the_carried_row():
         advance_cut_to_wire_band=advance,
     )
     session = Session.__new__(Session)
-    session._transcript = SimpleNamespace(has_entry=lambda entry_id: True)
+    # A REAL Transcript, not a namespace: the stub only needs ``has_entry`` and
+    # the spy never calls the replayable lambda, but the attribute's declared
+    # type is what keeps this test honest when that stops being true.
+    session._transcript = Transcript(tmp_path / "sess")
 
     # Prefix = [call, preserved, carried]; the image is on the kept side so the
     # image-pressure gate fires.
@@ -609,9 +613,7 @@ def test_the_wire_band_ruler_counts_the_carried_row():
         api, object(), [Message.user("call"), preserved, carried, image], 3
     )
     with_carried = seen["fixed"]
-    session._advance_cut_for_wire_band(
-        api, object(), [Message.user("call"), preserved, image], 3
-    )
+    session._advance_cut_for_wire_band(api, object(), [Message.user("call"), preserved, image], 3)
     without_carried = seen["fixed"]
 
     assert with_carried - without_carried == len(carried.text)
