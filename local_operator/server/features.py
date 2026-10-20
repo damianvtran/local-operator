@@ -110,8 +110,8 @@ def feature_flags() -> dict[str, Any]:
         # agents/teams inventory and never offers a Skills surface whose pull or
         # publish half would 404 on this backend. The key is a promise about the
         # WHOLE adapter, so it is advertised only while every route below exists;
-        # the pin in tests/unit/server/test_desktop_hub_skills.py fails if one is
-        # removed without also removing this key.
+        # the pin in tests/unit/server/test_desktop_hub_skill_publish.py fails if
+        # one is removed without also removing this key.
         "hub_skills": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
