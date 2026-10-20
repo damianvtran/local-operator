@@ -18,8 +18,8 @@ endpoint state are SERVER state (``GET /v1/messaging/status`` and
 ``/settings``); nothing here duplicates them. The master switch is a machine
 gate — the composed gate a surface checks is capability × eligible × enabled
 (RFC §5.4). Each reader's fallback is deliberate: an ABSENT value reads the
-shipped default (ON/opt-out for ``enabled``), while a PRESENT but unparseable
-``enabled`` reads OFF because ON performs a consent write.
+shipped default (OFF for ``enabled`` during the consent hold), while a PRESENT
+but unparseable value reads what the shipped default says, never a coerced ON.
 """
 
 from __future__ import annotations
@@ -31,17 +31,20 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.config import ConfigManager
 
-#: ``team_bridge.enabled`` — ON by default (opt-out).
+#: ``team_bridge.enabled`` — OFF by default (a consent hold).
 #:
-#: The product requirement is that a signed-in account with an eligible Radient
-#: Team plan has agent messages on without first walking an opt-in dialog; an
-#: explicit ``false`` written here (the settings row, a hand edit) is that
-#: machine's opt-out and wins over the default. This key is only the LOCAL half
-#: of the composed gate — capability × eligible × enabled (RFC §5.4) — so the
-#: default enables nothing on its own: ineligible, signed-out, dark-launched and
-#: disabled-membership accounts are still refused by the server and the surface
-#: matrix, and nothing (no boot path, no connector) may run while it is false.
-DEFAULT_TEAM_BRIDGE_ENABLED = True
+#: #2712 shipped the opt-out default ON, but the server still served
+#: ``bridge_consent_v1``, whose copy describes the data handling without ever
+#: offering an opt-out. A status read could therefore turn an eligible Team
+#: plan on and write a consent receipt before the member saw anything that
+#: asked them. Until a consent version carrying opt-out copy is served AND
+#: accepted, an absent key must mean OFF. This key remains only the LOCAL half
+#: of the composed gate — capability × eligible × enabled (RFC §5.4) — so an
+#: explicit ``true`` (the settings row, a hand edit) enables only the surfaces on
+#: this machine; the server still decides eligibility, consent and launch.
+#: Restoring the ON default belongs to the new-consent-version change, not a
+#: local flip.
+DEFAULT_TEAM_BRIDGE_ENABLED = False
 
 #: ``team_bridge.onboarding`` — the one-time dialog's shown-flag (RFC §5.3:
 #: client-local in v1, deliberately never a server row). ``""`` means "not
@@ -54,17 +57,15 @@ ONBOARDING_SEEN = "seen"
 
 #: ``team_bridge.default_enrollment`` — internal state (deliberately NOT a
 #: registry row, exactly like ``onboarding``): a mapping of ACCOUNT id to
-#: ``"done"`` recording that the opt-out default ran the consent write for that
-#: member. PER ACCOUNT on purpose: the default is a per-member product rule, so
-#: account A enrolling must not suppress account B on the same machine. It is
-#: the memory that keeps each consent write to ONE: the server's endpoint is
-#: normally that memory, but an endpoint can disappear (a server-side reset),
-#: and without this marker a later status answer would read the same "eligible,
-#: no endpoint" state and consent again on the user's behalf. Only a literal
-#: ``"done"`` under a non-empty account id counts; anything else reads as "not
-#: enrolled by default", the safe direction for a marker whose false reading
-#: costs one idempotent ``active`` write, never a missed opt-out (the local
-#: ``enabled`` key and the endpoint's own state are the opt-out gates).
+#: ``"done"`` recording the consent write an earlier opt-out default ran for
+#: that member. PER ACCOUNT on purpose: it was a per-member product rule, so
+#: account A enrolling did not suppress account B on the same machine.
+#:
+#: UNDER THE CONSENT HOLD NOTHING WRITES THIS. No status read may perform a
+#: consent write (#2712's auto-enrollment), and the explicit settings path does
+#: not need a per-account memory because the user's own PUT is the action. The
+#: reader and writer stay so an older build's file still loads and so a future
+#: consent version can reuse the shape; they must never drive auto-consent.
 DEFAULT_TEAM_BRIDGE_ENROLLMENT: Mapping[str, str] = {}
 DEFAULT_ENROLLMENT_DONE = "done"
 
@@ -89,13 +90,12 @@ _MISSING = object()
 
 
 def _enabled(value: Any) -> bool:
-    """The opt-out default, with a present-but-unreadable value reading OFF.
+    """The shipped default, with a present-but-unreadable value reading OFF.
 
-    WHY THIS IS NOT ``_bool(value, DEFAULT)``. The default is ON, and ON performs
-    an upstream consent write; a torn/hand-edited value we cannot parse must not
-    be the thing that consents. Absent stays the shipped default (opt-out), a
-    real bool is itself, and anything else fails closed — the same direction
-    ``read_context`` already takes for a torn read.
+    WHY THIS IS NOT ``_bool(value, DEFAULT)``. ``None`` cannot tell an absent
+    key from a hand-edited ``enabled: null``; only an ABSENT key may read the
+    shipped default. A real bool is itself, and anything else fails closed —
+    the same direction ``read_context`` already takes for a torn read.
     """
 
     if value is _MISSING:
@@ -139,7 +139,8 @@ class TeamBridgeSettings:
     deliberately NOT a registry row: it is UI bookkeeping, not a knob, and a
     public row would dress session-format state as configuration.
     ``default_enrollment`` is the same kind of internal state: the receipt that
-    the opt-out default consented once, not a user preference. SCREENING IS
+    an earlier opt-out default consented once, not a user preference; under the
+    consent hold nothing writes it and it drives no consent. SCREENING IS
     NOT HERE AT ALL: it is the admission gate (§8, §13.9), an invariant the
     implementation enforces — not a setting any write can turn off.
     """
@@ -182,7 +183,12 @@ class TeamBridgeSettings:
 
 
 def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
-    """Record that the opt-out default ran the consent write for ``account_id``.
+    """Record a completed default-enrollment consent write for ``account_id``.
+
+    Retained through the consent hold: no production path calls this while the
+    status read is forbidden from enrolling, but the stored marker keeps its
+    reader and a future consent version may reuse the shape. It must never be
+    what authorizes a consent write.
 
     Written through ``settings_io._store`` because this is INTERNAL state with
     no registry row (the same reason ``onboarding`` is hand-written): a public
