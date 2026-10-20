@@ -1,7 +1,7 @@
 {
   "wire.remote_compute.alone": "--remote-status và --remote-cancel là các lệnh riêng: chạy một lệnh duy nhất, không kèm --remote hay tùy chọn chạy nào khác.",
-  "wire.remote_compute.api_override": "Tính toán từ xa đang dùng {host} thay vì API Radient mặc định vì LOP_REMOTE_COMPUTE_API_URL đã được đặt.",
-  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL phải là URL https://, hoặc http:// trên 127.0.0.1, ::1 hay localhost, không có thông tin đăng nhập, truy vấn hay fragment; tính toán từ xa không khởi chạy.",
+  "wire.remote_compute.api_override": "Tính toán từ xa đang gửi thông tin đăng nhập Radient và các yêu cầu của bạn đến {host} thay vì API Radient mặc định, vì LOP_REMOTE_COMPUTE_API_URL đã được đặt. Hãy bỏ đặt biến này trừ khi bạn kiểm soát máy chủ đó.",
+  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL phải là URL https://, hoặc http:// trên 127.0.0.1, ::1 hay localhost, không có thông tin xác thực, tham số truy vấn hay fragment, không có khoảng trắng, ký tự điều khiển hay ký tự phi ASCII, và không có mã hóa phần trăm; tính toán từ xa không khởi chạy.",
   "wire.remote_compute.bad_repo": "Vì lần chạy này clone kho từ phía xa, --repo phải là URL https:// hoặc ssh://, hoặc địa chỉ git@host:path; không thể dùng đường dẫn cục bộ.",
   "wire.remote_compute.bad_sha": "Giá trị --sha phải là SHA commit đầy đủ 40 ký tự: tên nhánh hoặc hash rút gọn có thể trỏ tới commit khác với commit mà lần chạy này được gửi cho.",
   "wire.remote_compute.cancelled": "Lần chạy từ xa {run_id} đã bị hủy.",

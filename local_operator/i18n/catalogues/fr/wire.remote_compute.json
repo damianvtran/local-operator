@@ -1,7 +1,7 @@
 {
   "wire.remote_compute.alone": "--remote-status et --remote-cancel sont des commandes à part : lancez-en une seule, sans --remote ni d’autres options d’exécution.",
-  "wire.remote_compute.api_override": "Le calcul distant utilise {host} au lieu de l’API Radient par défaut, car LOP_REMOTE_COMPUTE_API_URL est défini.",
-  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL doit être une URL https://, ou http:// sur 127.0.0.1, ::1 ou localhost, sans identifiants, requête ni fragment ; le calcul distant n’a pas démarré.",
+  "wire.remote_compute.api_override": "Le calcul distant envoie vos identifiants Radient et vos requêtes à {host} au lieu de l’API Radient par défaut, car LOP_REMOTE_COMPUTE_API_URL est défini. Supprimez cette variable sauf si vous contrôlez cet hôte.",
+  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL doit être une URL https://, ou http:// sur 127.0.0.1, ::1 ou localhost, sans identifiants ni paramètres de requête ni fragment, sans espaces, caractères de contrôle ni caractères non ASCII, et sans encodage en pourcentage ; le calcul distant n’a pas démarré.",
   "wire.remote_compute.bad_repo": "Comme cette exécution clone le dépôt depuis le site distant, --repo doit être une URL https:// ou ssh://, ou une adresse git@host:path ; un chemin local ne peut donc pas être utilisé.",
   "wire.remote_compute.bad_sha": "La valeur de --sha doit être un SHA de commit complet de 40 caractères : un nom de branche ou un hash abrégé pourrait correspondre à un autre commit que celui soumis.",
   "wire.remote_compute.cancelled": "L’exécution distante {run_id} est annulée.",

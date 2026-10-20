@@ -1,7 +1,7 @@
 {
   "wire.remote_compute.alone": "--remote-status и --remote-cancel — самостоятельные команды: каждую запускают отдельно, без --remote и других параметров запуска.",
-  "wire.remote_compute.api_override": "Удалённые вычисления используют {host} вместо API Radient по умолчанию, потому что задана переменная LOP_REMOTE_COMPUTE_API_URL.",
-  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL должен быть URL-адресом https:// или http:// на 127.0.0.1, ::1 либо localhost, без данных пользователя, строки запроса и фрагмента; удалённые вычисления не запущены.",
+  "wire.remote_compute.api_override": "Удалённые вычисления отправляют ваш вход Radient и запросы на {host} вместо API Radient по умолчанию, потому что задана переменная LOP_REMOTE_COMPUTE_API_URL. Снимите эту переменную, если вы не контролируете этот хост.",
+  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL должен быть URL-адресом https:// или http:// на 127.0.0.1, ::1 либо localhost, без имени пользователя и пароля, параметров запроса и фрагмента, без пробельных, управляющих и не-ASCII символов и без процентного кодирования; удалённые вычисления не запущены.",
   "wire.remote_compute.bad_repo": "Поскольку запуск клонирует репозиторий на удалённой стороне, --repo должно быть URL вида https:// или ssh:// либо адресом git@host:path; локальный путь не подходит.",
   "wire.remote_compute.bad_sha": "Значение --sha должно быть полным 40-символьным SHA коммита: имя ветки или сокращённый хеш могут указать на другой коммит, не тот, для которого отправлен запуск.",
   "wire.remote_compute.cancelled": "Удалённый запуск {run_id} отменён.",

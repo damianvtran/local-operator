@@ -1034,6 +1034,17 @@ def test_a_403_says_the_preview_does_not_cover_this_account(
     assert "acct_not_allowlisted" not in captured.err
 
 
+#: The English sentence the CLI must print, with its one placeholder filled in
+#: by the test. Pinned by VALUE, not by a prefix: E4-5 is about the copy saying
+#: that the Radient login goes to that host, and a prefix match let the rest of
+#: the sentence drift unnoticed.
+_WARNING = (
+    "Remote compute is sending your Radient login and requests to {host} "
+    "instead of the default Radient API, because LOP_REMOTE_COMPUTE_API_URL is set. "
+    "Unset it unless you control that host."
+)
+
+
 def test_an_override_warns_once_and_leaves_stdout_to_the_run_id(
     enabled: None,
     network: NetworkRecord,
@@ -1049,12 +1060,46 @@ def test_an_override_warns_once_and_leaves_stdout_to_the_run_id(
     assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 0
     captured = capsys.readouterr()
     assert captured.out == RUN_ID + "\n"
-    lines = [
-        line for line in captured.err.splitlines() if line.startswith("Remote compute is using")
-    ]
-    assert len(lines) == 1
-    assert lines[0].startswith("Remote compute is using 127.0.0.1:8123 ")
+    assert _WARNING.format(host="127.0.0.1:8123") in captured.err.splitlines()
     assert str(origin.requests[0].url).startswith("http://127.0.0.1:8123")
+
+
+@pytest.mark.parametrize(
+    ("command", "answer"),
+    [
+        (["exec", "--remote-status", RUN_ID], {"id": RUN_ID, "status": "running"}),
+        (["exec", "--remote-cancel", RUN_ID], {"id": RUN_ID, "status": "stopping"}),
+    ],
+)
+def test_the_override_warns_before_the_request_on_the_two_run_commands(
+    signed_in: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+    answer: dict[str, Any],
+) -> None:
+    """N3: both send the same bearer, so both announce the destination.
+
+    The assertion is made INSIDE the transport, so it proves the line was on
+    stderr BEFORE the request left — not merely that it was printed at some
+    point in the command.
+    """
+    monkeypatch.setattr(config_module, "_announced", set())
+    monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", "https://staging.example.invalid")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(capsys.readouterr().err)
+        return httpx.Response(200, json={"msg": "Run", "result": answer})
+
+    monkeypatch.setattr(
+        remote_cli,
+        "_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    assert _run(command, monkeypatch) == 0
+    assert len(seen) == 1
+    assert seen[0] == _WARNING.format(host="staging.example.invalid") + "\n"
 
 
 def test_an_unusable_override_refuses_and_sends_nothing(
