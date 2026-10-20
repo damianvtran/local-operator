@@ -313,7 +313,8 @@ def _session_title(session_dir: Path) -> str:
     ``resume.session_name`` falls back to scanning the journal and costs a cold
     2-6 s on the first call; a list/detail request cannot pay that per row. A
     session with no title sidecar shows its id here, while occurrence titles
-    come from the scanner's own opening-line capture.
+    take the same stored title and fall back to the scanner's opening-line
+    capture only for a session that was never titled.
     """
     try:
         from local_operator import resume
