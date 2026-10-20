@@ -404,6 +404,18 @@ def _deferral_reaches_the_wire(session: Session) -> bool:
     return bool(withheld) and withheld == set(session.deferred_tool_names())
 
 
+def _remote_compute_advertised() -> bool:
+    """Whether the live feature map advertises remote compute right now.
+
+    Reads the default config dir, which the driver points at the watched
+    directory through ``LOCAL_OPERATOR_CONFIG_DIR``. The probe value is ``True``
+    (the default is off), so the bit appearing is the write landing.
+    """
+    from local_operator.server.features import live_feature_flags
+
+    return live_feature_flags().get("remote_compute") == 1
+
+
 def _web_tool_offered(session: Session, name: str) -> bool:
     """Whether ``name`` is in the inventory after the next turn-boundary reconcile.
 
@@ -757,6 +769,15 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "tools.defer": (False, lambda s, w: _deferral_reaches_the_wire(s)),
     "web_search.enabled": (False, lambda s, w: _web_tool_offered(s, "web_search")),
     "web_fetch.enabled": (False, lambda s, w: _web_tool_offered(s, "web_fetch")),
+    # -- remote compute (preview): the consent gate for sending work off-device -
+    # LIVE because nothing caches it: ``is_enabled`` re-reads config.yml on every
+    # call and the capability bit is in the per-call live half of the feature
+    # map. Observed through the capability map itself, which is what the GUI and
+    # the phone read, so a write from another process must flip the bit there.
+    "remote_compute.enabled": (
+        True,
+        lambda s, w: _remote_compute_advertised(),
+    ),
     # -- proactive class: the arm path re-reads every bound --------------------
     # The patience bounds guard a HIDDEN mechanism, and the reader is exactly
     # ``patience.policy(config_dir())`` — called at the moment a wait is armed
