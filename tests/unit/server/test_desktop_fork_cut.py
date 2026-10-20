@@ -390,3 +390,31 @@ async def test_auto_tag_does_not_overwrite_an_already_tagged_child(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert not (root / "sessions" / CHILD_ID / "auto-tag.json").exists()
+
+
+async def test_auto_tag_records_nothing_for_a_peer_held_fork(tmp_path: Path) -> None:
+    """A peer fork's child lives on the peer; this device must not tag a namesake.
+
+    The local child directory is created on purpose: it is what makes the
+    negative discriminating. Without the ``remote_row`` guard the route would
+    happily read that unrelated directory and write it a fork intent, and the
+    naming worker there would later tag the wrong conversation.
+    """
+    remote = FakeRemote()
+    app = _app(tmp_path, remote)
+    root = tmp_path / "cfg"
+    (root / "sessions" / CHILD_ID).mkdir(parents=True)
+    app.state.desktop_sessions.bridges["s1"].remote_row = SimpleNamespace(
+        owner_device="peer-a"
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/desktop/sessions/s1/fork",
+            json={"request_id": REQUEST_ID, "auto_tag": True},
+        )
+
+    assert response.status_code == 200, response.text
+    assert not (root / "sessions" / CHILD_ID / "auto-tag.json").exists()
+    # The fork itself is untouched: the peer still performs the cut.
+    assert remote.slashes == [("fork", "")]

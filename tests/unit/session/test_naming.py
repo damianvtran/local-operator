@@ -741,7 +741,10 @@ async def test_same_line_and_newline_tag_blocks_parse_before_the_title() -> None
 async def test_a_truncated_tag_block_keeps_the_title_and_assigns_nothing() -> None:
     replies = _Replies("<title>Fix the parser</title>\n<tags>a1b2")
     acceptance = await naming.generate_title_acceptance(
-        "please repair the parser", replies, tag_contract=_tag_contract()
+        "please repair the parser",
+        replies,
+        fit_check=_FitCheck(naming.TITLE_FITS),
+        tag_contract=_tag_contract(),
     )
     assert acceptance.title == "Fix the parser"
     assert acceptance.tags == ()
@@ -808,7 +811,10 @@ async def test_unknown_names_and_ids_assign_nothing_and_create_nothing() -> None
     for body in ("", "nope", "deadbeef00"):
         replies = _Replies(f"<title>Fix the parser</title>\n<tags>{body}</tags>")
         acceptance = await naming.generate_title_acceptance(
-            "please repair the parser", replies, tag_contract=_tag_contract()
+            "please repair the parser",
+            replies,
+            fit_check=_FitCheck(naming.TITLE_FITS),
+            tag_contract=_tag_contract(),
         )
         assert acceptance.title == "Fix the parser", body
         assert acceptance.tags == (), body
@@ -831,8 +837,14 @@ async def test_tag_selection_dedupes_retains_order_and_caps_at_eight() -> None:
 
 @pytest.mark.asyncio
 async def test_tags_buy_no_extra_provider_call() -> None:
-    plain = _Replies("<title>Fix the parser</title>")
-    tagged = _Replies("<title>Fix the parser</title><tags>Review</tags>")
+    # Two replies each: without a fit seam the cascade HEDGES the clean first
+    # sample, so both arms make the same two calls. The comparison is the
+    # point, not the count alone.
+    plain = _Replies("<title>Fix the parser</title>", "<title>Fix the parser</title>")
+    tagged = _Replies(
+        "<title>Fix the parser</title><tags>Review</tags>",
+        "<title>Fix the parser</title><tags>Review</tags>",
+    )
     await naming.generate_title_acceptance("please repair the parser", plain)
     await naming.generate_title_acceptance(
         "please repair the parser", tagged, tag_contract=_tag_contract()

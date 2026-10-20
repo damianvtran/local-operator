@@ -4261,7 +4261,7 @@ class ServingSessionHandle(SessionHandle):
         # already settled the intent; reading the sidecar again here would let
         # a retry claim tags after the row has been visible — and corrected —
         # in the list.
-        intent = None if heal else self._auto_tag_intent()
+        intent = None if heal else await self._auto_tag_intent()
         tag_contract = (
             await asyncio.to_thread(auto_tag.live_contract, intent.root)
             if intent is not None
@@ -4315,7 +4315,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         self._notify()
 
-    def _auto_tag_intent(self) -> Any:
+    async def _auto_tag_intent(self) -> Any:
         """The child's fork-time auto-tag intent, or ``None`` when not asked for.
 
         Read from the session's OWN store, the same root the fork branch lands
@@ -4325,6 +4325,10 @@ class ServingSessionHandle(SessionHandle):
         sidecar is READ, not spent — :func:`auto_tag.settle` clears it only
         after the naming attempt that accepted a title, which leaves a failed
         call's intent for the next prompt's naming retry.
+
+        Off the loop like every other store read in this module: even a missing
+        sidecar is a stat on a session directory, and the naming worker shares
+        the loop with the turn it was fired beside.
         """
         from local_operator.session import auto_tag
 
@@ -4332,7 +4336,7 @@ class ServingSessionHandle(SessionHandle):
         if not session_id:
             return None
         root = self._config_dir or _fork_store(self._session)
-        return auto_tag.read(root, session_id)
+        return await asyncio.to_thread(auto_tag.read, root, session_id)
 
     def _maybe_heal_name(self) -> None:
         """Spend the one-shot Tier 3 self-heal at a completed turn, if armed.

@@ -486,7 +486,13 @@ async def fork(session_id: str, body: Fork, request: Request):
             payload = json.dumps({"entry_id": body.entry_id}) if body.entry_id else ""
             result = await bridge.remote.route_shared_slash("fork", payload)
             child_id = result["data"]["session_id"]
-            if body.auto_tag:
+            # ``remote_row`` is the peer marker on the bridge (see
+            # ``DesktopSessionBridge``): a fork of a peer-held conversation runs
+            # on the peer, and its child id names a directory THIS device does
+            # not own. Writing the sidecar here could only target a same-named
+            # local session — the one way this route could auto-tag the wrong
+            # conversation — so a peer fork records nothing.
+            if body.auto_tag and getattr(bridge, "remote_row", None) is None:
                 # Imported HERE, like the desktop tag routes' own store import:
                 # the naming graph (which ``auto_tag`` pulls in) stays off the
                 # server's boot path, and this branch runs only for the clients
