@@ -249,8 +249,10 @@ def paint_order(rows: Sequence[LinkRow]) -> list[LinkRow]:
 
     ONE definition shared by the painter and the panel's selection index, so the
     highlighted row, the window and the policy-write target can never disagree
-    (D27). The service snapshot is sorted ``(kind, name)`` — agent, skill, team —
-    which is NOT paint order, so the panel must normalise on install.
+    (D27). The service inventory now sorts by this SAME explicit kind order
+    (``service.KIND_ORDER``: agent, team, skill, then name casefold), so the two
+    agree by construction; the panel still normalises on install because the
+    paint order is this card's invariant, not the service's accident.
     """
 
     by_kind: dict[str, list[LinkRow]] = {kind: [] for kind in section_order()}
