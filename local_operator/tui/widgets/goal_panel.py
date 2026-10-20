@@ -577,6 +577,45 @@ class GoalPanel(Static):
         if self.display:
             self._repaint()
 
+    def sync_layout(self, *, force: bool = False) -> None:
+        """Re-measure against the live screen and dock (the host's resize seam).
+
+        THE SAME SEAM ``UsagePanel``/``AsidePanel``/``KeysLegend`` expose, and the
+        reason this card needs it is structural: overlay cards are hosted in
+        ``width: auto`` containers, so a terminal resize does not resize THEM and
+        Textual delivers no ``Resize`` event. The app's ``on_resize`` calls
+        ``_sync_overlay_layout`` for exactly that reason; this panel was missing
+        from its list, so its ``_fit`` decision — and the ``-squeezed`` class that
+        states it — stayed at the pre-layout geometry. Measured at 80x12 (run
+        39286870604, job 118199298717): the card was clear of the composer but
+        still advertised the old fit. On a taller body the same staleness covers
+        the composer; see :meth:`_fit`.
+
+        ``force`` is accepted for the sibling signature; this card has no
+        fingerprint fast path to skip, so every call repaints. It is a no-op when
+        the card is closed.
+        """
+        del force
+        if self.display:
+            self._repaint()
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A resize changes both the card width and the ground it may use.
+
+        THE SIBLING'S RULE (``UsagePanel.on_resize``), and this card was missing
+        it. ``_fit`` reads ``overlay.rows_above_dock``, which is a function of the
+        DOCK's laid-out height — not of the screen constant. At ``on_mount`` that
+        height is not settled yet, so the first repaint can decide the card has
+        more ground than it will have; without a resize repaint the decision is
+        never revisited. Measured as the missing ``-squeezed`` class at 80x12 (run
+        39286870604, job 118199298717), where the card happened to stay clear of
+        the composer and the class — the proof the squeeze was CHOSEN — did not.
+        On a taller body the same staleness covers the composer, which is exactly
+        the invariant this card exists to keep.
+        """
+        if self.display:
+            self._repaint()
+
     # -- actions -------------------------------------------------------------
     def action_dismiss(self) -> None:
         # A close cancels a pending rehearsal: the arm is modal state about the
