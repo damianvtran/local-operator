@@ -16,6 +16,42 @@ from typing import Any, Callable, Literal, Sequence
 
 from lop_osworld_v2_adapter import guest_disk
 
+#: The action server's listening port. The guest's control server and the action
+#: server share :5000 on this AMI (``guest_loss.HEALTH_PROBE_SOURCE`` reads the
+#: same port as 0x1388), and the layout probe needs it to identify the process
+#: that owns the listening socket.
+ACTION_SERVER_PORT = 5000
+
+#: ONE shared deadline for the whole layout capture, matching the console
+#: capture discipline in ``guest_loss``: the diagnosis must never outlive the
+#: episode's setup path. The guest script carries a shorter internal deadline so
+#: it can still print partial evidence before the host abandons it.
+LAYOUT_BUDGET_S = 4.0
+
+#: The guest's OWN subprocess deadline for the probe, and the reason the socket
+#: deadline is not ``LAYOUT_BUDGET_S``: ``guest_deadline_for`` subtracts the
+#: 10 s transport margin, so a 4 s socket timeout asks the guest to finish in
+#: 1 s -- less than the script's 3 s internal deadline, which would cut a
+#: loaded guest off before it could print anything. The provider derives the
+#: socket timeout from this value; ``_run_bounded`` keeps the 4 s HOST budget
+#: authoritative regardless of how long the guest side is allowed.
+LAYOUT_GUEST_DEADLINE_S = 3.5
+
+#: Refusals decided by what the guest's units look like. The install command's
+#: other refusals (journal policy, an existing hook, a oneshot service) already
+#: name a property of a discovered unit, so they need no process layout. This is
+#: a frozenset of the fixed, guest-authored-never reason strings from
+#: ``INSTALL_SOURCE``; a type name or arbitrary text never matches.
+LAYOUT_REFUSALS = frozenset(
+    {
+        "unsupported action-server command",
+        "unsupported action-server ancestry",
+        "action server has no private service",
+        "unsupported service name",
+        "service does not exclusively own action server",
+    }
+)
+
 
 class GenerationMismatch(ValueError):
     """systemd observed a restart that the guest capture history cannot prove."""
@@ -204,6 +240,199 @@ except Exception:
 print(json.dumps({'unit': unit, 'installed': True}))
 """
 
+#: Read-only process/unit topology behind a supervisor refusal. This exists
+#: because the refusal said only that the service does not exclusively own the
+#: server; the next run must say WHO does. It prints one fixed-schema document:
+#: numeric ids, unit names, process ``comm`` and cgroup paths. No environment, no
+#: argv of any other process, no free-form guest text -- the host-side
+#: ``layout_record`` whitelists these keys again, and the provider scrubs the
+#: result, because a guest can print anything.
+LAYOUT_SOURCE = r"""
+import json, os, pathlib, re, subprocess, sys, time
+
+DEADLINE = time.monotonic() + 3.0
+PORT = int(sys.argv[1])
+PROPS = ('MainPID', 'ExecStart', 'Type', 'ControlGroup', 'SubState', 'LoadState')
+CONTROL = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def left():
+    return max(0.1, DEADLINE - time.monotonic())
+
+
+def text(name):
+    return pathlib.Path(name).read_text()
+
+
+def run(*args):
+    return subprocess.check_output(args, text=True, timeout=min(1.5, left()))
+
+
+def clean(value, limit=64):
+    return CONTROL.sub('', value)[:limit]
+
+
+def status(pid):
+    fields = {}
+    for line in text('/proc/%d/status' % pid).splitlines():
+        key, _, value = line.partition(':')
+        if key in ('Name', 'PPid'):
+            fields[key] = value.strip()
+    return clean(fields['Name'], 32), int(fields['PPid'])
+
+
+def cgroup_of(pid):
+    paths = []
+    for line in text('/proc/%d/cgroup' % pid).splitlines():
+        parts = line.split(':', 2)
+        if len(parts) == 3:
+            if line.startswith('0::'):
+                return parts[2]
+            paths.append(parts[2])
+    return paths[-1] if paths else ''
+
+
+def units_in(cgroup):
+    found = []
+    for name in re.findall(r'/([^/\n]+\.(?:service|scope))(?:/|$)', cgroup):
+        if name not in found:
+            found.append(name)
+    return found
+
+
+def listening_inodes(port):
+    inodes = set()
+    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            lines = text(name).splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != '0A':
+                continue
+            try:
+                if int(fields[1].rsplit(':', 1)[1], 16) != port:
+                    continue
+            except (IndexError, ValueError):
+                continue
+            inodes.add(fields[9])
+    return inodes
+
+
+def inode_pids(inodes):
+    pids = set()
+    if not inodes:
+        return []
+    wanted = {'socket:[' + inode + ']' for inode in inodes}
+    for entry in pathlib.Path('/proc').iterdir():
+        if time.monotonic() > DEADLINE:
+            break
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in entry.joinpath('fd').iterdir():
+                try:
+                    if os.readlink(fd) in wanted:
+                        pids.add(int(entry.name))
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return sorted(pids)
+
+
+def ancestry(pid):
+    chain, seen = [], set()
+    while pid > 0 and pid not in seen and len(chain) < 16 and time.monotonic() <= DEADLINE:
+        seen.add(pid)
+        try:
+            name, ppid = status(pid)
+        except (OSError, KeyError, ValueError):
+            break
+        chain.append({'pid': pid, 'ppid': ppid, 'comm': name})
+        pid = ppid
+    return chain
+
+
+def server_ancestor():
+    # Same walk as the install command. It is a FALLBACK only: the socket owner
+    # is the server even when the install could not classify it.
+    pid = os.getppid()
+    for _ in range(8):
+        try:
+            argv = pathlib.Path('/proc/%d/cmdline' % pid).read_bytes().split(b'\0')
+        except OSError:
+            return None
+        if any(a.endswith(b'/server/main.py') or a == b'main.py' for a in argv):
+            return pid
+        try:
+            _, ppid = status(pid)
+        except (OSError, KeyError, ValueError):
+            return None
+        if ppid <= 1:
+            return None
+        pid = ppid
+    return None
+
+
+def unit_record(unit):
+    record = {'unit': unit, 'main_pid': None, 'exec_start': '', 'type': 'other',
+              'control_group': '', 'sub_state': 'other', 'load_state': 'unavailable'}
+    try:
+        args = ['systemctl', 'show', unit]
+        for prop in PROPS:
+            args += ['-p', prop]
+        output = run(*args)
+        props = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+        if props.get('MainPID', '').isdigit():
+            record['main_pid'] = int(props['MainPID'])
+        record['exec_start'] = clean(props.get('ExecStart', ''), 512)
+        record['control_group'] = clean(props.get('ControlGroup', ''), 512)
+        record['type'] = clean(props.get('Type', ''), 32) or 'other'
+        record['sub_state'] = clean(props.get('SubState', ''), 32) or 'other'
+        record['load_state'] = clean(props.get('LoadState', ''), 32) or 'unavailable'
+    except Exception:
+        # A unit that cannot be queried is still evidence: keep its name.
+        pass
+    return record
+
+
+socket_pids = inode_pids(listening_inodes(PORT))
+fallback = server_ancestor()
+pid = socket_pids[0] if socket_pids else fallback
+chain = ancestry(pid) if pid else []
+server = None
+names = []
+for member in chain:
+    try:
+        cgroup = cgroup_of(member['pid'])
+    except OSError:
+        continue
+    for name in units_in(cgroup):
+        if name not in names:
+            names.append(name)
+if pid and chain:
+    try:
+        server = {'pid': pid, 'ppid': chain[0]['ppid'], 'comm': chain[0]['comm'],
+                  'cgroup': cgroup_of(pid)}
+    except OSError:
+        pass
+units = []
+for name in names[:8]:
+    # A call already in flight is capped by min(1.5, left()); starting one
+    # at the deadline could still run past the body timeout, so gate here.
+    if time.monotonic() > DEADLINE:
+        break
+    units.append(unit_record(name))
+# Only raw observations leave the guest. Derived claims (which pid owns the
+# socket, whether every MainPID agrees) are recomputed host-side from these,
+# so a guest cannot assert a contradiction into the evidence file.
+print(json.dumps({'schema_version': 1, 'socket_pids': socket_pids[:8], 'server': server,
+                  'ancestry': chain, 'units': units}))
+"""
+
 REPORT_SOURCE = r"""
 import json, pathlib, subprocess, sys
 unit = sys.argv[1]
@@ -244,6 +473,18 @@ def install_command(password: str) -> Sequence[str]:
 
 def report_command(unit: str, password: str) -> Sequence[str]:
     return _privileged(REPORT_SOURCE, [unit], password)
+
+
+def layout_command(password: str, port: int = ACTION_SERVER_PORT) -> Sequence[str]:
+    """One read-only, privileged probe of the layout behind a refusal.
+
+    Privileged for the same reason the install step is: rooting the guest is
+    what lets the socket-owner scan read another user's ``/proc/<pid>/fd``.
+    The escalation ladder is the existing one, so a stale password fails here
+    the same way it does in the install step -- and the caller treats any
+    failure as absent evidence, never as a changed refusal.
+    """
+    return _privileged(LAYOUT_SOURCE, [str(port)], password)
 
 
 #: Bounds on guest-controlled text. Every recovery attempt scans the capture,
@@ -366,6 +607,197 @@ def is_install_payload(value: object) -> bool:
     """
 
     return isinstance(value, dict) and isinstance(value.get("installed"), bool)
+
+
+def is_layout_payload(value: object) -> bool:
+    """Shape-only test for the layout probe's document.
+
+    The version marker keeps a future schema from being read as this one; the
+    detailed whitelist lives in ``layout_record`` so malformed fields are
+    dropped instead of refusing the whole capture.
+    """
+
+    return (
+        isinstance(value, dict)
+        and value.get("schema_version") == 1
+        and isinstance(value.get("units"), list)
+    )
+
+
+#: Host-side fixed vocabulary for guest-reported fields. Anything outside these
+#: sets becomes a neutral word, so a guest that prints arbitrary text cannot
+#: smuggle it into the evidence file through a field the adapter expects to be
+#: an enum.
+_LAYOUT_STATUSES = frozenset({"ok", "timeout", "error", "unparseable", "withheld"})
+_LAYOUT_UNIT_TYPES = frozenset(
+    {"simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "scope"}
+)
+_LAYOUT_LOAD_STATES = frozenset(
+    {"loaded", "not-found", "bad-setting", "error", "merged", "masked", "unavailable"}
+)
+_LAYOUT_UNIT_NAME = re.compile(r"[A-Za-z0-9_.:@-]{1,256}\.(?:service|scope)")
+_LAYOUT_WORD = re.compile(r"[a-z][a-z-]{0,31}")
+_LAYOUT_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_LAYOUT_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "port",
+        "pid_source",
+        "socket_pids",
+        "server",
+        "ancestry",
+        "units",
+        "socket_owned_by_unit",
+    }
+)
+
+
+def empty_layout(status: str) -> dict[str, Any]:
+    """A layout record that says only how the CAPTURE fared.
+
+    ``timeout``/``error``/``unparseable`` describe the diagnostic, not the
+    guest: the absence of a layout is never evidence that the guest has no
+    units. ``withheld`` means the scrub could not vouch for the capture.
+    """
+
+    return {"schema_version": 1, "status": status if status in _LAYOUT_STATUSES else "error"}
+
+
+def _layout_text(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return _LAYOUT_CONTROL.sub("", value)[:limit]
+
+
+def _layout_pid(value: object) -> int | None:
+    # ``type(...) is int`` (not isinstance) so ``True`` is not read as PID 1.
+    return value if type(value) is int and value > 0 else None
+
+
+def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]:
+    """Parse and whitelist one layout capture.
+
+    Every field is re-validated on this side, because the guest could print any
+    document it likes. Unknown keys are dropped, strings are bounded and
+    stripped of control characters, and enum-shaped fields fall back to a
+    neutral word. Derived claims (``pid_source``, the socket-owner comparison,
+    the probed port) are recomputed from RAW fields and the host's own request,
+    never taken from the guest: a capture that says ``socket_owned_by_unit``
+    is false beside a unit MainPID that is missing must not be able to assert a
+    negative it never observed. Raises ``SupervisorOutputUnparseable`` when no
+    layout document is present; callers turn that into
+    ``empty_layout('unparseable')``.
+    """
+
+    value = parse_output(output, is_layout_payload)
+    if not isinstance(value, dict):
+        raise ValueError("invalid supervisor layout")
+    units: list[dict[str, Any]] = []
+    for item in value.get("units") or []:
+        if not isinstance(item, dict):
+            continue
+        unit = item.get("unit")
+        if not isinstance(unit, str) or not _LAYOUT_UNIT_NAME.fullmatch(unit):
+            continue
+        sub_state = item.get("sub_state")
+        units.append(
+            {
+                "unit": unit,
+                "main_pid": _layout_pid(item.get("main_pid")),
+                "exec_start": _layout_text(item.get("exec_start"), 512),
+                "type": item.get("type") if item.get("type") in _LAYOUT_UNIT_TYPES else "other",
+                "control_group": _layout_text(item.get("control_group"), 512),
+                "sub_state": (
+                    sub_state
+                    if isinstance(sub_state, str) and _LAYOUT_WORD.fullmatch(sub_state)
+                    else "other"
+                ),
+                "load_state": (
+                    item.get("load_state")
+                    if item.get("load_state") in _LAYOUT_LOAD_STATES
+                    else "unavailable"
+                ),
+            }
+        )
+    ancestry: list[dict[str, Any]] = []
+    for item in (value.get("ancestry") or [])[:16]:
+        if not isinstance(item, dict):
+            continue
+        pid = _layout_pid(item.get("pid"))
+        if pid is None:
+            continue
+        ancestry.append(
+            {
+                "pid": pid,
+                "ppid": (
+                    item.get("ppid")
+                    if type(item.get("ppid")) is int and item["ppid"] >= 0
+                    else None
+                ),
+                "comm": _layout_text(item.get("comm"), 64),
+            }
+        )
+    server = value.get("server")
+    server_record = None
+    if isinstance(server, dict):
+        pid = _layout_pid(server.get("pid"))
+        if pid is not None:
+            server_record = {
+                "pid": pid,
+                "ppid": (
+                    server.get("ppid")
+                    if type(server.get("ppid")) is int and server["ppid"] >= 0
+                    else None
+                ),
+                "comm": _layout_text(server.get("comm"), 64),
+                "cgroup": _layout_text(server.get("cgroup"), 512),
+            }
+    # Cap BEFORE deriving: a claim must be reproducible from the units the
+    # record actually carries, not from a list it truncated afterwards.
+    units = units[:8]
+    sockets = [pid for pid in (value.get("socket_pids") or [])[:8] if _layout_pid(pid) is not None]
+    # ``pid_source`` is a statement about this capture, not a guest opinion.
+    # "socket" needs the recorded server proc to be one of the observed socket
+    # owners; "ancestry" needs no socket owner AND an ancestry whose head is
+    # that proc -- a lone server record is not ancestry evidence.
+    if server_record is not None and sockets and server_record["pid"] in sockets:
+        pid_source: str | None = "socket"
+    elif (
+        server_record is not None
+        and not sockets
+        and ancestry
+        and ancestry[0]["pid"] == server_record["pid"]
+    ):
+        pid_source = "ancestry"
+    else:
+        pid_source = None
+    # Three-state ``socket_owned_by_unit``: true when ANY observed socket owner
+    # is a unit's MainPID (a listener owned by one unit is what supervision
+    # needs), false only when every MainPID was observed and none owns a
+    # socket, and null while an unobserved MainPID could still be an owner.
+    owned: bool | None = None
+    if sockets and units:
+        known = [unit["main_pid"] for unit in units if unit["main_pid"] is not None]
+        if any(socket in known for socket in sockets):
+            owned = True
+        elif len(known) == len(units):
+            owned = False
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "ok",
+        "port": port if type(port) is int and 0 < port < 65536 else ACTION_SERVER_PORT,
+        "pid_source": pid_source,
+        "socket_pids": sockets,
+        "server": server_record,
+        "ancestry": ancestry,
+        "units": units,
+        "socket_owned_by_unit": owned,
+    }
+    # The frozen key set is the contract the provider writes; keeping it here
+    # means a future guest field cannot appear in the evidence unannounced.
+    assert set(record) <= _LAYOUT_KEYS
+    return record
 
 
 def is_receipt_payload(value: object) -> bool:
