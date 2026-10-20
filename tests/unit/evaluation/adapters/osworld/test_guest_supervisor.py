@@ -680,8 +680,18 @@ def test_parse_output_skips_an_unexpected_object_before_the_real_payload() -> No
     }
 
 
-def test_parse_output_does_not_return_a_nested_object_from_a_truncated_payload() -> None:
-    """A truncated payload must never degrade into its own innermost object."""
+def test_parse_output_refuses_a_truncated_payload_whose_inner_object_is_wrong_shape() -> None:
+    """A truncated payload whose innermost object is the WRONG shape must not win.
+
+    What this pins, and what it does not: the inner object here (``{"n": 1}``)
+    does not satisfy ``is_install_payload``, so it is skipped and the parse
+    fails closed. It does NOT prove that a completed, shape-MATCHING nested
+    object inside a truncated outer payload is rejected -- such an object is
+    indistinguishable from a real payload by shape alone and would be
+    returned. That case is unreachable today (no truncation path, and these
+    payloads contain no nested objects), so this test names the property it
+    actually holds rather than the broader one.
+    """
 
     captured = (
         "escalation=agentless>supplied\n"
