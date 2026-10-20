@@ -74,16 +74,36 @@ LAYOUT_REFUSALS = frozenset(
 #: reach such a holder.
 SUPERVISOR_KILL_MODE = "process"
 
-#: The explicit restart's internal budget, in the guest. ``RESTART_KILL_GRACE_S``
-#: is the bounded wait after SIGTERM for every recorded holder to release the
-#: socket; ``RESTART_VERIFY_S`` is the bounded wait for a FRESH listener to
-#: appear after ``systemctl start``. Their sum leaves the remainder of
-#: ``RESTART_GUEST_DEADLINE_S`` for the two ``systemctl`` calls. A guest restart
-#: that cannot prove freshness inside that budget fails closed rather than
-#: reporting a pending listener as recovered.
+#: The explicit restart's internal budget, in the guest. The SCRIPT deadline is
+#: one second inside ``RESTART_GUEST_DEADLINE_S``: the guest's subprocess budget
+#: starts at launch, while the script's clock starts a moment later, so the two
+#: cannot share one number (the layout path documents the same requirement in
+#: the other direction). ``RESTART_KILL_GRACE_S`` is the bounded wait for every
+#: recorded holder to release the socket; ``RESTART_VERIFY_S`` is the bounded
+#: wait for a FRESH listener after ``systemctl start``. Their sum is the script
+#: deadline, leaving the systemctl calls to fit inside the same clock.
 RESTART_KILL_GRACE_S = 2.0
 RESTART_VERIFY_S = 4.0
+RESTART_SCRIPT_DEADLINE_S = 6.0
 RESTART_GUEST_DEADLINE_S = 7.0
+
+#: The restart runs as a TRANSIENT SERVICE, not a scope: the target unit's
+#: process is the one serving our HTTP request, so a restart running in its
+#: cgroup would kill its own executor and its own response channel. The service
+#: writes its verdict here and the host reads it from a LATER command, once the
+#: action server is back. The token ties a result to the dispatch that asked for
+#: it, so a stale file from an earlier restart cannot be read as this one.
+RESTART_RESULT_PATH = "/var/lib/lop-action-supervisor/restart-result.json"
+RESTART_DISPATCH_TIMEOUT_S = 15.0
+RESTART_RESULT_TIMEOUT_S = 5.0
+RESTART_RESULT_INTERVAL_S = 0.25
+RESTART_RESULT_BUDGET_S = 20.0
+
+#: The install's socket scan must fit inside the install command's 5 s guest
+#: deadline (``guest_deadline_for(15)``). One second is several times what the
+#: ~200-process AMI needs, and leaves the existing systemctl calls their room;
+#: an incomplete scan refuses rather than spending the whole budget.
+INSTALL_SCAN_DEADLINE_S = 1.0
 
 
 class GenerationMismatch(ValueError):
@@ -156,12 +176,12 @@ persist()
 # scope must never gain a restart policy because it owns the GUI. Inspect only
 # our HTTP command's ancestors, never arbitrary process or task paths.
 INSTALL_SOURCE = r"""
-import json, os, pathlib, re, subprocess, sys, time
+import errno, json, os, pathlib, re, subprocess, sys, time
 
 # The socket scan, not the ancestry walk, decides ownership. Bounded so a
 # loaded guest cannot turn an install into an unbounded privileged probe; an
 # incomplete scan refuses rather than claiming an owner set it did not see.
-SCAN_DEADLINE = time.monotonic() + 2.0
+SCAN_DEADLINE = time.monotonic() + 1.0
 
 def run(*args):
     return subprocess.check_output(args, text=True, timeout=3)
@@ -191,24 +211,39 @@ def socket_owners(port):
     inodes, readable = listening_inodes(port)
     if not readable:
         return [], False
+    try:
+        entries = list(pathlib.Path('/proc').iterdir())
+    except OSError:
+        return [], False
     owners = set()
-    for entry in pathlib.Path('/proc').iterdir():
+    for entry in entries:
         if time.monotonic() > SCAN_DEADLINE:
             return sorted(owners), False
         if not entry.name.isdigit():
             continue
         try:
-            for fd in entry.joinpath('fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except OSError:
+            fds = list(entry.joinpath('fd').iterdir())
+        except OSError as error:
+            # A vanished process took its sockets with it. ANY other failure
+            # (typically EACCES) means a LIVE process whose fds we could not
+            # inspect; reporting the scan complete would omit a holder and
+            # authorize a restart that cannot reap it.
+            if error.errno in (errno.ENOENT, errno.ESRCH):
+                continue
+            return sorted(owners), False
+        for fd in fds:
+            if time.monotonic() > SCAN_DEADLINE:
+                return sorted(owners), False
+            try:
+                target = os.readlink(fd)
+            except OSError as error:
+                if error.errno in (errno.ENOENT, errno.ESRCH):
                     continue
-                link = re.fullmatch(r'socket:\[(\d+)\]', target)
-                if link and int(link[1]) in inodes:
-                    owners.add(int(entry.name))
-                    break
-        except OSError:
-            continue
+                return sorted(owners), False
+            link = re.fullmatch(r'socket:\[(\d+)\]', target)
+            if link and int(link[1]) in inodes:
+                owners.add(int(entry.name))
+                break
     return sorted(owners), True
 
 def cgroup_of(pid):
@@ -365,19 +400,33 @@ print(json.dumps({'unit': unit, 'installed': True}))
 #: stale screen state -- a false success, worse than no supervision. This script
 #: therefore signals EVERY process in the unit's cgroup, waits (bounded) for the
 #: recorded holders to release the socket, starts the unit, and reports the
-#: pre/post owner sets plus the new MainPID. The host derives freshness: a
-#: post-restart listener is acceptable only when its pid was not one of the pre-
-#: restart holders. The receipt envelope is read here too, so the host can
+#: pre/post owner sets, each post owner's ancestry and start time, the kill
+#: stamp and the new MainPID. The host derives freshness: a post-restart
+#: listener is acceptable only when it started at or after the kill AND is the
+#: new MainPID or one of its descendants, so a worker forked by a dying holder
+#: cannot pass as fresh. The receipt envelope is completed here (the on-disk
+#: file has five keys; NRestarts/ActiveEnter are report-only) so the host can
 #: consume the generation this restart produced instead of bouncing again.
+#:
+#: THE RESULT IS A FILE, NOT THIS PROCESS'S STDOUT. The script runs as a
+#: TRANSIENT SERVICE (``systemd-run``, never ``--scope``) because the target
+#: unit is the process serving the HTTP request that started it; a scope would
+#: place the script in the same cgroup and the all-process kill would reap its
+#: own executor and response channel. The service writes the verdict to
+#: ``RESTART_RESULT_PATH`` and the host reads it from a later command once the
+#: action server answers again.
 RESTART_SOURCE = r"""
-import json, os, pathlib, re, subprocess, sys, time
+import errno, json, os, pathlib, re, subprocess, sys, time
 
 UNIT = sys.argv[2]
 PORT = int(sys.argv[3])
-DEADLINE = time.monotonic() + 7.0
+RESULT = pathlib.Path(sys.argv[4])
+TOKEN = int(sys.argv[5])
+DEADLINE = time.monotonic() + 6.0
 KILL_GRACE = 2.0
 VERIFY = 4.0
 RECEIPT = pathlib.Path('/var/lib/lop-action-supervisor') / (UNIT + '.json')
+CLK_TCK = int(os.sysconf('SC_CLK_TCK'))
 
 def run(*args):
     left = DEADLINE - time.monotonic()
@@ -410,25 +459,73 @@ def owners():
     inodes, readable = listening_inodes()
     if not readable:
         return [], False
+    try:
+        entries = list(pathlib.Path('/proc').iterdir())
+    except OSError:
+        return [], False
     found = set()
-    for entry in pathlib.Path('/proc').iterdir():
+    for entry in entries:
         if time.monotonic() > DEADLINE:
             return sorted(found), False
         if not entry.name.isdigit():
             continue
         try:
-            for fd in entry.joinpath('fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except OSError:
+            fds = list(entry.joinpath('fd').iterdir())
+        except OSError as error:
+            # ENOENT/ESRCH: the process vanished, taking its sockets with it.
+            # Any other failure is a LIVE process we could not inspect; the
+            # scan is incomplete, never "this holder does not exist".
+            if error.errno in (errno.ENOENT, errno.ESRCH):
+                continue
+            return sorted(found), False
+        for fd in fds:
+            if time.monotonic() > DEADLINE:
+                return sorted(found), False
+            try:
+                target = os.readlink(fd)
+            except OSError as error:
+                if error.errno in (errno.ENOENT, errno.ESRCH):
                     continue
-                link = re.fullmatch(r'socket:\[(\d+)\]', target)
-                if link and int(link[1]) in inodes:
-                    found.add(int(entry.name))
-                    break
-        except OSError:
-            continue
+                return sorted(found), False
+            link = re.fullmatch(r'socket:\[(\d+)\]', target)
+            if link and int(link[1]) in inodes:
+                found.add(int(entry.name))
+                break
     return sorted(found), True
+
+def stat_of(pid):
+    text = pathlib.Path('/proc/%d/stat' % pid).read_text()
+    fields = text[text.rfind(')') + 2:].split()
+    return int(fields[1]), int(fields[19])
+
+def uptime_ticks():
+    return int(float(pathlib.Path('/proc/uptime').read_text().split()[0]) * CLK_TCK)
+
+def ancestors(pid):
+    chain = []
+    for _ in range(8):
+        if pid <= 1:
+            break
+        try:
+            parent, _ = stat_of(pid)
+        except OSError:
+            break
+        chain.append(pid)
+        pid = parent
+    return chain
+
+def describe(pids):
+    records = []
+    complete = True
+    for pid in pids:
+        try:
+            ppid, start = stat_of(pid)
+        except OSError:
+            complete = False
+            continue
+        records.append({'pid': pid, 'ppid': ppid, 'start_ticks': start,
+                        'ancestors': ancestors(ppid)})
+    return records, complete
 
 def main_pid():
     for line in run('systemctl', 'show', UNIT, '-p', 'MainPID').splitlines():
@@ -436,59 +533,111 @@ def main_pid():
             return int(line[8:])
     return 0
 
+# A result left by an earlier dispatch must not be read as this one.
+try:
+    RESULT.unlink()
+except OSError:
+    pass
+
+# An EMPTY pre set is not itself unprovable: freshness below is decided by
+# start time and ancestry, so a holder this scan could not see is still
+# refused. What must never be claimed is COMPLETENESS after an unreadable
+# process, which is why a non-vanishing OSError marks the scan incomplete and
+# this path refuses BEFORE the disruptive kill.
 pre, pre_complete = owners()
-kill_ok = start_ok = False
-try:
-    run('systemctl', 'kill', '--kill-whom=all', UNIT)
-    kill_ok = True
-except Exception:
-    pass
-# Bounded wait for the recorded holders to release. A survivor is not fatal
-# here -- the verification below is what refuses it.
-until = min(time.monotonic() + KILL_GRACE, DEADLINE)
-while time.monotonic() < until:
-    current, _ = owners()
-    if not (set(pre) & set(current)):
-        break
-    time.sleep(0.1)
-try:
-    run('systemctl', 'start', UNIT)
-    start_ok = True
-except Exception:
-    pass
-# Verify against the PRE-RESTART SET, not against the unit's own claim: a
-# listener that was already there before this restart is a survivor, however
-# healthy systemd says the unit is. Poll because a starting server binds late.
+kill_ticks = 0
 post = []
-post_complete = True
-until = min(time.monotonic() + VERIFY, DEADLINE)
-while time.monotonic() < until:
-    post, post_complete = owners()
-    if post and not (set(pre) & set(post)):
-        break
-    time.sleep(0.1)
-try:
-    new_main = main_pid()
-except Exception:
-    new_main = 0
-try:
-    receipt = json.loads(RECEIPT.read_text())
-except Exception:
-    receipt = None
-print(json.dumps({
+post_complete = False
+owner_records = []
+detail_complete = False
+new_main = 0
+new_main_start = 0
+receipt = None
+if pre_complete:
+    # The stamp is taken IMMEDIATELY before the signal. Freshness is then a
+    # start time at or after it, not merely a pid absent from the pre set: a
+    # holder that forks a worker while dying produces a pid the pre scan could
+    # not have seen, and that pid serves pre-restart state.
+    kill_ticks = uptime_ticks()
+    try:
+        run('systemctl', 'kill', '--kill-whom=all', UNIT)
+    except Exception:
+        pass
+    until = min(time.monotonic() + KILL_GRACE, DEADLINE)
+    while time.monotonic() < until:
+        current, _ = owners()
+        if not (set(pre) & set(current)):
+            break
+        time.sleep(0.1)
+    try:
+        run('systemctl', 'start', UNIT)
+    except Exception:
+        pass
+    # post_complete starts False: a loop that never runs must not claim a scan
+    # it did not perform.
+    post, post_complete = [], False
+    # Reserve room for the two reads after the loop (MainPID and the
+    # receipt): a verification that consumes the whole budget would report
+    # new_main_pid=0 and lose the evidence that explains the refusal.
+    until = min(time.monotonic() + VERIFY, DEADLINE - 0.8)
+    while time.monotonic() < until:
+        post, post_complete = owners()
+        if post and not (set(pre) & set(post)):
+            break
+        time.sleep(0.1)
+    owner_records, detail_complete = describe(post[:8])
+    try:
+        new_main = main_pid()
+    except Exception:
+        new_main = 0
+    if new_main > 0:
+        try:
+            _, new_main_start = stat_of(new_main)
+        except OSError:
+            new_main_start = 0
+    # The capture file has FIVE keys (the installer writes it); NRestarts and
+    # ActiveEnterTimestampMonotonic are added only in REPORT_SOURCE, in memory.
+    # Query them here too, or the host's receipt validation can never pass.
+    try:
+        receipt = json.loads(RECEIPT.read_text())
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT, '-p', 'NRestarts',
+            '-p', 'ActiveEnterTimestampMonotonic').splitlines())
+        receipt['systemd_nrestarts'] = int(props['NRestarts'])
+        receipt['systemd_active_enter'] = int(props['ActiveEnterTimestampMonotonic'])
+    except Exception:
+        receipt = None
+payload = {
     'schema_version': 1,
+    'token': TOKEN,
     'unit': UNIT,
     'pre_restart_pids': pre[:8],
     'pre_restart_count': len(pre),
     'pre_scan_complete': pre_complete,
+    'kill_uptime_ticks': kill_ticks,
     'post_restart_pids': post[:8],
     'post_restart_count': len(post),
-    'post_scan_complete': post_complete,
+    'post_scan_complete': post_complete and detail_complete,
+    'post_restart_owners': owner_records,
     'new_main_pid': new_main,
-    'kill_ok': kill_ok,
-    'start_ok': start_ok,
+    'new_main_start_ticks': new_main_start,
     'receipt': receipt,
-}))
+}
+tmp = RESULT.with_suffix('.tmp')
+tmp.write_text(json.dumps(payload))
+tmp.replace(RESULT)
+"""
+
+RESTART_RESULT_SOURCE = r"""
+import pathlib, sys
+path = pathlib.Path('/var/lib/lop-action-supervisor/restart-result.json')
+try:
+    text = path.read_text()
+except OSError:
+    raise SystemExit(1)
+if len(text) > 262144:
+    raise SystemExit(1)
+sys.stdout.write(text)
 """
 
 #: Read-only process/unit topology behind a supervisor refusal. This exists
@@ -731,11 +880,14 @@ print(json.dumps(history))
 """
 
 
-def _privileged(source: str, args: Sequence[str], password: str) -> Sequence[str]:
+def _privileged_fragment(fragment: str, password: str) -> Sequence[str]:
     # Reuse preparation's non-interactive escalation ladder. Nothing logs its
     # argv or error output, which may contain the supplied password.
-    fragment = shlex.join(["python3", "-c", source, *args])
     return ["bash", "-c", guest_disk.escalation_script(fragment, password)]
+
+
+def _privileged(source: str, args: Sequence[str], password: str) -> Sequence[str]:
+    return _privileged_fragment(shlex.join(["python3", "-c", source, *args]), password)
 
 
 def install_command(password: str) -> Sequence[str]:
@@ -756,14 +908,44 @@ def report_command(unit: str, password: str) -> Sequence[str]:
     return _privileged(REPORT_SOURCE, [unit], password)
 
 
-def restart_command(unit: str, password: str, port: int = ACTION_SERVER_PORT) -> Sequence[str]:
-    """One privileged, bounded, all-process restart of the supervised unit.
+def restart_command(
+    unit: str, password: str, token: int, port: int = ACTION_SERVER_PORT
+) -> Sequence[str]:
+    """Dispatch one privileged, bounded, all-process restart of the unit.
 
     Explicit rather than a bare ``systemctl restart`` because ``KillMode=process``
     leaves every non-MainPID holder alive; ``--kill-whom=all`` is the one
     operation that reaches them, and freshness is verified after it.
+
+    ``systemd-run`` (a transient SERVICE) is load-bearing: the unit being
+    restarted is the process serving this very request, so a ``--scope`` unit
+    would sit in the same cgroup and the kill would reap its own executor and
+    response channel. The service removes any old result file, restarts, and
+    writes its verdict to ``RESTART_RESULT_PATH``; this command only dispatches
+    it and may legitimately lose its HTTP response when the kill lands.
     """
-    return _privileged(RESTART_SOURCE, [unit, str(port)], password)
+    name = "lop-supervisor-restart-%d" % token
+    fragment = shlex.join(
+        [
+            "systemd-run",
+            "--quiet",
+            "--collect",
+            "--unit=" + name,
+            "python3",
+            "-c",
+            RESTART_SOURCE,
+            unit,
+            str(port),
+            RESTART_RESULT_PATH,
+            str(token),
+        ]
+    )
+    return _privileged_fragment(fragment, password)
+
+
+def restart_result_command(password: str) -> Sequence[str]:
+    """Read the detached restart's result file, never the restart itself."""
+    return _privileged(RESTART_RESULT_SOURCE, [], password)
 
 
 def layout_command(password: str, port: int = ACTION_SERVER_PORT) -> Sequence[str]:
@@ -1300,12 +1482,30 @@ RESTART_STATUSES = frozenset(
         "incomplete_scan",
         "receipt_unavailable",
         "command_failed",
+        "result_unavailable",
     }
 )
 
+#: One fixed cause per status. The failure evidence names WHY this restart was
+#: not accepted, so a stale listener and a missing result do not both read as
+#: the same sentence. Never guest text.
+RESTART_CAUSES = {
+    "stale_listener": "post-restart listener predates the restart",
+    "verification_timeout": "no listener appeared before the verification deadline",
+    "incomplete_scan": "socket owner scan was incomplete",
+    "receipt_unavailable": "post-restart receipt could not be reconciled",
+    "command_failed": "restart dispatch failed",
+    "result_unavailable": "restart result was not readable",
+}
+
+
+def restart_cause(status: str) -> str:
+    return RESTART_CAUSES.get(status, "restart verification failed")
+
+
 #: Evidence is bounded like the layout record: the pre/post owner sets are
 #: capped, and a pre-cap count above the cap makes the scan incomplete. An
-#: incomplete set cannot prove a non-member is fresh, so it fails closed.
+#: incomplete set cannot prove anything about the holders it did not see.
 RESTART_OWNER_CAP = 8
 
 
@@ -1313,23 +1513,44 @@ def is_restart_payload(value: object) -> bool:
     return (
         isinstance(value, dict)
         and value.get("schema_version") == 1
+        and type(value.get("token")) is int
+        and value["token"] > 0
         and isinstance(value.get("unit"), str)
         and isinstance(value.get("pre_restart_pids"), list)
         and isinstance(value.get("post_restart_pids"), list)
+        and isinstance(value.get("post_restart_owners"), list)
     )
 
 
-def listener_is_fresh(pre_restart_pids: Sequence[int], post_restart_pids: Sequence[int]) -> bool:
-    """True only when a listener exists and no holder predates the restart.
+def listener_postdates_restart(
+    owners: Sequence[dict[str, Any]],
+    new_main_pid: int,
+    new_main_start_ticks: int,
+    kill_uptime_ticks: int,
+) -> bool:
+    """True only when every listener STARTED at/after the kill and is the new
+    MainPID or one of its descendants.
 
-    Set membership, not equality with the MainPID, because a service may fork
-    its listener: such a pid is acceptable when it did not hold the port before
-    the restart, while a pre-existing survivor is refused however healthy the
-    unit claims to be. Duplicate entries and an absent post set are benign and
-    explicit here rather than left to the caller.
+    Set difference alone is not freshness: a holder that forks a worker while
+    dying creates a pid the pre scan could not have seen, and that worker
+    serves pre-restart state. The kill stamp (``/proc/uptime`` in clock ticks,
+    the same base as ``/proc/<pid>/stat`` start times) orders the processes;
+    the reported ancestor chain ties the listener to the process systemd just
+    started. Same-tick equality is allowed because ancestry still gates it.
     """
-    previous = set(pre_restart_pids)
-    return bool(post_restart_pids) and not (previous & set(post_restart_pids))
+    if (
+        not owners
+        or new_main_pid <= 0
+        or kill_uptime_ticks <= 0
+        or new_main_start_ticks < kill_uptime_ticks
+    ):
+        return False
+    for owner in owners:
+        if owner["start_ticks"] < kill_uptime_ticks:
+            return False
+        if owner["pid"] != new_main_pid and new_main_pid not in owner["ancestors"]:
+            return False
+    return True
 
 
 def empty_restart(status: str = "command_failed") -> dict[str, Any]:
@@ -1338,10 +1559,14 @@ def empty_restart(status: str = "command_failed") -> dict[str, Any]:
         "schema_version": 1,
         "status": status if status in RESTART_STATUSES else "command_failed",
         "unit": None,
+        "token": None,
         "pre_restart_pids": [],
         "post_restart_pids": [],
+        "post_restart_owners": [],
         "post_restart_owner": None,
+        "kill_uptime_ticks": 0,
         "new_main_pid": None,
+        "new_main_start_ticks": 0,
         "listener_is_new_main_pid": None,
         "fresh": False,
         "latest_restart": None,
@@ -1360,15 +1585,48 @@ def _restart_pids(value: object) -> list[int]:
     return pids[:RESTART_OWNER_CAP]
 
 
-def restart_record(output: str) -> dict[str, Any]:
-    """Whitelist one restart document and DERIVE the freshness claim here.
+def _restart_owners(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError("invalid restart owner detail")
+    owners: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("invalid restart owner detail")
+        pid = item.get("pid")
+        ppid = item.get("ppid")
+        start = item.get("start_ticks")
+        chain = item.get("ancestors")
+        if type(pid) is not int or pid <= 0:
+            raise ValueError("invalid restart owner pid")
+        if type(ppid) is not int or ppid < 0:
+            raise ValueError("invalid restart owner ppid")
+        if type(start) is not int or start < 0:
+            raise ValueError("invalid restart owner start time")
+        if not isinstance(chain, list) or not all(type(pid_) is int and pid_ > 0 for pid_ in chain):
+            raise ValueError("invalid restart ancestor chain")
+        owners.append(
+            {
+                "pid": pid,
+                "ppid": ppid,
+                "start_ticks": start,
+                "ancestors": chain[:RESTART_OWNER_CAP],
+            }
+        )
+        if len(owners) >= RESTART_OWNER_CAP:
+            break
+    return owners
 
-    The guest reports what it observed (numeric ids, the unit name and the
-    receipt envelope); it does not get to say whether the listener is fresh.
-    ``fresh`` and ``listener_is_new_main_pid`` are computed from those ids, and
-    the status is chosen from the fixed vocabulary. A receipt the host cannot
-    reconcile makes the restart unrecoverable even when the listener is fresh:
-    the generation could not be consumed, so the next poll would bounce again.
+
+def restart_record(output: str) -> dict[str, Any]:
+    """Whitelist one detached restart document and DERIVE freshness here.
+
+    The guest reports what it observed (numeric ids, start ticks, ancestor
+    chains and the receipt envelope); it does not get to say whether the
+    listener is fresh. ``fresh`` is computed from the kill stamp, the new
+    MainPID's start time and each owner's ancestry, and the status is chosen
+    from the fixed vocabulary. A receipt the host cannot reconcile makes the
+    restart unrecoverable even when the listener is fresh: the generation could
+    not be consumed, so the next poll would bounce again.
     """
     value = parse_output(output, is_restart_payload)
     if not isinstance(value, dict) or value.get("schema_version") != 1:
@@ -1378,6 +1636,7 @@ def restart_record(output: str) -> dict[str, Any]:
         raise ValueError("invalid restart unit")
     pre = _restart_pids(value.get("pre_restart_pids"))
     post = _restart_pids(value.get("post_restart_pids"))
+    owners = _restart_owners(value.get("post_restart_owners"))
     pre_count = value.get("pre_restart_count")
     post_count = value.get("post_restart_count")
     if type(pre_count) is not int or pre_count < len(pre):
@@ -1391,6 +1650,12 @@ def restart_record(output: str) -> dict[str, Any]:
     new_main = value.get("new_main_pid")
     if type(new_main) is not int or new_main < 0:
         raise ValueError("invalid restart MainPID")
+    new_main_start = value.get("new_main_start_ticks")
+    if type(new_main_start) is not int or new_main_start < 0:
+        raise ValueError("invalid restart MainPID start time")
+    kill_ticks = value.get("kill_uptime_ticks")
+    if type(kill_ticks) is not int or kill_ticks < 0:
+        raise ValueError("invalid restart kill stamp")
     try:
         records = _receipt_records_value(value.get("receipt"))
         latest = records[-1]["restart"] if records else None
@@ -1401,8 +1666,13 @@ def restart_record(output: str) -> dict[str, Any]:
         or value["post_scan_complete"] is not True
         or pre_count != len(pre)
         or post_count != len(post)
+        or [owner["pid"] for owner in owners] != post
     )
-    fresh = False if incomplete else listener_is_fresh(pre, post)
+    fresh = (
+        False
+        if incomplete
+        else listener_postdates_restart(owners, new_main, new_main_start, kill_ticks)
+    )
     if incomplete:
         status = "incomplete_scan"
     elif not post:
@@ -1418,10 +1688,14 @@ def restart_record(output: str) -> dict[str, Any]:
         "schema_version": 1,
         "status": status,
         "unit": unit,
+        "token": value["token"],
         "pre_restart_pids": pre,
         "post_restart_pids": post,
+        "post_restart_owners": owners,
         "post_restart_owner": owner,
+        "kill_uptime_ticks": kill_ticks,
         "new_main_pid": new_main or None,
+        "new_main_start_ticks": new_main_start,
         "listener_is_new_main_pid": (owner == new_main) if owner and new_main else None,
         "fresh": fresh,
         "latest_restart": latest,

@@ -1003,6 +1003,7 @@ class AwsProvider:
                 # closed instead of authorizing input against a survivor.
                 verification = self._restart_supervisor_unit(self._supervisor_unit)
                 if verification["status"] != "verified":
+                    status = str(verification["status"])
                     self._write_supervisor_evidence(
                         "guest-supervisor-recovery.json",
                         {
@@ -1010,7 +1011,8 @@ class AwsProvider:
                             "read_failed": False,
                             "receipt_unavailable": False,
                             "records_withheld": safe is None,
-                            "cause": "post-restart listener is not fresh",
+                            "cause": guest_supervisor.restart_cause(status),
+                            "cause_status": status,
                             "restart_verification": verification,
                             "failed_action_delivery": delivery,
                             "remaining_batch": "not_sent",
@@ -1064,27 +1066,47 @@ class AwsProvider:
         return guest_supervisor.ReceiptResult("read_failed")
 
     def _restart_supervisor_unit(self, unit: str) -> dict[str, Any]:
-        """Explicit all-process restart + freshness proof; never raises.
+        """Detached restart + freshness proof; never raises.
 
-        The socket deadline is DERIVED from the guest's own restart budget, so
-        the guest reaches its internal deadline first and ANSWERS (the same
-        ordering ``_run_guest_command`` enforces for every command). Any
-        transport, command or parse failure becomes the fixed
-        ``command_failed`` status -- never guest text -- and the caller fails
-        closed.
+        THE DISPATCH MAY LOSE ITS RESPONSE. The supervised unit is the process
+        serving this request, so the all-process kill terminates our HTTP
+        connection -- and, if the restart ran in the target cgroup, would
+        terminate the restart itself. The restart therefore runs as a transient
+        service and writes its verdict to ``RESTART_RESULT_PATH``; this method
+        treats the dispatch as fire-and-forget (a transport error is expected,
+        a clean non-zero return is a failure) and reads the result from a LATER
+        command once the server answers again. A token ties the result to this
+        dispatch, so a stale file cannot be read as a fresh restart.
         """
 
-        socket_timeout = guest_supervisor.RESTART_GUEST_DEADLINE_S + GUEST_TRANSPORT_MARGIN_S
+        token = time.time_ns()
         try:
-            result = self._run_guest_command(
-                guest_supervisor.restart_command(unit, self._supervisor_password),
-                timeout=socket_timeout,
+            dispatched = self._run_guest_command(
+                guest_supervisor.restart_command(unit, self._supervisor_password, token),
+                timeout=guest_supervisor.RESTART_DISPATCH_TIMEOUT_S,
             )
-            if result.returncode != 0:
+            if dispatched.returncode != 0:
                 return guest_supervisor.empty_restart("command_failed")
-            return guest_supervisor.restart_record(result.stdout)
         except Exception:
-            return guest_supervisor.empty_restart("command_failed")
+            # Expected: the kill closes the connection that carried the request.
+            pass
+        deadline = time.monotonic() + guest_supervisor.RESTART_RESULT_BUDGET_S
+        while time.monotonic() < deadline:
+            try:
+                result = self._run_guest_command(
+                    guest_supervisor.restart_result_command(self._supervisor_password),
+                    timeout=guest_supervisor.RESTART_RESULT_TIMEOUT_S,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    record = guest_supervisor.restart_record(result.stdout)
+                    if record["token"] == token:
+                        return record
+            except Exception:
+                # The server is down for part of this window, or the file holds
+                # a malformed/stale document; keep polling until the budget ends.
+                pass
+            self._sleep(guest_supervisor.RESTART_RESULT_INTERVAL_S)
+        return guest_supervisor.empty_restart("result_unavailable")
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float
