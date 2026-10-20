@@ -79,6 +79,35 @@ def test_source_syntax_does_not_authorize_credential_egress() -> None:
         approve_source("https://attacker.example/api", ("https://hub.example/api",))
 
 
+def test_approve_source_completes_only_the_version_segment() -> None:
+    """The renderer's unversioned server base names the same configured origin.
+
+    Completion may only append ``/v1`` to a root with no path: a different host,
+    scheme or version is still refused, and a custom gateway path is untouched.
+    """
+
+    assert (
+        approve_source("https://api.radienthq.com", ("https://api.radienthq.com/v1",))
+        == "https://api.radienthq.com/v1"
+    )
+    assert (
+        approve_source("http://127.0.0.1:8127", ("http://127.0.0.1:8127/v1",))
+        == "http://127.0.0.1:8127/v1"
+    )
+    assert (
+        approve_source("https://gw.example/hub", ("https://gw.example/hub",))
+        == "https://gw.example/hub"
+    )
+    for refused in (
+        "http://api.radienthq.com",
+        "https://api.radienthq.com/v2",
+        "https://attacker.example",
+    ):
+        with pytest.raises(LinkError) as refusal:
+            approve_source(refused, ("https://api.radienthq.com/v1",))
+        assert refusal.value.code == "origin-conflict"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

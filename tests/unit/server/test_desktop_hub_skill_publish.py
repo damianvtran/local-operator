@@ -748,3 +748,27 @@ async def test_public_auto_push_without_consent_is_unsafe_publication(api) -> No
     assert response.json()["detail"]["code"] == "unsafe-publication"
     assert hub.calls == []
     assert list(prov.iter_baselines(root)) == []
+
+
+async def test_publish_accepts_the_unversioned_renderer_base_setting(api, monkeypatch) -> None:
+    """The publish surface sees the renderer's unversioned value via its config.
+
+    `configured_radient_base_url` completes it to `/v1`; the preview receipt and
+    the materialized link must both carry that versioned origin.
+    """
+
+    client, root, holder = api
+    write_authored_skill(root / "skills", SOURCE)
+    monkeypatch.setenv("RADIENT_API_BASE_URL", "https://api.radienthq.com")
+    hub = PublishClient("https://api.radienthq.com/v1")
+    holder["client"] = hub
+
+    previewed = await preview(client)
+    assert previewed["preview"]["hub_source"] == "https://api.radienthq.com/v1"
+    assert previewed["preview"]["can_confirm"] is True
+
+    response = await client.post("/v1/desktop/hub/skills/publish", json=confirm_body(previewed))
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["local_link_receipt"]["state"] == "complete"
+    assert result["link"]["hub_source"] == "https://api.radienthq.com/v1"
