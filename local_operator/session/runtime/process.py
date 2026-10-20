@@ -5368,6 +5368,18 @@ async def amain(operator_cap: bytes | None = None) -> int:
         stall_watchdog.notify_on_evidence_signal(
             lambda: loop.call_soon_threadsafe(_dump_task_stacks)
         )
+        # THE READINESS LINE, and it exists because a TEST must not have to create
+        # the condition it is waiting for. The sibling runtime cells used to probe
+        # readiness by sending SIGUSR1 every 0.2 s from spawn until this block's
+        # effect appeared. That is a signal storm during boot — exactly the window
+        # in which threads start and stop — and CPython's faulthandler walks thread
+        # state without the GIL (python/cpython#116008), so the probe itself could
+        # kill the child with rc=-11 before it ever reached this line. Logging the
+        # installation gives the probe a positive fact to wait for; one signal
+        # afterwards is the whole test.
+        logger.info(
+            "signal handlers armed: clean stop on SIGTERM/SIGINT; SIGUSR1 task dump installed"
+        )
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
@@ -5745,5 +5757,12 @@ if __name__ == "__main__":
     # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
     # both halves of that. Arming before ``main()`` also means a stall during
     # boot — the window nothing else can report — is bounded and named.
-    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe)
+    # ``fatal_report=True`` is the entry point's alone: it points CPython's fatal
+    # signal handler at the stall dump, so a native death of an armed runtime leaves
+    # a thread and a frame instead of an empty stderr. The handler is process-global
+    # and is deliberately NOT installed by an in-process caller of ``arm`` — see the
+    # argument's docstring. It covers the crash class measured on 2026-10-20 (run
+    # 39411075050: an armed runtime child died SIGSEGV before publication with no
+    # stack anywhere); the dump is the one artifact a reader already opens.
+    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe, fatal_report=True)
     sys.exit(main())
