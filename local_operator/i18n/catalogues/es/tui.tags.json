@@ -12,7 +12,7 @@
   "tui.tags.grouping_off": "Grupos de etiquetas de la barra lateral desactivados — las secciones vuelven a ser una lista plana.",
   "tui.tags.grouping_on": "Grupos de etiquetas de la barra lateral activados — las secciones ahora se dividen por etiqueta principal.",
   "tui.tags.header": "Etiquetas de esta conversación · {count}/8 aplicadas",
-  "tui.tags.invalid": "Los nombres de etiqueta tienen de 1 a 24 caracteres y no admiten caracteres de control; “Sin etiqueta” está reservado.",
+  "tui.tags.invalid": "Nombres de etiqueta: 1–24 caracteres, sin caracteres de control; “Untagged” está reservado.",
   "tui.tags.none_applied": "No hay etiquetas aplicadas a esta conversación.",
   "tui.tags.not_applied": "no aplicada",
   "tui.tags.off": "desactivados",

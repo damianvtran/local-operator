@@ -12,7 +12,7 @@
   "tui.tags.grouping_off": "Groupes de tags de la barre latérale désactivés — les sections redeviennent une liste simple.",
   "tui.tags.grouping_on": "Groupes de tags de la barre latérale activés — les sections sont désormais réparties par tag principal.",
   "tui.tags.header": "Tags de cette conversation · {count}/8 appliqués",
-  "tui.tags.invalid": "Les noms de tag font 1 à 24 caractères, sans caractères de contrôle ; « Sans tag » est réservé.",
+  "tui.tags.invalid": "Les noms de tag font 1 à 24 caractères, sans caractères de contrôle ; « Untagged » est réservé.",
   "tui.tags.none_applied": "Aucun tag appliqué à cette conversation.",
   "tui.tags.not_applied": "non appliqué",
   "tui.tags.off": "désactivés",

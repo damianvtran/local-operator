@@ -12,7 +12,7 @@
   "tui.tags.grouping_off": "Đã tắt nhóm nhãn ở thanh bên — các mục lại hiển thị thành một danh sách phẳng.",
   "tui.tags.grouping_on": "Đã bật nhóm nhãn ở thanh bên — các mục giờ được chia theo nhãn chính.",
   "tui.tags.header": "Nhãn của cuộc trò chuyện này · {count}/8 đã áp dụng",
-  "tui.tags.invalid": "Tên nhãn dài 1–24 ký tự, không có ký tự điều khiển; “Chưa gắn nhãn” là tên dành riêng.",
+  "tui.tags.invalid": "Tên nhãn dài 1–24 ký tự, không có ký tự điều khiển; “Untagged” là tên dành riêng.",
   "tui.tags.none_applied": "Chưa áp dụng nhãn nào cho cuộc trò chuyện này.",
   "tui.tags.not_applied": "chưa áp dụng",
   "tui.tags.off": "tắt",
