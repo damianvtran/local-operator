@@ -1,5 +1,7 @@
+// @vitest-environment happy-dom
+import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openEventStream } from "./store";
+import { openEventStream, retainSessionListStream, useSessions } from "./store";
 
 class FakeEventSource {
 	static instances: FakeEventSource[] = [];
@@ -62,5 +64,64 @@ describe("openEventStream", () => {
 		second.onopen?.();
 		expect(transitions).toEqual(["open", "disconnected", "open"]);
 		close();
+	});
+});
+
+describe("the session-list frame revision", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		FakeEventSource.instances = [];
+	});
+
+	const frame = (ids: string[]) =>
+		JSON.stringify({
+			sessions: ids.map((session_id) => ({ session_id, pinned: false })),
+		});
+
+	it("counts accepted list frames only, and never a component render", () => {
+		vi.stubGlobal("EventSource", FakeEventSource);
+		const release = retainSessionListStream();
+		try {
+			const source = FakeEventSource.instances[0];
+			const { result, rerender } = renderHook(() => useSessions());
+			expect(result.current.revision).toBe(0);
+
+			/* A render driven by anything else must not move the counter: the
+			   revision is a fact about frames, not about React work. */
+			rerender();
+			expect(result.current.revision).toBe(0);
+
+			act(() => {
+				source.listeners.get("sessions")?.({
+					data: frame(["a"]),
+				} as MessageEvent);
+			});
+			expect(result.current.revision).toBe(1);
+			expect(result.current.sessions.map((row) => row.session_id)).toEqual(["a"]);
+
+			rerender();
+			expect(result.current.revision).toBe(1);
+
+			/* A malformed frame is DROPPED before it can replace the list, so it
+			   must not advance the counter either. */
+			act(() => {
+				source.listeners.get("sessions")?.({ data: "{" } as MessageEvent);
+			});
+			expect(result.current.revision).toBe(1);
+			expect(result.current.sessions.map((row) => row.session_id)).toEqual(["a"]);
+
+			act(() => {
+				source.listeners.get("sessions")?.({
+					data: frame(["a", "b"]),
+				} as MessageEvent);
+			});
+			expect(result.current.revision).toBe(2);
+			expect(result.current.sessions.map((row) => row.session_id)).toEqual([
+				"a",
+				"b",
+			]);
+		} finally {
+			release();
+		}
 	});
 });

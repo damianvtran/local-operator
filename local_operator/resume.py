@@ -2578,6 +2578,8 @@ class SessionRow(NamedTuple):
     #: existing construction site keeps working unchanged; only the live
     #: decorators (``decorate_rows`` and the desktop feed's ``_row_for``) set
     #: them.
+    waiting_on: int = 0
+    jobs_running: int | None = None
     subagents_running: int | None = None
     subagents_queued: int | None = None
     #: How many wakes are scheduled, and whether they are dormant because the
@@ -2710,8 +2712,8 @@ class SessionRow(NamedTuple):
         return self.owner_device[:8] if self.owner_device else ""
 
     @property
-    def delegating(self) -> tuple[int, int] | None:
-        """``(running, queued)`` when this row owns subagent work, else ``None``.
+    def delegating(self) -> tuple[int, int, int] | None:
+        """``(running, queued, jobs)`` when this row owns work, else ``None``.
 
         THE single fact behind the ``delegating`` state, read by both builders
         of a status — ``session.catalog.CatalogEntry.status_code``/``status``
@@ -2753,9 +2755,10 @@ class SessionRow(NamedTuple):
             return None
         running = _counted(self.subagents_running)
         queued = _counted(self.subagents_queued)
-        if running + queued < 1:
+        jobs = _counted(self.jobs_running)
+        if running + queued + jobs < 1:
             return None
-        return running, queued
+        return running, queued, jobs
 
 
 #: What a DEVICE with no name is called, on every surface that has to name one.

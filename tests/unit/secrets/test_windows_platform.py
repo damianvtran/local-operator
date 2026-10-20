@@ -47,6 +47,11 @@ from local_operator.secrets import protocol as protocol_module
 from local_operator.secrets.broker import BrokerError
 from local_operator.secrets.keys import key_mode, key_path, load_master_key
 
+# These cells drive ``ensure_broker``/``_spawn_broker`` directly (with the spawn
+# stubbed) and are the contract for the production seam; opt them out of the
+# autouse refusal that keeps ordinary unit tests from starting a real daemon.
+pytestmark = pytest.mark.allow_secret_broker
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 

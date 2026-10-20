@@ -73,7 +73,7 @@ from local_operator.harness.types import (
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import (
     carry_floor,
-    cost_summary,
+    cost_summary_by_basis,
     job_subtree_cost,
     turn_cost,
 )
@@ -716,8 +716,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, str], Any] = {}
-    order: list[tuple[str, str, str]] = []
+    folded: dict[tuple[str, str, str, str | None], Any] = {}
+    order: list[tuple[str, str, str, str | None]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -768,7 +768,9 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
             if accepted is not None
             else "estimated" if estimated is not None else "unknown"
         )
-        key = (provider, model_id, mode)
+        # A retained job row must not relabel API-key cash as plan money (or
+        # vice versa) merely because both calls used the same serving model.
+        key = (provider, model_id, mode, getattr(component, "billing_basis", None))
         existing = folded.get(key)
         if existing is None:
             folded[key] = component.model_copy(deep=True)
@@ -913,6 +915,134 @@ def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
     if not live_tokens and durable_tokens:
         overrides["context_tokens"] = durable_tokens
     return overrides
+
+
+def _restored_model_field(value: Any) -> Any:
+    """One live spec, in the restored field's own type.
+
+    ``model_copy`` does not validate, so the ``ModelSpec``-to-wire validator on
+    ``selected_model``/``effective_model`` does not run on this path — the same
+    reason the receipt fixup beside the call site has to hand over a validated
+    object rather than a dump. The dump is therefore re-validated into
+    ``FrontendModelSpec`` HERE, which is the shape ``refresh_from_session``'s
+    constructor call lands on the live path, so both stores hold the same type
+    and not merely the same values.
+    """
+    if isinstance(value, ModelSpec):
+        return FrontendModelSpec.model_validate(value.model_dump(mode="json"))
+    return value
+
+
+def _reading_pair(
+    configured: FrontendModelSpec | None, stored: FrontendModelSpec | None
+) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+    """The two specs a restored context reading is only meaningful between, or ``None``.
+
+    A token count is interpretable only against the window it was measured
+    against, so a reading may cross a restore only while BOTH sides name the
+    same model: the stored ``context_tokens`` were measured on the stored
+    spec's model, and the window about to divide them is the configured
+    spec's. Two different models have no honest conversion between them — the
+    user switched models since the checkpoint was written — so the reading is
+    DROPPED rather than recomputed.
+
+    ONE RULE, TWO CONSUMERS, IN TWO MODULES. ``attached.AttachedSession._restored_pair``
+    asks it for the COLD viewer (may this process adopt the checkpoint's
+    numerator and denominator?), and ``_live_model_updates`` asks it for the
+    first frame a restarted OWNER publishes (may it carry the checkpoint's
+    reading under a spec that names another model?). Those were two spellings
+    of the same comparison, and they drifted in exactly the way a duplicated
+    rule does: the viewer refused a cross-model reading while the owner's first
+    frame kept one (review round 1, M1 = QA round 1, Q2). A third consumer must
+    call this rather than restate the comparison.
+    """
+    if configured is None or stored is None:
+        return None
+    if configured.provider != stored.provider or configured.model_id != stored.model_id:
+        return None
+    return configured, stored
+
+
+def _live_model_updates(
+    session: Any, checkpoint_model: FrontendModelSpec | None = None
+) -> dict[str, Any]:
+    """The model pair a restored checkpoint must NOT be allowed to keep.
+
+    ``checkpoint_model`` is the spec the ROW's reading was measured on, which is
+    the row's ``effective_model`` — its SELECTED slot names the model the user
+    chose, and in a fallback session the two differ while only one of them
+    served the requests the tokens came from. Callers pass
+    ``effective_model or selected_model``, the same slot pair
+    ``refresh_from_session`` resolves (QA round 2, Q3).
+
+    A checkpoint is written at a turn end, so its ``selected_model`` /
+    ``effective_model`` describe the runtime that WROTE it. They were the one
+    live field ``_restored_state`` left standing, so a headless owner's FIRST
+    frame named the level the PREVIOUS runtime ran while ``session.model`` — the
+    level its requests, every later frame and the effort picker's entity list
+    read — named the one it had actually restored: the desktop chip painted
+    "High" over a session running "medium" until some unrelated refresh
+    happened to republish the pair (Defect B, session ddd673e63db8).
+
+    The checkpoint's spec is stale for exactly the reason its ``cwd`` is (see
+    the call site): a successor's own spec is authoritative for what it runs.
+    The projection is ``refresh_from_session``'s — ``session.model``, and
+    ``effective_model or selected`` — so the first frame a restarted owner
+    publishes and every frame after it cannot disagree about the running level.
+
+    An empty dict for a host that exposes no model at all: a reduced facade and
+    a test double have none, and there the checkpoint's spec is still the only
+    answer available (the fallback the ``cwd`` fixup documents).
+
+    THE CONTEXT READING IS THE MODEL'S TOO, and the pair above is what decides
+    it: ``context_tokens`` was measured on the model the row's ``effective_model``
+    NAMES — the one that served those calls — so when the restore lands on a
+    different ``(provider, model_id)`` that numerator and its window describe a
+    model that is not about to run. Left in place they made
+    the first frame name one model and divide another model's reading by its
+    window — the ``attached.py`` cold pair refused exactly this pairing while
+    this path published it (review round 1, M1 = QA round 1, Q2). The reading is
+    therefore DROPPED, not converted: no token count is known on the new model,
+    so ``context_tokens`` and its estimate flag go unset (the same honest
+    degradation the band already renders as ``—`` / the mobile meter as
+    ``no-reading``), and the window is the LIVE spec's own — the field
+    ``refresh_from_session`` publishes, so the first frame and every frame after
+    it divide by the same number. A SAME-model restore keeps the checkpoint's
+    pair exactly as it did, because that is the reading the conversation was
+    actually measured at; identity, not a window mismatch, is the gate.
+
+    THE PAIR'S OWN DERIVED FIELD MOVES WITH IT. ``effort_displacement`` (#2658)
+    is a fact ABOUT ``selected``/``effective`` — computed from them and the
+    conversation's ``chosen_effort`` — so re-stamping the pair without it
+    published a frame that contradicted itself: the pair named the level the
+    successor runs while the note still narrated the checkpoint's. Reproduced by
+    review round 4 (m1): a checkpoint written while ``minimal`` was clamped to
+    ``low``, a later ``/effort high``, and the successor's FIRST frame carried
+    ``high/high`` beside ``Effort: low on anthropic/claude-opus-5; you chose
+    minimal.`` until some unrelated refresh recomputed it. Same call and same
+    arguments as ``refresh_from_session``'s, deliberately: a second spelling of
+    the rule is how a derived field and its input drift apart.
+    """
+    selected = getattr(session, "model", None)
+    if selected is None:
+        return {}
+    effective = getattr(session, "effective_model", None) or selected
+    updates: dict[str, Any] = {
+        "selected_model": _restored_model_field(selected),
+        "effective_model": _restored_model_field(effective),
+        "effort_displacement": effort_displacement(
+            selected, effective, getattr(session, "chosen_effort", None)
+        ),
+    }
+    if _reading_pair(effective, checkpoint_model) is None:
+        updates.update(
+            {
+                "context_tokens": None,
+                "context_is_estimate": None,
+                "context_window": getattr(effective, "context_window", None),
+            }
+        )
+    return updates
 
 
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
@@ -1285,12 +1415,15 @@ class FrontendSpendChildren(BaseModel):
     #: say must not grow every frame by a key, the same shape ``asks_truncated``
     #: uses on the state model above.
     reason: str | None = None
+    by_basis: dict[str, int] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_reason(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         payload = handler(self)
         if self.reason is None:
             payload.pop("reason", None)
+        if self.by_basis is None:
+            payload.pop("by_basis", None)
         return payload
 
 
@@ -3318,6 +3451,101 @@ def effective_identity_for(
     return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
 
 
+def effort_displacement(selected: Any, effective: Any, chosen: str | None = None) -> dict[str, str]:
+    """The chosen reasoning level that is NOT in force on the serving model.
+
+    A fallback may serve at a level other than the one the conversation chose,
+    for two different reasons that read identically on a status band and must
+    not be silent either way: the chain entry pins a level of its own (the
+    operator's config says the rescue route runs at ``high``), or the target's
+    ladder cannot express the choice and ``spec_for_target`` clamps it. In both
+    cases the band's effort segment correctly names the level IN FORCE — that
+    is its job — so the divergence has to be stated somewhere else or the user
+    watches ``max`` become ``high`` with no explanation.
+
+    ``chosen`` is the CONVERSATION's choice (``Session.chosen_effort``), passed
+    separately because the selected spec may be a route that cannot express it
+    and then carries ``None``/a clamp itself. ``None`` means "read it off the
+    selected spec", which is the honest answer for an ownerless frame (a cold
+    catalogue row) that has no session to ask.
+
+    Returns ``{}`` when there is nothing to report: no level was chosen (a
+    model's seed is not a choice), or the serving spec is on exactly the chosen
+    level. Otherwise a five-key statement, all short strings:
+
+    * ``chosen`` — the level the conversation owns;
+    * ``effective`` — the level in force on the serving spec, ``""`` when that
+      spec exposes no level (the provider's own default, or no effort knob);
+    * ``selected`` / ``serving`` — ``provider/model_id`` labels for the two;
+    * ``note`` — the sentence a surface renders, composed HERE so the TUI, the
+      desktop strip and any other client cannot word one fact three ways.
+
+    The sentence names the level in force first and then the level that comes
+    back, which is the pair a user needs to decide whether to wait or re-pick:
+    ``Effort: high on anthropic/claude-sonnet-5-5; max resumes on
+    deepseek/deepseek-flash.`` Design review round 1 (D1) preferred this to the
+    first wording's ``returns with``, whose missing subject left the reader to
+    infer that the MODEL returns rather than the effort. A same-model route
+    (the quota walk can pin one model at a lower level) reads ``Effort: medium
+    on openai/gpt-6.1-sol; you chose high.``
+    """
+
+    def _level(spec: Any) -> str:
+        return str(getattr(spec, "reasoning_effort", "") or "").strip().lower()
+
+    def _label(spec: Any) -> str:
+        provider = str(getattr(spec, "provider", "") or "")
+        model_id = str(getattr(spec, "model_id", "") or "")
+        return f"{provider}/{model_id}" if provider and model_id else model_id
+
+    # ``in_force`` is the LEVEL; the ``effective`` SPEC stays the parameter —
+    # shadowing it with its own level was a real bug here (the first draft
+    # reassigned it before ``_label`` read the spec and composed an empty
+    # serving label, so every displacement answered "nothing to report").
+    in_force = _level(effective)
+    if chosen is None:
+        chosen_level = _level(selected)
+        # A SEED IS NOT A CHOICE. ``build_model_spec`` sets both fields to the
+        # same value and they diverge only when a level is picked (the
+        # documented contract ``_carried_effort`` reads as "a choice"). Without
+        # this guard a fallback would report the boot model's own seed as a
+        # preference the user never expressed — inventing a level and then
+        # mourning it.
+        chosen_default = (
+            str(getattr(selected, "reasoning_default_effort", "") or "").strip().lower()
+        )
+        if not chosen_level or chosen_level == chosen_default:
+            return {}
+    else:
+        # Callers that hold the session's own choice (the journal-backed
+        # ``Session.chosen_effort``) have already done that discrimination; an
+        # explicit empty value is "nothing chosen", never "read the spec".
+        chosen_level = str(chosen).strip().lower()
+        if not chosen_level:
+            return {}
+    if chosen_level == in_force:
+        return {}
+    selected_label = _label(selected)
+    serving_label = _label(effective)
+    if not serving_label:
+        return {}
+    level_in_force = in_force or "the model's own default"
+    if serving_label != selected_label:
+        note = (
+            f"Effort: {level_in_force} on {serving_label}; "
+            f"{chosen_level} resumes on {selected_label}."
+        )
+    else:
+        note = f"Effort: {level_in_force} on {serving_label}; you chose {chosen_level}."
+    return {
+        "chosen": chosen_level,
+        "effective": in_force,
+        "selected": selected_label,
+        "serving": serving_label,
+        "note": note,
+    }
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -3391,6 +3619,19 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: The chosen reasoning level a fallback is NOT honouring, or ``{}``.
+    #:
+    #: ADDITIVE, and the sibling of ``selected_model``/``effective_model``
+    #: rather than a fourth way to read them: the two specs already carry the
+    #: two levels, and this field exists because the DIFFERENCE is the fact a
+    #: user needs and no client could state it honestly without re-deriving
+    #: which of the two is a choice (see :func:`effort_displacement`). The
+    #: sentence is composed server-side so every surface says one thing.
+    #:
+    #: Bounded by its shape: five short strings, replaced (never appended) on
+    #: every refresh — the same classification ``effective_identity`` carries.
+    #: ``{}`` is the ordinary value and also what an older backend omits.
+    effort_displacement: dict[str, str] = Field(default_factory=dict)
     #: "Can the model this session is on actually run here" — see
     #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
     #: publish it, or one whose store could not be read); old clients ignore
@@ -3407,6 +3648,8 @@ class FrontendSessionState(BaseModel):
     # Whole manager ledger, not a sum of visible rows: live descendants, folded
     # attempts and retained-away jobs all belong here exactly once. Optional
     # knowledge distinguishes legacy checkpoints from an explicitly empty ledger.
+    # Same ledger walk as subagent_cost; retain across parent-only refreshes.
+    subagent_basis_micro: dict[str, int] | None = None
     subagent_cost: float | None = None
     subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
@@ -3568,6 +3811,8 @@ class FrontendSessionState(BaseModel):
     def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         mutable = self.model_copy(update={"jobs": list(self.jobs)})
         payload = handler(mutable)
+        if mutable.subagent_basis_micro is None:
+            payload.pop("subagent_basis_micro", None)
         # N2: the ask fields are present on the frame ONLY while the feature is
         # live in this process. Popped here rather than left to the writer,
         # because every consumer of this state — the install snapshot, every
@@ -7117,6 +7362,7 @@ class FrontendStateStore:
         ledger = {
             "subagent_cost": state.subagent_cost,
             "subagent_cost_knowledge": state.subagent_cost_knowledge,
+            "subagent_basis_micro": state.subagent_basis_micro,
         }
         payload = _spend_channels_payload(
             session, ledger, state.child_costs, getattr(session, "spend", None)
@@ -7234,6 +7480,16 @@ class FrontendStateStore:
                     else state.loop
                 ),
                 **_inherited_identity_fixups(state, session_id),
+                # WHAT THIS RUNTIME RUNS IS NOT THE CHECKPOINT'S TO DECIDE
+                # either, and this pair is the field the rule above was still
+                # missing: the row names the model the previous runtime ran, and
+                # the owner's own spec is the one its requests use. The
+                # comparison slot is the row's EFFECTIVE model, not its
+                # selected one: that is the model the row's ``context_tokens``
+                # were measured on, so gating on ``selected_model`` dropped a
+                # still-serving model's reading whenever a fallback had been in
+                # force when the row was written (QA round 2, Q3).
+                **_live_model_updates(session, state.effective_model or state.selected_model),
             }
         )
 
@@ -7389,6 +7645,16 @@ class FrontendStateStore:
             ),
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
+            ),
+            # The DIFFERENCE between those two, stated once and in words.
+            # Both specs are already on the state, so this is not a second
+            # source of truth: it is the answer to "is the level the user
+            # chose the level now serving", which a client could only derive
+            # by knowing that ``reasoning_effort != reasoning_default_effort``
+            # is this codebase's test for a CHOICE (see ``_carried_effort``).
+            # That knowledge belongs here, not in three renderers.
+            effort_displacement=effort_displacement(
+                selected, effective, getattr(session, "chosen_effort", None)
             ),
             # A fallback delta must not carry the former primary's accusation.
             # The owner access publisher will replace it with the serving claim.
@@ -7754,6 +8020,7 @@ class FrontendStateStore:
             ledger = {
                 "subagent_cost": state.subagent_cost,
                 "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                "subagent_basis_micro": state.subagent_basis_micro,
             }
         if child_costs is None:
             child_costs = state.child_costs
@@ -7783,6 +8050,7 @@ class FrontendStateStore:
                 else {
                     "subagent_cost": state.subagent_cost,
                     "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                    "subagent_basis_micro": state.subagent_basis_micro,
                 }
             ),
             state.child_costs,
@@ -8974,9 +9242,10 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
     if not callable(accounting):
         return {}
     components = accounting()
-    cost, unknown = cost_summary(components)
+    cost, unknown, bases = cost_summary_by_basis(components)
     return {
         "subagent_cost": cost,
+        "subagent_basis_micro": bases,
         # An empty ledger has no missing bills; an unknown-only nonempty ledger
         # does. PARTIAL keeps that distinction when parent spend is known.
         "subagent_cost_knowledge": (CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT),
@@ -9012,6 +9281,7 @@ def _children_snapshot(
         snapshot = ChildrenSnapshot(
             total_micro=_usd_to_micro(cost),
             knowledge=str(knowledge),
+            by_basis=ledger.get("subagent_basis_micro"),
         )
     elif child_costs:
         snapshot = ChildrenSnapshot(
@@ -9023,6 +9293,7 @@ def _children_snapshot(
     if predates_process and snapshot.knowledge in ("exact", "unknown"):
         return ChildrenSnapshot(
             total_micro=snapshot.total_micro,
+            by_basis=snapshot.by_basis,
             knowledge="partial",
             reason="subagent spend from earlier processes is not re-readable here",
         )
@@ -9055,8 +9326,12 @@ def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
     recorded basis.
     """
     try:
+        from local_operator.session.channel_spend import BASIS_VALUES
         from local_operator.session.spend import inference_billing_labels
 
+        basis = getattr(usage, "billing_basis", None)
+        if basis in BASIS_VALUES:
+            return basis
         provider = str(getattr(usage, "provider", "") or "")
         if not provider:
             provider = str(getattr(effective_model, "provider", "") or "")
@@ -9447,6 +9722,12 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
         reasoning_tokens=sum(u.reasoning_tokens for u in usages),
         context_tokens=last_context,
         cost_components=components,
+        billing_basis=(
+            components[0].billing_basis
+            if components
+            and all(c.billing_basis == components[0].billing_basis for c in components)
+            else None
+        ),
     )
 
 

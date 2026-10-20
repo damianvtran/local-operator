@@ -33,6 +33,7 @@ from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     AgentEndEvent,
     AgentEvent,
     AgentStartEvent,
@@ -110,6 +111,7 @@ from local_operator.session.frontend_state import (
     SnapshotWakeScheduler,
     WakeState,
     _fold_goal_status,
+    _reading_pair,
     effective_identity_for,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
@@ -1590,10 +1592,18 @@ class AttachedSession:
         if self._team_registry_cache is None:
             if self._within_registry_cooldown(self._team_registry_failed_at):
                 return None
+            from local_operator.profile_scope import scope_team_registry
             from local_operator.teams import TeamRegistry
 
             try:
-                self._team_registry_cache = TeamRegistry(self._config_dir)
+                # The viewer reads the session's scoped store beside the global
+                # one, so /team works on a COLD session exactly as it does on a
+                # live owner (LOH-9). A session with no local directory (a peer
+                # conversation) simply has no scoped rows to add.
+                self._team_registry_cache = scope_team_registry(
+                    TeamRegistry(self._config_dir),
+                    self._config_dir / "sessions" / self._session_id,
+                )
             except Exception:  # noqa: BLE001 — one feature must not break the session
                 self._team_registry_failed_at = time.monotonic()
                 return None
@@ -1657,9 +1667,13 @@ class AttachedSession:
             if self._within_registry_cooldown(self._agent_registry_failed_at):
                 return None
             from local_operator.agents import AgentRegistry
+            from local_operator.profile_scope import scope_agent_registry
 
             try:
-                self._agent_registry_cache = AgentRegistry(self._config_dir)
+                self._agent_registry_cache = scope_agent_registry(
+                    AgentRegistry(self._config_dir),
+                    self._config_dir / "sessions" / self._session_id,
+                )
             except Exception:  # noqa: BLE001 — one feature must not break the session
                 self._agent_registry_failed_at = time.monotonic()
                 return None
@@ -2457,20 +2471,20 @@ class AttachedSession:
         checkpoint's own window, so a numerator taken from one side under a
         denominator taken from the other is a percentage the tokens were never
         measured against — the wrong-reading class both methods exist to refuse.
-        A third consumer must call this rather than restating the comparison.
+        A third consumer must call the shared rule rather than restating the
+        comparison.
 
-        ``None`` when either side carries no spec, or when the two name
-        different models: the user switched models since the checkpoint was
-        written, so the stored reading describes a model that is not about to
-        run and is not convertible into one that is.
+        THAT RULE IS ``frontend_state._reading_pair``, not a copy kept here: the
+        owner's first frame asks the same question of the same pair
+        (``_live_model_updates``), and the two answers drifted once — this side
+        refused a cross-model reading while the owner's frame published it
+        (review round 1, M1 = QA round 1, Q2). The pair is ``None`` when either
+        side carries no spec, or when the two name different models: the user
+        switched models since the checkpoint was written, so the stored reading
+        describes a model that is not about to run and is not convertible into
+        one that is.
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        if configured is None or stored is None:
-            return None
-        if configured.provider != stored.provider or configured.model_id != stored.model_id:
-            return None
-        return configured, stored
+        return _reading_pair(state.selected_model, durable.selected_model)
 
     @staticmethod
     def _consistent_context(
@@ -9200,7 +9214,13 @@ class AttachedSession:
             stale=stale,
         )
 
-    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: ModelSpec,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         old = self.model
         client = self._client
         if client is None:
@@ -9208,8 +9228,24 @@ class AttachedSession:
         self._require_owner_can_serve(model.provider)
         # /effort changes only the reasoning rung; /model changes identity.
         if (model.provider, model.model_id) == (old.provider, old.model_id):
-            effort = model.reasoning_effort or "auto"
-            asyncio.create_task(client.set_effort(effort))
+            if effort_choice is not EFFORT_CHOICE_UNSET:
+                # The decision rides the MODEL op rather than ``set_effort``
+                # because ``set_effort`` validates against the ladder and so
+                # cannot express a WITHDRAWAL; ``auto`` is the owner's word for
+                # "no level chosen" and ``set_model_effort`` accepts it.
+                chosen = "auto" if effort_choice is None else str(effort_choice)
+                asyncio.create_task(client.set_model(model.provider, model.model_id, effort=chosen))
+            elif model.reasoning_effort != old.reasoning_effort:
+                # A LEVEL moved but this caller stated no DECISION (a carried
+                # spec, an adoption). `set_effort` is an explicit choice on the
+                # owner, and since the explicit-decision split it RECORDS one —
+                # so forwarding the spec's level here promoted a failover carry
+                # (or a `/fast`-era seed) into the conversation's durable choice
+                # (review round 2, M4). A pair-only switch lets the owner CARRY
+                # its own choice, which is the local Session's semantics for a
+                # level change with no decision; a spec whose level did not move
+                # (`/fast`) sends nothing at all.
+                asyncio.create_task(client.set_model(model.provider, model.model_id))
         else:
             asyncio.create_task(client.set_model(model.provider, model.model_id))
 

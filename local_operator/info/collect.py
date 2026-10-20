@@ -377,7 +377,7 @@ def collect_sessions(
                 # Live state from the record. Defaulted through getattr so a
                 # record written by an OLDER runtime (which has no such fields)
                 # lists cleanly rather than raising mid-table.
-                pending=getattr(rec, "pending", None),
+                pending=getattr(rec, "pending", None) if state == "live" else None,
                 busy=bool(getattr(rec, "busy", False)),
                 # The runtime's own statement that it is leaving and finishing
                 # work first. Defaulted like the two fields above so a record
@@ -433,6 +433,8 @@ def collect_sessions(
                 # has not told us it has no subagents, and ``or 0`` here would
                 # silently turn every older peer into a confident zero in the
                 # fleet total.
+                waiting_on=getattr(rec, "waiting_on", 0),
+                jobs_running=reported_subagent_count(getattr(rec, "jobs_running", None)),
                 subagents_running=reported_subagent_count(getattr(rec, "subagents_running", None)),
                 subagents_queued=reported_subagent_count(getattr(rec, "subagents_queued", None)),
                 is_self=self_pid is not None and rec.pid == self_pid,
@@ -850,6 +852,8 @@ def session_rows(
             # counting trajectories across a host wants these, and ``null``
             # (not 0) is what an older runtime contributes — the same
             # unreported-vs-zero distinction the screen makes.
+            "waiting_on": line.waiting_on,
+            "jobs_running": line.jobs_running,
             "subagents_running": line.subagents_running,
             "subagents_queued": line.subagents_queued,
             # The stored row's only clock (transcript activity mtime); ``None``

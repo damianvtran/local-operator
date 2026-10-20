@@ -131,6 +131,18 @@ def static_feature_flags() -> dict[str, Any]:
         # Own key: release-skewed clients must fail closed without hiding the
         # catalogue itself when durable tags are unavailable.
         "session_tags": 1,
+        # The OPTIONAL auto-tag half of a desktop fork: the `auto_tag` body key
+        # on POST /v1/desktop/sessions/{id}/fork and the naming call's tag
+        # contract behind it. Its own key rather than a bump of `session_tags`,
+        # and it exists for the STRICTER direction of skew: `Fork` inherits
+        # `extra="forbid"` (as the whole desktop plane does), so an OLDER
+        # daemon answers 422 to a body carrying `auto_tag` — a refused fork,
+        # not a degraded one. A client must therefore ask THIS key before it
+        # sends the field; absent, it omits it and the fork is byte- and
+        # behaviour-identical to today's. `session_tags` stays the gate for the
+        # tag catalogue, so a backend with the catalogue and without
+        # auto-tagging still shows tags and simply never tags a fork itself.
+        "session_tags_auto_tag": 1,
         # A catalogue that can be asked for ONE scope at a time, resumed
         # by an opaque cursor, and counted per group: the
         # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on

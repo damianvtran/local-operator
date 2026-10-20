@@ -332,7 +332,16 @@ def test_children_are_counted_once_and_propagate_their_knowledge() -> None:
         children=ChildrenSnapshot(total_micro=250, knowledge="partial"),
     )
     assert result["total_micro"] == 350
-    assert result["children"] == {"total_micro": 250, "knowledge": "partial"}
+    assert result["children"] == {
+        "total_micro": 250,
+        "knowledge": "partial",
+        "by_basis": {
+            "billed": 0,
+            "subscription_api_equivalent": 0,
+            "estimated": 0,
+            "not_tracked_micro": 250,
+        },
+    }
     assert result["knowledge"] == "partial"
 
 
@@ -691,7 +700,7 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
     assert [row["unpriced_reason"] for row in fixture["rows"] if "unpriced_reason" in row] == [
         "cancelled_outcome_unknown"
     ]
-    assert set(fixture["children"]) == {"total_micro", "knowledge"}
+    assert set(fixture["children"]) == {"total_micro", "knowledge", "by_basis"}
     assert set(fixture["by_basis"]) == {
         "billed",
         "subscription_api_equivalent",
@@ -725,8 +734,17 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
     # its own ``image`` source entry; the children ledger's not-tracked basis
     # sits in the ``inference`` entry's bases.
     assert fixture["total_micro"] == 1536000
-    assert fixture["children"] == {"total_micro": 520000, "knowledge": "exact"}
-    assert fixture["by_basis"]["not_tracked_micro"] == 1420000
+    assert fixture["children"] == {
+        "total_micro": 520000,
+        "knowledge": "exact",
+        "by_basis": {
+            "billed": 20000,
+            "subscription_api_equivalent": 0,
+            "estimated": 0,
+            "not_tracked_micro": 500000,
+        },
+    }
+    assert fixture["by_basis"]["not_tracked_micro"] == 1400000
     assert fixture["breakdown"]["by_agent"] == [
         {
             "id": "parent",
@@ -789,12 +807,12 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "bases": {
             "billed": {"label": "billed", "source_class": "paygo", "marker": "billed"},
             "subscription_api_equivalent": {
-                "label": "API-equivalent",
+                "label": "included",
                 "source_class": "subscription",
-                "marker": "API-equivalent · subscription",
+                "marker": "included · API-equivalent",
                 "note": (
-                    "You're on a subscription, so API-equivalent amounts are list-price "
-                    "equivalents — not what you are charged."
+                    "Covered by your plan — the amount is the API list-price equivalent, "
+                    "not money charged."
                 ),
             },
             "estimated": {"label": "estimated", "source_class": "paygo", "marker": "estimated"},

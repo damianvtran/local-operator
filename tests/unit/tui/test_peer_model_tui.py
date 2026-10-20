@@ -34,7 +34,9 @@ class _SwitchableSession(FakeSession):
     def model_label(self) -> str:
         return self._label
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         self.applied.append((model, explicit))
         self._label = f"{model.provider}/{model.model_id}"
 
@@ -183,7 +185,9 @@ class _FallbackSession(_SwitchableSession):
     def effective_model_label(self) -> str:
         return "deepseek/deepseek-flash" if self.active_fallback is not None else self._label
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         super().set_model(model, explicit=explicit)
         if explicit:
             self.active_fallback = None  # an explicit re-selection drops the pin

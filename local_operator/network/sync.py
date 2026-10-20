@@ -324,6 +324,16 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # Session-scoped role definitions (``profile_scope.SESSION_ROLES_DIRNAME``).
+    # v1 deliberately does not carry them: S3's move path refuses by default and
+    # names the roles, with ``--drop-session-roles`` as the explicit escape. S1
+    # has no product write path into this tree. **S2 must not make it writable
+    # until that refusal/notice lands with or before it**, or a deleting move
+    # would leave roles behind silently; the S2 PR carries that gate.
+    "roles": (
+        "session-scoped role definitions are not carried by a mesh move in v1; "
+        "S2 stays read-only for this tree until S3's refusal/notice lands with or before it"
+    ),
     # The tail anchor (``session.tail_anchor``): a hint about the SOURCE's own
     # journal bytes — an inode number and the offset of the end of its last
     # complete row. In a copy both are wrong by construction (a replica is a
@@ -352,6 +362,14 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # Lists jobs owned by the SOURCE's process; the destination's roster is its
     # own, and a copied one would name subagents that do not exist here.
     "subagent-roster.v1.json": "the source process's subagent roster",
+    # The desktop fork's auto-tag intent (``session.auto_tag.AUTO_TAG_FILENAME``):
+    # the enable bit and the child's ``tags_revision`` in THIS device's tag
+    # store, captured where the human ticked the View-options toggle. The tag
+    # store itself is never part of the copy set, so off this device the revision
+    # names nothing and the destination's registry may not even offer the same
+    # categories; carrying it would auto-tag a conversation against a vocabulary
+    # the user never opted into here.
+    "auto-tag.json": "a desktop fork's device-local intent against this device's tag store",
     # Per-directory "already swept" claims: on the destination they would suppress
     # a backfill in a directory no sweep has ever seen.
     "origin-scan.json": "a 'this directory was scanned' sentinel",
