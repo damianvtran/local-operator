@@ -180,9 +180,7 @@ def wire_namespaces(locale: str) -> tuple[str, ...]:
     alongside it in the same package are not this route's to serve.
     """
     return tuple(
-        namespace
-        for namespace in namespaces(locale)
-        if namespace.startswith(WIRE_NAMESPACE_PREFIX)
+        namespace for namespace in namespaces(locale) if namespace.startswith(WIRE_NAMESPACE_PREFIX)
     )
 
 
@@ -195,10 +193,16 @@ def wire_bundle(locale: str) -> dict[str, Any]:
     ``deferred`` but their messages are omitted; a client fetches one later with
     the per-namespace route when a surface actually needs it.
 
-    ``content_sha256`` is the bundle's cache identity: it covers the locale and
-    every wire namespace's committed-file hash, eager AND deferred, so a change
-    to either half changes the validator. It is a digest of the hashes, not of
-    a re-serialised map, keeping the same raw-bytes rule as the file hashes.
+    ``content_sha256`` is the bundle's cache identity: it covers the locale,
+    every wire namespace's committed-file hash, and each namespace's eager or
+    deferred membership. The membership term is load-bearing, not decoration:
+    a client revalidates with the ETag and re-registers only on a 200 (see the
+    desktop catalogue loader), so a namespace moving between the two sets must
+    change the validator even though its own bytes did not. Without it, a
+    namespace that became newly eager kept its old ETag, the client got a 304,
+    and those messages stayed English indefinitely. It is a digest of the
+    hashes and membership markers, not of a re-serialised map, keeping the same
+    raw-bytes rule as the file hashes.
     """
     digest = hashlib.sha256()
     digest.update(locale.encode("utf-8") + b"\n")
@@ -207,8 +211,11 @@ def wire_bundle(locale: str) -> dict[str, Any]:
     deferred: list[dict[str, Any]] = []
     for namespace in wire_namespaces(locale):
         sha = catalogue_sha256(locale, namespace)
-        digest.update(f"{namespace}\t{sha}\n".encode("utf-8"))
-        if namespace in DEFERRED_NAMESPACES:
+        deferred_flag = namespace in DEFERRED_NAMESPACES
+        digest.update(
+            f"{namespace}\t{sha}\t{'deferred' if deferred_flag else 'eager'}\n".encode("utf-8")
+        )
+        if deferred_flag:
             deferred.append(
                 {
                     "namespace": namespace,

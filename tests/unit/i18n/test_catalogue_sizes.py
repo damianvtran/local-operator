@@ -27,8 +27,8 @@ from local_operator.i18n import catalogues, resolve
 #: guard against structural growth, not a tight packing target.
 EAGER_MAX_BYTES = 32 * 1024
 
-#: The deferred namespace's own ceiling. `wire.settings` is 77,176 B in en and
-#: 127,795 B in hi today; the headroom is for ordinary copy edits, and the cap
+#: The deferred namespace's own ceiling. `wire.settings` is 80,658 B in en and
+#: 133,641 B in hi today; the headroom is for ordinary copy edits, and the cap
 #: forces the split conversation before the file reaches its next order of
 #: magnitude.
 DEFERRED_MAX_BYTES = 160 * 1024
@@ -53,9 +53,7 @@ def test_no_eager_wire_namespace_exceeds_the_per_namespace_ceiling() -> None:
         for namespace in _eager_namespaces(locale):
             size = len(catalogues.catalogue_bytes(locale, namespace))
             if size > EAGER_MAX_BYTES:
-                violations.append(
-                    f"{locale}/{namespace} is {size} B (ceiling {EAGER_MAX_BYTES} B)"
-                )
+                violations.append(f"{locale}/{namespace} is {size} B (ceiling {EAGER_MAX_BYTES} B)")
     assert not violations, (
         "A namespace grew past the eager ceiling. Either split it into child "
         "namespaces, or add it to DEFERRED_NAMESPACES in "

@@ -620,10 +620,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
     "local_operator/i18n/catalogues.py": (
-        1,
+        2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
         "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
-        "data shipped with the wheel, never an entry of a session directory",
+        "data shipped with the wheel, never an entry of a session directory. "
+        "``WIRE_NAMESPACE_PREFIX`` (``wire.``): a namespace-SELECTOR prefix the "
+        "per-locale bundle route filters catalogue namespace ids with; it is never "
+        "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
         1,

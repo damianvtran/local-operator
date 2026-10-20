@@ -217,9 +217,10 @@ async def test_the_bundle_carries_a_translated_identity_and_revalidates(
     french = catalogues.load_catalogue("fr", "wire.errors.settings")
     identity = "wire.errors.settings.not_registered"
     assert result["messages"][identity] == french[identity]
-    assert result["messages"][identity] != catalogues.load_catalogue(
-        "en", "wire.errors.settings"
-    )[identity]
+    assert (
+        result["messages"][identity]
+        != catalogues.load_catalogue("en", "wire.errors.settings")[identity]
+    )
 
     cached = await test_app_client.get(
         "/v1/i18n/catalogues/fr", headers={"If-None-Match": response.headers["etag"]}
