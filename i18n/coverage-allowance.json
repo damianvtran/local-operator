@@ -16209,6 +16209,8 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
+        "wire.memory.capture.locators.help",
+        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -16233,6 +16235,8 @@
       "missing": [
         "wire.memory.capture.help",
         "wire.memory.capture.label",
+        "wire.memory.capture.locators.help",
+        "wire.memory.capture.locators.label",
         "wire.memory.command",
         "wire.memory.description",
         "wire.memory.enabled.help",
@@ -16246,6 +16250,62 @@
         "wire.memory.sync.help",
         "wire.memory.sync.label",
         "wire.memory.title"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.viewer",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "tui.viewer.binary",
+        "tui.viewer.changed",
+        "tui.viewer.copied",
+        "tui.viewer.copy_failed",
+        "tui.viewer.description",
+        "tui.viewer.header",
+        "tui.viewer.kind_code",
+        "tui.viewer.kind_markdown",
+        "tui.viewer.kind_text",
+        "tui.viewer.legend",
+        "tui.viewer.loading",
+        "tui.viewer.open_failed",
+        "tui.viewer.title",
+        "tui.viewer.truncated",
+        "tui.viewer.unreadable",
+        "tui.viewer.unsupported",
+        "tui.viewer.usage",
+        "tui.viewer.wrap_off",
+        "tui.viewer.wrap_on"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.viewer",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-03-31",
+      "missing": [
+        "tui.viewer.binary",
+        "tui.viewer.changed",
+        "tui.viewer.copied",
+        "tui.viewer.copy_failed",
+        "tui.viewer.description",
+        "tui.viewer.header",
+        "tui.viewer.kind_code",
+        "tui.viewer.kind_markdown",
+        "tui.viewer.kind_text",
+        "tui.viewer.legend",
+        "tui.viewer.loading",
+        "tui.viewer.open_failed",
+        "tui.viewer.title",
+        "tui.viewer.truncated",
+        "tui.viewer.unreadable",
+        "tui.viewer.unsupported",
+        "tui.viewer.usage",
+        "tui.viewer.wrap_off",
+        "tui.viewer.wrap_on"
       ]
     }
   ]
