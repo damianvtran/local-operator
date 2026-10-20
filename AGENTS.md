@@ -1713,10 +1713,11 @@ never happened.
 
 Note what that makes the allowance load-bearing: a catalogue file that is
 **present and partial** is judged by both gates, the fast one demanding every
-key, the slow one only the mismatches. And the slow gate counts **two
-different errors**, which is why an allowance edit is not a single move: a
+key, the slow one only the mismatches. And the slow gate asserts **three
+sets**, which is why an allowance edit is not a single move: a
 key that is missing and **unrecorded** is `unlisted`, and a recorded key that
-is **no longer missing** is `stale`. So carrying the keys that were unlisted
+is **no longer missing** is `stale`, and a listed pair the gate no longer
+checks at all is `unknown`. So carrying the keys that were unlisted
 clears the pair on its own — one move. But carrying keys that were **listed**
 turns those entries stale, and the pair stays red until the allowance is
 **shrunk** to match, which is the shrink-only rule above. Shrinking on its
@@ -1742,16 +1743,25 @@ into a claim nobody checked. **The scope is the claim.**
 
 **And a bound is only as good as the data it projects from — and a bound
 cannot tell you when that data is stale.** A ceiling derived from a weight
-manifest is exactly as trustworthy as the manifest, and the check cannot
-distinguish "the work grew to meet the ceiling" from "the manifest was
-describing work that no longer exists". Measured in this repository on
-2026-10-19: `tests/durations.json` projected 7220 s of serial weight for the
-unit tree against 4466 s measured from real CI timings — an overstatement of
-about 62% — so a shard ceiling and its own guard agreed with each other
-about a number neither had re-derived. **When a derived bound fails, the
-first question is not which constant to raise. It is when the data behind
-that bound was last measured, and by what.** Raising the constant makes the
-check pass on that data; re-measuring makes the data right.
+manifest is exactly as trustworthy as the manifest. Measured in this
+repository on 2026-10-19, the unit tree's heaviest shard projected **7,232 s**
+from `tests/durations.json` at `8497001139`, against **4,466 s** from the
+refreshed manifest in `#2689` applied to the same tree — an overstatement of
+about **62%** — so a shard ceiling and its own guard agreed with each other
+about a number neither had re-derived.
+
+**The cause is worth naming, because it is not "stale entries":** there were
+**no orphaned manifest entries at all**, and the inflation came from the
+other direction — **630 of that tree's 1,703 unit test files carried no
+measurement**, and each was charged the **30.786 s** fallback. A manifest
+that is merely incomplete therefore reads as *more* work, not less, and the
+conservatism is invisible: nothing in the failure says which of the 630
+files it was guessing about. **When a derived bound fails, the first question
+is not which constant to raise. It is how much of the data behind that bound
+was measured, and when, and by what.** Raising the constant makes the check
+pass on that data; measuring more of it makes the data right — and the two
+produce different numbers, which is why the failure cannot tell you which
+one you are looking at.
 
 ### Installing over a live fleet
 
