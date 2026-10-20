@@ -639,6 +639,44 @@ async def test_a_transport_failure_is_unreachable_without_a_chain(credential: in
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.InvalidURL("Invalid URL 'https://h.example:'"),
+        # A URL build can also fail on the IDNA path, which raises a
+        # ``UnicodeError`` rather than an httpx type.
+        UnicodeError("label cannot be encoded"),
+    ],
+    ids=["invalid-url", "unicode-error"],
+)
+async def test_a_request_httpx_will_not_build_is_the_typed_refusal(
+    credential: int, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """E5-1 — nothing was tried, so this is not ``Unreachable``.
+
+    A base ``resolve_api_url`` accepted but httpx refuses to build used to fall
+    through ``_request`` as a raw httpx error, which the CLI reports as the
+    generic "remote compute failed". It has to be the typed refusal, and it has
+    to arrive without the httpx object chained: that object carries the request
+    and the request carries the bearer.
+    """
+    origin = _Origin()
+    client, http = _client(origin, credential)
+
+    async def unbuildable(*args: Any, **kwargs: Any) -> httpx.Response:
+        raise failure
+
+    monkeypatch.setattr(http, "request", unbuildable)
+    async with http:
+        with pytest.raises(InvalidApiOverride) as caught:
+            await client.get_run("run_1")
+    assert origin.requests == []
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "Bearer" not in _residual_text(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_a_revoked_grant_surfaces_login_required(
     credential: int, request_for: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

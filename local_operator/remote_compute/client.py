@@ -60,7 +60,7 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     CredentialInvalidError,
 )
-from local_operator.remote_compute.config import resolve_api_url
+from local_operator.remote_compute.config import invalid_override, resolve_api_url
 from local_operator.remote_compute.errors import (
     ERROR_BY_STATUS,
     InvalidIdempotencyKey,
@@ -350,6 +350,10 @@ class RemoteComputeClient:
         The STATUS comes back beside the payload because 200 and 201 mean
         different things on a create (replay versus created) and the body is
         identical either way, so the status is not recoverable from it.
+
+        A request httpx refuses to BUILD raises
+        :class:`~local_operator.remote_compute.errors.InvalidApiOverride`, not
+        :class:`Unreachable`: nothing was tried, so there is nothing to retry.
         """
         headers = await self._headers()
         if idempotency_key is not None:
@@ -361,6 +365,7 @@ class RemoteComputeClient:
         # ``except`` block first means neither ``__cause__`` nor
         # ``__context__`` exists, so there is no object to walk to a bearer.
         response: httpx.Response | None = None
+        unbuildable = False
         try:
             response = await self.client.request(
                 method,
@@ -373,6 +378,18 @@ class RemoteComputeClient:
             )
         except httpx.HTTPError:
             pass
+        except (httpx.InvalidURL, UnicodeError):
+            # A REQUEST httpx will not BUILD, as opposed to one it could not
+            # DELIVER. The expected source is the base: ``resolve_api_url``
+            # accepted it and httpx's own parse refuses it, which is the
+            # override's condition arriving one step late. Reporting that as
+            # ``Unreachable`` would tell the operator to retry a host that will
+            # never work, so it becomes the typed refusal the CLI maps to its
+            # own sentence. Raised outside the handler above for the bearer
+            # reason stated there.
+            unbuildable = True
+        if unbuildable:
+            raise invalid_override()
         if response is None:
             raise Unreachable("Radient could not be reached for this remote-compute request.")
         # Never surface a provider body — see the module docstring.
