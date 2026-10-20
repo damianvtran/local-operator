@@ -638,7 +638,7 @@ DEFAULT_CONFIG = Config(
             # read through ``cleanup.DELEGATED_PATH``; the content layer's
             # rules, guards and thresholds live in
             # ``local_operator.session.delegated_retention`` ("THE CONTENT
-            # LAYER"). The content layer's THIRD arm — plain non-git directory
+            # LAYER"). The content layer's FOURTH arm — plain non-git directory
             # copies — is the exception to the on-by-default pair: it is
             # ``non_git_copies.enabled``, OFF by default, because its proof is
             # per FILE against a reference repository the operator names

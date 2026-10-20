@@ -199,7 +199,7 @@ def deletable_origins() -> frozenset[str]:
 #: content phase is part of the same delegated class).
 DEFAULT_DELEGATED_SCRATCHPAD_ENABLED = True
 
-#: The content layer's THIRD arm — plain non-git directory copies — is OFF by
+#: The content layer's FOURTH arm — plain non-git directory copies — is OFF by
 #: default, unlike the two above. WHY: the other two arms match a shape the
 #: WRITE policy itself refuses (a write could not have put a ``node_modules``
 #: or a ``.pytest_cache`` there) or a tree git can PROVE is merged; a non-git
@@ -283,7 +283,7 @@ class CleanupPolicy:
     #: :attr:`delegated_enabled` so the record pass and the content phase can
     #: be turned off independently.
     delegated_scratchpad_enabled: bool = DEFAULT_DELEGATED_SCRATCHPAD_ENABLED
-    #: The content layer's THIRD arm, the plain non-git copy collector (see
+    #: The content layer's FOURTH arm, the plain non-git copy collector (see
     #: :data:`DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED`). Off by default: its
     #: per-file proof needs a reference repository the operator names.
     delegated_non_git_copies_enabled: bool = DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED

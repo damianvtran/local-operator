@@ -2560,7 +2560,9 @@ def test_a_copy_below_the_share_threshold_keeps_everything(root: Path) -> None:
     assert result.content == []
     assert result.copy_reclaimed_bytes == 0
     reason = dict(result.content_kept)["foreign"]
-    assert "only 0% of its bytes" in reason and "match a merged tree" in reason
+    # A nonzero share that truncates to zero reads as "<1%", never "0%" beside
+    # 6 bytes (design C4): the earlier spelling made the instrument look broken.
+    assert "only <1% of its bytes" in reason and "match a merged tree" in reason
 
 
 def test_a_copy_with_no_reference_repository_is_kept(root: Path) -> None:
@@ -2657,17 +2659,38 @@ def test_zero_files_with_real_bytes_is_still_an_impossible_result(
     assert any("zero files" in reason for _, reason in result.content_kept)
 
 
-def test_the_store_guard_raises_and_an_empty_store_does_not(root: Path) -> None:
-    """A big store with no copy children is an instrument failure, not a pass."""
+def test_the_store_guard_means_could_not_see_the_store(root: Path) -> None:
+    """Both directions of the vacuous guard, measured (review B3b).
+
+    A store whose PADS WERE SCANNED and hold no plain copies is an honest
+    empty report; only a store with no reachable scratchpad directory over the
+    floor is the instrument failing.
+    """
     session = root / "sessions" / "fileonly"
     (session / "scratchpad").mkdir(parents=True)
     (session / "scratchpad" / "notes.txt").write_text("x")
-    with pytest.raises(dr.NonGitCopyScanError, match="zero non-git copy children"):
-        dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    honest = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    assert honest.candidates == [] and honest.count == 0
+
+    # No scratchpad directory at all, over a store that holds bytes: the scan
+    # could not see the class, so it must not read as "nothing to reclaim".
+    blind = root / "blind-store" / "sessions"
+    (blind / "transcript-only").mkdir(parents=True)
+    (blind / "transcript-only" / "transcript.jsonl").write_text("x" * 64)
+    with pytest.raises(dr.NonGitCopyScanError, match="could not see any scratchpad"):
+        dr.scan_non_git_copies(blind, min_store_bytes=1)
 
     empty = root / "empty-store" / "sessions"
     empty.mkdir(parents=True)
     assert dr.scan_non_git_copies(empty, min_store_bytes=1).candidates == []
+
+
+def test_an_unreadable_store_raises_instead_of_reporting_empty(root: Path) -> None:
+    """An unlistable store is never "nothing to reclaim" (review B3a)."""
+    not_a_store = root / "sessions-is-a-file"
+    not_a_store.write_text("not a directory")
+    with pytest.raises(dr.NonGitCopyScanError, match="store cannot be read"):
+        dr.scan_non_git_copies(not_a_store)
 
 
 def test_an_unreadable_file_refuses_the_candidate_without_aborting_the_pad(
@@ -2719,9 +2742,28 @@ def test_a_report_lists_both_provable_and_withheld_copies(root: Path) -> None:
     assert rows["oldcopy"].proof_ok and rows["oldcopy"].would_reclaim
     assert rows["youngcopy"].proof_ok and not rows["youngcopy"].would_reclaim
     assert "inside the 48h window" in rows["youngcopy"].reason
-    assert report.reclaimable_pads == 1 and report.within_window_pads == 1
+    assert report.reclaimable_sessions == 1 and report.within_window_sessions == 1
+    assert rows["youngcopy"].waiting is True and rows["oldcopy"].waiting is False
     assert report.reclaimable_bytes == rows["oldcopy"].matched_bytes
     assert rows["oldcopy"].proved_by == (os.path.realpath(source),)
+
+
+def test_the_report_counts_sessions_not_provable_subtrees(root: Path) -> None:
+    """One session with two provable siblings is ONE session (design D2)."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "twocopies")
+    _copy_tree(source, pad / "a")
+    _copy_tree(source, pad / "b")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+
+    assert report.count == 2, "both top-level directories are candidates"
+    assert report.reclaimable_sessions == 1
+    assert report.reclaimable_bytes == sum(
+        row.matched_bytes for row in report.candidates if row.would_reclaim
+    )
 
 
 def test_a_dry_run_lists_the_copy_and_removes_nothing(root: Path) -> None:
@@ -2781,7 +2823,171 @@ def test_a_refused_removal_keeps_the_file_and_counts_an_error(root: Path) -> Non
     assert (copy / "payload").exists(), "the refused file is kept"
     assert result.errors == 1
     assert all(row.bytes == 6 for row in result.content), "only sub/a.txt was removable"
+    # THE PASS COUNTER IS WHAT WAS TAKEN, NOT WHAT WAS PLANNED (review B2):
+    # the planned 55 MB payload never left, so only its sibling's 6 bytes count.
+    assert result.copy_reclaimed_bytes == 6
     assert any("cannot be removed" in reason for _, reason in result.content_kept)
+
+
+def test_a_polluted_git_dir_cannot_redirect_the_proof(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduced: ``GIT_DIR=<repoB>/.git`` made ``_merged_tree(repoA)`` list B."""
+    first = _published_source(root)
+    second = _copy_reference(root, "other")
+    (second / "payload").write_text("a different payload\n")
+    _publish(second)
+
+    monkeypatch.setenv("GIT_DIR", os.fspath(second / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", os.fspath(second))
+    merged = dr._merged_tree(os.fspath(first))
+
+    assert merged is not None
+    payload = first / "payload"
+    assert merged[1]["payload"] == dr._blob_sha1(payload, payload.stat().st_size)
+    assert merged[1]["payload"] != dr._blob_sha1(
+        second / "payload", (second / "payload").stat().st_size
+    )
+
+
+def test_in_pad_references_are_capped_and_sorted(root: Path) -> None:
+    """A pad with many repos contributes at most CONTENT_MAX_REPOS, in name order."""
+    pad = _kept_pad(root, "manyrepos")
+    for index in range(10):
+        repo = pad / f"repo-{index}"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+
+    repos = dr._repos_in(pad)
+
+    assert len(repos) == dr.CONTENT_MAX_REPOS
+    assert [path.name for path in repos] == sorted(path.name for path in repos)
+
+
+def test_a_pad_with_no_copy_shaped_directory_resolves_no_references(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm must not walk for repos in a pad it could never prove anything in."""
+    pad = _kept_pad(root, "nothingtoprove")
+    (pad / "notes.txt").write_text("not a copy\n")
+    source = _published_source(root)
+    calls: list[Path] = []
+
+    def counted(path: Path) -> list[Path]:
+        calls.append(path)
+        return []
+
+    monkeypatch.setattr(dr, "_repos_in", counted)
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert calls == []
+    assert result.content == [] and result.copy_candidates == 0
+
+
+def test_a_hash_cache_hit_is_not_charged_to_the_budget(root: Path) -> None:
+    """A refused parent re-offers files its child will hash; only reads cost."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "cached")
+    copy = _copy_tree(source, pad / "copy")
+    merged = dr._merged_tree(os.fspath(source))
+    assert merged is not None
+    trees = ((os.path.realpath(source), merged[1]),)
+    cache = dr._HashCache()
+
+    first = dr._prove_copy(copy, trees=trees, cache=cache)
+    second = dr._prove_copy(copy, trees=trees, cache=cache)
+
+    assert first.ok and second.ok
+    assert first.hashed_bytes > 0
+    assert second.hashed_bytes == 0
+
+
+def test_the_report_keeps_a_copy_the_pass_would_refuse(root: Path) -> None:
+    """Both pad-root guards the pass applies must reach the report (review B1)."""
+    source = _published_source(root)
+    root_git = _kept_pad(root, "rootgit")
+    _copy_tree(source, root_git / "copy")
+    (root_git / ".git").write_text("gitdir: elsewhere\n")
+    session_git = _kept_pad(root, "sessiongit")
+    _copy_tree(source, session_git / "copy")
+    (session_git.parent / ".git").write_text("gitdir: elsewhere\n")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions",
+        references=(os.fspath(source),),
+        now=NOW,
+        window_hours=48,
+    )
+
+    rows = {row.session: row for row in report.candidates}
+    assert rows["rootgit"].would_reclaim is False
+    assert rows["rootgit"].reason == "the scratchpad root is itself a git tree"
+    assert rows["sessiongit"].would_reclaim is False
+    assert rows["sessiongit"].reason == "the session directory is itself a git tree"
+    assert report.reclaimable_sessions == 0
+    assert report.kept_candidates == 2
+
+
+def test_a_sha256_reference_is_refused_with_its_object_format(root: Path) -> None:
+    """A SHA-256 repo silently matches nothing; say WHY it is unusable (D4)."""
+    source = _published_source(root)
+    sha = root / "copy-refs" / "sha256"
+    sha.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-q", "--object-format=sha256", "-b", "main", str(sha)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT},
+    )
+    _big_file(sha / "payload")
+    origin = root / "copy-origins" / "sha256.git"
+    subprocess.run(
+        [
+            "git",
+            "init",
+            "-q",
+            "--bare",
+            "--object-format=sha256",
+            "-b",
+            "main",
+            str(origin),
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT},
+    )
+    _git(sha, "remote", "add", "origin", str(origin))
+    _git(sha, "add", "-A")
+    _git(sha, "commit", "-qm", "content")
+    _git(sha, "push", "-q", "origin", "HEAD:main")
+    _git(sha, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    pad = _kept_pad(root, "sha256ref")
+    copy = _copy_tree(source, pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(sha),), now=NOW, window_hours=48
+    )
+
+    rows = [row for row in report.candidates if row.session == "sha256ref"]
+    assert rows, "the candidate must still be reported"
+    assert all("reference object format is sha256" in row.reason for row in rows)
+    assert not any(row.would_reclaim for row in rows)
+    assert (copy / "payload").exists()
+
+
+def test_the_early_refusal_uses_the_one_merged_tree_phrase(root: Path) -> None:
+    """One refusal phrase in both bounds; no "at a merged-tree path" variant."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "earlybound")
+    copy = _copy_tree(source, pad / "copy")
+    _big_file(copy / "run-only.bin", fill=b"y")  # a path no merged tree has
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    reason = dict(result.content_kept)["earlybound"]
+    assert "at most" in reason and "match a merged tree" in reason
+    assert "merged-tree path" not in reason
+    assert (copy / "payload").exists(), "the whole candidate is kept"
 
 
 def test_candidates_are_recursive_and_the_largest_provable_subtree_wins(root: Path) -> None:

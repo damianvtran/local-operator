@@ -788,10 +788,35 @@ def test_the_copy_report_lists_the_class_and_removes_nothing(store: Path, capsys
 
     out = capsys.readouterr().out
     assert "== Non-git copies (read-only) ==" in out
-    assert "1 candidate(s)" in out
-    assert "would reclaim now 1 pad(s)" in out
-    assert "would reclaim  copycat" in out and "base-repo" in out
+    assert "1 candidate(s) (top-level directories)" in out
+    assert "would reclaim now: 1 session(s)" in out
+    assert "waiting for the 48h window: 0 session(s)" in out
+    assert "kept: 0 candidate(s)" in out
+    assert "proof: a file is recoverable" in out
+    assert "operator holds: none configured" in out
+    # The nested candidate prints its parent path, so ``base-repo`` cannot be
+    # mistaken for the refused ``qa`` row above it (design C5).
+    assert "would reclaim  copycat" in out and "qa/base-repo" in out
     assert (copy / "payload").exists(), "the report removes nothing"
+
+
+def test_the_copy_report_shows_a_configured_operator_hold(store: Path, capsys: Any) -> None:
+    """A configured hold is visible as a hold, and the summary names it (C1)."""
+    reference, copy = _copy_session(store)
+    _config(store, delegated={"non_git_copies": {"hold_sessions": "copycat"}})
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "operator holds: 1 session(s) (copycat)" in out
+    assert "would reclaim now: 0 session(s)" in out
+    assert "hold" in out and "operator hold" in out
+    assert (copy / "payload").exists()
 
 
 def test_the_copy_report_json_carries_every_row(store: Path, capsys: Any) -> None:
@@ -827,7 +852,8 @@ def test_the_normal_dry_run_says_the_copy_arm_is_off(store: Path, capsys: Any) -
     out = capsys.readouterr().out
     assert (
         "non-git copies: off (session.cleanup.delegated.non_git_copies.enabled is off; "
-        "--report-non-git-copies previews the class)" in out
+        "--report-non-git-copies --dry-run previews the class; hold sessions with "
+        "session.cleanup.delegated.non_git_copies.hold_sessions)" in out
     )
 
 
