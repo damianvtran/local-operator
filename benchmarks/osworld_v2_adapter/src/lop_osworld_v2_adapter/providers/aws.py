@@ -990,15 +990,42 @@ class AwsProvider:
                 records = guest_supervisor.receipt_records(result.stdout)
                 if not records or records[-1]["restart"] == self._supervisor_restart:
                     return guest_supervisor.ReceiptResult("verified_none")
-                restart = records[-1]["restart"]
                 # Keep the console evidence's fail-closed treatment. A withheld
                 # stderr payload is explicitly marked, never a silent clean [].
                 safe = guest_loss._scrub(json.dumps(records), self._known_secret_values)
                 self._supervisor_records = json.loads(safe) if safe is not None else []
-                # Commit the seen generation only after receipt processing has
-                # completed. Otherwise a scrub/parse error could make the retry
-                # mistake this unbound generation for an already accepted one.
-                self._supervisor_restart = restart
+                # A RECEIPT ONLY SAYS systemd's MainPID was replaced. Under
+                # ``KillMode=process`` every other holder survives that restart
+                # and can keep answering the action port with pre-restart screen
+                # state, so the receipt alone is NOT recovery. Bounce every
+                # process in the unit's cgroup and prove the listener is one
+                # that did not hold the port before; an unproved listener fails
+                # closed instead of authorizing input against a survivor.
+                verification = self._restart_supervisor_unit(self._supervisor_unit)
+                if verification["status"] != "verified":
+                    status = str(verification["status"])
+                    self._write_supervisor_evidence(
+                        "guest-supervisor-recovery.json",
+                        {
+                            "recovered": False,
+                            "read_failed": False,
+                            "receipt_unavailable": False,
+                            "records_withheld": safe is None,
+                            "cause": guest_supervisor.restart_cause(status),
+                            "cause_status": status,
+                            "restart_verification": verification,
+                            "failed_action_delivery": delivery,
+                            "remaining_batch": "not_sent",
+                            "records": self._supervisor_records,
+                        },
+                    )
+                    # The existing recovery failure, with a fixed cause: the
+                    # caller stops before posting the pending action.
+                    return guest_supervisor.ReceiptResult("read_failed", recovery_exhausted=True)
+                # Commit the generation the restart itself produced. Without
+                # this, the next poll would read the same record as a second
+                # restart and bounce a healthy server in a loop.
+                self._supervisor_restart = verification["latest_restart"]
                 self._write_supervisor_evidence(
                     "guest-supervisor-recovery.json",
                     {
@@ -1006,6 +1033,7 @@ class AwsProvider:
                         "read_failed": False,
                         "receipt_unavailable": False,
                         "records_withheld": safe is None,
+                        "restart_verification": verification,
                         "failed_action_delivery": delivery,
                         "remaining_batch": "not_sent",
                         "records": self._supervisor_records,
@@ -1036,6 +1064,49 @@ class AwsProvider:
             },
         )
         return guest_supervisor.ReceiptResult("read_failed")
+
+    def _restart_supervisor_unit(self, unit: str) -> dict[str, Any]:
+        """Detached restart + freshness proof; never raises.
+
+        THE DISPATCH MAY LOSE ITS RESPONSE. The supervised unit is the process
+        serving this request, so the all-process kill terminates our HTTP
+        connection -- and, if the restart ran in the target cgroup, would
+        terminate the restart itself. The restart therefore runs as a transient
+        service and writes its verdict to ``RESTART_RESULT_PATH``; this method
+        treats the dispatch as fire-and-forget (a transport error is expected,
+        a clean non-zero return is a failure) and reads the result from a LATER
+        command once the server answers again. A token ties the result to this
+        dispatch, so a stale file cannot be read as a fresh restart.
+        """
+
+        token = time.time_ns()
+        try:
+            dispatched = self._run_guest_command(
+                guest_supervisor.restart_command(unit, self._supervisor_password, token),
+                timeout=guest_supervisor.RESTART_DISPATCH_TIMEOUT_S,
+            )
+            if dispatched.returncode != 0:
+                return guest_supervisor.empty_restart("command_failed")
+        except Exception:
+            # Expected: the kill closes the connection that carried the request.
+            pass
+        deadline = time.monotonic() + guest_supervisor.RESTART_RESULT_BUDGET_S
+        while time.monotonic() < deadline:
+            try:
+                result = self._run_guest_command(
+                    guest_supervisor.restart_result_command(self._supervisor_password),
+                    timeout=guest_supervisor.RESTART_RESULT_TIMEOUT_S,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    record = guest_supervisor.restart_record(result.stdout)
+                    if record["token"] == token:
+                        return record
+            except Exception:
+                # The server is down for part of this window, or the file holds
+                # a malformed/stale document; keep polling until the budget ends.
+                pass
+            self._sleep(guest_supervisor.RESTART_RESULT_INTERVAL_S)
+        return guest_supervisor.empty_restart("result_unavailable")
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float
