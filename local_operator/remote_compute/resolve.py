@@ -5,12 +5,14 @@ network this device's LOCAL RECORD knows it belongs to. The input is a name or
 an id a human typed; the output is a :class:`NetworkBinding` — the network's
 minted id plus its display name — and that object is constructible NOWHERE
 ELSE, so the guarantee is carried by the type rather than by every caller
-remembering to resolve. The store lists local records, so an id the device
-never joined answers ``unknown`` rather than "not reachable", and a membership
-this device lost (removed, refused by peers, untrusted after a panic) is
-refused before any request is built. "Local record" is the honest bound: a
-removal this device has not yet received is not visible here, and no local read
-can show it.
+remembering to resolve. "NOWHERE ELSE" INCLUDES COPIES: ``dataclasses.replace``
+is refused too (see the class docstring), so the one public stdlib call that
+could have kept the proof while swapping the id cannot. The store lists local
+records, so an id the device never joined answers ``unknown`` rather than "not
+reachable", and a membership this device lost (removed, refused by peers,
+untrusted after a panic) is refused before any request is built. "Local record"
+is the honest bound: a removal this device has not yet received is not visible
+here, and no local read can show it.
 
 WHY THE RESOLUTION RULES LOOK FAMILIAR: ``network.cli._resolve`` already answers
 the same question for the CLI's verbs, with the same "never guess between two
@@ -45,10 +47,13 @@ if TYPE_CHECKING:
 #: a trailing newline, so ``^n_[0-9a-f]{24}$`` admits ``"n_<hex>\n"``.
 NETWORK_ID_PATTERN = re.compile(r"n_[0-9a-f]{24}")
 
-#: The construction token for :class:`NetworkBinding`. Module-private on
-#: purpose: :func:`resolve_network` is its only issuer, so holding a binding is
-#: PROOF that this device's local record vouched for the network. A bare id
-#: beside it would let a caller skip that proof — the hole this field closes.
+#: The mint mark for :class:`NetworkBinding`. Module-private on purpose:
+#: :func:`resolve_network` (through :func:`_issue`) is its only issuer, so
+#: holding a binding is PROOF that this device's local record vouched for the
+#: network. It is a flavour on the instance rather than a constructor argument
+#: (the field is ``init=False``), because an argument is a value a caller can
+#: pass: ``dataclasses.replace`` forwards every init field, which is exactly how
+#: a hand-built binding to another network would have been minted.
 _ISSUE_TOKEN = object()
 
 #: Refusal codes, spelled once because a caller (and a test) branches on the
@@ -70,24 +75,61 @@ class NetworkBinding:
     binding mutated between two reads could name one network in the body and
     another in the receipt.
 
-    ISSUED ONLY BY :func:`resolve_network`. The private token is compared in
-    ``__post_init__``, so ``NetworkBinding(network_id=..., name=...)`` raises
-    ``TypeError``: membership is not a property a caller can assert into
-    existence, and a request that took a bare id could never prove it either.
-    The token is excluded from ``repr`` and equality because it is proof of
-    issue, not part of what the binding MEANS.
+    ISSUED ONLY BY :func:`resolve_network`, through the module-private
+    :func:`_issue`. The mint mark is an ``init=False`` field, so it is not an
+    argument to ``__init__``: ``NetworkBinding(network_id=..., name=...)``
+    reaches ``__post_init__`` with the default ``None`` and raises ``TypeError``.
+    Membership is not a property a caller can assert into existence, and a
+    request that took a bare id could never prove it either.
+
+    ``dataclasses.replace`` IS REFUSED TOO, and that is why the check lives in
+    ``__post_init__``: ``replace`` forwards only init fields, so the copy's mark
+    is ``None`` again, and it re-runs ``__post_init__`` on that copy. A replace
+    that changed nothing but the display name is refused as well, deliberately —
+    ``replace(binding, network_id=other)`` is precisely how a plain frozen
+    dataclass would carry this device's membership proof to a network it never
+    joined, and no replace is worth keeping that door open for.
+
+    THE GUARANTEE BINDS CONSTRUCTION, not the instance graph. ``copy.copy``,
+    ``copy.deepcopy`` and ``pickle`` re-run neither ``__init__`` nor
+    ``__post_init__``; each reproduces the id of an ALREADY-ISSUED binding — an
+    id this device's store vouched for — so none can name a network that was
+    never resolved, and none is defended against. (``copy.copy`` carries the
+    same mark object; ``deepcopy`` and ``pickle`` rebuild it as a distinct
+    object, which nothing re-checks.) Subclassing this type, or importing this
+    module's private names to mint a mark, is a deliberate act outside the
+    guarantee, which covers the routes an ordinary caller reaches for.
     """
 
     network_id: str
     name: str
-    _issued_by: object = dataclasses.field(default=None, repr=False, compare=False)
+    _issued_by: object = dataclasses.field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         if self._issued_by is not _ISSUE_TOKEN:
             raise TypeError(
                 "NetworkBinding is issued only by remote_compute.resolve_network(); "
-                "a binding built by hand has not checked this device's membership"
+                "a binding built by hand, or copied with dataclasses.replace, "
+                "has not checked this device's membership"
             )
+
+
+def _issue(network_id: str, name: str) -> NetworkBinding:
+    """Mint the one proof of membership this module hands out.
+
+    ``__init__`` cannot build it: ``__post_init__`` refuses every instance that
+    does not already carry the mark, and the mark is ``init=False``, so no
+    constructor argument can deliver it. ``__new__`` then ``object.__setattr__``
+    (the dataclass is frozen) sets the state, and ``__post_init__`` is run by
+    hand afterwards so the mint path and the refusal path share ONE check
+    rather than two rules that could drift apart.
+    """
+    binding = NetworkBinding.__new__(NetworkBinding)
+    object.__setattr__(binding, "network_id", network_id)
+    object.__setattr__(binding, "name", name)
+    object.__setattr__(binding, "_issued_by", _ISSUE_TOKEN)
+    binding.__post_init__()
+    return binding
 
 
 def resolve_network(network: str | None, root: Path | None = None) -> NetworkBinding:
@@ -149,7 +191,7 @@ def resolve_network(network: str | None, root: Path | None = None) -> NetworkBin
             "which is not a minted mesh network id; re-create or re-pair the network "
             "before sending work to it",
         )
-    return NetworkBinding(network_id=record.network_id, name=record.name, _issued_by=_ISSUE_TOKEN)
+    return _issue(record.network_id, record.name)
 
 
 def _is_active_member(record: "NetworkRecord") -> bool:

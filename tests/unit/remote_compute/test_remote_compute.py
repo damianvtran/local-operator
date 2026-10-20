@@ -8,6 +8,7 @@ the operator's live ``~/.local-operator`` (AGENTS.md, "Isolating a run").
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from pathlib import Path
 
@@ -118,6 +119,37 @@ def test_the_capability_bit_follows_a_live_toggle(config_root: Path) -> None:
     assert feature_flags()["remote_compute"] == 1
     _write_flag(config_root, False)
     assert "remote_compute" not in feature_flags()
+
+
+def test_the_static_and_live_halves_stay_disjoint_and_merge_cleanly(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2-2: pin the split the mobile daemon's memo relies on.
+
+    ``static_feature_flags`` may be cached for the life of a process and
+    ``live_feature_flags`` may not, so neither half may leak a key into the
+    other, the merged map must be exactly their union, and toggling every switch
+    the halves read must leave the static half unchanged. ``references``
+    and ``remote_compute`` are the two conditional keys: each is PRESENT in the
+    live half only while its switch is on, and never in the static half.
+    """
+    from local_operator.server.features import live_feature_flags, static_feature_flags
+
+    static_baseline = static_feature_flags()
+    for at_references in ("0", "1"):
+        for remote_compute_on in (False, True):
+            monkeypatch.setenv("LOCAL_OPERATOR_AT_REFERENCES", at_references)
+            _write_flag(config_root, remote_compute_on)
+
+            static = static_feature_flags()
+            live = live_feature_flags()
+            assert static == static_baseline, "no switch may reach the static half"
+            assert set(static) & set(live) == set(), "the halves own disjoint keys"
+            assert feature_flags() == {**static, **live}
+            assert "references" not in static
+            assert ("references" in live) is (at_references == "1")
+            assert "remote_compute" not in static
+            assert ("remote_compute" in live) is remote_compute_on
 
 
 def test_the_enabling_key_is_the_registry_path() -> None:
@@ -322,6 +354,51 @@ def test_a_binding_cannot_be_constructed_by_hand() -> None:
     record = _network("home")
     with pytest.raises(TypeError):
         NetworkBinding(network_id=record.network_id, name=record.name)
+
+
+def test_a_binding_cannot_be_replaced_either(mesh_root: Path) -> None:
+    """SC2-1: ``dataclasses.replace`` must not carry the mint mark across.
+
+    The copy is built through ``__init__``, which never receives an ``init=False``
+    field, and re-runs ``__post_init__`` — so a replace that swaps the network id
+    raises instead of lending this device's membership proof to a network the
+    store never vouched for. ANY replace is a re-mint, hence the name-only case.
+    """
+    record = _network("home")
+    _save(record, mesh_root)
+    binding = resolve_network("home", mesh_root)
+    with pytest.raises(TypeError):
+        dataclasses.replace(binding, network_id=store.new_network_id())
+    with pytest.raises(TypeError):
+        dataclasses.replace(binding, name="office")
+    # The refused copies left the issued binding intact, and it still round-trips
+    # into the wire body with the resolved id.
+    request = RunCreateRequest(binding, {"command": ["echo", "hi"]})
+    assert request.to_json() == {
+        "command": ["echo", "hi"],
+        "network_id": record.network_id,
+    }
+
+
+def test_the_mint_mark_is_outside_the_binding_meaning(mesh_root: Path) -> None:
+    """SC2-1: the mark is not in ``repr``, equality, hash or ``__init__``."""
+    record = _network("home")
+    _save(record, mesh_root)
+    binding = resolve_network("home", mesh_root)
+
+    mark = {field.name: field for field in dataclasses.fields(NetworkBinding)}["_issued_by"]
+    assert (mark.init, mark.repr, mark.compare) == (False, False, False)
+    assert repr(binding) == f"NetworkBinding(network_id={record.network_id!r}, name='home')"
+    # A shallow copy keeps the mark object, and two bindings that name the same
+    # network compare and hash alike because the mark is outside both. Swapping
+    # the copy's mark (a private write, used here only to have TWO different
+    # marks) must not change either fact.
+    twin = copy.copy(binding)
+    assert twin == binding
+    assert hash(twin) == hash(binding)
+    object.__setattr__(twin, "_issued_by", object())
+    assert twin == binding
+    assert hash(twin) == hash(binding)
 
 
 def test_a_request_cannot_be_built_without_a_network_id() -> None:
