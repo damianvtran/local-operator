@@ -211,3 +211,70 @@ async def test_enter_on_a_typed_name_toggles_and_creates_once() -> None:
         assert [item["name"] for item in registry] == ["Review", "Brand New"]
         brand_new = next(item["id"] for item in registry if item["name"] == "Brand New")
         assert state["tags"] == [brand_new]
+
+
+@pytest.mark.asyncio
+async def test_tag_keyboard_arrows_enter_escape_and_inline_draft() -> None:
+    """The key contract the design preflight names, on the real composer.
+
+    Arrows move the highlight without writing; Escape closes with the draft
+    intact and zero writes; Enter toggles once; an inline `/tag` inside a draft
+    opens the list without consuming the prose around it.
+    """
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(app, pilot)
+        review = write_categories(config_dir(), [(None, "Review")])[0]
+        ops = write_categories(
+            config_dir(),
+            [(review["id"], "Review"), (None, "Ops")],
+        )[1]
+        set_entity_tags(
+            config_dir(),
+            "session",
+            "abcdef123456",
+            [review["id"], ops["id"]],
+            review["id"],
+        )
+        editor = app._editor()
+        before = read_entity_tags(config_dir(), "session", "abcdef123456")
+
+        editor._set_text_and_caret("/tag ", len("/tag "))
+        await pilot.pause()
+        await pilot.pause()
+        picker = editor.picker
+        assert picker.is_open()
+        first = picker.highlighted_name()
+        await pilot.press("down")
+        await pilot.pause()
+        assert picker.highlighted_name() != first
+        assert read_entity_tags(config_dir(), "session", "abcdef123456") == before
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not picker.is_open()
+        assert editor.text == "/tag "
+        assert read_entity_tags(config_dir(), "session", "abcdef123456") == before
+
+        editor._set_text_and_caret("/tag Review", len("/tag Review"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        # Enter toggled the APPLIED primary OFF once; the oldest survivor is
+        # promoted, which is the same rule the store unit tests pin.
+        assert read_entity_tags(config_dir(), "session", "abcdef123456") == {
+            "tags": [ops["id"]],
+            "primary": ops["id"],
+            "revision": 2,
+        }
+
+        editor._set_text_and_caret("keep this draft /tag", len("keep this draft /tag"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "keep this draft" in editor.text
+        assert editor.picker.is_open()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text.startswith("keep this draft")
