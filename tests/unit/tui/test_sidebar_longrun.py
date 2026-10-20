@@ -237,8 +237,18 @@ async def poll_until(
                 await one_poll(app, pilot)
     except TimeoutError as exc:
         live = {entry.id: entry.row.live_state for entry in app._session_sidebar.entries}
+        # THE PAGE GEOMETRY BELONGS HERE. A one-row window is a DIFFERENT
+        # failure from a slow catalog, and without these two numbers a reader
+        # sees six live rows and an empty parked list and concludes the catalog
+        # was slow -- when the real cause is that `_reveal` pinned the offset
+        # before the widget was laid out, leaving `visible_entries` one row deep
+        # so prewarm finds no candidates. Naming the geometry is what separates
+        # "the sidebar is collapsed" from "the catalog is late".
         raise AssertionError(
             f"sidebar never ready: {description}; catalog live states={live!r}; "
+            f"visible={len(app._session_sidebar.visible_entries)}/"
+            f"{len(app._session_sidebar.entries)} "
+            f"page_size={app._session_sidebar.page_size}; "
             f"parked={list(app._sidebar_presentations)!r}; "
             f"refresh pending={app._sidebar_refresh_pending}; "
             f"prefetch active={app._sidebar_prefetch is not None}"
