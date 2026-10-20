@@ -26,12 +26,82 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | theme-flip ground: the ROOT element paints `--lo-canvas`, dark fallback `#121212` | 2,056 | 8,047 | 10,103 | 4,573 |
 | numeric cells: finite-only bar/line scales and labelled bar gaps | 2,056 | 8,170 | 10,226 | 4,602 |
 | v5 remediation: silent nulls, centred series gaps, labelled line gaps + shared-code trims | 2,056 | 8,077 | 10,133 | 4,607 |
+| v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,124 | 10,002 | 4,606 |
+| v7 review round 1: viewBox pin (no upscale), dark hairline, light chrome reset, max-ending ticks, dense-label thinning, `.row`/`.muted` trims | 1,833 | 8,186 | 10,019 | 4,605 |
+| v8 scroll-lock: `html{overflow:hidden}` + body natural-height report | 1,849 | 8,170 | 10,019 | 4,601 |
+| v9 tall content: body is the 100vh scroller; report `body.scrollHeight`; viewport-width chart | 1,860 | 8,161 | 10,021 | 4,602 |
 
 Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
-1,131 B raw / **1 B gzip**. Relative to v3: +30 B raw / +34 B gzip; relative to the
-reviewed v4: −93 B raw / +5 B gzip. `PRELUDE_VERSION` **5** is what a served document
+1,243 B raw / **6 B gzip**. Relative to v3: −82 B raw / +29 B gzip; relative to the
+reviewed v5: −112 B raw / −5 B gzip. `PRELUDE_VERSION` **9** is what a served document
 re-derives under. The theme-flip ground and its wait for `[data-ready]` are documented in
 `prelude.src.css`; they are unchanged by this repair.
+
+The v6 shape pass was measured the same way, and it is **net smaller** than v5 despite
+adding three behaviours. Probe builds (one feature removed at a time, current source
+otherwise unchanged) put the adds at roughly +24 B gzip for the bar-count height, +22 B for
+the measured gutter and +18 B for width-aware tick density; the dark FALLBACK ink cost
++11 B. Those are paid for by rules that the memo's own contract makes unreachable:
+
+* `h1,h2,h3` — §2.8/operator directive 2026-10-10 says a component is body-only and its
+  title is never drawn; no helper or fixture emits a heading. -15 B gzip measured.
+* `@media (prefers-reduced-motion:reduce)` — the generation contract says "no animation,
+  transitions". The CSS rule is gone, but the rule it enforced is now a validator deny
+  (`_MOTION_RE` in `validate.py`), which covers component-authored `<style>`/`<script>` and
+  costs 0 prelude bytes. -42 B gzip measured.
+* `.dim` — no helper emits it and the prompt teaches `var(--lo-ink-dim)` instead. The
+  `--lo-ink-dim` token stays in the root palette. -8 B gzip measured.
+* `.row` — the side-by-side layout helper is not emitted by any prelude helper, fixture,
+  test or the generator prompt. -33 B gzip measured.
+* `.muted` — likewise undocumented and emitted by no helper; the prompt teaches
+  `var(--lo-ink-muted)` for the same effect. -7 B gzip measured. Together these pay for
+  v7's width pin, dark hairline and max-ending ticks.
+
+The v7 remediation was driven by review round 1. The SVG now carries `width`/`height` equal
+to its viewBox, so `svg{max-width:100%}` only shrinks it on a narrow frame and cannot
+magnify a bounded height at 1200/1440 (9 bars and 40 bars now render 346/360 px + 16 px of
+body padding, under the 480 clamp; the old stretch gave 486/505 and 581/604). That also
+keeps 12 px axis type at 12 px instead of 16.3 px at a 1200 column. Dense charts (band
+<= 14 px) drop their value labels and the last category label instead of stacking them on
+5 px bars; the axis, the earlier labels and the per-bar tooltip remain. The dark fallback adds
+`--lo-hairline:#333` so reference lines recede behind the bars (light path unchanged), and
+the `data-mode=light` `color-scheme` reset returns for horizontally scrolling tables on a
+dark-OS host. The universal reduced-motion rule's enforcement moved to the validator (see
+above); removing it from the prelude is no longer a behaviour loss.
+
+The v9 correction keeps the v8 lock fix and restores reachability for genuinely oversized
+content. `html{overflow:hidden}` alone clipped a 30-row table (876 px document) at the UI's
+480 px clamp with no scrollbar and no way to reach row 30. The body is now the scroller
+(`overflow:hidden auto;max-height:100vh`) and `size()` reports `body.scrollHeight`: 379 px for
+the four-bar chart at 810 (no body scroll after the host grows), 876 px for the table (the host
+clamps at 480 and the body scrolls to row 30). Chart width is `R.clientWidth - 4` (viewport
+minus the body's 2 px side padding), not the body content width, so a body scrollbar cannot
+narrow the chart and recreate the 379/373 feedback lock. `svg` no longer has `max-width:100%`
+or `height:auto`: the width attribute is the viewport width, and the body's `overflow-x:hidden`
+clips only the transient 15 px during the one-step grow. The pair is 4,602 B gzip; the
+removed `max-width`/`height` rules paid for the body overflow.
+
+The v8 scroll-lock fix came from the desktop UI's reproduction of the operator's "weird bar
+on the right" on a VERTICAL four-bar chart at an 810 px column. The host seeded the iframe at
+373 px; the document's first layout was 379 px (chart 363 + 16 px body padding); Chromium
+added a 15 px scrollbar; the narrower chart re-rendered 7 px shorter and reported 373 px, so
+the host kept the scrollbar as a settled feedback lock (`scrollHeight == clientHeight` once
+locked). `html{overflow:hidden}` removes the child scrollbar entirely, and `size()` now
+reports `body.offsetHeight` (the body's natural height, padding included) instead of the
+root's current box. The report is 379 px at 810/373, 293 px at 620/320 and 412 px at
+1200/320; the frames show no strip and `innerWidth - documentElement.clientWidth == 0`.
+The shorter `offsetHeight` expression paid for the CSS clip: the pair is 4 B gzip smaller
+than v7.
+
+`_e = LO.el` was also tried as a size trim and measured **worse** under gzip (a repeated
+`LO.el(` compresses better than a two-letter alias plus its definition); it is not in the
+build. The gutter minimum dropped from an arbitrary 56 px to the measured label width, and
+the horizontal label slot is the gutter less the same 8 px inset the text is anchored at, so
+a measured label is never refit 4 px smaller than its own slot. The merged value label was
+already drawn OUTSIDE the bar (`max(a,z)+4`); the unreadable pixels in the operator's
+screenshot came from the dark fallback leaving light-theme ink on `#121212`, not from a
+label inside the fill. The fallback now owns a light ink pair, which is what the rendered
+evidence shows.
 
 The v5 additions were measured before accepting them. A generic shared gap helper was
 4,661 B gzip. The direct string-only/null-safe bar branch was 4,609 B; sharing `fmt`'s
@@ -53,14 +123,14 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 1 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 6 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in the 1 B gzip headroom this pair
+`e.source!==parent` check drops it today). None of that fits in the 6 B gzip headroom this pair
 has left. Lane N either injects a native-only shim at assembly time without touching this shared
 pair, or revisits the cap in its own PR with measured numbers.
 
