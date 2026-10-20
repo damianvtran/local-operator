@@ -98,6 +98,7 @@ from local_operator.paths import config_dir
 # `local_operator.resume` is deliberately tiny (pathlib only): importing the
 # session factory here for the same constant dragged the harness and asyncio
 # onto the CLI startup path, which test_import_graph exists to prevent.
+from local_operator.remote_compute.arguments import add_remote_arguments, wants_remote
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
@@ -2014,6 +2015,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
+    # Tier-1 remote compute (``lop exec --remote``). Registered from its own
+    # module because the flag set is also the classification the refusal reads:
+    # keeping the parser and the "what does this flag mean remotely" table
+    # together is what stops the two from disagreeing.
+    add_remote_arguments(exec_parser, help_locale=help_locale)
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -15705,6 +15711,15 @@ def main() -> int:
                     f"{received}.\n{hint}"
                     "(--workstream is a flag — it publishes the run and takes no value.)"
                 )
+            # Remote compute is dispatched BEFORE the local-run machinery, and
+            # before ``--run-in`` moves the process: every remote refusal must be
+            # a sentence and a non-zero exit, not a local run that ignored the
+            # flags it did not understand. The heavy module (client, httpx,
+            # exec_mode) is imported HERE, never at the top of this file.
+            if wants_remote(args):
+                from local_operator.remote_compute.cli import remote_command
+
+                return remote_command(args)
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
             # handling matches the legacy pre-run behavior.
