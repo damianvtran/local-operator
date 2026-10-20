@@ -75,6 +75,11 @@ TEAM_ROSTER_MAX = 64
 
 Prefer = Literal["none", "local", "remote"]
 
+#: The one batch/listing order: agents first, then teams, then skills. Sorted by
+#: this rank instead of the kind string so a skill never lands between the two
+#: kinds it was added after (the TUI's ``section_order()`` is the same list).
+KIND_ORDER: dict[str, int] = {"agent": 0, "team": 1, "skill": 2}
+
 
 #: How long an interactive caller waits for another process's update run before
 #: refusing. Long enough to ride out a short tick, short enough that a click never
@@ -1235,20 +1240,48 @@ def _apply_skill(
         # a write (the invariant the QA repro tripped over).
         return fail("baseline-unknown", "this skill link has no writer identity yet", "refused")
     alias = record.local_alias
+    # ABSENT CONTENT IS NOT A DIFF. The recorded state (not a missing directory)
+    # is the authority: an explicitly absent link has nothing to compare or
+    # merge, so an apply installs the remote document WHOLESALE -- the same
+    # shape ``install_skill`` writes for a fresh link -- and never reports
+    # ``unchanged`` or computes a three-way merge against bytes that are not
+    # there.
+    #
+    # The CHECK's fact is carried too: if a pull landed between the check and
+    # this apply, the record is present but this row still has no local side.
+    # Installing wholesale is safe there because the storage re-verifies under
+    # its lock (``expected_fingerprint`` is None, so existing bytes refuse with
+    # ``local-concurrent-edit``) -- never a bogus "invalid skill document".
+    absent = c.content_state == "absent" or record.content_state == "absent"
 
     try:
-        local_doc = SkillDocument.from_json(dict(c.local or {}))
         remote_doc = SkillDocument.from_json(dict(c.remote or {}))
-        base_doc = SkillDocument.from_json(dict(c.base)) if c.base else None
+        local_doc = None if absent else SkillDocument.from_json(dict(c.local or {}))
+        base_doc = None if absent else (SkillDocument.from_json(dict(c.base)) if c.base else None)
     except SkillValidationError as exc:
         return fail("merge-refused", f"the skill document is invalid: {exc}", "refused")
 
     results: list[MergeResult] = []
-    if replace == "remote":
+    if absent:
+        if replace == "local":
+            # "Keep my side" has no side to keep: pretending otherwise would
+            # install the hub's bytes under a request that asked for the
+            # opposite. Refuse by name and write nothing.
+            return fail(
+                "merge-refused",
+                "there is no local copy to keep: this link is subscribed without content",
+                "refused",
+            )
         merged: SkillDocument | None = remote_doc
+    elif replace == "remote":
+        merged = remote_doc
     elif replace == "local":
         merged = local_doc
     else:
+        if local_doc is None:
+            # Unreachable: an absent row took the wholesale branch above. The
+            # guard keeps a three-way merge from ever running against nothing.
+            return fail("merge-refused", "the local skill document is missing", "refused")
         merged_json, results = merge_skill_document(
             base_doc.to_json() if base_doc is not None else None,
             local_doc.to_json(),
@@ -1272,7 +1305,9 @@ def _apply_skill(
 
     # Source-name space comparison: nothing to write when the merge reproduced the
     # local document exactly (the remote and local already agree on content).
-    if merged.to_json() == local_doc.to_json() and replace is None:
+    # ``local_doc`` is None exactly for an absent row, which has nothing to
+    # reproduce.
+    if local_doc is not None and merged.to_json() == local_doc.to_json() and replace is None:
         if not dry_run:
             # This site compared the FULL documents (stronger than the check's
             # fingerprints), but the mark still goes through the agreement gate:
@@ -1290,7 +1325,8 @@ def _apply_skill(
         local_write = merged.with_name(alias)
         # The disk copy is alias-rendered; its fingerprint is what the storage
         # re-verifies under its lock (a local edit since this check refuses).
-        before_fingerprint = local_doc.with_name(alias).fingerprint
+        # An absent link has no bytes, so the precondition is exactly None.
+        before_fingerprint = None if local_doc is None else local_doc.with_name(alias).fingerprint
     except SkillValidationError as exc:
         return fail(
             "merge-refused", f"the merged skill cannot be rendered locally: {exc}", "refused"
@@ -1306,6 +1342,9 @@ def _apply_skill(
         identity=record.identity,
         local_alias=alias,
         remote_revision=c.remote_revision or record.remote_revision,
+        # This write makes the copy exist: the state must say so atomically with
+        # the content transaction's baseline finalize.
+        content_state="present",
     )
     storage = ManagedSkillStorage(ctx.config_dir)
     try:
@@ -1366,6 +1405,20 @@ def apply_one(
             "unavailable",
             error_class=c.reason,
             message=c.detail,
+        )
+    if c.kind == "skill" and c.content_state == "absent" and auto:
+        # UNATTENDED NEVER INSTALLS. ``auto`` is the runner tick and the retry
+        # composition; installing a subscribed-only skill is an explicit pull
+        # (or a per-item apply), never a side effect of those paths. Writing a
+        # copy the operator never asked for is the same class of surprise as
+        # clobbering local edits.
+        return ItemMergeReport(
+            c.kind,
+            c.local_id,
+            c.name,
+            c.hub_id,
+            "skipped",
+            skipped_reason="install-requires-pull",
         )
     # An EXPLICIT replace acts on a copy that differs from the hub even when the hub
     # has not moved (classification ``local-only``, which a plain pull reads as
@@ -1571,15 +1624,33 @@ def _apply_items_locked(
 ) -> ApplyReport:
     if all_available:
         prefer, replace = "none", None
-    kinds = (kind,) if kind else ("agent", "team")
+    kinds = (kind,) if kind else ("agent", "team", "skill")
     todo = list(checks) if checks is not None else check_items(ctx, kinds=kinds, names=names)
-    todo.sort(key=lambda c: (0 if c.kind == "agent" else 1, c.name.casefold()))
+    # Agents first, then teams, then skills: the frozen batch order, extended by
+    # one rank rather than replaced, so a client's existing expectations hold.
+    todo.sort(key=lambda c: (KIND_ORDER.get(c.kind, len(KIND_ORDER)), c.name.casefold()))
     reports: list[ItemMergeReport] = []
     stopped: str | None = None
     for c in todo:
         if kind and c.kind != kind:
             continue
         if all_available and c.verdict != "available":
+            continue
+        if all_available and c.kind == "skill" and c.content_state == "absent":
+            # UPDATE-ALL NEVER INSTALLS A SUBSCRIBED-ONLY SKILL. The row is
+            # visible here because it is subscribed and the remote is readable,
+            # but the batch action must not write a copy the operator never
+            # asked for; installing one is an explicit per-item pull.
+            reports.append(
+                ItemMergeReport(
+                    c.kind,
+                    c.local_id,
+                    c.name,
+                    c.hub_id,
+                    "skipped",
+                    skipped_reason="content-absent",
+                )
+            )
             continue
         if stopped is not None and c.verdict == "available":
             reports.append(
@@ -1623,12 +1694,29 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for item in doc.get("items", {}).values():
         kind = item.get("kind", "agent")
-        if kind not in ("agent", "team"):
-            # The legacy typed projection never learned a third kind: skill rows
-            # (and their counts) travel on the capability-gated /hub/links route
-            # only, so an older consumer can never receive an unexpected shape.
+        if kind not in ("agent", "team", "skill"):
+            # Skill failures are part of the updates surface now (the operator's
+            # brief: a skill that cannot update must be visible and retryable
+            # through the SAME channel as agents and teams), so this legacy
+            # projection lists them beside the other two kinds. Unknown kinds
+            # still never reach a typed consumer.
             continue
         state = st.effective_state(item, now)
+        # A ROW THAT CARRIES AN ERROR IS FAILED IN THIS PROJECTION. The store
+        # deliberately keeps a retryable row ``available`` so the timer can still
+        # act on it, and the desktop sidebar compensates by also reading
+        # ``error_class`` -- but every other consumer of this projection sees
+        # only ``state`` and ``counts``. Deriving the failure HERE, for every
+        # kind, means one rule rather than per-kind compensation: a carried
+        # error is counted in ``counts.failed`` and a consumer can act on
+        # ``state`` alone.
+        #
+        # ``no-credential`` is NOT a failure -- it is the sign-in fact an
+        # up-to-date row is listed FOR (UX round 2, U11) -- and a row a writer
+        # still holds in ``updating`` has not failed yet.
+        error_class = item.get("error_class")
+        if error_class and error_class != "no-credential" and state != "updating":
+            state = "failed"
         counts[state] = counts.get(state, 0) + 1
         # An up-to-date item is listed only when it carries the sign-in fact
         # (``no-credential``): the user has no login for an item they have linked, and
@@ -1662,7 +1750,9 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
                 "summary": item.get("summary") or {},
             }
         )
-    items.sort(key=lambda i: (i["kind"], str(i["name"]).casefold()))
+    items.sort(
+        key=lambda i: (KIND_ORDER.get(i["kind"], len(KIND_ORDER)), str(i["name"]).casefold())
+    )
     last = doc.get("last_tick") or {}
     return {
         "generated_at": prov.now_iso(),
@@ -1809,10 +1899,11 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
     (link_id/kind/local_id/name/hub_id/hub_source/visibility/tenant_id),
     policy{subscribe,auto_push,revision}, service-computed
     eligibility{can_auto_push,reason}, `auto_will_apply`/`auto_will_push`,
-    baseline_state, remote_revision, and INDEPENDENT `pull`/`push`
-    DirectionStatus objects. Distinct from ``status_snapshot`` (attention-only):
-    this lists a healthy idle link too, so the sidebar can show its quiet mark and
-    offer a source-scoped toggle with zero pending changes. Local reads only.
+    baseline_state, remote_revision, `content_state` with `local_path` when the
+    copy exists, and INDEPENDENT `pull`/`push` DirectionStatus objects. Distinct
+    from ``status_snapshot`` (attention-only): this lists a healthy idle link too,
+    so the sidebar can show its quiet mark and offer a source-scoped toggle with
+    zero pending changes. Local reads only.
 
     ``kinds`` filters the enumeration (the route's ``?kind=``); skill rows are
     capability-gated by the route so old typed consumers never see them.
@@ -1861,6 +1952,7 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
         policy = snapshot.policy
         eligibility = _eligibility(ctx, identity, policy, values, record, doc)
         capability = _capability_auto_push(doc, identity)
+        content_present = record.content_state != "absent"
         links.append(
             {
                 "link_id": identity.link_id,
@@ -1874,7 +1966,18 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "tenant_name": _tenant_name(values, identity),
                 "policy": snapshot.to_json(),
                 "eligibility": eligibility,
-                "auto_will_apply": _auto_will_apply(item, policy, ctx, now),
+                # Where the managed copy lives, when it exists. A client needs this
+                # to tell the operator where the bytes are without re-deriving the
+                # managed root; an absent link has no local copy at all.
+                "local_path": (
+                    _managed_skill_path(ctx, name)
+                    if identity.kind == "skill" and content_present
+                    else None
+                ),
+                "content_state": record.content_state,
+                "auto_will_apply": _auto_will_apply(
+                    item, policy, ctx, now, content_present=content_present
+                ),
                 "auto_will_push": _auto_will_push(item, policy, ctx, now, eligibility),
                 "baseline_state": record.recorded_by,
                 "remote_revision": record.remote_revision,
@@ -1882,14 +1985,37 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "push": _direction_status(item, "push", policy, now, capability),
             }
         )
-    links.sort(key=lambda link: (link["kind"], str(link["name"]).casefold()))
-    unresolved.sort(key=lambda row: (row["kind"], str(row["name"]).casefold()))
+    links.sort(
+        key=lambda link: (
+            KIND_ORDER.get(link["kind"], len(KIND_ORDER)),
+            str(link["name"]).casefold(),
+        )
+    )
+    unresolved.sort(
+        key=lambda row: (KIND_ORDER.get(row["kind"], len(KIND_ORDER)), str(row["name"]).casefold())
+    )
     return {
         "generated_at": prov.now_iso(),
         "capability": "hub_links:1",
         "links": links,
         "unresolved": unresolved,
     }
+
+
+def _managed_skill_path(ctx: HubSyncContext, alias: str) -> str | None:
+    """The managed directory for one skill alias, or None when it is not addressable.
+
+    Read-only: ``ManagedSkillStorage.path`` only validates the alias and refuses a
+    symlinked root/alias, so an inventory read can never aim a client at a path the
+    writer would reject.
+    """
+
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    try:
+        return str(ManagedSkillStorage(ctx.config_dir).path(alias))
+    except Exception:  # noqa: BLE001 - an unaddressable alias simply has no path to show
+        return None
 
 
 def _tenant_name(values: Mapping[str, Any], identity: LinkIdentity) -> str | None:
@@ -2013,6 +2139,13 @@ def _eligibility(
     grant bound to THIS link at the current publication-contract version. A
     reason is always present when the answer is no.
     """
+    # AN ABSENT COPY HAS NOTHING TO PUBLISH. A subscribed-without-pull link may be
+    # checked and reported, but an unattended push would have to invent the
+    # local side; the content state is a fact, not a momentary gap. It comes
+    # FIRST because it is the actionable fact: no capability attestation would
+    # make a link with no bytes publishable.
+    if getattr(record, "content_state", "present") == "absent":
+        return {"can_auto_push": False, "reason": "content-absent"}
     if not _capability_auto_push(doc, identity):
         return {"can_auto_push": False, "reason": "unsupported-precondition"}
     # SOURCE-SCOPED CAS ATTESTATION: eligibility is bound to this origin's
@@ -2048,9 +2181,23 @@ def _eligibility(
     return {"can_auto_push": True, "reason": "eligible"}
 
 
-def _auto_will_apply(item: Mapping[str, Any], policy: Any, ctx: HubSyncContext, now: Any) -> bool:
-    """Whether the next run would apply an incoming change: policy+backoff+grace."""
+def _auto_will_apply(
+    item: Mapping[str, Any],
+    policy: Any,
+    ctx: HubSyncContext,
+    now: Any,
+    *,
+    content_present: bool = True,
+) -> bool:
+    """Whether the next run would apply an incoming change: policy+backoff+grace.
 
+    ``content_present`` is False for an explicitly absent skill link: the runner
+    never auto-INSTALLS one, so the row must not promise an automatic update it
+    will not perform.
+    """
+
+    if not content_present:
+        return False
     if not policy.subscribe:
         return False
     if st.effective_state(item, now) not in ("available", "updating"):
@@ -2205,7 +2352,7 @@ def skill_link_local_id(
     return f"skl-{digest[:32]}"
 
 
-def install_skill(
+def _resolve_remote_skill(
     ctx: HubSyncContext,
     *,
     hub_source: str,
@@ -2213,40 +2360,22 @@ def install_skill(
     visibility: Visibility,
     tenant_id: str | None,
     alias: str,
-    subscribe: bool | None = None,
-    auto_push: bool | None = None,
-    confirm_public_egress: bool = False,
-) -> dict[str, Any]:
-    """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
+) -> tuple[str, str, LinkIdentity, dict[str, Any], str]:
+    """The ONE remote-identity path a skill PULL or SUBSCRIBE runs before local state.
 
-    This is the desktop plane's entry into the SAME engine the linked checks and
-    applies use: the fetch goes through the check lane's own seam, the write
-    through ``ManagedSkillStorage``'s journaled transaction, and the row the
-    response carries is the ordinary ``links_snapshot`` inventory row.
+    Source approval, scope pairing, alias validation, the credentialed fetch and
+    the answered-row proof live here so the two writers cannot diverge about
+    which row they are allowed to trust: a subscribe records the same identity a
+    pull does, and a row a pull would refuse is refused identically before any
+    link exists. Returns ``(source, alias, identity, canonical, revision)`` and
+    writes nothing.
 
-    Identities are MINTED DETERMINISTICALLY from the remote identity tuple
-    (kind, normalized source, visibility, tenant, hub id): the local id -- and
-    so the link id -- is stable across retries, which is what makes a crashed
-    install resume as the SAME link instead of minting a second one beside its
-    own journal. The alias stays display-only (the architecture rule); one
-    remote skill is one local link in this milestone, so a second alias for a
-    linked skill is refused rather than silently duplicated.
-
-    The answered row is validated against the REQUESTED identity before its
-    manifest is trusted (R1): a row from another scope or identity refuses
-    with the same nondisclosing 404 as a missing one. The initial policy is
-    committed WITH the content transaction: an explicit ``subscribe`` rides
-    the baseline's materialization hint, and only an ``auto_push: true``
-    request -- eligible exactly like the link-policy PATCH, through the ONE
-    ``policies`` writer with SERVICE-computed attestations -- is staged
-    beforehand and reverted on a failed install while its revision is still
-    ours. Every local-state step runs under the cross-process update lease
-    (Q3), and a crashed attempt is recovered before fresh-vs-completed is
-    decided, so its retry resumes the SAME link (Q4).
+    Every refusal keeps the pull route's vocabulary: ``skill-not-found`` for a
+    missing OR foreign row (one flat 404, never distinguishable), ``no-credential``
+    for a missing sign-in, ``origin-conflict`` for a mismatched source/scope, and
+    ``hub-upstream`` for an unreachable hub.
     """
 
-    from local_operator.config import read_config_values
-    from local_operator.hub_sync import policies as pol
     from local_operator.hub_sync.adapters import SkillAdapter
     from local_operator.hub_sync.check import (
         REQUEST_TIMEOUT_S,
@@ -2257,12 +2386,9 @@ def install_skill(
     )
     from local_operator.hub_sync.identity import approve_source
     from local_operator.hub_sync.skill_document import (
-        SkillDocument,
         SkillValidationError,
         validate_name,
     )
-    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
-    from local_operator.hub_sync.transactions import TransactionError
     from local_operator.providers.radient_credentials import (
         ORG_LOGIN_REMEDY,
         configured_radient_base_url,
@@ -2311,12 +2437,9 @@ def install_skill(
     #    resolves access from the ROW itself, and the signed-in client can read
     #    public and org rows alike -- so the envelope, never the request, is the
     #    only evidence of which row actually answered. Accepting a relabeled row
-    #    would attach clean, trusted ancestry and source-scoped policy to
-    #    another scope's (or another identity's) content. Refusals are the SAME
-    #    flat 404 as a missing or foreign row: a probe must not be able to tell
-    #    the checks apart. Absent/unknown metadata fails closed -- the real
-    #    detail envelope always carries id + visibility, and tenant_id for org
-    #    rows.
+    #    would attach an identity (and, on a pull, clean ancestry) to another
+    #    scope's content. Refusals are the SAME flat 404 as a missing or foreign
+    #    row: a probe must not be able to tell the checks apart.
     if not isinstance(document, dict):
         raise LinkError("skill-not-found", "no such skill")
     remote_id = document.get("id")
@@ -2341,8 +2464,8 @@ def install_skill(
         ) from None
     revision, _contract = _remote_meta(document)
     if not revision:
-        # An install records the ancestry fact; without a revision the link
-        # could never prove what it integrated. Refuse now, write nothing.
+        # A link records the ancestry fact; without a revision it could never
+        # prove what it names. Refuse now, write nothing.
         raise LinkError("unsupported-precondition", "the remote skill carries no revision")
 
     # 6. Deterministic identity: a retry after a crash resumes the SAME link.
@@ -2350,6 +2473,67 @@ def install_skill(
         source=source, visibility=visibility, tenant_id=tenant_id, hub_id=hub_id
     )
     identity = LinkIdentity("skill", local_id, source, visibility, tenant_id, hub_id)
+    return source, alias, identity, canonical, revision
+
+
+def install_skill(
+    ctx: HubSyncContext,
+    *,
+    hub_source: str,
+    hub_id: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    alias: str,
+    subscribe: bool | None = None,
+    auto_push: bool | None = None,
+    confirm_public_egress: bool = False,
+) -> dict[str, Any]:
+    """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
+
+    This is the desktop plane's entry into the SAME engine the linked checks and
+    applies use: the fetch goes through the check lane's own seam, the write
+    through ``ManagedSkillStorage``'s journaled transaction, and the row the
+    response carries is the ordinary ``links_snapshot`` inventory row.
+
+    Identities are MINTED DETERMINISTICALLY from the remote identity tuple
+    (kind, normalized source, visibility, tenant, hub id): the local id -- and
+    so the link id -- is stable across retries, which is what makes a crashed
+    install resume as the SAME link instead of minting a second one beside its
+    own journal. The alias stays display-only (the architecture rule); one
+    remote skill is one local link in this milestone, so a second alias for a
+    linked skill is refused rather than silently duplicated.
+
+    The answered row is validated against the REQUESTED identity before its
+    manifest is trusted (R1): a row from another scope or identity refuses
+    with the same nondisclosing 404 as a missing one. The initial policy is
+    committed WITH the content transaction: an explicit ``subscribe`` rides
+    the baseline's materialization hint, and only an ``auto_push: true``
+    request -- eligible exactly like the link-policy PATCH, through the ONE
+    ``policies`` writer with SERVICE-computed attestations -- is staged
+    beforehand and reverted on a failed install while its revision is still
+    ours. Every local-state step runs under the cross-process update lease
+    (Q3), and a crashed attempt is recovered before fresh-vs-completed is
+    decided, so its retry resumes the SAME link (Q4).
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.hub_sync import policies as pol
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    _source, alias, identity, canonical, revision = _resolve_remote_skill(
+        ctx,
+        hub_source=hub_source,
+        hub_id=hub_id,
+        visibility=visibility,
+        tenant_id=tenant_id,
+        alias=alias,
+    )
+    local_id = identity.local_id
 
     storage = ManagedSkillStorage(ctx.config_dir)
 
@@ -2376,7 +2560,12 @@ def install_skill(
         # 7b. Already-linked / replay arm BEFORE any write: a deterministic id
         #     that already exists is THIS install's own earlier attempt (or a
         #     completed one -- including one just finalized by the recovery
-        #     above), never a second copy.
+        #     above), never a second copy. EXCEPTION: a link whose content is
+        #     explicitly ABSENT (subscribe-without-pull, or an unpulled copy) is
+        #     not a completed install -- an explicit pull IS the install it was
+        #     waiting for, so it falls through to the content transaction below
+        #     and carries the existing identity, scope and policy into it.
+        resuming_absent: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
                 continue
@@ -2388,6 +2577,9 @@ def install_skill(
                     f"this skill is already linked as {record.local_alias!r}; one remote skill is "
                     "one local link here -- remove that link first",
                 )
+            if record.content_state == "absent":
+                resuming_absent = record
+                break
             snapshot = links_snapshot(ctx)
             row = next(
                 (link for link in snapshot["links"] if link["link_id"] == identity.link_id), None
@@ -2432,13 +2624,29 @@ def install_skill(
         except SkillValidationError as error:
             raise LinkError("skill-validation", str(error)) from None
         baseline = prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "pull")
+        if resuming_absent is not None:
+            # The prior link's identity/scope/policy/alias must survive an
+            # install that was explicitly requested on top of it; only the
+            # content facts this pull actually establishes move. The migration
+            # hint is left untouched because that link's policy already exists.
+            baseline = replace(
+                resuming_absent,
+                fields=dict(canonical),
+                fingerprint=prov.fingerprint_fields("skill", canonical),
+                recorded_by="pull",
+                content_state="present",
+                remote_revision=revision,
+                lineage="clean",
+            )
+        else:
+            baseline = replace(baseline, legacy_subscribe_hint=subscribe)
         baseline = replace(
             baseline,
             identity=identity,
             local_alias=alias,
             remote_revision=revision,
             lineage="clean",
-            legacy_subscribe_hint=subscribe,
+            content_state="present",
         )
 
         values = read_config_values(ctx.config_dir)
@@ -2476,7 +2684,9 @@ def install_skill(
                 ineligible_reason=str(eligibility["reason"]),
             )
             staged_revision = current.revision
-        elif pol.stored_link_policy(values or {}, identity.link_id) is not None:
+        elif resuming_absent is None and (
+            pol.stored_link_policy(values or {}, identity.link_id) is not None
+        ):
             # No baseline exists (the scan above would have returned), yet an
             # EXPLICIT entry does: a failed or crashed earlier attempt staged
             # it. This request's values are authoritative for the uninstalled
@@ -2617,3 +2827,146 @@ def install_skill(
             }
         )
         return {"reports": [payload], "link": row, "links": snapshot}
+
+
+def subscribe_skill(
+    ctx: HubSyncContext,
+    *,
+    hub_source: str,
+    hub_id: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    alias: str,
+) -> dict[str, Any]:
+    """Link one remote skill WITHOUT installing a local copy (``hub.skillSubscribe``).
+
+    The link and its content are independent facts. Subscribing records the
+    origin, the alias reservation, the baseline and an explicit
+    ``subscribe: true / auto_push: false`` policy with ``content_state: absent``,
+    so the updates surface can report the remote and a later explicit pull can
+    install it -- while nothing is written into the managed skills root. This is
+    the same identity a pull would mint (the shared ``_resolve_remote_skill``
+    chain, including its nondisclosing refusals), so a repeat request resolves
+    to the SAME link and is replayed rather than duplicated.
+
+    An existing link is left exactly as it is: a subscribe is not a policy edit,
+    and it must never silently turn off an auto_push the operator enabled.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.hub_sync import policies as pol
+
+    _source, alias, identity, canonical, revision = _resolve_remote_skill(
+        ctx,
+        hub_source=hub_source,
+        hub_id=hub_id,
+        visibility=visibility,
+        tenant_id=tenant_id,
+        alias=alias,
+    )
+    local_id = identity.local_id
+
+    # Same lease the install/apply paths take: creating the baseline is local
+    # state a concurrent tick or install must not interleave with.
+    with exclusive(ctx, wait_s=0.0):
+        existing: prov.BaselineRecord | None = None
+        for record in prov.iter_baselines(ctx.config_dir):
+            if record.kind != "skill" or record.local_id != local_id:
+                continue
+            if record.identity is None or record.identity != identity:
+                raise LinkError("origin-conflict", "a local skill already owns this identity")
+            if (record.local_alias or record.local_id) != alias:
+                raise LinkError(
+                    "origin-conflict",
+                    f"this skill is already linked as {record.local_alias!r}; one remote skill is "
+                    "one local link here -- remove that link first",
+                )
+            existing = record
+            break
+
+        if existing is None:
+            record = replace(
+                prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "subscribe"),
+                identity=identity,
+                local_alias=alias,
+                remote_revision=revision,
+                # NOT "clean": nothing from this origin has landed locally. The
+                # baseline names what the hub served at subscribe time; the
+                # lineage becomes clean only when an install integrates it, and
+                # the absent state keeps the link ineligible for pushes until
+                # then (``_eligibility`` refuses on content-absent).
+                lineage="unknown",
+                content_state="absent",
+            )
+            prov.write_baseline(ctx.config_dir, record)
+
+        # The explicit subscription policy. An entry that already exists means
+        # this request's link does too, and a replay never rewrites it; a link
+        # with no entry (a hand-written baseline, or one whose policy was
+        # removed) gets exactly the state this route promises.
+        values = read_config_values(ctx.config_dir)
+        if values is None and (ctx.config_dir / "config.yml").exists():
+            raise LinkError("invalid-link-policy", "configuration is unreadable")
+        if pol.stored_link_policy(values or {}, identity.link_id) is None:
+            current = pol.read_policy(values or {}, identity)
+            pol.update_policy(
+                ctx.config_manager,
+                identity,
+                expected_revision=current.revision,
+                subscribe=True,
+                auto_push=False,
+                can_enable_auto_push=False,
+                ineligible_reason="content-absent",
+            )
+
+        snapshot = links_snapshot(ctx)
+        row = next(
+            (link for link in snapshot["links"] if link["link_id"] == identity.link_id), None
+        )
+        if row is None:
+            raise LinkError("origin-conflict", "the subscription did not materialize a link row")
+        return {"link": row, "links": snapshot}
+
+
+def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
+    """Remove one skill link's managed copy, keeping baseline/policy/alias.
+
+    Membership is the LINK; the bytes are one direction of it. Unpull is an
+    explicit local action, so it is not a policy change and never unlinks: the
+    baseline keeps owning the alias (no other origin can claim it), the policy
+    keeps its subscribe/auto_push values, and the check later reports the remote
+    as ``available`` for an explicit pull to install. Repeating it on an
+    already-absent link is a success, not a "not found": the request's intent is
+    already true.
+
+    The content removal itself (atomic rename, intent marker, state write) lives
+    in ``ManagedSkillStorage.unpull`` so its crash window is recoverable from
+    durable evidence rather than inferred from a missing directory.
+    """
+
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    with exclusive(ctx, wait_s=0.0):
+        record = None
+        for candidate in prov.iter_baselines(ctx.config_dir):
+            if (
+                candidate.kind == "skill"
+                and candidate.identity is not None
+                and candidate.identity.link_id == link_id
+            ):
+                record = candidate
+                break
+        if record is None:
+            raise LinkError("skill-not-found", "no such skill link")
+        try:
+            ManagedSkillStorage(ctx.config_dir).unpull(record.local_id)
+        except TransactionError as error:
+            raise LinkError(
+                getattr(error, "code", "") or "local-concurrent-edit", str(error)
+            ) from None
+        snapshot = links_snapshot(ctx)
+        row = next((link for link in snapshot["links"] if link["link_id"] == link_id), None)
+        if row is None:
+            raise LinkError("origin-conflict", "the unpull left no link row")
+        return {"link": row, "links": snapshot}
