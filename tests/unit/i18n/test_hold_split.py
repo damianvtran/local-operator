@@ -41,8 +41,10 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # history.
     # P3b adds its 35-key tui.team_authoring namespace after independent audit.
     # The audited `hi/wire.memory` row this branch lands makes it TWENTY-FOUR;
-    # the pin stays cardinal so an unrelated held namespace cannot slip in.
-    assert len(hindi) == 24
+    # the /tag slice's independently re-audited 27-key `tui.tags` row makes it
+    # TWENTY-FIVE. The pin stays cardinal so an unrelated held namespace cannot
+    # slip in.
+    assert len(hindi) == 25
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

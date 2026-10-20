@@ -165,6 +165,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "tui.review",
         "tui.schedule",
         "tui.status",
+        "tui.tags",
         "tui.team_authoring",
         "tui.transcript",
         "tui.viewer",

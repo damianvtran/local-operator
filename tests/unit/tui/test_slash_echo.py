@@ -134,6 +134,11 @@ ECHO_POLICY = {
     # A control command (`status` is the default), never words for the model:
     # the receipt names the Librarian's state, and `open` switches sessions.
     "librarian": False,
+    # Toggles one label and opens a list; neither is words for the model, and
+    # both handlers print their own receipt (`Added “…”`, the list itself).
+    "tag": False,
+    # A presentation preference plus its receipt; nothing reaches the model.
+    "tags": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -267,6 +272,11 @@ PROMPT_POLICY = {
     # The verbs are a selection, and a bare `/librarian` reports status; none
     # of them is a prompt.
     "librarian": False,
+    # Toggles one label and opens a list; neither is words for the model, and
+    # both handlers print their own receipt (`Added “…”`, the list itself).
+    "tag": False,
+    # A presentation preference plus its receipt; nothing reaches the model.
+    "tags": False,
     "sidebar": False,
     "search": False,
     "accounts": False,

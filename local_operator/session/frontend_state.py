@@ -1310,6 +1310,16 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # The tag store is THIS machine's: `config_dir()/tags` holds the registry and
+    # the per-session assignment files the sidebar's bucket map reads, exactly
+    # the argument `/archive` makes about `archived-sessions.json`. Routed to the
+    # runtime, a `/tag` write would land on the runtime host's config root while
+    # the picker and the sidebar beside it paint this one — and `/tags on|off`
+    # would persist a presentation mode governing a list this terminal draws.
+    # Both commands are frontend-local for the store they share, which is also
+    # what keeps them out of `serving.py::_slash_result`.
+    "tag",
+    "tags",
     # Memory inspection is this frontend's synced store, like /project. A
     # follower without registry identity can inspect only session/global; it
     # never guesses the remote owner's agent/team identity from a role name.
