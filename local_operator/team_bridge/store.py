@@ -1385,6 +1385,36 @@ class Store:
                 return None
             return {"consent_version": version, "consent_ref": ref}
 
+    def update_designated_session(self, owner: OwnerSnapshot, session_id: str | None) -> None:
+        """Set or CLEAR the live owner's designated CoS session.
+
+        WHY THIS EXISTS. The designation is the wake consent (§13.6), and the
+        settings row that names it must keep working after enrollment: the
+        default path commits the session once, and without this writer a later
+        ``team_bridge.session`` edit (or clearing the row) never reached the
+        native record — waking stayed frozen at the first commit and clearing
+        the row did not withdraw consent (review round 2, M1). ``None`` (or an
+        empty string) clears it, which is badge-only, never a fallback.
+
+        THE FENCE. ``_require_live`` is the same exact owner/generation check
+        every other mutation uses: a stale snapshot cannot rename another
+        generation's wake destination. A cleared value is written as SQL NULL,
+        so readers keep answering ``None`` for "no designation".
+        """
+
+        if session_id is not None:
+            if not isinstance(session_id, str):
+                raise StoreRefused("invalid_designation", "a designation is a string or None")
+            session_id = session_id.strip() or None
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            conn.execute(
+                "UPDATE enrollments SET designated_session = ? WHERE owner_key = ?",
+                (session_id, _owner_key(owner)),
+            )
+
     def designated_session_for(self, owner: OwnerSnapshot) -> str | None:
         """The designated CoS session id under the live-owner/generation fence.
 

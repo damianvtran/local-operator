@@ -17,8 +17,9 @@ SCOPE. These are the LOCAL, per-machine keys. Eligibility, consent and the
 endpoint state are SERVER state (``GET /v1/messaging/status`` and
 ``/settings``); nothing here duplicates them. The master switch is a machine
 gate — the composed gate a surface checks is capability × eligible × enabled
-(RFC §5.4), and every reader normalises an unknown value to the shipped
-default (now ON/opt-out for ``enabled``), never to an invented state.
+(RFC §5.4). Each reader's fallback is deliberate: an ABSENT value reads the
+shipped default (ON/opt-out for ``enabled``), while a PRESENT but unparseable
+``enabled`` reads OFF because ON performs a consent write.
 """
 
 from __future__ import annotations
