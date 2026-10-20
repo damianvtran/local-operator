@@ -388,6 +388,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "c5400d7df9911be8936a9db192e815148f820c5c",
+        "version": "1.2.3",
+        "instructions_sha256": "85bd7b5f501b76ce2f6ecda6929da1a4f0d5b08fc305fdc09e941f9ed40bc879",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -527,6 +537,16 @@
         "sha": "458e29e81814ae84bd39cd24957eb7bce90606dd",
         "version": "1.5.1",
         "instructions_sha256": "a3ed201b520201902b84cbaeec8e5c9efabb4b73669a42443ee79a38cff38dc1",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "c5400d7df9911be8936a9db192e815148f820c5c",
+        "version": "1.5.2",
+        "instructions_sha256": "1b7fc06d8c0f65c5d75c4136bb7bdcb76b0be2b8da515b70e193d255cdc3cccf",
         "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
         "tools": null,
         "effort": null,
@@ -811,6 +831,27 @@
         "effort": null,
         "delegate": true,
         "class": null
+      },
+      {
+        "sha": "c5400d7df9911be8936a9db192e815148f820c5c",
+        "version": "1.6.3",
+        "instructions_sha256": "937baa1b017119551e98c30cd5b374d36f81ff0fe0a70f751185a2768fd6d5dd",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
       }
     ],
     "qa-tester": [
@@ -968,6 +1009,27 @@
           "read_variable",
           "bash",
           "todo",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "c5400d7df9911be8936a9db192e815148f820c5c",
+        "version": "1.3.2",
+        "instructions_sha256": "9c6beb64c84b7a9f53382e09fb2f419abda4f821eb29956f9cc15b41e2b4463c",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
           "web_search",
           "web_fetch"
         ],
@@ -1201,6 +1263,16 @@
         "sha": "458e29e81814ae84bd39cd24957eb7bce90606dd",
         "version": "1.4.1",
         "instructions_sha256": "a96a69df4b777d3c9493a421c85e306ed88358d4fe2ece2e13b51855ef0dd67d",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "c5400d7df9911be8936a9db192e815148f820c5c",
+        "version": "1.4.2",
+        "instructions_sha256": "7f1802eef6f1b66bcd6a3d6a9c178e099626c9468de5b3deb153ee6921d6c8f1",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,
