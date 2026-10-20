@@ -7,11 +7,14 @@ from typing import Any
 import pytest
 
 from local_operator.session.session_tags import (
+    TagCreateApplyError,
+    effective_primary,
     read_categories,
     read_entity_tags,
     read_tags_revision,
     resolve_category_names,
     set_entity_tags,
+    toggle_entity_tag,
     usage_counts,
     write_categories,
 )
@@ -391,3 +394,105 @@ def test_legacy_assignment_starts_at_zero_without_rewriting_on_retry(tmp_path: P
     assert set_entity_tags(tmp_path, "session", SID, [tag], tag, "0")["revision"] == 0
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert set_entity_tags(tmp_path, "session", SID, [], None, "0")["revision"] == 1
+
+
+# -- one toggle/create-and-apply semantic -------------------------------------
+
+
+def test_toggle_creates_and_applies_a_new_name_once(tmp_path: Path) -> None:
+    """An exact new name is ONE activation: create the category, assign it, primary."""
+    first = toggle_entity_tag(tmp_path, "session", SID, "Deep Work")
+    assert first["created"] is True
+    assert first["applied"] is True
+    assert read_categories(tmp_path) == [{"id": first["primary"], "name": "Deep Work"}]
+    assert read_entity_tags(tmp_path, "session", SID) == {
+        "tags": [first["primary"]],
+        "primary": first["primary"],
+        "revision": 1,
+    }
+
+
+def test_toggle_uses_existing_name_case_insensitively(tmp_path: Path) -> None:
+    tag = write_categories(tmp_path, [(None, "Review")])[0]["id"]
+    result = toggle_entity_tag(tmp_path, "session", SID, " review ")
+    assert result == {
+        "tags": [tag],
+        "primary": tag,
+        "revision": 1,
+        "created": False,
+        "applied": True,
+    }
+    assert read_categories(tmp_path) == [{"id": tag, "name": "Review"}]
+
+
+def test_toggle_primary_rules_across_add_and_remove(tmp_path: Path) -> None:
+    """First assigned is primary; adding never moves it; removing it promotes oldest."""
+    a = toggle_entity_tag(tmp_path, "session", SID, "A")
+    a_id = a["tags"][0]
+    b = toggle_entity_tag(tmp_path, "session", SID, "B")
+    b_id = b["tags"][-1]
+    c = toggle_entity_tag(tmp_path, "session", SID, "C")
+    c_id = c["tags"][-1]
+    state = read_entity_tags(tmp_path, "session", SID)
+    assert state["tags"] == [a_id, b_id, c_id]
+    assert state["primary"] == a_id
+
+    removed_b = toggle_entity_tag(tmp_path, "session", SID, "B")
+    assert removed_b["applied"] is False
+    assert removed_b["tags"] == [a_id, c_id]
+    assert removed_b["primary"] == a_id
+
+    removed_a = toggle_entity_tag(tmp_path, "session", SID, "A")
+    assert removed_a["tags"] == [c_id]
+    assert removed_a["primary"] == c_id
+
+    emptied = toggle_entity_tag(tmp_path, "session", SID, "C")
+    assert emptied["tags"] == []
+    assert emptied["primary"] is None
+
+
+def test_toggle_checks_assignment_cap_before_creating(tmp_path: Path) -> None:
+    for index in range(8):
+        toggle_entity_tag(tmp_path, "session", SID, f"T{index}")
+    registry = read_categories(tmp_path)
+    with pytest.raises(ValueError, match="At most 8"):
+        toggle_entity_tag(tmp_path, "session", SID, "Too Many")
+    assert read_categories(tmp_path) == registry
+
+
+def test_toggle_checks_registry_cap_before_creating(tmp_path: Path) -> None:
+    write_categories(tmp_path, [(None, str(index)) for index in range(32)])
+    with pytest.raises(ValueError, match="At most 32"):
+        toggle_entity_tag(tmp_path, "session", SID, "One More")
+    assert read_entity_tags(tmp_path, "session", SID)["tags"] == []
+
+
+def test_create_then_assignment_failure_reports_which_half_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two-write seam is disclosed, never reported as an atomic failure.
+
+    Retrying the CREATE would duplicate the name; retrying the APPLY is right.
+    The exception carries that distinction so the receipt can say so.
+    """
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("local_operator.session.session_tags._set_entity_tags", fail)
+    with pytest.raises(TagCreateApplyError) as caught:
+        toggle_entity_tag(tmp_path, "session", SID, "New")
+    assert caught.value.created is True
+    assert [item["name"] for item in read_categories(tmp_path)] == ["New"]
+
+
+def test_effective_primary_requires_registered_and_assigned(tmp_path: Path) -> None:
+    a = write_categories(tmp_path, [(None, "A")])[0]["id"]
+    b = write_categories(tmp_path, [(a, "A"), (None, "B")])[1]["id"]
+    categories = read_categories(tmp_path)
+    assert effective_primary([a], a, categories) == a
+    # not assigned: the id is valid but this entity is Untagged for grouping
+    assert effective_primary([b], a, categories) is None
+    # removed from the registry: a dangling assignment falls to Untagged
+    assert effective_primary([a], a, []) is None
+    assert effective_primary([], None, categories) is None
