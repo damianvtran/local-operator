@@ -105,6 +105,13 @@ def approve_source(source: str, approved: tuple[str, ...]) -> str:
     custom gateway path is untouched, and host/scheme are never rewritten. The
     equality below is still the authorization check, and a source that does not
     name the configured origin keeps the same nondisclosing refusal.
+
+    The RAW value is validated by :func:`normalize_source` BEFORE completion:
+    that function owns the refusal vocabulary for whitespace, credentials and
+    malformed URLs (a bracketed host such as ``http://[::1`` raises ValueError
+    from ``urlsplit``), and completion strips whitespace. Validating first keeps
+    those inputs refused here with the same ``origin-conflict`` sentence instead
+    of leaking a parser message or silently accepting a padded value.
     """
 
     # Imported here: `local_operator.env` loads `.env` at import time, and the
@@ -112,7 +119,8 @@ def approve_source(source: str, approved: tuple[str, ...]) -> str:
     from local_operator.env import normalize_radient_api_base_url
 
     def canonical(value: str) -> str:
-        return normalize_source(normalize_radient_api_base_url(value))
+        raw = normalize_source(value)
+        return normalize_source(normalize_radient_api_base_url(raw))
 
     normalized = canonical(source)
     if normalized not in {canonical(candidate) for candidate in approved}:
