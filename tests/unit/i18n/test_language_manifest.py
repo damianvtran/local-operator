@@ -467,3 +467,48 @@ def test_allowance_growth_notes_missing_default_inside_git(
     monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     assert i18n_check.check_allowance_growth() == []
     assert "allowance growth: skipped (no base ref)" in capsys.readouterr().out
+
+
+def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A locale with no catalogue at base cannot be translated, so its debt is lawful.
+
+    Without this carve-out the manifest gate (which checks every language in
+    the manifest) and the growth ratchet (which rejects added rows when
+    English grows) are mutually unsatisfiable for any change that adds
+    English copy: a deadlock rather than a ratchet.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.fresh"]}]}
+    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.existing"},
+        inactive_locales={"ur"},
+    )
+    assert got == set()
+
+
+def test_allowance_growth_rejects_a_removed_translation(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """Deleting a translation and recording debt is growth, not debt recording.
+
+    The key was present at base and missing at head with English unchanged,
+    which is the ``translate-then-drop`` route: it must fail even though no
+    English key moved.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: {"demo.one": "traduit"})
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.one"},
+        inactive_locales=set(),
+    )
+    assert got == {("fr", "demo", "demo.one")}
