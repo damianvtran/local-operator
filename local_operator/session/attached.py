@@ -1591,10 +1591,18 @@ class AttachedSession:
         if self._team_registry_cache is None:
             if self._within_registry_cooldown(self._team_registry_failed_at):
                 return None
+            from local_operator.profile_scope import scope_team_registry
             from local_operator.teams import TeamRegistry
 
             try:
-                self._team_registry_cache = TeamRegistry(self._config_dir)
+                # The viewer reads the session's scoped store beside the global
+                # one, so /team works on a COLD session exactly as it does on a
+                # live owner (LOH-9). A session with no local directory (a peer
+                # conversation) simply has no scoped rows to add.
+                self._team_registry_cache = scope_team_registry(
+                    TeamRegistry(self._config_dir),
+                    self._config_dir / "sessions" / self._session_id,
+                )
             except Exception:  # noqa: BLE001 — one feature must not break the session
                 self._team_registry_failed_at = time.monotonic()
                 return None
@@ -1658,9 +1666,13 @@ class AttachedSession:
             if self._within_registry_cooldown(self._agent_registry_failed_at):
                 return None
             from local_operator.agents import AgentRegistry
+            from local_operator.profile_scope import scope_agent_registry
 
             try:
-                self._agent_registry_cache = AgentRegistry(self._config_dir)
+                self._agent_registry_cache = scope_agent_registry(
+                    AgentRegistry(self._config_dir),
+                    self._config_dir / "sessions" / self._session_id,
+                )
             except Exception:  # noqa: BLE001 — one feature must not break the session
                 self._agent_registry_failed_at = time.monotonic()
                 return None
