@@ -223,6 +223,12 @@ def render_delta(
             continue
         old_lines = old_split[i1:i2]
         new_lines = new_split[j1:j2]
+        # Preview ORDER is the pre-window contract: every ``-`` line of a hunk,
+        # then every ``+`` line. The gate reads this text, so reordering a
+        # multi-line replace would change its input for diffs that never needed
+        # the character window — short-line hunks stay byte-identical.
+        minus: list[str] = []
+        plus: list[str] = []
         if tag == "replace":
             # Pair the two sides positionally: a replaced line's information is
             # the CHARACTERS that differ, and a prefix clip of a long JSON line
@@ -233,19 +239,19 @@ def render_delta(
             paired = min(len(old_lines), len(new_lines))
             for index in range(paired):
                 old_preview, new_preview = _pair_previews(old_lines[index], new_lines[index])
-                previews.append("- " + old_preview)
-                previews.append("+ " + new_preview)
+                minus.append(old_preview)
+                plus.append(new_preview)
                 if old_preview == new_preview:
                     hidden = True
             for line in old_lines[paired:]:
-                previews.append("- " + _clip(line))
+                minus.append(_clip(line))
             for line in new_lines[paired:]:
-                previews.append("+ " + _clip(line))
+                plus.append(_clip(line))
         else:
-            for line in old_lines:
-                previews.append("- " + _clip(line))
-            for line in new_lines:
-                previews.append("+ " + _clip(line))
+            minus = [_clip(line) for line in old_lines]
+            plus = [_clip(line) for line in new_lines]
+        previews.extend("- " + preview for preview in minus)
+        previews.extend("+ " + preview for preview in plus)
 
     changed = added + removed
     header = f"+{added}/-{removed} changed lines"

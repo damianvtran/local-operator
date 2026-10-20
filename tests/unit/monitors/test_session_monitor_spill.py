@@ -198,7 +198,7 @@ async def test_an_unspilled_result_is_compared_verbatim(tmp_path: Path, config_d
         outcome = await session._run_monitor_check(spec())
     finally:
         await session.dispose()
-    assert outcome == {"text": "one\nline", "error": None}
+    assert outcome == {"text": "one\nline", "error": None, "handle": None}
 
 
 @pytest.mark.asyncio
@@ -312,3 +312,191 @@ def test_the_spill_footer_is_not_part_of_a_comparable_body() -> None:
     assert display != body
     assert f"Output was {len(body)} chars" in display
     assert "Output was" not in body
+
+
+def long_body(changed: bool = False) -> str:
+    """~100 KB over 2,000 lines — far past the 32 KiB snapshot cap."""
+    lines = [f"line {index:04d} " + "payload " * 5 for index in range(2_000)]
+    if changed:
+        lines[1_500] = "line 1500 CHANGED-REPLY " + "payload " * 5
+    return "\n".join(lines)
+
+
+def _long_body_tool(state: dict[str, Any]) -> AgentTool:
+    async def execute(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> ToolResult:
+        body = state["body"]
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name=TOOL,
+            content=[TextContent(text=_display(body))],
+            details=_details(body),
+        )
+
+    return AgentTool(
+        name=TOOL,
+        approval_tier="read",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+        execute=execute,
+    )
+
+
+async def _run_body_check(session: Any, clock: list[int], *, advance: int = 60_000) -> None:
+    clock[0] += advance
+    await session._monitors.pump(now_ms=clock[0] + 5_000)
+    await drain_checks(session._monitors, session)
+
+
+@pytest.mark.asyncio
+async def test_a_change_past_the_snapshot_cap_is_diffed_from_the_full_body(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """Review round 1, F1: the 32 KiB snapshot is not the previous result.
+
+    A 100 KB body with one edit at line 1500 was diffed against the snapshot's
+    prefix, so the previews were boundary continuation lines and the gate could
+    suppress a change it never saw. The spill handle recorded with the commit
+    addresses the whole body and is used instead.
+    """
+    state: dict[str, Any] = {"body": long_body()}
+    assert len(state["body"]) > 32_768
+    calls: list[str] = []
+
+    async def classify(gate_text: str) -> str | None:
+        calls.append(gate_text)
+        return None
+
+    session = make_session(
+        tmp_path,
+        ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[_long_body_tool(state)],
+        monitor_classify=classify,
+    )
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    events: list[Any] = []
+
+    async def record(event: Any) -> None:
+        events.append(event)
+
+    session._emit = record  # type: ignore[method-assign]
+    try:
+        await session.set_monitor_schedules([spec()])
+        await _run_body_check(session, clock)  # baseline
+        baseline = monitor_state.read_counters(config_dir, session.session_id, "m1")
+        assert baseline is not None and baseline["content_hash"]
+        assert baseline["last_handle"].startswith("spill://")
+
+        state["body"] = long_body(changed=True)
+        await _run_body_check(session, clock)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m1")
+        assert counters is not None
+        assert counters["deliveries"] == 1
+        assert counters["content_hash"] != baseline["content_hash"]
+        texts = [getattr(event, "text", "") for event in events]
+        assert any("CHANGED-REPLY" in text for text in texts), texts
+        # hidden=False, so the gate saw the change itself (not a boundary line).
+        assert calls and "CHANGED-REPLY" in calls[0], calls
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_evicted_previous_body_is_a_beyond_window_delta_that_skips_the_gate(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """Review round 1, F1: no full baseline and a clipped snapshot -> fail open."""
+    state: dict[str, Any] = {"body": long_body()}
+    calls: list[str] = []
+
+    async def classify(gate_text: str) -> str | None:
+        calls.append(gate_text)
+        return "non-material-metadata"  # would suppress, if it were asked
+
+    session = make_session(
+        tmp_path,
+        ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[_long_body_tool(state)],
+        monitor_classify=classify,
+    )
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    events: list[Any] = []
+
+    async def record(event: Any) -> None:
+        events.append(event)
+
+    session._emit = record  # type: ignore[method-assign]
+    try:
+        await session.set_monitor_schedules([spec()])
+        await _run_body_check(session, clock)  # baseline
+
+        # The previous full result is gone; the stored snapshot is a 32 KiB
+        # prefix, so there is no honest old side to diff against.
+        session._monitors._entries["m1"].counters["last_handle"] = MISSING
+        state["body"] = long_body(changed=True)
+        await _run_body_check(session, clock)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m1")
+        assert counters is not None
+        assert counters["deliveries"] == 1
+        assert calls == [], "a boundary delta is not gate evidence"
+        texts = [getattr(event, "text", "") for event in events]
+        assert any("beyond the stored snapshot window" in text for text in texts), texts
+        assert not any("CHANGED-REPLY" in text for text in texts)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_body_past_the_diff_bound_delivers_a_checksum_delta(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """The full baseline is bounded for the quadratic matcher (F1's cost).
+
+    Above ``MAX_DIFF_CHARS`` the change is delivered as the beyond-window
+    sentence with ``hidden`` set, so the gate is never asked about a delta that
+    does not show the change, and a check cannot stall in ``difflib``.
+    """
+    state: dict[str, Any] = {"body": ("payload " * 250 + "\n") * 600}
+    assert len(state["body"]) > 1_048_576
+    calls: list[str] = []
+
+    async def classify(gate_text: str) -> str | None:
+        calls.append(gate_text)
+        return "non-material-metadata"
+
+    session = make_session(
+        tmp_path,
+        ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[_long_body_tool(state)],
+        monitor_classify=classify,
+    )
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    events: list[Any] = []
+
+    async def record(event: Any) -> None:
+        events.append(event)
+
+    session._emit = record  # type: ignore[method-assign]
+    try:
+        await session.set_monitor_schedules([spec()])
+        await _run_body_check(session, clock)  # baseline
+        state["body"] = state["body"].replace("payload payload", "PAYLOAD payload", 1)
+        await _run_body_check(session, clock)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m1")
+        assert counters is not None
+        assert counters["deliveries"] == 1
+        assert calls == [], "a checksum delta is not gate evidence"
+        texts = [getattr(event, "text", "") for event in events]
+        assert any("beyond the stored snapshot window" in text for text in texts), texts
+    finally:
+        await session.dispose()

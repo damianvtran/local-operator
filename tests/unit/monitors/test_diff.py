@@ -200,3 +200,25 @@ def test_is_pure_addition_table(old: str, new: str, expected: bool) -> None:
     from local_operator.monitors.diff import is_pure_addition
 
     assert is_pure_addition(old, new) is expected
+
+
+def test_replace_previews_keep_the_minus_then_plus_order() -> None:
+    """Review round 1, F2: the gate's input must not be reordered.
+
+    Windowing pairs the two sides to find the first difference, but the
+    rendered order stays the pre-change one — every ``-`` line of a hunk, then
+    every ``+`` line — so an all-short replace hunk is byte-identical to the
+    old renderer.
+    """
+    assert diff.render_delta(
+        "a\nb\nc", "A\nB\nc", max_delta_lines=12, delta_max_chars=1200
+    ).text == ("+2/-2 changed lines\n- a\n- b\n+ A\n+ B")
+
+
+def test_a_windowed_replace_pair_also_keeps_minus_before_plus() -> None:
+    old = "x" * 300 + "OLD"
+    new = "x" * 300 + "NEW"
+    rendered = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=1200)
+    previews = [line for line in rendered.text.split("\n") if line[:2] in ("+ ", "- ")]
+    assert previews[0].startswith("- …") and previews[1].startswith("+ …")
+    assert "OLD" in previews[0] and "NEW" in previews[1]

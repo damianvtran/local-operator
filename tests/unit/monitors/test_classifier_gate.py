@@ -449,8 +449,14 @@ async def test_an_edit_still_goes_to_the_gate(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_append_to_a_truncated_snapshot_is_still_gated(tmp_path: Any) -> None:
-    """Review R2: beyond the stored window a tail edit looks like an insert."""
+async def test_an_append_past_a_truncated_snapshot_is_delivered_not_gated(tmp_path: Any) -> None:
+    """Review round 1, F1: a clipped baseline is not evidence for the gate.
+
+    With no spill handle to read the full previous result from, the old side of
+    the diff is the stored window's prefix — a tail append there renders as a
+    boundary continuation, which is exactly the kind of delta the gate must not
+    judge. It is delivered, and ``hidden`` keeps the gate out of the loop.
+    """
     harness = Harness(tmp_path, settings=MonitorSettings(snapshot_max_chars=19))
     try:
         harness.script.append(NON_MATERIAL_METADATA)
@@ -463,7 +469,9 @@ async def test_an_append_to_a_truncated_snapshot_is_still_gated(tmp_path: Any) -
         )
         await harness.ripe()
         await harness.ripe()
-        assert len(harness.states) == 1, "a truncated window must not bypass the gate"
+        assert harness.states == [], "a truncated window is not gate evidence"
+        assert len(harness.deliveries) == 1
+        assert "beyond the stored snapshot window" in harness.deliveries[0].delta_text
     finally:
         harness.scheduler.dispose()
 

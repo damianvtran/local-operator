@@ -405,6 +405,24 @@ def test_a_blind_row_says_it_cannot_compare_and_outranks_other_hints() -> None:
     )
 
 
+def test_expired_outranks_blind() -> None:
+    """Review round 1, F5: a watch past ``until_at`` will not tick again.
+
+    Its blind state describes a failure that can no longer cost a missed
+    change, so no surface may lead with it. One rule for ``health_hint``, the
+    CLI state word, the TUI band and the desktop/mobile rows.
+    """
+    expired = _row(
+        blind=True,
+        blind_reason="its full result is no longer in the spill store",
+        until_at=1_756_000_050_000,
+        checks=5,
+        deliveries=0,
+    )
+    hint = monitor_store.health_hint(expired, 1_756_000_060_000)
+    assert hint is None or not hint.startswith("BLIND"), hint
+
+
 def test_suppressions_are_named_instead_of_nothing_has_changed() -> None:
     """A row that suppressed changes did not "see nothing" — it was told not to tell."""
     hint = monitor_store.health_hint(
@@ -416,7 +434,7 @@ def test_suppressions_are_named_instead_of_nothing_has_changed() -> None:
         1_756_000_060_000,
     )
     assert hint == (
-        "5 checks, 0 deliveries — 93 changes suppressed as non-material — "
+        "93 changes suppressed as non-material (5 checks, 0 deliveries) — "
         "the call may have changed without telling you"
     )
     # Singular reads as one change, not one changes.

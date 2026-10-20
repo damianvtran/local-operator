@@ -1349,3 +1349,84 @@ def test_disabled_clause_covers_every_cause_the_counters_can_describe() -> None:
         == "2 consecutive failed checks"
     )
     assert disabled_clause({}) == "repeated failed checks"
+
+
+@pytest.mark.asyncio
+async def test_a_first_check_that_is_blind_says_there_is_no_baseline(tmp_path: Any) -> None:
+    """Review round 1, F4 / QA round 1, Q1: do not promise a delta that cannot come.
+
+    The live m2 monitor's first check was blind (a 4.5 MB result exceeded the
+    spill cap), so the recovery captured the first comparable result silently
+    while the notice claimed a kept baseline. Both notices now carry the fact.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)
+
+        assert [notice.kind for notice in harness.notices] == ["blind", "seeing"]
+        assert harness.notices[0].no_baseline is True
+        assert harness.notices[1].no_baseline is True
+        counters = harness.counters()
+        assert counters["content_hash"] != ""
+        # The first comparable result became the baseline; there is no delta.
+        assert counters["deliveries"] == 0
+        assert "blind_no_baseline" not in counters
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_changed_blind_reason_refreshes_the_index(tmp_path: Any) -> None:
+    """Review round 1, F3: a mid-episode reason change is stale on the wire."""
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)
+        assert harness.changes == 0
+
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert harness.changes == 1
+
+        # Same reason, same episode: no rewrite.
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert harness.changes == 1
+
+        # A different reason is new information for the index row.
+        harness.results.append({"error": "its result was stored incompletely", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert harness.changes == 2
+        assert harness.counters()["blind_reason"] == "its result was stored incompletely"
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_rate_capped_change_refreshes_the_index(tmp_path: Any) -> None:
+    """Review round 1, F3: the rate-cap suppression count must reach the row."""
+    settings = dataclasses.replace(MonitorSettings(), max_deliveries_per_hour=1)
+    harness = Harness(tmp_path, settings=settings)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.extend([{"text": "A", "error": None}, {"text": "B", "error": None}])
+        await rill(harness, 60_000)  # baseline
+        await rill(harness, 60_000)  # delivered
+        after_delivery = harness.changes
+        assert harness.counters()["deliveries"] == 1
+
+        harness.results.append({"text": "C", "error": None})
+        await rill(harness, 60_000)  # rate capped
+        counters = harness.counters()
+        assert counters["suppressed"]["rate_cap"] == 1
+        assert counters["deliveries"] == 1
+        assert harness.changes == after_delivery + 1
+        row = harness.scheduler.index_rows()[0]
+        assert row["suppressed"]["rate_cap"] == 1
+    finally:
+        harness.scheduler.dispose()
