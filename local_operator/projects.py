@@ -154,6 +154,7 @@ def _attachment_kind(suffix: str) -> Literal["image", "audio", "video", "data"]:
         return "video"
     return "data"
 
+
 #: How long a progress snippet stays "fresh" when the operator has not said
 #: otherwise. The live threshold is the settings key ``projects.stale_after_hours``
 #: (int hours, default 4, bounds 1–168), resolved in ONE place —
