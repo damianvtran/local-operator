@@ -26,11 +26,18 @@ other than what was signed. The rule is checked after parsing and BEFORE the
 canonical comparison, because the bytes are not evidence of anything until the
 values they spell are known to be the values a reader may print.
 
-WHY THE ENCODED SIZES ARE BOUNDED BEFORE DECODING. A payload or signature
-string is attacker-controlled input to a decoder, so its length is checked
-while it is still a string: an unbounded decode allocates whatever the peer
-asked for, and a signature has exactly one legal encoded length. See
-:data:`_PAYLOAD_B64_MAX_CHARS` and :data:`_SIGNATURE_B64_CHARS`.
+WHY THE ENCODED SIZES ARE BOUNDED BEFORE DECODING. A payload, signature or
+public key string is attacker-controlled input to a decoder, so its length is
+checked while it is still a string: an unbounded decode allocates whatever the
+peer asked for, and a signature and a public key each have exactly one legal
+encoded length. See :data:`_PAYLOAD_B64_MAX_CHARS`, :data:`_SIGNATURE_B64_CHARS`
+and :data:`_PUBLIC_KEY_B64_CHARS`.
+
+WHY A KEY ID IS AN IDENTIFIER AND NOT A STRING. Every refusal here names the key
+id it is about, and a refusal becomes a log line, so an id carrying an escape or
+a newline would be printed as something other than what the server published.
+The id is therefore held to the statement fields' rule and to a length bound;
+see :func:`_require_key_id`.
 
 WHY THE CHECKS HAVE A FIXED ORDER. Recognisability comes before meaning: a
 caller with no expectation configured, or a statement signed by a key this
@@ -100,6 +107,7 @@ CODE_EXPIRED = "remote_compute_attestation_expired"
 CODE_WINDOW_INVERTED = "remote_compute_attestation_window_inverted"
 CODE_WINDOW_TOO_LONG = "remote_compute_attestation_window_too_long"
 CODE_MALFORMED_KEY_SET = "remote_compute_attestation_malformed_key_set"
+CODE_MALFORMED_KEY_ID = "remote_compute_attestation_malformed_key_id"
 CODE_DUPLICATE_KEY_ID = "remote_compute_attestation_duplicate_key_id"
 CODE_EMPTY_KEY_SET = "remote_compute_attestation_empty_key_set"
 
@@ -130,6 +138,14 @@ _SIGNATURE_BYTES = 64
 #: The one encoded length of a 64-byte unpadded URL-safe base64 signature:
 #: 86 characters, and no other spelling decodes to 64 bytes.
 _SIGNATURE_B64_CHARS = 86
+
+#: The one encoded length of a 32-byte unpadded URL-safe base64 public key:
+#: 43 characters, and no other spelling decodes to 32 bytes.
+_PUBLIC_KEY_B64_CHARS = 43
+
+#: The longest key id this verifier accepts, in characters. Nothing in the wire
+#: contract sizes an id, and an unbounded one is a line an operator cannot read.
+_KEY_ID_MAX_CHARS = 128
 
 
 class AttestationRefusal(MeshRefusal):
@@ -208,7 +224,15 @@ def verify_attestation(
     AFTER the network check — the tenant is the segmentation guarantee, and a
     statement about another network is refused before anyone asks whether it is
     about the right workload in it.
+
+    ``keys`` VALUES MUST BE ``bytes``; anything else is a ``TypeError``, not a
+    refusal. Discovery answers ``{id: AttestationKey}`` and :func:`public_keys`
+    projects it, so the mistake a caller actually makes is passing the parsed
+    objects straight through — which without this check surfaced as "not a
+    32-byte key" and read as a bad server rather than as the wrong argument.
     """
+    _require_byte_keys(keys)
+    _require_key_id(key_id, CODE_MALFORMED_KEY_ID, "key_id argument")
     _require_expectation(expect_network_id, expect_workload_id, expect_device_key)
     public_key = _select_key(keys, key_id)
 
@@ -299,6 +323,7 @@ def parse_attestation_keys(body: Any) -> dict[str, AttestationKey]:
                 CODE_MALFORMED_KEY_SET,
                 f"key entry {index} has no `key_id`",
             )
+        _require_key_id(key_id, CODE_MALFORMED_KEY_SET, "key id")
         if row.get("alg") != "Ed25519":
             raise AttestationRefusal(
                 CODE_MALFORMED_KEY_SET,
@@ -318,12 +343,23 @@ def parse_attestation_keys(body: Any) -> dict[str, AttestationKey]:
                 "exactly one key, or a signature could be checked against the wrong one",
             )
         public_key = row.get("public_key")
+        # BOUNDED BEFORE DECODING, exactly as the signature is: an Ed25519 public
+        # key has one legal spelling, so any other length is refused while the
+        # value is still a string rather than decoded into an allocation sized
+        # by whoever published the key set.
+        if not isinstance(public_key, str) or len(public_key) != _PUBLIC_KEY_B64_CHARS:
+            raise AttestationRefusal(
+                CODE_MALFORMED_KEY_SET,
+                f"key {key_id!r} carries a `public_key` that is not the "
+                f"{_PUBLIC_KEY_B64_CHARS}-character unpadded base64 of a "
+                f"{_PUBLIC_KEY_BYTES}-byte Ed25519 public key",
+            )
         try:
             decoded = _decode_b64u(public_key)
         except ValueError as exc:
             raise AttestationRefusal(
                 CODE_MALFORMED_KEY_SET,
-                f"key {key_id!r} carries a `public_key` that is not unpadded " "URL-safe base64",
+                f"key {key_id!r} carries a `public_key` that is {exc}",
             ) from exc
         if len(decoded) != _PUBLIC_KEY_BYTES:
             raise AttestationRefusal(
@@ -354,6 +390,25 @@ def public_keys(parsed: Mapping[str, AttestationKey]) -> dict[str, bytes]:
     freshness is the statement's own rule.
     """
     return {key_id: key.public_key for key_id, key in parsed.items()}
+
+
+def _require_byte_keys(keys: Mapping[str, bytes]) -> None:
+    """Refuse a key set whose values are not ``bytes`` — a caller bug, not a refusal.
+
+    THE COMPOSITION IS THE THING THAT GOES WRONG. Discovery answers
+    ``{key_id: AttestationKey}`` and :func:`public_keys` projects it to what this
+    verifier takes, so a caller who skips the projection hands over objects that
+    reach :func:`_select_key` and are reported as "not a 32-byte key" — a
+    sentence about the server for a mistake on this side. ``TypeError`` because
+    that is what a wrong-typed argument is, and the sentence names the fix.
+    """
+    for key_id, public_key in keys.items():
+        if not isinstance(public_key, bytes):
+            raise TypeError(
+                f"key {key_id!r} is a {type(public_key).__name__}, not bytes; "
+                "verify_attestation takes {key_id: public key bytes} — pass "
+                "public_keys(parse_attestation_keys(...))"
+            )
 
 
 def _require_expectation(
@@ -435,7 +490,7 @@ def _decode_payload(payload_b64: str) -> bytes:
     except ValueError as exc:
         raise AttestationRefusal(
             CODE_MALFORMED_PAYLOAD,
-            "the attestation payload is not unpadded URL-safe base64",
+            f"the attestation payload is {exc}",
         ) from exc
 
 
@@ -466,7 +521,7 @@ def _verify_signature(
     except ValueError as exc:
         raise AttestationRefusal(
             CODE_BAD_SIGNATURE,
-            f"the attestation's signature for key {key_id!r} is not unpadded " "URL-safe base64",
+            f"the attestation's signature for key {key_id!r} is {exc}",
         ) from exc
     if len(signature_bytes) != _SIGNATURE_BYTES:
         raise AttestationRefusal(
@@ -548,6 +603,35 @@ def _require_printable(statement: Mapping[str, Any], field: str) -> None:
         )
 
 
+def _require_key_id(key_id: object, code: str, source: str) -> None:
+    """Refuse a key id that is not a short PRINTABLE identifier.
+
+    THE MESSAGE NAMES THE ID, so the id has to be something a log line may carry.
+    A statement's string fields are held to this rule already; a key id was not,
+    and it is the one value that appears in every refusal this module writes. The
+    length bound is here because nothing in the wire contract sizes an id, and an
+    id the operator cannot read is not an identifier.
+
+    ``source`` names where the id came from — the caller's argument or the
+    published set — because the two are refused under different codes and a
+    caller needs to know which side to fix.
+    """
+    if not isinstance(key_id, str) or not key_id:
+        raise AttestationRefusal(code, f"the {source} is not a non-empty string")
+    if len(key_id) > _KEY_ID_MAX_CHARS or not _PRINTABLE_ASCII_PATTERN.fullmatch(key_id):
+        raise AttestationRefusal(
+            code,
+            f"the {source} is longer than {_KEY_ID_MAX_CHARS} characters or is not "
+            "printable ASCII",
+        )
+    if '"' in key_id or "\\" in key_id:
+        raise AttestationRefusal(
+            code,
+            f"the {source} carries a quote or a backslash, which would make it "
+            "ambiguous inside the JSON it arrived in",
+        )
+
+
 def _require_supported_version(statement: Mapping[str, Any]) -> None:
     """Refuse a statement this verifier does not know how to read."""
     if statement["v"] != STATEMENT_VERSION:
@@ -620,7 +704,7 @@ def _require_device_key(statement: Mapping[str, Any], expect_device_key: bytes) 
     except ValueError as exc:
         raise AttestationRefusal(
             CODE_MALFORMED_PAYLOAD,
-            "the attested device key is not unpadded URL-safe base64",
+            f"the attested device key is {exc}",
         ) from exc
     if device_key != expect_device_key:
         raise AttestationRefusal(
@@ -711,6 +795,7 @@ __all__ = [
     "CODE_INVALID_KEY",
     "CODE_ISSUED_IN_FUTURE",
     "CODE_MALFORMED_KEY_SET",
+    "CODE_MALFORMED_KEY_ID",
     "CODE_MALFORMED_PAYLOAD",
     "CODE_MISSING_EXPECTATION",
     "CODE_NETWORK_MISMATCH",

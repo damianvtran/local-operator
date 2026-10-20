@@ -1022,18 +1022,24 @@ def test_remote_compute_import_leaves_the_verifier_for_first_use(
 
 
 def test_the_remote_compute_attestation_reexports_resolve() -> None:
-    """The four names ``__getattr__`` serves must exist on the submodule.
+    """The six names ``__getattr__`` serves must exist on the submodule.
 
     A name missing from ``_ATTESTATION_NAMES``-driven resolution fails only at
-    the caller's use site, in a process where the failure reads as a typo.
+    the caller's use site, in a process where the failure reads as a typo. The
+    KEY-SET pair is in the table for the same reason the verifier is: discovery
+    and verification are one composition, and a caller that has to reach into the
+    submodule to project a parsed set is one that can skip the projection.
     """
     import local_operator.remote_compute as package
     from local_operator.remote_compute import attestation
 
     for name in (
+        "AttestationKey",
         "AttestationRefusal",
         "VerifiedAttestation",
         "parse_attestation_keys",
+        "public_keys",
         "verify_attestation",
     ):
+        assert name in package.__all__, name
         assert getattr(package, name) is getattr(attestation, name), name

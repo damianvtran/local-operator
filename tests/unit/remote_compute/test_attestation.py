@@ -26,6 +26,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from local_operator.remote_compute import attestation
 from local_operator.remote_compute.attestation import (
     CODE_BAD_SIGNATURE,
     CODE_DEVICE_MISMATCH,
@@ -34,6 +35,7 @@ from local_operator.remote_compute.attestation import (
     CODE_EXPIRED,
     CODE_INVALID_KEY,
     CODE_ISSUED_IN_FUTURE,
+    CODE_MALFORMED_KEY_ID,
     CODE_MALFORMED_KEY_SET,
     CODE_MALFORMED_PAYLOAD,
     CODE_MISSING_EXPECTATION,
@@ -333,7 +335,9 @@ def test_a_non_canonical_base64_spelling_is_refused(
     with pytest.raises(AttestationRefusal) as caught:
         _verify(vector, keys, signature=signature)
     assert caught.value.code == CODE_BAD_SIGNATURE
-    assert "canonical" in str(caught.value) or "base64" in str(caught.value)
+    # The SPECIFIC reason reaches the caller: "bad signature" alone would send an
+    # operator looking at the key while the defect is the spelling.
+    assert "not canonical unpadded URL-safe base64" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +631,29 @@ def test_discovery_refuses_a_short_key() -> None:
     assert caught.value.code == CODE_MALFORMED_KEY_SET
 
 
+def test_discovery_refuses_a_public_key_of_the_wrong_encoded_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """4 MB is refused by its LENGTH, before a decoder is handed it.
+
+    ``_decode_b64u`` is replaced with a tripwire rather than measured with a
+    clock: the property under test is "no work proportional to the input", and a
+    wall-clock bound would be a flake on a loaded host while still passing if the
+    decoder merely happened to be fast.
+    """
+
+    def _tripwire(_text: object) -> bytes:
+        raise AssertionError("the public_key reached the decoder; the length rule ran late")
+
+    monkeypatch.setattr(attestation, "_decode_b64u", _tripwire)
+    body = _discovery_body()
+    body["keys"][0]["public_key"] = "A" * 4 * 1024 * 1024
+    with pytest.raises(AttestationRefusal) as caught:
+        parse_attestation_keys(body)
+    assert caught.value.code == CODE_MALFORMED_KEY_SET
+    assert "43-character" in str(caught.value)
+
+
 def test_discovery_refuses_a_duplicate_id() -> None:
     body = _discovery_body()
     body["keys"].append(dict(body["keys"][0], public_key=_b64u(b"\x22" * 32)))
@@ -639,6 +666,51 @@ def test_discovery_refuses_an_unknown_status() -> None:
     with pytest.raises(AttestationRefusal) as caught:
         parse_attestation_keys(_discovery_body("revoked"))
     assert caught.value.code == CODE_MALFORMED_KEY_SET
+
+
+@pytest.mark.parametrize("key_id", ["k\x1b[31m", 'k"', "k\\", "k\u2028"])
+def test_discovery_refuses_a_key_id_that_is_not_printable(key_id: str) -> None:
+    """The id lands in every refusal sentence, so it must be a log-safe identifier."""
+    body = _discovery_body()
+    body["keys"][0]["key_id"] = key_id
+    with pytest.raises(AttestationRefusal) as caught:
+        parse_attestation_keys(body)
+    assert caught.value.code == CODE_MALFORMED_KEY_SET
+    # NOT ECHOED: the value is the attacker's, and printing it is the hole.
+    assert "\x1b" not in str(caught.value)
+
+
+@pytest.mark.parametrize("key_id", ["k" * 129])
+def test_discovery_refuses_an_overlong_key_id(key_id: str) -> None:
+    body = _discovery_body()
+    body["keys"][0]["key_id"] = key_id
+    with pytest.raises(AttestationRefusal) as caught:
+        parse_attestation_keys(body)
+    assert caught.value.code == CODE_MALFORMED_KEY_SET
+    assert "128" in str(caught.value)
+
+
+def test_the_key_id_argument_is_held_to_the_same_rule(vector: dict[str, Any]) -> None:
+    """A caller's own id is refused before it is searched for, and by its own code."""
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, {vector["signer_key_id"]: b"\x00" * 32}, key_id="k\x1b[31m")
+    assert caught.value.code == CODE_MALFORMED_KEY_ID
+    assert "\x1b" not in str(caught.value)
+
+
+def test_the_parsed_key_objects_must_be_projected_before_verifying(
+    vector: dict[str, Any],
+) -> None:
+    """The composition mistake is a ``TypeError`` naming the projection.
+
+    ``parse_attestation_keys`` answers objects; passing them straight to
+    ``verify_attestation`` used to be reported as "not a 32-byte key", which
+    blames the server for the caller's error.
+    """
+    parsed: Any = parse_attestation_keys(_discovery_body())
+    with pytest.raises(TypeError) as caught:
+        _verify(vector, parsed)
+    assert "public_keys(parse_attestation_keys(...))" in str(caught.value)
 
 
 @pytest.mark.parametrize(

@@ -100,7 +100,14 @@ def is_enabled(config_dir: Path | None = None) -> bool:
 #: negotiation — the same reason :func:`is_enabled` reads the config lazily. Only
 #: a caller that actually verifies a statement pays for that import.
 _ATTESTATION_NAMES = frozenset(
-    {"AttestationRefusal", "VerifiedAttestation", "parse_attestation_keys", "verify_attestation"}
+    {
+        "AttestationKey",
+        "AttestationRefusal",
+        "VerifiedAttestation",
+        "parse_attestation_keys",
+        "public_keys",
+        "verify_attestation",
+    }
 )
 
 
@@ -114,14 +121,17 @@ def __getattr__(name: str) -> object:
 
 if TYPE_CHECKING:  # the names __getattr__ serves, typed where the analyzer can see them
     from local_operator.remote_compute.attestation import (
+        AttestationKey,
         AttestationRefusal,
         VerifiedAttestation,
         parse_attestation_keys,
+        public_keys,
         verify_attestation,
     )
 
 
 __all__ = [
+    "AttestationKey",
     "AttestationRefusal",
     "CODE_AMBIGUOUS_NETWORK",
     "CODE_DUPLICATE_NETWORK_ID",
@@ -137,6 +147,7 @@ __all__ = [
     "VerifiedAttestation",
     "is_enabled",
     "parse_attestation_keys",
+    "public_keys",
     "resolve_network",
     "verify_attestation",
 ]
