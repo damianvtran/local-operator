@@ -427,6 +427,9 @@ release cut**.
 - Tests: tool defaults/overrides, **global refusal with no grant + success with a recorded
   grant**, receipts/details audit fields, TUI rows, desktop command-entities, global surfaces
   unchanged.
+- **Gate: `roles/` stays non-writable until S3's mesh refusal/notice lands with or before
+  this slice.** The copy set excludes session roles for v1, so an S2 write path without that
+  refusal would let a deleting move leave roles behind silently. The S2 PR carries this gate.
 - Gate: design/UX review of badge wording; i18n `--check`; tool-doc drift tests updated.
 
 ### S3 — Lifecycle integration

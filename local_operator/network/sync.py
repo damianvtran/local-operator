@@ -327,11 +327,12 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # Session-scoped role definitions (``profile_scope.SESSION_ROLES_DIRNAME``).
     # v1 deliberately does not carry them: S3's move path refuses by default and
     # names the roles, with ``--drop-session-roles`` as the explicit escape. S1
-    # and S2 have no product write path into this tree, so the exclusion cannot
-    # drop user data yet; S3 must add that refusal before S2 makes it writable.
+    # has no product write path into this tree. **S2 must not make it writable
+    # until that refusal/notice lands with or before it**, or a deleting move
+    # would leave roles behind silently; the S2 PR carries that gate.
     "roles": (
         "session-scoped role definitions are not carried by a mesh move in v1; "
-        "S3 adds the refusal/drop path before S2 makes this tree writable"
+        "S2 stays read-only for this tree until S3's refusal/notice lands with or before it"
     ),
     # The tail anchor (``session.tail_anchor``): a hint about the SOURCE's own
     # journal bytes — an inode number and the offset of the end of its last
