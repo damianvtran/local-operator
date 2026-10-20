@@ -104,7 +104,11 @@ async def test_registry_assignments_and_catalogue(api) -> None:
     }
     rows = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"]
     assert all("tags" in row and "primary" in row for row in rows)
-    assert (await client.get("/v1/capabilities")).json()["result"]["features"]["session_tags"] == 1
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["session_tags"] == 1
+    # V2-3's optional fork half is its own key: a client must be able to ask
+    # before sending `auto_tag`, because `Fork` forbids unknown body keys.
+    assert features["session_tags_auto_tag"] == 1
 
 
 @pytest.mark.asyncio

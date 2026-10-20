@@ -362,6 +362,14 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # Lists jobs owned by the SOURCE's process; the destination's roster is its
     # own, and a copied one would name subagents that do not exist here.
     "subagent-roster.v1.json": "the source process's subagent roster",
+    # The desktop fork's auto-tag intent (``session.auto_tag.AUTO_TAG_FILENAME``):
+    # the enable bit and the child's ``tags_revision`` in THIS device's tag
+    # store, captured where the human ticked the View-options toggle. The tag
+    # store itself is never part of the copy set, so off this device the revision
+    # names nothing and the destination's registry may not even offer the same
+    # categories; carrying it would auto-tag a conversation against a vocabulary
+    # the user never opted into here.
+    "auto-tag.json": "a desktop fork's device-local intent against this device's tag store",
     # Per-directory "already swept" claims: on the destination they would suppress
     # a backfill in a directory no sweep has ever seen.
     "origin-scan.json": "a 'this directory was scanned' sentinel",

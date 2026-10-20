@@ -155,12 +155,19 @@ COPIED_SIDECARS: tuple[str, ...] = (
 #:   INV-1 says one device owns a session; a fork with an inherited stamp is the
 #:   counterexample that arrives without any move having happened
 #:   (``mesh-session-mobility.md`` §1.2).
+#: - ``auto-tag.json``: a desktop fork's pending auto-tag intent
+#:   (``session/auto_tag.py``). It names the PARENT's own child and carries that
+#:   child's assignment revision, so a fork of that fork would either auto-tag a
+#:   conversation whose UI did not ask for it, or fail the revision guard against
+#:   a row it does not own. Intent is per-fork and re-recorded only when a new
+#:   fork request carries ``auto_tag``.
 EXCLUDED_SIDECARS: tuple[str, ...] = (
     ".session.pid",
     "subagent-roster.v1.json",
     "origin-scan.json",
     "title-scan.json",
     MESH_STAMP_NAME,
+    "auto-tag.json",
 )
 
 
