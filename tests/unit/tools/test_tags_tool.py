@@ -268,6 +268,41 @@ async def test_assign_refuses_primary_outside_the_assigned_names(
 
 
 @pytest.mark.asyncio
+async def test_omitting_primary_retains_a_second_position_primary(
+    root: Path, context: ToolContext
+) -> None:
+    """The operator's chosen primary is not assignment order (R-1).
+
+    The store's own ``primary=None`` fallback is ``ordered[0]`` — the oldest
+    surviving assignment. A second-position primary therefore disappears
+    unless the tool reads the current assignment and passes it through, which
+    is what keeps "adding another tag never moves it" true for agent writes.
+    """
+    make_session(root, SESSION_A)
+    await text_of(context, op="create", name="Review")
+    await text_of(context, op="create", name="Project")
+    project_id = {item["name"]: item["id"] for item in read_categories(root)}["Project"]
+    await text_of(
+        context,
+        op="assign",
+        session_id=SESSION_A,
+        tags=["Review", "Project"],
+        primary="Project",
+    )
+
+    kept = await call(context, op="assign", session_id=SESSION_A, tags=["Project", "Review"])
+    assert not kept.is_error
+    assert read_entity_tags(root, "session", SESSION_A)["primary"] == project_id
+    assert payload(kept)["primary"] == "Project"
+
+    # When the primary does NOT survive, the store's first-in-order fallback is
+    # correct and the receipt reports the promoted survivor.
+    dropped = await call(context, op="assign", session_id=SESSION_A, tags=["Review"])
+    assert not dropped.is_error
+    assert payload(dropped)["primary"] == "Review"
+
+
+@pytest.mark.asyncio
 async def test_a_failed_assign_leaves_the_previous_assignment_untouched(
     root: Path, context: ToolContext
 ) -> None:

@@ -113,8 +113,8 @@ or another multiplexer — `lop exec` is the fallback for a human's terminal, no
 a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).
 Session tags: use `tags` to list, create or rename categories and assign them.
 `assign` takes existing category NAMES only — never spell one the store does
-not contain; create it first, then assign. Every result names the categories
-and the session, and that ledger is the audit trail.
+not contain; create it first, then assign. Every successful receipt names the
+categories and the session, and that ledger is the audit trail.
 
 Most tools take `i`: a 2–6 word present-participle intent, capitalized, no
 period, naming the goal rather than the mechanism ("Auditing tickets against

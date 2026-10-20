@@ -23,8 +23,9 @@ misspelled name is refused with the known vocabulary — it is never created, an
 session's assignments, because the store's own semantics are a full desired
 state.
 
-Every receipt names the categories and the session, which is what makes the
-tool ledger the audit trail; nothing here relies on a separate log line.
+Every successful receipt names the categories and the session, which is what
+makes the tool ledger the audit trail; nothing here relies on a separate log
+line (a refusal names whichever half is available and carries no audit claim).
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from local_operator.session.session_tags import (
     MAX_NAME_CHARS,
     RESERVED_NAME,
     read_categories,
+    read_entity_tags,
     resolve_category_names,
     set_entity_tags,
     usage_counts,
@@ -329,10 +331,10 @@ async def execute_tags(
             tag_ids = resolve_category_names(root, names, categories=categories)
         except ValueError as exc:
             return _error(tool_call_id, "tags", str(exc))
-        # Omitted primary keeps the store's documented fallback: the existing
-        # primary if it survives this set, else the first assignment in order.
-        # The route does the same by passing ``None`` through, and that is what
-        # keeps a category re-assignment from silently re-primarying a session.
+        # An EXPLICIT primary is resolved here; an omitted one is resolved
+        # below, after the session's current assignment is read, because the
+        # store's own fallback is assignment order (``ordered[0]``) and would
+        # move a second-position primary. Only an explicit name is chosen here.
         primary_id = None
         if primary_name is not None:
             folded = primary_name.casefold()
@@ -375,6 +377,20 @@ async def execute_tags(
             "no mesh device holds it.",
             details={"op": "assign", "session_id": session_id},
         )
+
+    # OMITTED PRIMARY MUST RETAIN, not fall back to assignment order. The
+    # store resolves ``primary=None`` as ``ordered[0]``, which is the OLDEST
+    # surviving assignment — the desktop UI may have chosen any member, so a
+    # later agent call that omits ``primary`` would silently move the session
+    # out of the operator's group (``effective_primary`` reads this field).
+    # Passing the current primary through when it survives keeps "adding
+    # another tag never moves it" true across surfaces.
+    if params.primary is None:
+        current = await asyncio.to_thread(
+            read_entity_tags, root, "session", session_id, categories=categories
+        )
+        retained = current["primary"]
+        primary_id = retained if retained in tag_ids else None
 
     # DIRECTORY ADMISSION, deliberately: delegated and hidden runs are taggable
     # (the route's own note says this is not the user-conversation visibility

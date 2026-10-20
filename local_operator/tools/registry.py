@@ -248,9 +248,9 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "video_status",
     "setting",
     "bridge",
-    # The audio pair (see the table comments): createIf-gated per direction.
-    # The newest appends, so they end both tables (the pin test moves with
-    # the newest append).
+    # The audio pair (see the table comments): createIf-gated per direction,
+    # and the newest append BEFORE `tags` below — the pin test moves with the
+    # newest append, so only `tags` ends both tables now.
     "generate_voiceover",
     "generate_sound_effect",
     # The newest append (see the table comment above).
