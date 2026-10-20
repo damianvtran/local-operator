@@ -381,6 +381,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
+    # NEW (V2-4 agent tags, 2026-10-20): the ``tags`` doc — the names-only
+    # assignment rule, the caps, the remote refusal and the receipt contract.
+    # Deliberate cost of that reference being one read away; the same tool's
+    # schema is the whole of ``scripts/bench_context_budget.py``'s raise
+    # (measurement recorded there), so the two ledgers move together.
+    "tags": 522,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than

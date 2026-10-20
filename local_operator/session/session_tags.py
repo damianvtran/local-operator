@@ -32,6 +32,14 @@ from uuid import uuid4
 #: module deliberately imports no store.
 MAX_TAGS = 8
 
+#: Registry caps and the reserved display name, exported for the SAME reason:
+#: ``tools/tags_tool.py`` pre-checks so a refusal can name the colliding row and
+#: the live vocabulary, and a second set of literals there would let the
+#: message drift from what this store actually accepts.
+MAX_CATEGORIES = 32
+MAX_NAME_CHARS = 24
+RESERVED_NAME = "Untagged"
+
 
 class EntityTags(TypedDict):
     tags: list[str]
@@ -163,20 +171,20 @@ def read_categories(root: Path) -> list[dict[str, str]]:
             isinstance(key, str)
             and re.fullmatch(r"[a-f0-9]{10}", key)
             and isinstance(name, str)
-            and 1 <= len(name.strip()) <= 24
-            and name.strip().casefold() != "untagged"
+            and 1 <= len(name.strip()) <= MAX_NAME_CHARS
+            and name.strip().casefold() != RESERVED_NAME.casefold()
             and key not in ids
             and name.strip().casefold() not in names
         ):
             result.append({"id": key, "name": name.strip()})
             ids.add(key)
             names.add(name.strip().casefold())
-    return result[:32]
+    return result[:MAX_CATEGORIES]
 
 
 def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[dict[str, str]]:
-    if len(desired) > 32:
-        raise ValueError("At most 32 categories are allowed")
+    if len(desired) > MAX_CATEGORIES:
+        raise ValueError(f"At most {MAX_CATEGORIES} categories are allowed")
     existing = read_categories(root)
     known = {item["id"] for item in existing}
     by_name = {item["name"].casefold(): item["id"] for item in existing}
@@ -187,9 +195,14 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
     for key, raw_name in desired:
         name = raw_name.strip()
         folded = name.casefold()
-        if not 1 <= len(name) <= 24 or folded == "untagged" or folded in names:
+        if (
+            not 1 <= len(name) <= MAX_NAME_CHARS
+            or folded == RESERVED_NAME.casefold()
+            or folded in names
+        ):
             raise ValueError(
-                "Category names must be unique, 1..24 characters; Untagged is reserved"
+                f"Category names must be unique, 1..{MAX_NAME_CHARS} characters; "
+                f"{RESERVED_NAME} is reserved"
             )
         if key is not None and (key not in known or key in ids):
             raise ValueError("Unknown or duplicate category id")
