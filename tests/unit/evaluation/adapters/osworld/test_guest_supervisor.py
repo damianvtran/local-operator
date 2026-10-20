@@ -683,14 +683,11 @@ def test_parse_output_skips_an_unexpected_object_before_the_real_payload() -> No
 def test_parse_output_refuses_a_truncated_payload_whose_inner_object_is_wrong_shape() -> None:
     """A truncated payload whose innermost object is the WRONG shape must not win.
 
-    What this pins, and what it does not: the inner object here (``{"n": 1}``)
-    does not satisfy ``is_install_payload``, so it is skipped and the parse
-    fails closed. It does NOT prove that a completed, shape-MATCHING nested
-    object inside a truncated outer payload is rejected -- such an object is
-    indistinguishable from a real payload by shape alone and would be
-    returned. That case is unreachable today (no truncation path, and these
-    payloads contain no nested objects), so this test names the property it
-    actually holds rather than the broader one.
+    The inner object here (``{"n": 1}``) does not satisfy ``is_install_payload``,
+    so it is skipped and the parse fails closed. A completed, shape-MATCHING
+    nested object is refused by the document-boundary rule instead, which the
+    two ``installed_unit`` tests below pin -- shape alone could never tell it
+    apart from a real payload.
     """
 
     captured = (
@@ -700,6 +697,67 @@ def test_parse_output_refuses_a_truncated_payload_whose_inner_object_is_wrong_sh
     with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
         guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
     assert str(failure.value) == "supervisor output contained no JSON object"
+
+
+def test_installed_unit_refuses_an_array_wrapped_object() -> None:
+    """An array is not the install payload, even when it wraps one.
+
+    The pre-PR parser returned the LIST for this capture and ``installed_unit``
+    refused it. Decoding the inner object would install a unit the GUEST chose
+    for a service the action server does not own.
+    """
+
+    captured = 'escalation=x\n[{"installed": true, "unit": "evil.service"}]\n'
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.installed_unit(captured)
+    assert isinstance(failure.value, ValueError)
+
+
+def test_installed_unit_refuses_an_object_nested_inside_a_larger_object() -> None:
+    """A member of another object is not a top-level payload."""
+
+    captured = 'escalation=x\n{"outer": {"installed": true, "unit": "evil.service"}}\n'
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable):
+        guest_supervisor.installed_unit(captured)
+
+
+def test_installed_unit_refuses_a_multiline_member_of_another_object() -> None:
+    """Boundary detection must not rely on the member being on a shared line."""
+
+    captured = (
+        "escalation=x\n"
+        "{\n"
+        '  "outer":\n'
+        '  {"installed": true, "unit": "evil.service"}\n'
+        "}\n"
+    )
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable):
+        guest_supervisor.installed_unit(captured)
+
+
+def test_parse_output_fails_closed_past_the_candidate_bound() -> None:
+    """Guest-controlled brace-led lines must not buy unbounded scan work."""
+
+    captured = "escalation=agentless\n" + "{\n" * (guest_supervisor._MAX_PAYLOAD_CANDIDATES + 1)
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert str(failure.value) == "supervisor output exceeded the parser candidate bound"
+
+
+def test_parse_output_fails_closed_past_the_size_bound() -> None:
+    captured = "escalation=agentless\n" + "x" * guest_supervisor._MAX_CAPTURE_CHARS
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert str(failure.value) == "supervisor output exceeded the parser size bound"
+
+
+def test_parse_output_wraps_decoder_recursion_in_the_named_failure() -> None:
+    """Deep nesting must not escape as a bare RecursionError."""
+
+    captured = "escalation=agentless\n" + '{"a":' * 4000 + "1" + "}" * 4000 + "\n"
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert type(failure.value).__name__ == "SupervisorOutputUnparseable"
 
 
 def test_receipt_records_survive_the_sudo_prompt_before_the_payload() -> None:

@@ -246,6 +246,39 @@ def report_command(unit: str, password: str) -> Sequence[str]:
     return _privileged(REPORT_SOURCE, [unit], password)
 
 
+#: Bounds on guest-controlled text. Every recovery attempt scans the capture,
+#: so an adversarial guest must not be able to buy unbounded work: before these
+#: existed, a brace-dense 1 MB capture measured ~11 s against a sub-millisecond
+#: old parser. Real captures are ~20 KB (four 4 KB journal tails plus the
+#: envelope), so both bounds leave years of headroom and fail closed past them.
+_MAX_CAPTURE_CHARS = 256 * 1024
+_MAX_PAYLOAD_CANDIDATES = 32
+
+
+def _begins_a_document(output: str, index: int) -> bool:
+    """True when nothing but indentation precedes ``index`` on its line."""
+
+    cursor = index - 1
+    while cursor >= 0 and output[cursor] in " \t":
+        cursor -= 1
+    return cursor < 0 or output[cursor] == "\n"
+
+
+def _ends_a_document(output: str, end: int) -> bool:
+    """True when the decoded value is not immediately a MEMBER of a container.
+
+    A member is followed by its container's own delimiter, so an array-wrapped
+    ``[{"installed": true, ...}]`` and an object nested in a larger object are
+    not top-level documents and must not be read as one. Trailing noise after a
+    real payload is ordinary text, so it passes here.
+    """
+
+    cursor = end
+    while cursor < len(output) and output[cursor] in " \t\r\n":
+        cursor += 1
+    return cursor >= len(output) or output[cursor] not in ",]}"
+
+
 def parse_output(output: str, accept: Callable[[object], bool]) -> object:
     """Extract the guest's expected JSON payload from a captured escalation output.
 
@@ -267,24 +300,50 @@ def parse_output(output: str, accept: Callable[[object], bool]) -> object:
     real envelope and report a restart as "no restart" -- the silent loss
     this module exists to prevent. The caller therefore states what its own
     command prints (``is_install_payload`` / ``is_receipt_payload``), and only
-    objects of that shape count. Among those, the LAST wins: the capture puts
-    the ladder's metadata and the guest's stderr noise BEFORE the payload, so
-    a preamble shadow cannot displace the command's own final output.
+    objects of that shape count. Among those, the LAST wins: the ladder prints
+    the command's own output last (``guest_disk.escalation_script`` carries the
+    invariant next to that print), so its payload is the final document while
+    sudo's prompt and guest warnings land before it.
 
-    Guest text printed around the payload is never quoted into evidence, so a
-    failure raises the named error instead of echoing what was captured.
+    WHY ONLY TOP-LEVEL DOCUMENTS. Decoding an inner object and accepting it
+    would let a guest-chosen fragment inside an array or a larger object stand
+    in for the payload -- e.g. ``[{"installed": true, "unit": "x.service"}]``
+    would install a unit the action server does not own, where the old parser
+    returned the list and the caller refused it. A candidate must therefore
+    begin a document (only indentation before it on its line) and end one (not
+    followed by a container delimiter).
+
+    Only ``SupervisorOutputUnparseable`` (a ``ValueError``) escapes for an
+    extraction failure: no expected top-level document, a capture past
+    ``_MAX_CAPTURE_CHARS``, more than ``_MAX_PAYLOAD_CANDIDATES`` candidates,
+    or nesting deep enough to raise ``RecursionError`` in the decoder. Guest
+    text is never quoted into the message, because it can carry a password
+    prompt.
     """
 
+    if len(output) > _MAX_CAPTURE_CHARS:
+        raise SupervisorOutputUnparseable("supervisor output exceeded the parser size bound")
     decoder = json.JSONDecoder()
     found = False
     match: object = None
+    candidates = 0
     for index, char in enumerate(output):
-        if char != "{":
+        if char != "{" or not _begins_a_document(output, index):
             continue
+        candidates += 1
+        if candidates > _MAX_PAYLOAD_CANDIDATES:
+            # Fail closed rather than keep buying work for a guest that keeps
+            # printing brace-led lines.
+            raise SupervisorOutputUnparseable(
+                "supervisor output exceeded the parser candidate bound"
+            )
         try:
-            value, _ = decoder.raw_decode(output, index)
-        except ValueError:
-            # Not a JSON object (or not one that starts here): keep looking.
+            value, end = decoder.raw_decode(output, index)
+        except (ValueError, RecursionError):
+            # Not a JSON object here, or nested past the interpreter's limit:
+            # neither is a payload, and both must stay inside the named error.
+            continue
+        if not _ends_a_document(output, end):
             continue
         if accept(value):
             found, match = True, value
