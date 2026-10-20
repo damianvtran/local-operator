@@ -53,7 +53,13 @@ logger = logging.getLogger(__name__)
 
 INDEX_DIRNAME: Final = "library"
 INDEX_FILENAME: Final = "index.json"
-INDEX_SCHEMA: Final = 3
+#: Bumped to 4 when the occurrence title stopped taking the scan's
+#: opening-line capture over the stored session title (see ``_session_entry``).
+#: Index files are derived and discardable — a schema mismatch rebuilds them —
+#: so bumping costs one rescan and never an error; WITHOUT the bump every
+#: existing cache would keep serving the old, wrong title indefinitely, because
+#: a cache entry is otherwise trusted on the transcript's stat alone.
+INDEX_SCHEMA: Final = 4
 DEFAULT_BUDGET_S: Final = service.DEFAULT_BUDGET_S
 
 #: How long a request-path caller may reuse the in-process aggregate without a
@@ -622,9 +628,16 @@ def _session_entry(
     )
     if snapshot is None:
         return None, 0.0
-    # The scan's own opening-line capture beats the sidecar for a session the
-    # user never titled, and costs nothing here; the sidecar wins when present.
-    title = snapshot.scan.title or title
+    # The stored title wins: it is the name the user last SAW (auto-generated on
+    # the first substantive turn, or typed at ``/rename``), and the Library is
+    # rendering a conversation reference, not a transcript excerpt. The scan's
+    # ``title`` is ``sanitize_prompt_line(texts[0])`` — the session's OPENING
+    # user message — so preferring it labelled every occurrence with the first
+    # thing anyone typed, however long ago, and a renamed session never showed
+    # its name. It survives only as the fallback for a session nobody ever
+    # titled (one written before titles were journalled), where it is the best
+    # label available and costs nothing.
+    title = title or snapshot.scan.title
     entries = [_record_dict(record) for record in snapshot.scan.records.values()]
     highlights = _highlight_paths(snapshot, cwd=cwd, home=home, deny=deny)
     for entry in entries:
@@ -962,11 +975,22 @@ def _build_locked(
         session_dir = config / "sessions" / session_id
         current = _signature(session_dir)
         cached = cached_sessions.get(session_id)
+        # ``/rename`` writes the title SIDECAR and never the transcript, and the
+        # sidecar write deliberately preserves the directory's mtime — so the
+        # journal signature cannot see a rename, and a cached entry would keep
+        # the pre-rename title until some later turn moved the transcript. A
+        # cached title that disagrees with the stored one is therefore stale and
+        # forces a refresh of this entry. Only a NON-EMPTY stored title does: an
+        # untitled session's opening-line title must not force a rescan on every
+        # poll forever. ``stored_session_title`` is stat-memoised, so a match
+        # costs one ``stat``, not a transcript read.
+        stored_title = resume.stored_session_title(session_dir)
         if (
             isinstance(cached, dict)
             and cached.get("complete")
             and _sig_matches(cached.get("sig"), current)
             and _roster_matches(cached.get("roster_sig"), _roster_signature(session_dir))
+            and (not stored_title or stored_title == str(cached.get("title") or ""))
         ):
             entry = cached
             entry_complete = True
@@ -1025,7 +1049,7 @@ def _build_locked(
                 config,
                 session_id,
                 session_dir,
-                title=resume.stored_session_title(session_dir),
+                title=stored_title,
                 cwd=service.session_cwd(config, session_id, session_dir),
                 home=home,
                 deny=deny,
