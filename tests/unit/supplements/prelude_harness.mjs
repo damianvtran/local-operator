@@ -16,7 +16,7 @@
 //   `script` runs a component's inline script as the browser would: a throw is NOT fatal to
 //   the page, it becomes the window `error` event ("Uncaught <error>"). That is how a
 //   component that fails during parse -- before the host's theme push -- is reproduced.
-// output   = {posts:[...], texts:[{text,x,y,anchor,left,right,top,bottom}...], svgW, svgH}
+// output   = {posts:[...], texts:[{text,x,y,anchor,left,right,top,bottom}...], svgW, svgH, svgAttrW, svgAttrH}
 import fs from "node:fs";
 import vm from "node:vm";
 
@@ -125,7 +125,7 @@ const walk = (n, dx, dy) => {
   for (const c of n.children) if (typeof c === "object") walk(c, dx, dy);
 };
 walk(target, 0, 0);
-let svgW = 0, svgH = 0;
-const findSvg = (n) => { if (n.tag === "svg") { const b = n.attrs.viewBox.split(" "); svgW = +b[2]; svgH = +b[3]; } for (const c of n.children) if (typeof c === "object") findSvg(c); };
+let svgW = 0, svgH = 0, svgAttrW = 0, svgAttrH = 0;
+const findSvg = (n) => { if (n.tag === "svg") { const b = n.attrs.viewBox.split(" "); svgW = +b[2]; svgH = +b[3]; svgAttrW = +(n.attrs.width || 0); svgAttrH = +(n.attrs.height || 0); } for (const c of n.children) if (typeof c === "object") findSvg(c); };
 findSvg(target);
-process.stdout.write(JSON.stringify({ posts, texts, nodes, calls, svgW, svgH }));
+process.stdout.write(JSON.stringify({ posts, texts, nodes, calls, svgW, svgH, svgAttrW, svgAttrH }));

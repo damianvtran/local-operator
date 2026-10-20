@@ -73,9 +73,15 @@ from typing import Any, Final, Mapping
 #: 6 — horizontal-bar shape: the SVG height follows the bar count (a band per bar, capped),
 #: the left gutter is the measured widest category label (clamped, then ellipsised), tick
 #: density follows the plot width, and the dark FALLBACK declares its own ink so a frame
-#: that never receives a host push is readable on #121212. Paid for by dead CSS (no drawn
-#: headings, no motion) and the unused `.dim` rule: 10,002 B raw / 4,606 B gzip.
-PRELUDE_VERSION: Final = 6
+#: that never receives a host push is readable on #121212.
+#: 7 — review round 1: the SVG carries its viewBox as width/height, so CSS `max-width:100%`
+#: only shrinks it on a narrow frame and never magnifies a bounded height past the host's
+#: clamp; the dark fallback's reference lines recede (`--lo-hairline:#333`), and the light
+#: push resets `color-scheme` for table scrollbars. The reduced-motion enforcement moved to
+#: the validator (0 prelude bytes), and dense bars drop value labels rather than overprint.
+#: The last tick ends on the scale maximum at two-tick widths. Paid for by the unused `.row`
+#: and `.muted` rules: 10,019 B raw / 4,605 B gzip.
+PRELUDE_VERSION: Final = 7
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (
