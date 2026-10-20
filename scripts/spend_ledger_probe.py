@@ -104,6 +104,8 @@ def census(store: Path, db_path: Path | None, session_dir: Path | None) -> dict[
         "ratios": [],
         "undercount": [],
         "record_micro": 0,
+        "inference_by_basis_micro": {},
+        "children_by_basis_micro": {},
     }
     for directory in directories:
         try:
@@ -115,7 +117,7 @@ def census(store: Path, db_path: Path | None, session_dir: Path | None) -> dict[
             # than the reason to read.
             suffix = read_replay_suffix(
                 directory,
-                checkpoint_types=(SESSION_SPEND_CUSTOM_TYPE,),
+                checkpoint_types=(SESSION_SPEND_CUSTOM_TYPE, "subagent_roster"),
             )
         except Exception:  # noqa: BLE001 — a broken session must not stop the census
             continue
@@ -129,6 +131,47 @@ def census(store: Path, db_path: Path | None, session_dir: Path | None) -> dict[
         newest_cost = _price(newest.model_dump(mode="json"), default_label) if newest else None
 
         record = SessionSpend.from_details(suffix.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE))
+        # These are recorded payment facts, not a reclassification based on
+        # whichever account happens to be logged in during this export.
+        from local_operator.harness.types import Usage
+        from local_operator.model.costs import cost_summary_by_basis
+
+        _, _, inference_bases = cost_summary_by_basis(
+            (
+                component
+                for row in rows
+                for usage in [Usage.model_validate(row)]
+                for component in (usage.cost_components or [usage])
+            ),
+            model_label=default_label,
+        )
+        if record is not None:
+            # A suffix may start after older calls. The cumulative spend record
+            # owns their durable split; only journals without it need reprice.
+            from local_operator.session.channel_spend import (
+                BASIS_NOT_TRACKED,
+                BASIS_VALUES,
+            )
+
+            inference_bases = {basis: 0 for basis in BASIS_VALUES}
+            for identity in record.by_identity.values():
+                for basis, micro in identity.get("bases", {}).items():
+                    key = basis if basis in BASIS_VALUES else BASIS_NOT_TRACKED
+                    inference_bases[key] += int(micro)
+            inference_bases[BASIS_NOT_TRACKED] += max(
+                0, record.micro - sum(inference_bases.values())
+            )
+        roster = suffix.checkpoints.get("subagent_roster") or {}
+        _, _, child_bases = cost_summary_by_basis(
+            (Usage.model_validate(row) for row in roster.get("accounting", []))
+        )
+        for field, bases in (
+            ("inference_by_basis_micro", inference_bases),
+            ("children_by_basis_micro", child_bases),
+        ):
+            for basis, micro in bases.items():
+                stats[field][basis] = stats[field].get(basis, 0) + micro
+
         if priced_all:
             stats["with_cost"] += 1
         # BEFORE: the restore prices the newest surviving reading and marks it

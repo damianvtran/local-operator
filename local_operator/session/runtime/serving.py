@@ -5146,10 +5146,19 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
-        elif (
-            current is not None
-            and current.reasoning_effort
-            and current.reasoning_effort != current.reasoning_default_effort
+        elif current is not None and (
+            (
+                current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+            )
+            # OR THE CONVERSATION'S HELD CHOICE, which is the half that was
+            # missing. A trip through a route that cannot express the level
+            # leaves the SPEC at ``None``; the choice is still real (see
+            # ``Session.chosen_effort``), and a switch made from that route
+            # used to arrive here with nothing to carry and fall to the new
+            # model's seed — the observed "switch away from an aggregator and
+            # Max becomes High".
+            or getattr(self._session, "chosen_effort", None)
         ):
             # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
             #
@@ -5178,17 +5187,41 @@ class ServingSessionHandle(SessionHandle):
             # model that cannot express it lands on its nearest rung instead
             # of one it rejects -- the same stale-level clamp the ``if effort``
             # arm above applies.
+            # THE CHOICE OUTRANKS THE SPEC. The spec's level can be a CLAMP
+            # (a carry onto a narrower ladder leaves `xhigh` there while the
+            # conversation still chose `max`), and preferring it here carried
+            # the clamp onward — the reverse of the defect M1a named, and what
+            # made a round trip through a narrow route lose `max` even after
+            # the clamp stopped being RECORDED as the choice. The spec is
+            # consulted only when no choice is held (a legacy sender that set
+            # a non-seed level through `set_model` directly).
+            carry_level = getattr(self._session, "chosen_effort", None) or (
+                current.reasoning_effort
+                if current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+                else None
+            )
             carried = resolve_effort_in(
                 spec.reasoning_efforts,
                 spec.reasoning_default_effort,
-                current.reasoning_effort,
+                carry_level,
             )
             if carried is not None:
                 spec = spec.model_copy(update={"reasoning_effort": carried})
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
-        self._session.set_model(spec, explicit=True)
+        #
+        # ``effort_choice`` is passed ONLY when the CALLER named a level: a
+        # level-less switch carries one (or clamps it for display) without
+        # deciding anything, and letting ``set_model`` infer a choice from the
+        # resulting spec would record a failover clamp as the user's choice
+        # (review round 1, M1). An explicit ``auto`` is a withdrawal, which
+        # ``_normalise_effort_choice`` turns into ``None``.
+        switch: dict[str, Any] = {"explicit": True}
+        if effort:
+            switch["effort_choice"] = effort
+        self._session.set_model(spec, **switch)
         self._refresh_state()
         # The claim follows the model it is about: a switch can land on a
         # provider this host has no credential for, and a reader must not keep
@@ -5617,7 +5650,9 @@ class ServingSessionHandle(SessionHandle):
                 raise ValueError(f"{spec.model_id} has no reasoning-effort levels; drop --effort")
             ladder = ", ".join(spec.reasoning_efforts)
             raise ValueError(f"{spec.model_id} accepts {ladder} \u2014 not '{effort}'")
-        self._session.set_model(spec.model_copy(update={"reasoning_effort": effort}))
+        self._session.set_model(
+            spec.model_copy(update={"reasoning_effort": effort}), effort_choice=effort
+        )
         self._refresh_state()
         return f"effort: {effort}"
 
@@ -9962,6 +9997,13 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
         self._publish_subagents()
+        for name, value in (("set_waiting", self.waiting_on()), ("set_jobs", self.job_counts())):
+            publish = getattr(server, name, None)
+            if callable(publish):
+                try:
+                    publish(value)
+                except Exception:  # noqa: BLE001 — presence must not fail a turn
+                    logger.debug("could not publish the job presence", exc_info=True)
 
     def _publish_session_started(self) -> None:
         """Flip the record's ``started`` bit once a real turn has run.
@@ -9980,6 +10022,19 @@ class ServingSessionHandle(SessionHandle):
             setter(True)
         except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
             logger.debug("could not publish the started state", exc_info=True)
+
+    def waiting_on(self) -> int:
+        """Read the foreground wait snapshot, never infer it from busy."""
+        return getattr(self._session, "_waiting_on", 0)
+
+    def job_counts(self) -> int | None:
+        """Count only background tools: task rows already belong to the roster."""
+        try:
+            return sum(
+                row.status == "running" and row.type != "task" for row in self._session.jobs.list()
+            )
+        except Exception:  # noqa: BLE001 — unknown is not a measured zero
+            return None
 
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories, or ``(None, None)``.

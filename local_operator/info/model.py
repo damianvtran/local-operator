@@ -225,6 +225,9 @@ class SessionLine:
     #: means the runtime did not report — an older build, or a handle that
     #: cannot answer the probe — which is NOT the same fact as zero and must
     #: never be summed as one. See :attr:`SessionsInfo.subagents_unreported`.
+    # Presence is additive; None remains an unreported background-job count.
+    waiting_on: int = 0
+    jobs_running: int | None = None
     subagents_running: int | None = None
     subagents_queued: int | None = None
     #: The LAST STORED OUTCOME for this session, read from the attention store:

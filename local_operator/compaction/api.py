@@ -37,6 +37,8 @@ from .advisor import (
     validate_hint,
 )
 from .cutpoint import (
+    CARRIED_TIER_ID_PREFIX,
+    CARRIED_TIER_KEY,
     DEFAULT_PRESERVED_TURN_CAP,
     ELISION_GENUINE_COUNT_KEY,
     ELISION_INJECTION_COUNT_KEY,
@@ -51,6 +53,7 @@ from .cutpoint import (
     elision_notice_text,
     extract_preserved_user_turns,
     find_cut_point,
+    is_carried_tier,
     is_rendered_injection,
     prepare_partitions,
     preserved_turn_payload,
@@ -111,6 +114,8 @@ __all__ = [
     "MAX_SUMMARY_TOKENS",
     "MIN_PRUNE_TOKENS",
     "DEFAULT_PRESERVED_TURN_CAP",
+    "CARRIED_TIER_ID_PREFIX",
+    "CARRIED_TIER_KEY",
     "ELISION_GENUINE_COUNT_KEY",
     "ELISION_INJECTION_COUNT_KEY",
     "PRESERVED_TURN_ELISION_ID",
@@ -123,6 +128,7 @@ __all__ = [
     "elision_counts_of",
     "elision_notice_text",
     "is_rendered_injection",
+    "is_carried_tier",
     "preserved_turn_payload",
     "replay_preserved_turns",
     "RECOVERY_BAND",

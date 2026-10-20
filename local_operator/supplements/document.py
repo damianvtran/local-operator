@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from functools import cache
 from importlib import resources
 from typing import Any, Final, Mapping
@@ -66,7 +67,29 @@ from typing import Any, Final, Mapping
 #: (local-operator-mobile PR #83). Bumped for the same reason as 2, and because the desktop
 #: UI's frozen story documents (its ``supplement-document-fixtures.ts``, copied verbatim from
 #: ``tests/fixtures/supplements/documents/``) name this number as their regeneration trigger.
-PRELUDE_VERSION: Final = 3
+#: 4 — numeric-only chart scales: legacy formatted cells are normalised at assembly,
+#: while unknown values remain labelled gaps instead of poisoning every SVG coordinate.
+#: 5 — preserve silent null gaps; centre explicit string gaps within each series band.
+#: 6 — horizontal-bar shape: the SVG height follows the bar count (a band per bar, capped),
+#: the left gutter is the measured widest category label (clamped, then ellipsised), tick
+#: density follows the plot width, and the dark FALLBACK declares its own ink so a frame
+#: that never receives a host push is readable on #121212.
+#: 7 — review round 1: the SVG carries its viewBox as width/height, so CSS `max-width:100%`
+#: only shrinks it on a narrow frame and never magnifies a bounded height past the host's
+#: clamp; the dark fallback's reference lines recede (`--lo-hairline:#333`), and the light
+#: push resets `color-scheme` for table scrollbars. The reduced-motion enforcement moved to
+#: the validator (0 prelude bytes), and dense bars drop value labels rather than overprint.
+#: The last tick ends on the scale maximum at two-tick widths. Paid for by the unused `.row`
+#: and `.muted` rules.
+#: 8 — the operator's "weird bar on the right": `html` clips overflow and the resize report
+#: is the BODY's natural height, not the root's current box, so a first layout 6 px taller
+#: than the host seed cannot lock a scrollbar by shrinking the chart and re-reporting the
+#: box. 10,019 B raw / 4,601 B gzip; the `offsetHeight` report paid for the CSS clip.
+#: 9 — tall content stays reachable: `body` clamps at `100vh` and scrolls itself, while the
+#: report is `body.scrollHeight` (natural height, padding included). The chart width is the
+#: viewport minus the 4 px body padding, so a body scrollbar cannot narrow the chart and
+#: re-trigger the 379/373 lock. 10,021 B raw / 4,602 B gzip.
+PRELUDE_VERSION: Final = 9
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (
@@ -115,6 +138,57 @@ def prelude_js() -> str:
 
 def _read_prelude(name: str) -> str:
     return (resources.files(_PRELUDE_PACKAGE) / "prelude" / name).read_text(encoding="utf-8")
+
+
+# Only an explicit decimal, optionally currency-prefixed OR percent-suffixed. Grouping
+# must be thousands; suffix magnitudes, locale guesses and leading-zero identifiers stay
+# strings. Percent is NOT divided by 100: the chart unit carries the display symbol.
+_NUMERIC_CELL: Final = re.compile(
+    r"(?P<sign>[+-]?)(?P<currency>[$€£¥]?)(?P<number>"
+    r"(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}(?:,[0-9]{3})+)(?:\.[0-9]+)?)"
+    r"(?P<percent>%?)"
+)
+
+
+def numeric_cell(value: Any) -> Any:
+    """Normalise explicit numeric formatting without guessing units or magnitude."""
+    if not isinstance(value, str):
+        return value
+    match = _NUMERIC_CELL.fullmatch(value.strip())
+    if match is None or (match["currency"] and match["percent"]):
+        return value
+    token = match["sign"] + match["number"].replace(",", "")
+    decimal = Decimal(token)
+    # JavaScript cannot represent larger integers exactly. Nor may a long fractional
+    # spelling silently round or underflow: keep it a gap if its decimal meaning changes.
+    if abs(decimal) > 2**53 - 1:
+        return value
+    number = float(token) if "." in token else int(token)
+    return number if Decimal(str(number)) == decimal else value
+
+
+def _plot_data(data: Mapping[str, Any] | None, body: str) -> dict[str, Any]:
+    # split_component is ALSO used by provenance validation: keep it lossless. Convert
+    # only the rendered copy, after validation, never stored bytes or dataset metadata.
+    # Tables have no unit option: converting their cells would erase explicit currency
+    # and percent text. Prefer preserving text even in a mixed table/chart component;
+    # helpers still treat its unknown chart values as gaps rather than inventing values.
+    if re.search(r"\bLO\.table\s*\(", body) or not re.search(r"\bLO\.(?:bar|line)\s*\(", body):
+        return dict(data or {})
+    return {
+        key: (
+            {
+                **dataset,
+                "rows": [
+                    [numeric_cell(cell) for cell in row] if isinstance(row, list) else row
+                    for row in dataset["rows"]
+                ],
+            }
+            if isinstance(dataset, dict) and isinstance(dataset.get("rows"), list)
+            else dataset
+        )
+        for key, dataset in (data or {}).items()
+    }
 
 
 def data_json(data: Mapping[str, Any] | None) -> str:
@@ -204,7 +278,7 @@ def assemble_document(body: str, data: Mapping[str, Any] | None = None) -> str:
             '<script type="application/json" id="',
             DATA_ELEMENT_ID,
             '">',
-            data_json(data),
+            data_json(_plot_data(data, body)),
             "</script>\n<script>",
             prelude_js(),
             "</script>\n",

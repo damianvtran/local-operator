@@ -163,6 +163,42 @@ def cost_summary(
     return total, unknown
 
 
+def cost_summary_by_basis(
+    components: Any, *, model_label: str = "", recorded_only: bool = False
+) -> tuple[float | None, bool, dict[str, int]]:
+    """Price each component once for both the child total and payment split.
+
+    Legacy/foreign bases stay unknown, not inferred from today's login. Round
+    after accumulating USD per basis so tiny calls do not each gain a micro.
+    The final micro residual belongs to the unknown bucket, never to cash.
+    """
+    from local_operator.session.channel_spend import BASIS_NOT_TRACKED, BASIS_VALUES
+
+    total: float | None = None
+    unknown = False
+    amounts = {basis: 0.0 for basis in BASIS_VALUES}
+    for component in components:
+        provider = getattr(component, "provider", None)
+        model_id = getattr(component, "model_id", None)
+        label = f"{provider}/{model_id}" if provider and model_id else model_label
+        cost = _recorded_cost(component) if recorded_only else turn_cost(label, component)
+        if cost is None:
+            unknown = True
+            continue
+        total = (total or 0.0) + cost
+        basis = getattr(component, "billing_basis", None)
+        amounts[basis if basis in BASIS_VALUES else BASIS_NOT_TRACKED] += cost
+    micros = {basis: round(value * 1_000_000) for basis, value in amounts.items()}
+    micros[BASIS_NOT_TRACKED] += round((total or 0.0) * 1_000_000) - sum(micros.values())
+    # A rounding correction must not publish negative unknown spend. Take the
+    # micro from the largest bucket when rounded known buckets overshoot.
+    if micros[BASIS_NOT_TRACKED] < 0:
+        largest = max(micros, key=lambda basis: micros[basis])
+        micros[largest] += micros[BASIS_NOT_TRACKED]
+        micros[BASIS_NOT_TRACKED] = 0
+    return total, unknown, micros
+
+
 def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:
     """What one subagent job's OWN calls have cost, or ``None`` when unpriceable.
 
