@@ -269,12 +269,12 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: the authority; raise this number only with a fresh measurement.
 #:
 #: RAISED BY 16 B for §14's ``notify`` (origin-aware notifications), from 2,145
-#: to 2,161, and that is the whole of this feature's ceiling spend. MEASURED on
-#: this head by serializing the arm's own frame twice — once as the shipped
-#: fixture leaves it, and once with ``notify`` dropped from the attention state
-#: — with the second reading 1,050,721 B, exactly the total this comment's
-#: 2,145 already stood for (1,048,576 + 2,145). So the delta is 16 B and it is
-#: ADDITIVE here: the released arm's catalogue is already pinned at
+#: to 2,161, and that is the whole of this feature's ceiling spend. MEASURED
+#: by serializing the arm's own frame twice — once as the shipped fixture
+#: leaves it, and once with ``notify`` dropped from the attention state — with
+#: the second reading exactly the total this comment's 2,145 already stood for
+#: (1,048,576 + 2,145). So the delta is 16 B and it is ADDITIVE here: the
+#: released arm's catalogue is already pinned at
 #: ``MODEL_CATALOGUE_FLOOR_ROWS`` (the frame is over the line even at the
 #: floor), so nothing else can absorb the bytes.
 #:
@@ -287,14 +287,19 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: RAISED BY 16 B for slice 4's monitors snapshot key (design §12), from 2,161
 #: to 2,177, and that is the whole of that slice's spend on this arm. MEASURED
 #: on this head by the arm's own arithmetic rather than restated: the released
-#: frame serialized at 1,050,753 B — 1,048,576 + 2,177 exactly, 16 B over the
-#: reading this comment's 2,161 stood for (1,050,737). The 16 B is the
-#: serialized key in full — ``"monitors": []`` and the separator that leaves
-#: with it — a fixed-width EMPTY list: the charged-list treatment is the
-#: ``populated`` entry's, and nothing about it grows with the session. It is
-#: ADDITIVE here for the same reason as ``notify``: the released arm's
-#: catalogue is already pinned at ``MODEL_CATALOGUE_FLOOR_ROWS``, so nothing
-#: else can absorb the bytes.
+#: frame serialized at 1,050,732 B — 21 B UNDER the 1,048,576 + 2,177 this
+#: constant reserves, because the fixture below pays TWO charges out of one
+#: free-text pool (origin/main's 127 B title-filler charge AND the effort
+#: field's 323 B goal-filler charge), so this head's worst case sits below the
+#: line origin/main's fixture reached exactly. The CONSTANT is unchanged: 2,177
+#: is the reserved excess and the assertion below is a CEILING, so the 21 B is
+#: headroom against the next field that legitimately needs it, not a licence
+#: to spend it. The 16 B is the serialized key in full — ``"monitors": []`` and
+#: the separator that leaves with it — a fixed-width EMPTY list: the
+#: charged-list treatment is the ``populated`` entry's, and nothing about it
+#: grows with the session. It is ADDITIVE here for the same reason as
+#: ``notify``: the released arm's catalogue is already pinned at
+#: ``MODEL_CATALOGUE_FLOOR_ROWS``, so nothing else can absorb the bytes.
 _RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_177
 
 #: No comms node: these released children have no lineage, which is the smaller
@@ -652,6 +657,12 @@ _BOUNDED_COLLECTION_FIELDS = {
     # turns, and its size is fixed by the name rules the values come from (a
     # no-space role or team slug), not by what the user typed into the chat.
     "effective_identity": "one speaker/team/role triple, replaced every refresh",
+    # The chosen level a fallback is not honouring: five short strings
+    # (two level words, two selectors, one sentence), REBUILT from the two model
+    # specs on every refresh rather than appended to. It cannot grow with
+    # conversation length or child count, and neither selector can be longer
+    # than a published model id.
+    "effort_displacement": "five short strings, replaced every refresh",
     "child_costs": "one float per job; O(1) bytes each",
     # At most four fixed basis keys, independent of conversation or child count.
     "subagent_basis_micro": "one micro-USD integer per fixed payment basis",
@@ -1273,6 +1284,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             "team": "a-team-name-at-its-longest-allowed-length-here",
             "role_of_speaker": "manager",
         },
+        "effort_displacement": {
+            "chosen": "minimal",
+            "effective": "xhigh",
+            "selected": "openrouter/anthropic/claude-sonnet-5-5",
+            "serving": "openrouter/anthropic/claude-sonnet-5-5",
+            "note": (
+                "Effort: xhigh on openrouter/anthropic/claude-sonnet-5-5; "
+                "minimal resumes on openrouter/anthropic/claude-sonnet-5-5."
+            ),
+        },
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
         # COMPLETED TOOL CALLS, not `message_update` rows. The old fixture used
         # 200 `message_update`s, which `_fold_live_event` dedupes to a single
@@ -1472,13 +1493,26 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # what must not grow. The field's own size-policy review is its entry in
         # ``_BOUNDED_COLLECTION_FIELDS``. Re-derive both figures before moving
         # either number.
-        # Payment-basis buckets charge a further 127 B: bare sync 1,586 -
-        # 1,459 B, and released excess 2,304 - 2,177 B, measured with all four
-        # populated keys. Pay that same fixed charge from title filler
-        # (323 - 127 = 196), preserving the instrument's total and its existing
-        # excess allowance rather than increasing a wire cap to hide the cost.
+        # TWO fixed charges are paid out of the same free-text pool, from the
+        # same base (title 323, goal 2,000), and each is paid in the space its
+        # own change added to:
+        #
+        # 1. Payment-basis buckets charge 127 B: bare sync 1,586 - 1,459 B, and
+        #    released excess 2,304 - 2,177 B, measured with all four populated
+        #    keys. Paid from title filler (323 - 127 = 196).
+        # 2. `effort_displacement` charges 323 B (QA round 1 of the effort
+        #    persistence change): the new field's widest honest shape measures
+        #    323 bytes including its key and separator. Paid from free-text
+        #    goal space (2,000 - 323 = 1,677).
+        #
+        # Both preserve the instrument's TOTAL and its existing excess
+        # allowance rather than increasing a wire cap to hide the cost. The
+        # charges are additive because the bytes they occupy are additive, so
+        # taking both from the pool is the only way the worst-case TOTAL stays
+        # where it has always been: one side's charge alone would leave the
+        # other's field unbudgeted.
         conversation_title="a" * 196,
-        goal="g" * 2_000,
+        goal="g" * 1_677,
         cwd="/" + "d" * 500,
         **populated,
     )

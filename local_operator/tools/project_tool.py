@@ -158,7 +158,12 @@ class ProjectParams(BaseModel):
     remove: bool = Field(default=False, description="milestone: remove the named milestone.")
     attach: list[str] | None = Field(
         default=None,
-        description="update: evidence file paths for the new progress line.",
+        description=(
+            "update: evidence for the NEW progress line — the screenshot or "
+            "before/after frame showing a user-visible change, a chart or data "
+            "extract for a measured result, a log excerpt for a failure. Files "
+            "are copied into the project store (max 10, 5 MB each)."
+        ),
     )
     history: int | None = Field(
         default=None,
