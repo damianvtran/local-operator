@@ -972,3 +972,75 @@ async def test_a_deferred_sidebar_reveal_lands_in_the_first_height_bearing_frame
     assert all(
         frame == first for frame in frames
     ), f"the sidebar jumped between displayed frames: {frames}"
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_sidebar_reveal_lands_when_the_sidebar_is_reopened() -> None:
+    """Re-showing the list must land a reveal armed while it was closed.
+
+    A `display = False` -> `True` toggle collapses the widget's region but
+    leaves `_size` alone, so `_size_updated` reports `changed=False` on the
+    re-show — yet that re-show is the first real geometry the widget has. On
+    the pre-fix head the arm was gated on `changed`, so it survived: the
+    adopted row stayed off-page on re-show (`offset=76 top_visible=False
+    deferred=True`) and the next unrelated resize fired it as a scroll jump to
+    `offset=0`. This is the flow the zero-height fix regressed: `_adopt_session`
+    calls `set_current` unconditionally, so closing the sidebar, switching
+    session and reopening is ordinary use.
+    """
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        # The catalog poll is not this scenario: it would replace the fixture
+        # rows with the empty FakeSession catalog between the steps. The timer
+        # callback holds the pre-patch bound method, so it is paused too.
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        sidebar.set_open(True)
+        if app._sidebar_timer is not None:
+            app._sidebar_timer.pause()
+        app._sync_sidebar_layout(app.size)
+        await pilot.pause()
+        entries = [CatalogEntry(SessionRow("current", 1, "Current conversation"))]
+        entries.extend(
+            CatalogEntry(SessionRow(str(i), i + 2, f"long name {i}")) for i in range(100)
+        )
+        sidebar.set_entries(entries)
+        sidebar.current_id = "current"
+        sidebar.cursor_id = "current"
+        sidebar._reveal()
+        await pilot.pause()
+        assert sidebar._offset > 0, "premise: the list sits on its bottom page"
+
+        app._set_sidebar_open(False)
+        await pilot.pause()
+        top = sidebar.entries[0].id
+        sidebar.set_current(top)  # the app's adoption edge, list closed
+        assert sidebar._reveal_deferred, "premise: adoption while closed must defer the reveal"
+
+        app._set_sidebar_open(True)
+        if app._sidebar_timer is not None:
+            app._sidebar_timer.pause()
+        app._sync_sidebar_layout(app.size)
+        await pilot.pause()
+
+        visible = {entry.id for entry in sidebar.visible_entries}
+        assert not sidebar._reveal_deferred, (
+            "the reveal armed while closed survived the re-show: "
+            f"offset={sidebar._offset} deferred=True top_visible={top in visible}"
+        )
+        assert top in visible, (
+            "the adopted row is not on the page after re-show: "
+            f"offset={sidebar._offset} page_size={sidebar.page_size} top_visible=False"
+        )
+        landed = sidebar._offset
+
+        # The arm is one-shot and already spent: an unrelated resize must not
+        # move the page (on the pre-fix head this is where the jump happened).
+        await pilot.resize_terminal(100, 34)
+        await pilot.pause()
+        assert (
+            sidebar._offset == landed
+        ), f"a resize moved the page after re-show: {landed} -> {sidebar._offset}"
+        assert top in {entry.id for entry in sidebar.visible_entries}

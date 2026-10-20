@@ -703,9 +703,11 @@ class SessionSidebar(Widget, can_focus=True):
         #: catalog worker can land `set_current`/`set_entries` between
         #: `display = True` and the first layout, when `size.height` is still 0;
         #: `_reveal` cannot price a scroll then, so it records the intent here
-        #: and `on_resize` honors it on the first real geometry. Without this the
-        #: reveal silently became "offset = last row" and the one-row window it
-        #: created was permanent (`page_size` at the last row is 1 by
+        #: and `_size_updated` honors it before the next frame is painted. That
+        #: includes a RE-SHOW: a `display` toggle leaves `_size` unchanged, so
+        #: the reveal must not be gated on the size having changed. Without this
+        #: the reveal silently became "offset = last row" and the one-row window
+        #: it created was permanent (`page_size` at the last row is 1 by
         #: construction, and `set_entries`' clamp only ever lowers the offset to
         #: that row).
         self._reveal_deferred: bool = False
@@ -1595,13 +1597,13 @@ class SessionSidebar(Widget, can_focus=True):
         `page_size` is the whole remaining order by design (see
         `_page_size_at`), so the guess would be honest but the walk could not
         be: scrolling is a statement about a screen that does not exist yet.
-        Record the intent instead and let `on_resize` run this same method on
-        the first real geometry. Deferring rather than guessing is what keeps
-        the one-row window from forming: the old arithmetic on a 0-height
-        widget resolved `page_size` to 1 and pinned the offset to the LAST row,
-        where a one-row page size is self-consistent — so no later poll could
-        recover it (measured: `offset=5, page_size=1, visible=1` over 20 idle
-        polls on a six-row catalog).
+        Record the intent instead and let `_size_updated` run this same method
+        before the next real-height frame. Deferring rather than guessing is
+        what keeps the one-row window from forming: the old arithmetic on a
+        0-height widget resolved `page_size` to 1 and pinned the offset to the
+        LAST row, where a one-row page size is self-consistent — so no later
+        poll could recover it (measured: `offset=5, page_size=1, visible=1` over
+        20 idle polls on a six-row catalog).
         """
         if self.size.height <= 0:
             self._reveal_deferred = True
@@ -2450,13 +2452,21 @@ class SessionSidebar(Widget, can_focus=True):
         harmless: the paint this reflow is about to compose already reads the
         new offset, and the follow-up refresh produces the identical frame.
 
+        NOT GATED ON `changed`. A `display = False` → `True` toggle collapses the
+        widget's region but leaves `_size` alone, so the re-show pass reports
+        `changed=False` even though it is the first real geometry the widget has
+        had — gating here stranded the arm until some later resize fired it as a
+        scroll jump. `_size_updated` is called on the re-show, and the height
+        check alone is the honest guard; the flag is one-shot, so the repeated
+        no-change passes cannot scroll twice.
+
         `Widget._size_updated` has assigned `self._size` before returning, so
         the reveal prices the real page here. This is also the seam
         `TranscriptView` uses for its tail anchor, for the same reason
         (`_size_updated` is early enough to change the frame being composed).
         """
         changed = super()._size_updated(size, virtual_size, container_size, layout)
-        if changed and size.height > 0 and self._reveal_deferred:
+        if size.height > 0 and self._reveal_deferred:
             self._reveal_deferred = False
             self._reveal()
         return changed
@@ -2467,7 +2477,8 @@ class SessionSidebar(Widget, can_focus=True):
         THE ORDINARY RESIZE PATH. A deferred reveal does NOT land here:
         `Resize` is a message and arrives after the frame has been presented,
         which is exactly the one-frame jump `_size_updated` exists to remove.
-        `_size_updated` clears that flag before the first height-bearing paint;
+        `_size_updated` clears that flag before the first height-bearing paint
+        on both paths — a size change and a re-show where `_size` is unchanged;
         this handler only re-clamps an offset that the new, taller page size has
         made out of range.
         """
