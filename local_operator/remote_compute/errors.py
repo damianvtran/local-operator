@@ -40,6 +40,18 @@ class InsufficientCredit(RemoteComputeError):
     """402 — admission refused for credit, so no retry changes the answer."""
 
 
+class PreviewNotEnabled(RemoteComputeError):
+    """403 — remote compute is not on this account's preview allowlist yet.
+
+    The server-side preview is admitted per account, so a login the allowlist
+    does not carry is refused before any run is composed. It is NOT a login
+    problem (401 answers the same status for an expired grant) and not a credit
+    problem (402 names that), which is why it gets its own type: the remedy is
+    "wait for the preview to reach this account", and no retry or new key
+    changes it.
+    """
+
+
 class RunNotFound(RemoteComputeError):
     """404 — no such run under the selected login, or the path is wrong."""
 
@@ -95,6 +107,17 @@ class RunIdentityMismatch(RemoteComputeError):
         )
         self.asked_for = asked_for
         self.answered = answered
+
+
+class InvalidApiOverride(RemoteComputeError):
+    """``LOP_REMOTE_COMPUTE_API_URL`` names a base this client will not use.
+
+    The bearer goes to whatever host is named, so the override is held to the
+    rules :func:`local_operator.remote_compute.config.resolve_api_url` states
+    and an unusable value is a REFUSAL, never a silent fall back to production:
+    a run sent to the wrong host is work nobody can account for, and the
+    operator set the variable on purpose.
+    """
 
 
 class InvalidIdempotencyKey(RemoteComputeError):
@@ -154,6 +177,7 @@ class Unreachable(RemoteComputeError):
 ERROR_BY_STATUS: dict[int, type[RemoteComputeError]] = {
     400: InvalidRequest,
     402: InsufficientCredit,
+    403: PreviewNotEnabled,
     404: RunNotFound,
     409: IdempotencyConflict,
     503: CapacityUnavailable,
@@ -164,9 +188,11 @@ __all__ = [
     "CapacityUnavailable",
     "IdempotencyConflict",
     "InsufficientCredit",
+    "InvalidApiOverride",
     "InvalidIdempotencyKey",
     "InvalidRequest",
     "NetworkMismatch",
+    "PreviewNotEnabled",
     "RemoteComputeError",
     "RunIdentityMismatch",
     "RunNotFound",

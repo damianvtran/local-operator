@@ -1,5 +1,7 @@
 {
   "wire.remote_compute.alone": "--remote-status और --remote-cancel अपने आप में पूरे कमांड हैं: इनमें से एक को अकेले चलाएँ, --remote या रन के दूसरे विकल्पों के बिना।",
+  "wire.remote_compute.api_override": "रिमोट कंप्यूट डिफ़ॉल्ट Radient API के बजाय {host} का उपयोग कर रहा है, क्योंकि LOP_REMOTE_COMPUTE_API_URL सेट है।",
+  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL कोई https:// URL होना चाहिए, या 127.0.0.1, ::1 या localhost पर http://, बिना उपयोगकर्ता-नाम या पासवर्ड, क्वेरी या फ़्रैगमेंट के; रिमोट कंप्यूट शुरू नहीं हुआ।",
   "wire.remote_compute.bad_repo": "--repo का मान https:// या ssh:// URL, या git@host:path पता होना चाहिए: यह रन रिपॉज़िटरी को दूर से क्लोन करता है, इसलिए स्थानीय पथ नहीं दिया जा सकता।",
   "wire.remote_compute.bad_sha": "--sha का मान पूरा 40-अक्षरों वाला commit SHA होना चाहिए: शाखा का नाम या छोटा hash उस commit से भिन्न commit पर जा सकता है जिसके लिए यह रन भेजा गया था।",
   "wire.remote_compute.cancelled": "रिमोट रन {run_id} रद्द कर दिया गया है।",
@@ -26,6 +28,7 @@
   "wire.remote_compute.no_capacity": "Radient के पास अभी रिमोट कंप्यूट की क्षमता नहीं है; बाद में फिर कोशिश करें।",
   "wire.remote_compute.no_credit": "Radient के पास इस खाते के लिए कंप्यूट क्रेडिट नहीं है, इसलिए रन स्वीकार नहीं किया गया।",
   "wire.remote_compute.only_with": "{flag} केवल --remote के साथ लागू होता है।",
+  "wire.remote_compute.preview_not_enabled": "इस Radient खाते के लिए रिमोट कंप्यूट अभी सक्षम नहीं है (प्रीव्यू)।",
   "wire.remote_compute.replayed": "आइडेम्पोटेंसी कुंजी पहले भेजे गए किसी अनुरोध से मेल खाती है, इसलिए यह रिमोट रन {run_id} ही है और कोई नया रन नहीं बनाया गया।",
   "wire.remote_compute.retrying": "Radient ने इस रन में त्रुटि बताई है और इसे फिर से आज़माएगा, इसलिए निगरानी जारी है।",
   "wire.remote_compute.run_identity_mismatch": "Radient ने रिमोट रन {answered} लौटाया, न कि वह रन {asked_for} जिसके लिए अनुरोध किया गया था, इसलिए इस उत्तर को उस रन की स्थिति के रूप में नहीं बताया जा सकता।",

@@ -27,7 +27,9 @@ import pytest
 from local_operator.network import store
 from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore, CredentialInvalidError
-from local_operator.remote_compute import RunCreateRequest, RunSpec, resolve_network
+from local_operator.remote_compute import RunCreateRequest, RunSpec
+from local_operator.remote_compute import config as config_module
+from local_operator.remote_compute import resolve_network
 from local_operator.remote_compute.client import (
     KNOWN_RUN_STATUSES,
     MAX_IDEMPOTENCY_KEY_BYTES,
@@ -45,13 +47,16 @@ from local_operator.remote_compute.client import (
     run_outcome,
     run_status,
 )
+from local_operator.remote_compute.config import ENV_VAR
 from local_operator.remote_compute.errors import (
     CapacityUnavailable,
     IdempotencyConflict,
     InsufficientCredit,
+    InvalidApiOverride,
     InvalidIdempotencyKey,
     InvalidRequest,
     NetworkMismatch,
+    PreviewNotEnabled,
     RemoteComputeError,
     RunIdentityMismatch,
     RunNotFound,
@@ -218,6 +223,40 @@ async def test_create_sends_the_contract_fields_and_the_tenant(
     assert (body["size"], body["max_hours"]) == ("m", 2.0)
     # Optional fields are OMITTED, not sent as null.
     assert "budget_usd" not in body and "name" not in body
+
+
+@pytest.mark.asyncio
+async def test_the_request_goes_to_the_override_host(
+    credential: int,
+    request_for: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An override is not decoration: the URL the transport sees names it."""
+    monkeypatch.setattr(config_module, "_announced", set())
+    monkeypatch.setenv(ENV_VAR, "http://127.0.0.1:8123")
+    expected = _run(network_id=request_for.record.network_id)
+    origin = _Origin(httpx.Response(201, json=_created(expected)))
+    client, http = _client(origin, credential)
+    async with http:
+        await client.create_run(request_for(), idempotency_key="k")
+    (sent,) = origin.requests
+    assert str(sent.url) == "http://127.0.0.1:8123" + RUNS_PATH
+    # The warning lands on stderr at construction, never on stdout.
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "127.0.0.1:8123" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_override_refuses_before_a_request(
+    credential: int, request_for: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ENV_VAR, "http://staging.example.invalid")
+    origin = _Origin()
+    with pytest.raises(InvalidApiOverride):
+        _client(origin, credential)
+    assert origin.requests == []
 
 
 @pytest.mark.asyncio
@@ -538,6 +577,7 @@ SECRET_BODY = "sk-live-SECRET-account-42-balance-9.99"
         (400, InvalidRequest),
         (401, LoginRequired),
         (402, InsufficientCredit),
+        (403, PreviewNotEnabled),
         (404, RunNotFound),
         (409, IdempotencyConflict),
         (503, CapacityUnavailable),

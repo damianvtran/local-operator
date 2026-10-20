@@ -14,6 +14,14 @@ def alone() -> Msg:
     return Msg("wire.remote_compute.alone", {})
 
 
+def api_override(*, host: str) -> Msg:
+    return Msg("wire.remote_compute.api_override", {"host": host})
+
+
+def api_override_invalid() -> Msg:
+    return Msg("wire.remote_compute.api_override_invalid", {})
+
+
 def bad_repo() -> Msg:
     return Msg("wire.remote_compute.bad_repo", {})
 
@@ -119,6 +127,10 @@ def no_credit() -> Msg:
 
 def only_with(*, flag: str) -> Msg:
     return Msg("wire.remote_compute.only_with", {"flag": flag})
+
+
+def preview_not_enabled() -> Msg:
+    return Msg("wire.remote_compute.preview_not_enabled", {})
 
 
 def replayed(*, run_id: str) -> Msg:

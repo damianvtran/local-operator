@@ -83,9 +83,11 @@ from local_operator.remote_compute.errors import (
     CapacityUnavailable,
     IdempotencyConflict,
     InsufficientCredit,
+    InvalidApiOverride,
     InvalidIdempotencyKey,
     InvalidRequest,
     NetworkMismatch,
+    PreviewNotEnabled,
     RunIdentityMismatch,
     RunNotFound,
     Unreachable,
@@ -221,6 +223,10 @@ def _report(failure: BaseException) -> int:
         return _refuse(_t(_wr.unreadable_envelope()))
     if isinstance(failure, Unreachable):
         return _refuse(_t(_wr.unreachable()))
+    if isinstance(failure, InvalidApiOverride):
+        return _refuse(_t(_wr.api_override_invalid()))
+    if isinstance(failure, PreviewNotEnabled):
+        return _refuse(_t(_wr.preview_not_enabled()))
     if isinstance(failure, InsufficientCredit):
         return _refuse(_t(_wr.no_credit()))
     if isinstance(failure, CapacityUnavailable):

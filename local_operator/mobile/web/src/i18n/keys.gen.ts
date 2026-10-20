@@ -335,6 +335,8 @@ export type MessageParams = {
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
   "wire.remote_compute.alone": undefined;
+  "wire.remote_compute.api_override": { "host": string };
+  "wire.remote_compute.api_override_invalid": undefined;
   "wire.remote_compute.bad_repo": undefined;
   "wire.remote_compute.bad_sha": undefined;
   "wire.remote_compute.cancelled": { "run_id": string };
@@ -361,6 +363,7 @@ export type MessageParams = {
   "wire.remote_compute.no_capacity": undefined;
   "wire.remote_compute.no_credit": undefined;
   "wire.remote_compute.only_with": { "flag": string };
+  "wire.remote_compute.preview_not_enabled": undefined;
   "wire.remote_compute.replayed": { "run_id": string };
   "wire.remote_compute.retrying": undefined;
   "wire.remote_compute.run_identity_mismatch": { "answered": string; "asked_for": string };

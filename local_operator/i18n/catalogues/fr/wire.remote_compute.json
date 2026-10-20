@@ -1,5 +1,7 @@
 {
   "wire.remote_compute.alone": "--remote-status et --remote-cancel sont des commandes à part : lancez-en une seule, sans --remote ni d’autres options d’exécution.",
+  "wire.remote_compute.api_override": "Le calcul distant utilise {host} au lieu de l’API Radient par défaut, car LOP_REMOTE_COMPUTE_API_URL est défini.",
+  "wire.remote_compute.api_override_invalid": "LOP_REMOTE_COMPUTE_API_URL doit être une URL https://, ou http:// sur 127.0.0.1, ::1 ou localhost, sans identifiants, requête ni fragment ; le calcul distant n’a pas démarré.",
   "wire.remote_compute.bad_repo": "Comme cette exécution clone le dépôt depuis le site distant, --repo doit être une URL https:// ou ssh://, ou une adresse git@host:path ; un chemin local ne peut donc pas être utilisé.",
   "wire.remote_compute.bad_sha": "La valeur de --sha doit être un SHA de commit complet de 40 caractères : un nom de branche ou un hash abrégé pourrait correspondre à un autre commit que celui soumis.",
   "wire.remote_compute.cancelled": "L’exécution distante {run_id} est annulée.",
@@ -26,6 +28,7 @@
   "wire.remote_compute.no_capacity": "Radient n’a aucune capacité de calcul distant pour le moment ; réessayez plus tard.",
   "wire.remote_compute.no_credit": "Radient n’a pas de crédit de calcul pour ce compte : l’exécution n’a pas été admise.",
   "wire.remote_compute.only_with": "{flag} ne s’applique qu’avec --remote.",
+  "wire.remote_compute.preview_not_enabled": "Le calcul distant n’est pas encore activé pour ce compte Radient (aperçu).",
   "wire.remote_compute.replayed": "La clé d’idempotence correspond à une soumission antérieure : il s’agit donc de l’exécution distante {run_id}, et aucune nouvelle exécution n’a été créée.",
   "wire.remote_compute.retrying": "Radient a signalé une erreur pour cette exécution et va la réessayer ; le suivi continue.",
   "wire.remote_compute.run_identity_mismatch": "Radient a répondu avec l’exécution distante {answered}, et non avec l’exécution {asked_for} demandée : cette réponse ne peut donc pas être présentée comme l’état de cette exécution.",

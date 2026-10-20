@@ -1,11 +1,15 @@
 """The remote-compute HTTP client: owner-pinned Radient calls, never a key cascade.
 
 REUSE, BY COMPOSITION. This client makes the same requests the tunnels client
-makes, against the same host and the same OAuth grant, so it reuses that
-client's parts rather than re-deriving them: ``tunnels.config.DEFAULT_API_URL``
-for the host, ``tunnels.api.credential_id`` for "which signed-in Radient account
-is this device's", and ``tunnels.errors.LoginRequired`` for the one failure a
-retry cannot fix. What it does NOT do is share the request method: the tunnels
+makes, against the same OAuth grant, so it reuses that client's parts rather
+than re-deriving them: ``tunnels.api.credential_id`` for "which signed-in
+Radient account is this device's", and ``tunnels.errors.LoginRequired`` for the
+one failure a retry cannot fix. The HOST comes from
+:func:`local_operator.remote_compute.config.resolve_api_url`, whose default is
+``tunnels.config.DEFAULT_API_URL``. That is the one place the two products
+differ on purpose: remote compute may be pointed at a non-production Radient
+for testing, while a tunnel's credential stays pinned to the host its origin
+proof is issued for. What it does NOT do is share the request method: the tunnels
 one prefixes ``/v1/tunnels``, unwraps the tunnel envelope and maps 404 to a
 tunnel-specific type, so a shared method would have to be parameterised by path,
 envelope and error table — three knobs for two callers, which is the shape where
@@ -56,6 +60,7 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     CredentialInvalidError,
 )
+from local_operator.remote_compute.config import resolve_api_url
 from local_operator.remote_compute.errors import (
     ERROR_BY_STATUS,
     InvalidIdempotencyKey,
@@ -67,7 +72,6 @@ from local_operator.remote_compute.errors import (
 )
 from local_operator.remote_compute.request import RunCreateRequest
 from local_operator.tunnels import api as tunnels_api
-from local_operator.tunnels.config import DEFAULT_API_URL
 from local_operator.tunnels.errors import LoginRequired
 
 #: Where the run endpoints live, relative to the API host.
@@ -284,6 +288,10 @@ class RemoteComputeClient:
     def __init__(self, client: httpx.AsyncClient, *, credential_id: int | None = None) -> None:
         self.client = client
         self.selected = credential_id
+        # RESOLVED ONCE PER CLIENT, not per request: an unusable override has to
+        # be refused BEFORE a request is composed, and the destination warning
+        # then lands once rather than ahead of every poll of a watch.
+        self.api_url = resolve_api_url()
 
     async def _headers(self) -> dict[str, str]:
         """A fresh bearer, or a typed refusal — never a fallback to an API key.
@@ -356,7 +364,7 @@ class RemoteComputeClient:
         try:
             response = await self.client.request(
                 method,
-                DEFAULT_API_URL + RUNS_PATH + path,
+                self.api_url + RUNS_PATH + path,
                 json=body,
                 params=params,
                 headers=headers,

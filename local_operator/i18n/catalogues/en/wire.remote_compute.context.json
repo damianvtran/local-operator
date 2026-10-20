@@ -198,5 +198,20 @@
     "role": "CLI runtime message for lop exec --remote",
     "tone": "plain, one sentence; commands and flags stay verbatim; never alarmist",
     "note": "No placeholders. The response body looked like Radient's envelope but carried keys outside the msg/result/error set, so this build cannot parse it: the format changed after this build was cut. It says so and names `lop-update` as the remedy; a retry cannot help."
+  },
+  "wire.remote_compute.api_override": {
+    "role": "CLI warning printed to STDERR when the remote-compute API base is overridden",
+    "tone": "plain, one sentence; the variable name and the host stay verbatim",
+    "note": "{host} is the host the bearer is being sent to, WITHOUT any credential and without a path — it is the whole point of the line and must be preserved. Printed once per invocation, to stderr, so stdout stays the run id alone. It exists because the destination is otherwise invisible: a login going to a staging server must never look like one going to production."
+  },
+  "wire.remote_compute.api_override_invalid": {
+    "role": "CLI refusal for an unusable LOP_REMOTE_COMPUTE_API_URL",
+    "tone": "plain, one sentence; the variable, the schemes and the literal loopback hosts stay verbatim",
+    "note": "No placeholders. The value itself is never echoed. It states the whole rule (https, or http only on 127.0.0.1, ::1 or localhost, no userinfo/query/fragment) because the command exits rather than falling back to production; the last clause says that the remote-compute command did not start."
+  },
+  "wire.remote_compute.preview_not_enabled": {
+    "role": "CLI error for HTTP 403 from the remote-compute API",
+    "tone": "plain, one sentence; not a bug report",
+    "note": "No placeholders. 403 means the server-side preview allowlist does not carry this Radient account yet, so the remedy is to wait for the preview rather than to retry or re-login. `preview` stays in parentheses as the feature's own label."
   }
 }
