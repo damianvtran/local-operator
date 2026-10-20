@@ -1518,6 +1518,76 @@ class RadientClient:
             ) from e
         return self._publication_result(response, action="pull the skill")
 
+    def publish_skill_document(
+        self,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        accept_unresolved: Optional[Sequence[str]] = None,
+        moderation_allowance: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish a skill manifest to the public hub or into an organization.
+
+        ``document`` is the version-1 skill manifest (``document_version``,
+        ``name``, ``description``, ``files``) -- the same strict shape
+        ``GET /skills/{id}`` serves and the pull path validates, never a bundle
+        or a folder. The hub's decoder refuses unknown top-level fields, so the
+        SCOPE travels on QUERY PARAMS exactly as it does for the agent and team
+        publish families (``org_target_params``: public carries no tenant, org
+        requires one); a scope smuggled inside the document would be a 422.
+
+        The commit half of the preview protocol is identical to
+        :meth:`publish_agent_instruction_set` (``preview_token``,
+        ``accept_unresolved``, ``moderation_allowance``; the consent param is a
+        commit-only, org-only control). With all three at their defaults the
+        request is the plain POST an older server already answers. No
+        client-side timeout, deliberately: the hub reviews the submission with a
+        model before accepting it, and a cutoff on a MUTATING request would leave
+        the hub finishing a publication the caller has walked away from.
+
+        Returns:
+            The publication result the UI's ``SkillPublicationResult`` projects:
+            the created row (``skill``: ``id``/``name``) beside
+            ``accepted_document``, the opaque ``revision``, the integer
+            ``content_revision``, ``operation_id`` and ``sync_contract``.
+
+        Raises:
+            APIError: When the hub refuses -- ``name_taken``,
+                ``name_reserved_builtin``, ``invalid_skill_document`` (with
+                ``field``/``rule`` details), ``payload_too_large``,
+                ``moderation_rejected``, ``moderation_unavailable``,
+                ``not_a_member``, ``insufficient_role``, plus the commit
+                family's ``preview_mismatch``, ``preview_expired`` and
+                ``preview_stale``.
+            ValueError: When ``visibility``/``tenant_id`` do not form a valid
+                target (refused before the request is sent).
+        """
+        url = f"{self.base_url}/skills/publish"
+        headers = self._get_headers(content_type="application/json")
+        headers.update(self._preview_commit_headers(preview_token, accept_unresolved))
+        params = org_target_params(visibility, tenant_id)
+        if moderation_allowance is not None:
+            params[MODERATION_ALLOWANCE_PARAM] = moderation_allowance
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=dict(document),
+                params=params,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not publish the skill to the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="publish the skill")
+
     def publish_team_document(
         self,
         document: Mapping[str, Any],

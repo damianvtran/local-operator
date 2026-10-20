@@ -217,13 +217,68 @@ async def test_a_public_pull_installs_every_file_and_reads_back_the_contract(api
     assert record.local_alias == ALIAS and record.hub_id == HUB_ID
     assert dict(record.fields)["files"] == manifest()["files"]
 
-    # The partial-adapter milestone must NOT advertise `hub_skills` yet.
-    assert "hub_skills" not in svc_features.feature_flags()
+    # The complete-adapter milestone advertises `hub_skills` beside the links key;
+    # the route pin below fails if the routes it promises are removed.
+    assert svc_features.feature_flags().get("hub_skills") == 1
     assert "hub_links" in svc_features.feature_flags()
 
     # A public fetch is anonymous: the client carried no credential.
     (call,) = holder["anon"].calls
     assert call["with_credential"] is False
+
+
+async def test_an_unversioned_renderer_source_is_completed_not_refused(api) -> None:
+    """The UI sends VITE_RADIENT_SERVER_BASE_URL verbatim, without `/v1`.
+
+    The route must complete it with the same rule the configured base uses and
+    answer the work, while the minted link carries the versioned origin.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="https://api.radienthq.com"),
+    )
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+    assert row["hub_source"] == BASE
+    record = prov.read_baseline(root, "skill", row["local_id"])
+    assert record is not None and record.identity is not None
+    assert record.identity.hub_source == BASE
+
+    # A DIFFERENT origin is still refused after completion.
+    holder["anon"].calls.clear()
+    refused = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="https://elsewhere.invalid"),
+    )
+    assert refused.status_code == 422, refused.text
+    assert holder["anon"].calls == []
+
+
+async def test_a_malformed_hub_source_is_the_normal_origin_conflict(api) -> None:
+    """A bracketed host fails in ``urlsplit``; the route must not leak that.
+
+    Completion runs before approval, so a raw ``ValueError`` used to reach the
+    route's generic handler and answer 409 with the parser's own sentence. The
+    refusal is the same nondisclosing 422 every unapproved origin gets, and no
+    client is built.
+    """
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="http://[::1"),
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "origin-conflict"
+    assert "Invalid IPv6 URL" not in detail["message"]
+    assert holder["anon"].calls == []
 
 
 async def test_an_org_pull_uses_the_org_client_and_records_the_tenant(api) -> None:

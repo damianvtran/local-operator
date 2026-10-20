@@ -36,9 +36,15 @@ human resolves the item).
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
+import os
+import re
+import secrets
+import tempfile
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
@@ -2970,3 +2976,981 @@ def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
         if row is None:
             raise LinkError("origin-conflict", "the unpull left no link row")
         return {"link": row, "links": snapshot}
+
+
+# -- initial skill publication (the complete adapter's push half) -------------------------
+#
+# `POST /v1/desktop/hub/skills/publish` is the desktop plane's initial-publication
+# arm. It is deliberately NOT a republish path: the hub contract this adapter
+# advertises creates a NEW remote row (`publication: "create"`), and a second
+# publication of an already-linked skill is refused locally with the alias owner
+# rather than answered by an upstream `name_taken`.
+#
+# TWO receipts are involved and they are different facts:
+#   * the PREVIEW receipt is local and review-only. A dry run projects the exact
+#     bytes a confirm would send, binds them to the draft tuple + policy, and
+#     persists that under `hub/publication-previews`. Nothing is published, no
+#     paid call is made, and no link/baseline/policy is written;
+#   * the LOCAL LINK receipt is the answer to "did this machine finish turning
+#     the accepted publication into a real `links_snapshot` row". It is
+#     `complete` only after the managed baseline + policy exist, and
+#     `pending-reconciliation` when the hub accepted the row but local
+#     bookkeeping did not finish. The remote outcome is persisted before any
+#     local write, so a retry resumes the SAME link instead of republishing.
+#
+# RETENTION: a draft receipt is confirmable for PUBLICATION_PREVIEW_TTL_S and
+# expires with the review. Once the hub ACCEPTS, the receipt is the only record
+# of the remote row (no baseline and no link exist yet), so it is retained
+# indefinitely while reconciliation is pending -- through restarts and past the
+# draft TTL. That is why it keeps the reviewed proposal bytes as well as the raw
+# accepted result: re-materializing the link after a restart must not depend on
+# the authored folder, which may have been edited, moved or removed. When the
+# local link completes the receipt is deleted; a failed deletion leaves a
+# `completed` marker that the next expired-receipt sweep prunes.
+#
+# A REFUSED publication leaves every piece of skill state untouched: the hub call
+# happens before the managed transaction, and the only bytes this path writes on
+# a dry run are the preview receipt itself.
+
+#: How long a publication preview stays confirmable. The hub's own preview pins
+#: expire after 15 minutes and this receipt fronts the same reviewed-draft act, so
+#: it uses the same bound: a longer window would let a reviewed payload drift from
+#: the bytes a later confirm sends.
+PUBLICATION_PREVIEW_TTL_S = 900
+
+_PREVIEW_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+
+
+def _publication_preview_dir(config_dir: Path) -> Path:
+    return prov.hub_root(config_dir) / "publication-previews"
+
+
+def _publication_preview_path(config_dir: Path, token: str) -> Path:
+    if not isinstance(token, str) or not _PREVIEW_TOKEN_RE.fullmatch(token):
+        # A token is an opaque local file name; anything path-shaped is refused
+        # before it can name a file outside the preview directory.
+        raise LinkError("preview_mismatch", "the publication preview receipt is not valid")
+    return _publication_preview_dir(config_dir) / f"{token}.json"
+
+
+def _read_publication_preview(config_dir: Path, token: str) -> dict[str, Any] | None:
+    path = _publication_preview_path(config_dir, token)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise LinkError("preview_mismatch", "the publication preview receipt is unsafe")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_publication_preview(config_dir: Path, record: Mapping[str, Any]) -> None:
+    token = str(record.get("preview_receipt") or "")
+    path = _publication_preview_path(config_dir, token)
+    directory = path.parent
+    if directory.is_symlink():
+        raise LinkError("preview_mismatch", "the publication preview store is unsafe")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(dict(record), handle, ensure_ascii=False, indent=1, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _prune_publication_previews(directory, keep=path)
+
+
+def _prune_publication_previews(directory: Path, *, keep: Path) -> None:
+    """Drop expired receipts; a preview is single-review state, not a history.
+
+    A receipt that carries an ACCEPTED remote outcome but has not completed local
+    reconciliation is never pruned: its hub id exists nowhere else (no baseline,
+    no link), so deleting it would orphan the publication. The 15-minute bound is
+    the reviewed DRAFT's lifetime, not the accepted row's. A COMPLETED receipt is
+    prunable like any other: its link is durable, so the record is only a leftover
+    of a failed unlink.
+    """
+
+    cutoff = datetime.now(timezone.utc)
+    try:
+        candidates = list(directory.glob("*.json"))
+    except OSError:
+        return
+    for candidate in candidates:
+        if candidate == keep:
+            continue
+        raw: Any = None
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+            expires = _parse_iso(str(raw.get("expires_at") or ""))
+        except (OSError, ValueError):
+            expires = None
+        if (
+            expires is not None
+            and expires < cutoff
+            and not (isinstance(raw, Mapping) and _receipt_awaits_reconciliation(raw))
+        ):
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+
+
+def _receipt_awaits_reconciliation(record: Mapping[str, Any]) -> bool:
+    """Does this receipt hold a hub row whose local link has not landed yet?"""
+
+    accepted = isinstance(record.get("outcome"), Mapping) or isinstance(
+        record.get("remote_result"), Mapping
+    )
+    return accepted and not record.get("completed")
+
+
+def _delete_publication_preview(config_dir: Path, token: str) -> None:
+    """Remove a reconciled receipt; best-effort, because the link is durable."""
+
+    try:
+        path = _publication_preview_path(config_dir, token)
+    except LinkError:
+        return
+    if path.is_symlink() or path.parent.is_symlink():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _parse_iso(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _resolve_authored_skill(config_dir: Path, name: str) -> Any:
+    """The locally discovered skill a publication names, or a named refusal.
+
+    The UI's source picker reads the SAME sessionless catalogue this resolves
+    against (``GET /v1/desktop/skills`` with no folder: home roots), so a name the
+    picker offered always resolves here and a hand-crafted name cannot reach an
+    arbitrary path. Name collisions follow the catalogue's own rule (the earliest
+    root wins).
+    """
+
+    from local_operator.skills import default_skill_roots, discover_skills
+
+    skills, _warnings = discover_skills(default_skill_roots(Path.home()), config_dir=config_dir)
+    match = next((skill for skill in skills if skill.name == name), None)
+    if match is None:
+        raise LinkError("skill-not-found", "no locally authored skill has that name")
+    # A source that already owns a hub link is NOT authored content any more:
+    # discovering it through the managed root would let a pulled private-org
+    # skill be re-published publicly under a new alias (the baseline is what
+    # proves the origin, and the destination-alias check cannot see a rename).
+    # This is also why re-publishing a linked skill is refused rather than
+    # answered upstream with `name_taken`: the adapter advertises CREATE only.
+    if prov.alias_owner(config_dir, "skill", match.name) is not None:
+        raise LinkError(
+            "origin-conflict",
+            "that skill is already linked to the hub; a new publication needs authored content",
+        )
+    return match
+
+
+def _project_publication(
+    config_dir: Path, *, source_skill: str, local_alias: str
+) -> tuple[Any, Any, Any]:
+    """Read + validate the authored source and render the exact publication draft.
+
+    Returns ``(skill, source_document, draft_document)``. The source is read with
+    :meth:`SkillDocument.from_directory` -- the SAME bounded, all-file validation
+    the pull path applies to a remote manifest -- and the draft is its local-alias
+    rendering (name/description are stored twice, so ``with_name`` rewrites the
+    frontmatter scalar too). Every refusal is the adapter's own named code.
+    """
+
+    from local_operator.hub_sync.adapters import SkillAdapter
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+        validate_name,
+    )
+
+    skill = _resolve_authored_skill(config_dir, source_skill)
+    try:
+        source_document = SkillDocument.from_directory(skill.base_dir)
+        alias = validate_name(local_alias)
+        draft = source_document.with_name(alias)
+        SkillAdapter().validate(draft.to_json())
+    except SkillValidationError as error:
+        raise LinkError(getattr(error, "code", "") or "skill-validation", str(error)) from None
+    return skill, source_document, draft
+
+
+def _proposal_fingerprint(fields: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        {"kind": "skill", "fields": dict(fields)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _publication_blocker(
+    ctx: HubSyncContext, skill: Any, source_document: Any, alias: str
+) -> str | None:
+    """A LOCAL reason this draft can never confirm, or None.
+
+    Checked in the preview so Confirm is disabled with a named reason instead of
+    failing after the hub already created a row. Confirm re-checks the same facts
+    under the update lease; this is not the authority, only the honest preview.
+    """
+
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    try:
+        destination = ManagedSkillStorage(ctx.config_dir).path(alias)
+    except LinkError:
+        return "skill-validation"
+    owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+    if owner is not None:
+        return "origin-conflict"
+    if destination.exists():
+        try:
+            same = destination.resolve() == Path(skill.base_dir).resolve()
+        except OSError:
+            same = False
+        # An authored folder may be adopted only when it IS the published name:
+        # adoption never rewrites bytes, so a differing alias would leave the
+        # managed folder named differently from its link.
+        if not same or alias != source_document.name:
+            return "origin-conflict"
+    return None
+
+
+def _publication_preview_reason(
+    ctx: HubSyncContext,
+    *,
+    hub_source: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    auto_push: bool,
+    confirm_public_egress: bool,
+    blocker: str | None,
+) -> str | None:
+    if blocker is not None:
+        return blocker
+    if ctx.client_for_tenant(tenant_id or "") is None:
+        return "no-credential"
+    if auto_push:
+        # The same capability attestation the policy PATCH and install paths
+        # demand. It is a persisted fact about the DEPLOYED server, never a
+        # boolean this request can supply.
+        probe = LinkIdentity("skill", "preview", hub_source, visibility, tenant_id, "preview")
+        if not _capability_auto_push(ctx.store().load(), probe):
+            return "unsupported-precondition"
+        if visibility == "public" and not confirm_public_egress:
+            # The egress grant is minted by the confirmed policy write; the
+            # preview may not claim confirmability without the explicit consent.
+            return "unsafe-publication"
+    return None
+
+
+def preview_skill_publication(
+    ctx: HubSyncContext,
+    *,
+    source_skill: str,
+    local_alias: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    subscribe: bool,
+    auto_push: bool,
+    confirm_public_egress: bool,
+) -> dict[str, Any]:
+    """Project a local skill into the exact initial-publication preview (no network)."""
+
+    from local_operator.hub_sync.identity import approve_source
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    # Scope pairing first: a half pair must never reach a credential selector.
+    if visibility == "public" and tenant_id is not None:
+        raise LinkError("origin-conflict", "a public skill publication cannot name an organization")
+    if visibility == "org" and not tenant_id:
+        raise LinkError("origin-conflict", "an organization skill publication requires a tenant")
+
+    source = approve_source(
+        configured_radient_base_url(ctx.config_manager),
+        (configured_radient_base_url(ctx.config_manager),),
+    )
+    skill, source_document, draft = _project_publication(
+        ctx.config_dir, source_skill=source_skill, local_alias=local_alias
+    )
+    alias = draft.name
+    fields = draft.to_json()
+    blocker = _publication_blocker(ctx, skill, source_document, alias)
+    reason = _publication_preview_reason(
+        ctx,
+        hub_source=source,
+        visibility=visibility,
+        tenant_id=tenant_id,
+        auto_push=auto_push,
+        confirm_public_egress=confirm_public_egress,
+        blocker=blocker,
+    )
+    warnings: list[str] = []
+    if alias != source_document.name:
+        warnings.append(
+            f"This publication renames the skill from {source_document.name!r} to {alias!r}."
+        )
+    token = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(seconds=PUBLICATION_PREVIEW_TTL_S)
+    preview: dict[str, Any] = {
+        "preview_receipt": token,
+        "kind": "skill",
+        "direction": "push",
+        "publication": "create",
+        "source_skill": source_skill,
+        "local_alias": alias,
+        "hub_source": source,
+        "visibility": visibility,
+        "tenant_id": tenant_id,
+        "local_fingerprint": source_document.fingerprint,
+        "draft_fingerprint": draft.fingerprint,
+        "proposal_fingerprint": _proposal_fingerprint(fields),
+        "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "policy": {
+            "subscribe": bool(subscribe),
+            "auto_push": bool(auto_push),
+            "confirm_public_egress": bool(confirm_public_egress),
+        },
+        "proposal": {"kind": "skill", "fields": fields},
+        "warnings": warnings,
+        "can_confirm": reason is None,
+        "reason": reason,
+    }
+    record = dict(preview)
+    # Private fields: never part of the wire contract, only the local receipt.
+    record["source_dir"] = str(Path(skill.base_dir).resolve())
+    _write_publication_preview(ctx.config_dir, record)
+    return preview
+
+
+def _publication_from_result(
+    result: Mapping[str, Any], proposal: Mapping[str, Any], alias: str
+) -> dict[str, Any]:
+    """The `publication` half of the UI contract, from the hub's accepted answer.
+
+    ``accepted_document`` is normalised through the adapter's tolerant-envelope /
+    strict-manifest reader: the hub echoes metadata beside the manifest, and the
+    managed baseline's own finalizer parses its fields as a bare skill document,
+    so an envelope stored verbatim would be refused at commit time.
+    """
+
+    from local_operator.hub_sync.adapters import SkillAdapter
+    from local_operator.hub_sync.skill_document import SkillValidationError
+
+    accepted = result.get("accepted_document")
+    raw_accepted_id = str(accepted.get("id") or "").strip() if isinstance(accepted, Mapping) else ""
+    if isinstance(accepted, Mapping):
+        try:
+            accepted_fields = dict(SkillAdapter().canonical_fields(accepted))
+        except SkillValidationError as error:
+            raise LinkError(
+                "hub-upstream", f"the hub's accepted skill document is invalid: {error}"
+            ) from None
+    else:
+        accepted_fields = dict(proposal)
+    row = result.get("skill")
+    skill_id = ""
+    skill_name = alias
+    if isinstance(row, Mapping):
+        skill_id = str(row.get("id") or "").strip()
+        skill_name = str(row.get("name") or "").strip() or skill_name
+    if not skill_id:
+        skill_id = raw_accepted_id
+    if not skill_id:
+        raise LinkError("hub-upstream", "the hub accepted the publication but named no skill id")
+    revision = result.get("revision")
+    content_revision = result.get("content_revision")
+    return {
+        "skill": {"id": skill_id, "name": skill_name},
+        "accepted_document": accepted_fields,
+        "revision": str(revision) if isinstance(revision, str) and revision else "",
+        "content_revision": (
+            content_revision
+            if isinstance(content_revision, int) and not isinstance(content_revision, bool)
+            else 0
+        ),
+        "operation_id": str(result.get("operation_id") or ""),
+        "sync_contract": (
+            dict(result.get("sync_contract") or {})
+            if isinstance(result.get("sync_contract"), Mapping)
+            else {}
+        ),
+    }
+
+
+def _published_baseline(
+    identity: LinkIdentity,
+    *,
+    alias: str,
+    accepted: Mapping[str, Any],
+    local_fields: Mapping[str, Any],
+    revision: str,
+    operation_id: str,
+    subscribe: bool,
+) -> Any:
+    """The durable published baseline: the hub's accepted canonical document, not L.
+
+    A publication is the strongest origin proof there is, so the record is
+    `recorded_by="publish"` with clean lineage, and the outbound (A, P) receipt is
+    seeded in the SAME write: auto-push has no other honest starting point, and a
+    first publication is exactly the known-agreed act that proves one.
+    """
+
+    from local_operator.hub_sync.push import receipt_for
+
+    record = prov.make_record(
+        "skill", identity.local_id, identity.hub_id, identity.tenant_id, accepted, "publish"
+    )
+    record = replace(
+        record,
+        identity=identity,
+        local_alias=alias,
+        remote_revision=revision or None,
+        lineage="clean",
+        legacy_subscribe_hint=subscribe,
+        outbound=receipt_for(
+            "skill",
+            accepted,
+            local_fields,
+            revision=revision or None,
+            operation_id=operation_id or None,
+        ),
+    )
+    return record
+
+
+def _materialize_published_skill(
+    ctx: HubSyncContext,
+    *,
+    identity: LinkIdentity,
+    alias: str,
+    draft: Any,
+    baseline: Any,
+    source_dir: str,
+    subscribe: bool,
+    auto_push: bool,
+    confirm_public_egress: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Turn an ACCEPTED publication into a real local link.
+
+    Mirrors :func:`install_skill`'s local half under the same cross-process
+    update lease: the alias-ownership check, the journaled managed transaction
+    (or, when the authored folder already IS the destination, an in-place adopt
+    that writes no bytes), and the policy materialization. The answered row is
+    the ORDINARY ``links_snapshot`` row, never a synthesized projection.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.hub_sync import policies as pol
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    storage = ManagedSkillStorage(ctx.config_dir)
+    destination = storage.path(alias)
+    with exclusive(ctx, wait_s=0.0):
+        values = read_config_values(ctx.config_dir)
+        if values is None and (ctx.config_dir / "config.yml").exists():
+            raise LinkError("invalid-link-policy", "configuration is unreadable")
+        existing = prov.read_baseline(ctx.config_dir, "skill", identity.local_id)
+        if existing is not None:
+            if existing.identity != identity or existing.local_alias != alias:
+                raise LinkError("origin-conflict", "a local skill already owns this identity")
+            # REPLAY ARM: the remote outcome was persisted, but a crash may have
+            # landed the baseline without the policy write (or the caller may be
+            # repeating a completed confirm). Materialize is idempotent; only a
+            # requested auto-push that is not ON yet needs the eligibility gate.
+            current = pol.read_policy(values or {}, identity)
+            if auto_push and not current.policy.auto_push:
+                eligibility = _eligibility(
+                    ctx, identity, current.policy, values or {}, baseline, ctx.store().load()
+                )
+                pol.update_policy(
+                    ctx.config_manager,
+                    identity,
+                    expected_revision=current.revision,
+                    subscribe=subscribe,
+                    auto_push=True,
+                    confirm_public_egress=confirm_public_egress,
+                    can_enable_auto_push=bool(eligibility["can_auto_push"]),
+                    ineligible_reason=str(eligibility["reason"]),
+                )
+            else:
+                pol.materialize_policy(
+                    ctx.config_manager, identity, legacy_subscribe_hint=subscribe
+                )
+            operation_id = f"link-{identity.local_id}"
+        else:
+            owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+            if owner not in (None, identity.local_id):
+                raise LinkError(
+                    "origin-conflict", "managed alias belongs to another local skill origin"
+                )
+            current = pol.read_policy(values or {}, identity)
+            adopt = destination.exists()
+            if adopt:
+                # The authored source and the managed destination are one folder;
+                # adoption writes no bytes, so the alias must already be the name
+                # the draft carries. Confirm re-reads it under the lease: an edit
+                # since the preview is a concurrent-edit refusal, not a silent
+                # baseline over changed content.
+                try:
+                    same = destination.resolve() == Path(source_dir).resolve()
+                except OSError:
+                    same = False
+                if not same:
+                    raise LinkError(
+                        "origin-conflict", "refusing to overwrite an unknown local skill"
+                    )
+                if SkillDocument.from_directory(destination).fingerprint != draft.fingerprint:
+                    raise LinkError(
+                        "local-concurrent-edit", "managed skill changed before publication"
+                    )
+            staged_revision: str | None = None
+            if auto_push:
+                eligibility = _eligibility(
+                    ctx, identity, current.policy, values or {}, baseline, ctx.store().load()
+                )
+                current = pol.update_policy(
+                    ctx.config_manager,
+                    identity,
+                    expected_revision=current.revision,
+                    subscribe=subscribe,
+                    auto_push=True,
+                    confirm_public_egress=confirm_public_egress,
+                    can_enable_auto_push=bool(eligibility["can_auto_push"]),
+                    ineligible_reason=str(eligibility["reason"]),
+                )
+                staged_revision = current.revision
+            try:
+                if adopt:
+                    prov.write_baseline(ctx.config_dir, baseline)
+                    pol.materialize_policy(
+                        ctx.config_manager, identity, legacy_subscribe_hint=subscribe
+                    )
+                    operation_id = f"link-{identity.local_id}"
+                else:
+                    transaction = storage.apply(
+                        identity,
+                        alias,
+                        draft,
+                        baseline,
+                        expected_fingerprint=None,
+                        expected_policy_revision=current.revision,
+                        automatic=False,
+                        basis="initial-publish",
+                    )
+                    operation_id = transaction.operation_id
+            except Exception as error:
+                # A staged auto-push entry must not orphan a link that never
+                # landed -- but a grant whose content/baseline DID land is the
+                # recovered install's policy and must survive (the same split
+                # install_skill's settlement makes). Only revert when neither
+                # durable fact is present.
+                if staged_revision is not None:
+                    landed = (
+                        prov.read_baseline(ctx.config_dir, "skill", identity.local_id) is not None
+                    )
+                    if not landed and not adopt:
+                        try:
+                            landed = (
+                                destination.exists()
+                                and SkillDocument.from_directory(destination).fingerprint
+                                == draft.fingerprint
+                            )
+                        except Exception:  # noqa: BLE001 - cannot prove it did not land
+                            landed = True
+                    if not landed:
+                        try:
+                            pol.revert_policy_if_unchanged(
+                                ctx.config_manager, identity, expected_revision=staged_revision
+                            )
+                        except Exception:  # noqa: BLE001 - never mask the original failure
+                            pass
+                if isinstance(error, LinkError):
+                    raise
+                if isinstance(
+                    error, (TransactionError, SkillValidationError, OSError, prov.BaselineError)
+                ):
+                    raise LinkError(getattr(error, "code", "") or "hub-error", str(error)) from None
+                raise
+
+    # The managed transaction writes policy through its OWN manager instance; the
+    # request's manager still holds the pre-write snapshot, and reading the link
+    # row from it would report a creation default instead of what was stored.
+    # Reload before projecting the row so the answer is the persisted policy.
+    ctx.config_manager.reload()
+    snapshot = links_snapshot(ctx)
+    row = next((link for link in snapshot["links"] if link["link_id"] == identity.link_id), None)
+    if row is None:
+        raise LinkError("origin-conflict", "the publication did not materialize a link row")
+    receipt = {
+        "state": "complete",
+        "operation_id": operation_id,
+        "link_id": identity.link_id,
+        "safe_message": None,
+    }
+    return row, receipt
+
+
+def _project_accepted_publication(
+    result: Mapping[str, Any], proposal: Mapping[str, Any], alias: str
+) -> dict[str, Any] | None:
+    """Project an ACCEPTED hub result, or None when its shape cannot be read.
+
+    A projection failure happens AFTER the hub created the row. It must reach the
+    caller as `pending-reconciliation`, never as a 502: the row exists, and
+    "nothing happened" would invite a duplicate publication.
+    """
+
+    try:
+        return _publication_from_result(result, proposal, alias)
+    except LinkError as error:
+        logger.warning("could not project the hub's accepted skill publication: %s", error)
+        return None
+
+
+def _pending_publication(
+    publication: Mapping[str, Any] | None, local_id: str | None, message: str
+) -> dict[str, Any]:
+    """The `pending-reconciliation` answer for an accepted row whose link is not done."""
+
+    return {
+        "preview": None,
+        "link": None,
+        "local_link_receipt": {
+            "state": "pending-reconciliation",
+            "operation_id": f"link-{local_id}" if local_id else "link-pending",
+            "link_id": None,
+            "safe_message": message,
+        },
+        "publication": dict(publication) if publication is not None else None,
+    }
+
+
+def _recorded_draft(record: Mapping[str, Any]) -> Any:
+    """Rebuild the reviewed draft from a receipt, WITHOUT re-reading the source.
+
+    Reconciliation depends on the bytes the hub accepted, not on whatever now
+    sits in the authored folder: the source may have been edited or removed, and
+    refusing the retry for that would orphan the remote row forever.
+    """
+
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+
+    proposal = record.get("proposal")
+    fields = proposal.get("fields") if isinstance(proposal, Mapping) else None
+    if not isinstance(fields, Mapping):
+        raise LinkError("preview_stale", "the publication receipt carries no reviewed draft")
+    try:
+        return SkillDocument.from_json(dict(fields))
+    except SkillValidationError as error:
+        raise LinkError("preview_stale", f"the recorded publication draft is invalid: {error}")
+
+
+def publish_skill(
+    ctx: HubSyncContext,
+    *,
+    source_skill: str,
+    local_alias: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    subscribe: bool,
+    auto_push: bool,
+    confirm_public_egress: bool,
+    dry_run: bool = False,
+    preview_receipt: str | None = None,
+) -> dict[str, Any]:
+    """Initial skill publication: preview (dry run) or confirm a reviewed draft.
+
+    The confirm path is two-phase and crash-ordered:
+
+    1. the preview receipt is re-read, expiry-checked and compared field-for-field
+       with the request;
+    2. the source is re-read from disk and ALL-file bytes are compared with the
+       fingerprints the reviewed draft pinned (`local_fingerprint`,
+       `draft_fingerprint`, `proposal_fingerprint`) -- an edit since the review is
+       `preview_stale`, never a publication of unreviewed bytes;
+    3. the hub call runs BEFORE any local write, and a refusal leaves every piece
+       of local skill state untouched;
+    4. the remote outcome is persisted into the receipt before the managed link
+       transaction, so a retry with the same receipt resumes the SAME local link
+       (the deterministic id is minted from the published hub id) instead of
+       publishing twice;
+    5. the local link is materialized exactly as ``install_skill`` does and the
+       answer carries that real inventory row.
+
+    A local failure AFTER an accepted publication is reported as
+    ``pending-reconciliation`` -- the remote row exists and saying otherwise
+    would invite a duplicate publication.
+    """
+
+    from local_operator.clients._http import APIError
+    from local_operator.hub_sync.identity import approve_source
+    from local_operator.providers.radient_credentials import (
+        ORG_LOGIN_REMEDY,
+        configured_radient_base_url,
+    )
+
+    if dry_run:
+        return {
+            "preview": preview_skill_publication(
+                ctx,
+                source_skill=source_skill,
+                local_alias=local_alias,
+                visibility=visibility,
+                tenant_id=tenant_id,
+                subscribe=subscribe,
+                auto_push=auto_push,
+                confirm_public_egress=confirm_public_egress,
+            ),
+            "link": None,
+            "local_link_receipt": None,
+            "publication": None,
+        }
+
+    if not preview_receipt:
+        raise LinkError("preview_mismatch", "a publication confirm requires its preview receipt")
+    record = _read_publication_preview(ctx.config_dir, preview_receipt)
+    if record is None:
+        raise LinkError("preview_expired", "the publication preview receipt is unknown or expired")
+    durable = isinstance(record.get("outcome"), Mapping) or isinstance(
+        record.get("remote_result"), Mapping
+    )
+    expires = _parse_iso(str(record.get("expires_at") or ""))
+    if not durable and (expires is None or datetime.now(timezone.utc) > expires):
+        raise LinkError("preview_expired", "the publication preview has expired; preview again")
+
+    expected = {
+        "source_skill": source_skill,
+        "local_alias": local_alias,
+        "visibility": visibility,
+        "tenant_id": tenant_id,
+        "policy": {
+            "subscribe": bool(subscribe),
+            "auto_push": bool(auto_push),
+            "confirm_public_egress": bool(confirm_public_egress),
+        },
+    }
+    for key, value in expected.items():
+        if record.get(key) != value:
+            raise LinkError("preview_mismatch", "the publication draft changed after its preview")
+
+    hub_source = str(record.get("hub_source") or "")
+
+    recorded_outcome = record.get("outcome")
+    publication: dict[str, Any] | None = (
+        dict(recorded_outcome) if isinstance(recorded_outcome, Mapping) else None
+    )
+    if publication is not None:
+        # RECONCILIATION ARM: the hub accepted this row. Local bookkeeping is the
+        # only work left, and it must not depend on the authored source -- the
+        # source may have moved, been edited or been deleted since the review.
+        draft = _recorded_draft(record)
+        fields = draft.to_json()
+        source_dir = str(record.get("source_dir") or "")
+    elif isinstance(record.get("remote_result"), Mapping):
+        # The hub accepted but its response could not be projected (or the
+        # projected outcome could not be persisted). Re-read the RAW accepted
+        # result, which was made durable at acceptance, so the retry never asks
+        # for a fresh review nor republishes.
+        draft = _recorded_draft(record)
+        fields = draft.to_json()
+        source_dir = str(record.get("source_dir") or "")
+        publication = _project_accepted_publication(
+            dict(record["remote_result"]), fields, draft.name
+        )
+        if publication is None:
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but its response could not be read",
+            )
+        record["outcome"] = publication
+        try:
+            _write_publication_preview(ctx.config_dir, record)
+        except Exception:  # noqa: BLE001 - the raw result is already durable
+            logger.warning("could not promote the publication outcome", exc_info=True)
+    else:
+        skill, source_document, draft = _project_publication(
+            ctx.config_dir, source_skill=source_skill, local_alias=local_alias
+        )
+        try:
+            recorded_dir = Path(str(record.get("source_dir") or "")).resolve()
+        except OSError:
+            recorded_dir = None
+        if recorded_dir is None or recorded_dir != Path(skill.base_dir).resolve():
+            # A different folder now answers this name (a new higher-priority root):
+            # the reviewed bytes are not this draft, even if a file happens to agree.
+            raise LinkError("preview_stale", "the authored skill moved since its preview")
+        fields = draft.to_json()
+        if (
+            record.get("local_fingerprint") != source_document.fingerprint
+            or record.get("draft_fingerprint") != draft.fingerprint
+            or record.get("proposal_fingerprint") != _proposal_fingerprint(fields)
+        ):
+            raise LinkError("preview_stale", "the authored skill changed since its preview")
+
+        configured = approve_source(
+            configured_radient_base_url(ctx.config_manager),
+            (configured_radient_base_url(ctx.config_manager),),
+        )
+        if hub_source != configured:
+            # The configured destination moved since the review. Re-targeting a
+            # reviewed publication silently would send the bytes somewhere the user
+            # did not review. (Reconciliation does not re-target: it never calls the
+            # hub, so it keeps the recorded destination.)
+            raise LinkError("preview_stale", "the hub destination changed since the preview")
+
+        # A preview whose Confirm control was disabled must not be confirmable by
+        # replaying its receipt directly: the same local/capability/consent gates
+        # are re-evaluated HERE, before the hub can create a row.
+        preflight = _publication_preview_reason(
+            ctx,
+            hub_source=hub_source,
+            visibility=visibility,
+            tenant_id=tenant_id,
+            auto_push=auto_push,
+            confirm_public_egress=confirm_public_egress,
+            blocker=_publication_blocker(ctx, skill, source_document, draft.name),
+        )
+        if preflight is not None:
+            raise LinkError(preflight, "the publication preview is not confirmable")
+        client = ctx.client_for_tenant(tenant_id or "")
+        if client is None:
+            raise LinkError("no-credential", ORG_LOGIN_REMEDY)
+        if str(getattr(client, "base_url", "")).rstrip("/") != hub_source:
+            raise LinkError(
+                "origin-conflict", "the answering client's base is not the requested source"
+            )
+        try:
+            result = client.publish_skill_document(
+                dict(fields), visibility=visibility, tenant_id=tenant_id
+            )
+        except APIError as error:
+            raise LinkError(getattr(error, "code", None) or "hub-error", str(error)) from None
+
+        # THE HUB HAS ACCEPTED. Persist the RAW result before any projection: a
+        # 2xx whose shape cannot be read still names a row that exists, and a 502
+        # would invite a duplicate publication. This file is the only record of
+        # the hub id until a baseline lands.
+        raw_result = dict(result) if isinstance(result, Mapping) else None
+        if raw_result is None:
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but returned an unreadable result",
+            )
+        record["remote_result"] = raw_result
+        try:
+            _write_publication_preview(ctx.config_dir, record)
+        except Exception:  # noqa: BLE001 - report pending, never 502, after acceptance
+            logger.warning("could not record the accepted publication", exc_info=True)
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but its outcome could not be recorded",
+            )
+        publication = _project_accepted_publication(raw_result, fields, draft.name)
+        if publication is None:
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but its response could not be read",
+            )
+        record["outcome"] = publication
+        try:
+            _write_publication_preview(ctx.config_dir, record)
+        except Exception:  # noqa: BLE001 - raw_result is durable; the retry re-projects
+            logger.warning("could not persist the projected publication", exc_info=True)
+        source_dir = str(Path(skill.base_dir).resolve())
+
+    # Every arm above either returned a pending answer or set both facts; the
+    # assertion makes that a runtime invariant as well as a typing one.
+    assert publication is not None
+    hub_id = str(publication["skill"]["id"])
+    local_id = skill_link_local_id(
+        source=hub_source, visibility=visibility, tenant_id=tenant_id, hub_id=hub_id
+    )
+    identity = LinkIdentity("skill", local_id, hub_source, visibility, tenant_id, hub_id)
+    accepted = publication.get("accepted_document")
+    accepted_fields = dict(accepted) if isinstance(accepted, Mapping) else fields
+    baseline = _published_baseline(
+        identity,
+        alias=draft.name,
+        accepted=accepted_fields,
+        local_fields=fields,
+        revision=str(publication.get("revision") or ""),
+        operation_id=str(publication.get("operation_id") or ""),
+        subscribe=subscribe,
+    )
+    try:
+        row, local_receipt = _materialize_published_skill(
+            ctx,
+            identity=identity,
+            alias=draft.name,
+            draft=draft,
+            baseline=baseline,
+            source_dir=source_dir,
+            subscribe=subscribe,
+            auto_push=auto_push,
+            confirm_public_egress=confirm_public_egress,
+        )
+    except Exception as error:
+        # The hub row EXISTS. Reporting the failure as an error would read as
+        # "nothing happened" and invite a duplicate publication; the contract's
+        # pending receipt is the honest state, and the persisted outcome lets a
+        # retry reconcile this same link.
+        logger.warning("could not materialize the published skill link", exc_info=True)
+        return _pending_publication(
+            publication,
+            local_id,
+            (
+                str(error)
+                if isinstance(error, LinkError)
+                else "the local link could not be materialized"
+            ),
+        )
+    record["completed"] = True
+    try:
+        # The marker is only load-bearing if the unlink below fails: a completed
+        # record is prunable, whereas an accepted-unreconciled one is not.
+        _write_publication_preview(ctx.config_dir, record)
+    except Exception:  # noqa: BLE001 - the local link already landed
+        logger.warning("could not mark the publication receipt complete", exc_info=True)
+    _delete_publication_preview(ctx.config_dir, preview_receipt)
+    return {
+        "preview": None,
+        "link": row,
+        "local_link_receipt": local_receipt,
+        "publication": publication,
+    }
