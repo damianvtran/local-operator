@@ -111,6 +111,7 @@ from local_operator.session.frontend_state import (
     SnapshotWakeScheduler,
     WakeState,
     _fold_goal_status,
+    _reading_pair,
     effective_identity_for,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
@@ -2470,20 +2471,20 @@ class AttachedSession:
         checkpoint's own window, so a numerator taken from one side under a
         denominator taken from the other is a percentage the tokens were never
         measured against — the wrong-reading class both methods exist to refuse.
-        A third consumer must call this rather than restating the comparison.
+        A third consumer must call the shared rule rather than restating the
+        comparison.
 
-        ``None`` when either side carries no spec, or when the two name
-        different models: the user switched models since the checkpoint was
-        written, so the stored reading describes a model that is not about to
-        run and is not convertible into one that is.
+        THAT RULE IS ``frontend_state._reading_pair``, not a copy kept here: the
+        owner's first frame asks the same question of the same pair
+        (``_live_model_updates``), and the two answers drifted once — this side
+        refused a cross-model reading while the owner's frame published it
+        (review round 1, M1 = QA round 1, Q2). The pair is ``None`` when either
+        side carries no spec, or when the two name different models: the user
+        switched models since the checkpoint was written, so the stored reading
+        describes a model that is not about to run and is not convertible into
+        one that is.
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        if configured is None or stored is None:
-            return None
-        if configured.provider != stored.provider or configured.model_id != stored.model_id:
-            return None
-        return configured, stored
+        return _reading_pair(state.selected_model, durable.selected_model)
 
     @staticmethod
     def _consistent_context(
