@@ -47,6 +47,11 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The remote-compute API override names the host that receives the
+    # operator's Radient bearer. Inheriting a developer's staging value would
+    # point the suite's remote-compute client at a real host; tests that cover
+    # the override set their own loopback value.
+    "LOP_REMOTE_COMPUTE_API_URL",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
