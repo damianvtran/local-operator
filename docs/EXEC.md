@@ -122,7 +122,7 @@ reported as this network's run.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The run succeeded (or, for `--detach`/`--remote-status`/`--remote-cancel`, the command did). |
+| `0` | The run succeeded (or, for `--detach`/`--remote-status`/`--remote-cancel`, the command did). Also `0` when the watch reaches its time bound while the run is still going: the run did **not** finish, so check it with `--remote-status`. |
 | `1` | The run failed, or its outcome is unknown, or it ended with no outcome (a deleted run), or the command itself errored. |
 | `3` | The run expired: it hit its deadline before it was done. |
 | `4` | The run was cancelled. |
