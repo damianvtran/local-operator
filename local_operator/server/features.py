@@ -966,8 +966,9 @@ def live_feature_flags() -> dict[str, Any]:
         # sends, and the composer says why. The key is the whole switch;
         # nothing else about the app changed to light it up.
         #
-        # CONDITIONAL, and it is the only key in this map whose PRESENCE
-        # is a runtime fact rather than a build fact.
+        # CONDITIONAL, and — beside ``remote_compute`` above — one of the
+        # two keys in this map whose PRESENCE is a runtime fact rather than
+        # a build fact.
         # ``LOCAL_OPERATOR_AT_REFERENCES``
         # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
         # switch read per call, so a process told not to expand must not
