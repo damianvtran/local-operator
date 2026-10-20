@@ -2904,6 +2904,62 @@ def _dispose_hook_failure_label(hook: object, exc: BaseException) -> str:
     return f"dispose hook {name} failed: {type(exc).__name__}: {str(exc)[:200]}"
 
 
+def _monitor_comparable_text(text: str, details: Any) -> tuple[str | None, str | None, str | None]:
+    """``(comparable_text, blind_reason, spill_handle)`` for one monitor check.
+
+    WHY the monitor must not compare ``ToolResult.text``: for an oversized
+    result that is the DISPLAY PROJECTION — a ``spill_truncate`` head+tail plus
+    a footer naming the char count and a ``spill://`` handle — not the result.
+    A live Slack-thread monitor compared two projections of a 13.8 KB
+    single-line JSON, saw only the footer's count change, and the gate called
+    that count non-material metadata: seven new replies were suppressed and the
+    baseline advanced past them. The FULL stored body is the thing that was
+    watched, so it is read back from the spill store.
+
+    Only ``complete=True`` entries may be compared. A missing, evicted or
+    incomplete entry returns a human sentence instead: comparing what survived
+    would silently narrow the watch (and an incomplete body could hide the
+    change), which is the failure this function exists to prevent. The caller
+    turns that sentence into a ``kind="blind"`` outcome that advances no
+    baseline. The handle rides back with the body so the scheduler can keep it
+    as the next diff's baseline: for a result above ``snapshotMaxChars`` the
+    stored snapshot is a clipped prefix, and diffing against that prefix hides
+    a change past the cut (review round 1, F1).
+    """
+    spill = details.get("spill") if isinstance(details, Mapping) else None
+    if not isinstance(spill, Mapping):
+        return text, None, None
+    handle = spill.get("handle")
+    if not isinstance(handle, str) or not handle:
+        return None, "its full result was not kept, so there is nothing to compare", None
+
+    # Imported here: ``session`` is on every session's import path, and the
+    # spill store is reached only by a check whose result actually overflowed.
+    from local_operator.tools.spill import get_store
+
+    store = get_store()
+    meta = store.stat(handle)
+    if meta is None:
+        return None, "its full result is no longer in the spill store", None
+    if not meta.complete:
+        return (
+            None,
+            (
+                "its result was stored incompletely (it exceeded the spill store's per-entry cap), "
+                "so a change in the missing part could not be compared"
+            ),
+            None,
+        )
+    loaded = store.read_lines(handle, 1, None)
+    if loaded is None:
+        return None, "its full result could not be read back from the spill store", None
+    lines, _total = loaded
+    # ``splitlines`` drops a trailing newline; ``diff.normalize`` drops it from
+    # the comparison anyway, so the joined body is the same text as far as the
+    # monitor's equality is concerned.
+    return "\n".join(lines), None, handle
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -27150,7 +27206,10 @@ class Session:
                 ),
                 "kind": "fatal",
             }
-        return {"text": result.text, "error": None}
+        comparable, blind, handle = _monitor_comparable_text(result.text, details)
+        if blind is not None:
+            return {"error": blind, "kind": "blind"}
+        return {"text": comparable, "error": None, "handle": handle}
 
     def _mcp_call_lost_its_server(self, name: str) -> bool:
         """Whether an MCP error result happened while the server was not up.
