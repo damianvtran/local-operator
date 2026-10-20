@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_operator.remote_compute.request import RunCreateRequest
+from local_operator.remote_compute.request import RunCreateRequest, RunSpec
 from local_operator.remote_compute.resolve import (
     CODE_AMBIGUOUS_NETWORK,
     CODE_DUPLICATE_NETWORK_ID,
@@ -101,6 +101,7 @@ __all__ = [
     "NETWORK_ID_PATTERN",
     "NetworkBinding",
     "RunCreateRequest",
+    "RunSpec",
     "SETTING_PATH",
     "is_enabled",
     "resolve_network",
