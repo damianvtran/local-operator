@@ -1,0 +1,261 @@
+# The release gate: a small, dedicated lane for "is this commit releasable?".
+#
+# WHY THIS FILE EXISTS, in the numbers that produced it.
+#
+# The account runs 40 concurrent standard jobs (GitHub Pro; the standard-runner
+# table is Free 20 / Pro 40 / Team 60) with a SEPARATE cap of 5 concurrent
+# macOS jobs, and the cap is account-wide across every repository the account
+# owns. On 2026-10-19 that pool was saturated: 26-28 workflow runs in flight
+# across three repositories, 53-118 jobs queued, a median pending-job AGE of
+# 25.8 minutes (p90 35.0, max 48.8), and a four-minute sample in which ZERO
+# jobs started. Over 318 sampled jobs the queue cost 34.6 hours of waiting to
+# do 5.1 hours of work -- a 6.8x amplification, and the amplification is
+# structural rather than incidental: `ci.yml` declares no `max-parallel`
+# anywhere, so every run fans its whole matrix out at once, and every heavy
+# job in a run is only CREATED after that run's 13-second `changes` classifier
+# has won a runner slot (measured wait: p50 12.5 min, max 18.5 min).
+#
+# A release gate is just another run in that queue, and it is the run with the
+# most at stake. A `push: main` run of `ci.yml` asks for 18 jobs the instant
+# its classifier finishes and roughly 32 over its life; the release branch's
+# gate is currently a hand-dispatched `workflow_dispatch` of the same file
+# (measured: run 39312407055 on `release-next-0-83-0`, 9 jobs pending and 6
+# running), so the release owner is asked to dispatch a 25-job run into a
+# saturated pool and then wait for it like everyone else.
+#
+# THIS FILE IS THE OTHER HALF OF THAT ANSWER. It runs on the same commits, it
+# is NEW at the moment the push lands, and it asks for four runner slots
+# instead of thirty, so it is served while the big matrix is still queued.
+#
+# The structural difference is CREATION ORDER, and it is a property of the
+# workflow graph rather than of GitHub's scheduler: this file's four jobs
+# EXIST the moment the push lands, while `ci.yml`'s heavy jobs are only
+# CREATED after that run's 13-second `changes` classifier has won a runner
+# slot -- measured p50 12.5 minutes, max 18.5. So the matrix's heavy jobs
+# enter the queue 12-18 minutes LATER than this file's do, and a queued
+# `ci.yml` run is a run whose heavy jobs DO NOT EXIST YET.
+#
+# AND WHAT THAT IS WORTH WAS MEASURED, because it is smaller than it sounds
+# and it is not priority. This file was run for real on a saturated account
+# (40 of 40 slots running, 81 queued): its four jobs were created at
+# 21:48:27Z and the first started at 22:00:41Z -- a 12.2 minute wait, and
+# the remaining legs 13.0, 13.8 and 14.9 minutes. Creation order buys a place
+# in the queue, NOT a runner: the gate waited 12.2 minutes while the median
+# queued RUN was 22.6 minutes old, and every one of those queued `ci.yml`
+# runs still had its heavy jobs uncreated. The win is therefore the SLOT
+# COUNT and the SCOPE, and the order is the mechanism, not the benefit:
+#
+#   - this file asks for four slots and the matrix asks for about thirty, so
+#     when slots do free, the gate drains in under two minutes of work where
+#     the matrix's ten unit shards alone each need a slot for ~30 minutes;
+#   - and the gate covers the release branch, where `ci.yml` runs nothing.
+#
+# MEASURED END TO END, on the same account in the same saturation, same day:
+# this file went from push to fully green in 15.9 MINUTES (12.2 of queue
+# wait, 3.7 of work), while the full `ci.yml` matrix on `main` took 120.4
+# MINUTES from push to its last job. That is the number this file is for.
+#
+# It does NOT replace `ci.yml`. The unit suite, the lint and type gates and
+# the e2e freeze guard stay exactly where they are, and a release still needs
+# both. Duplicating them here would ADD to the very queue pressure this file
+# exists to relieve, which is the opposite of the point. What this file adds
+# is the fast answer to the question the release owner asks first -- "is the
+# ARTIFACT sound?" -- answered in minutes instead of hours.
+#
+# WHAT IS IN IT, and why each thing is here:
+#
+#   - the commit under test is the commit that was pushed, so nothing can move
+#     underneath the verdict;
+#   - the interpreter is the `requires-python` floor, the same one the release
+#     path uses in `publish.yml`, and the artifact is additionally smoked on
+#     every interpreter the package claims;
+#   - the i18n catalogues match the source, because a stale catalogue ships in
+#     the wheel and the unit suite does not see the packaged file. What this
+#     enforces on a PUSH is the catalogue half -- the generated tables are
+#     byte-identical to the source, and the catalogues are consistent with
+#     them. The allowance-growth half of `scripts/i18n/check.py` compares a
+#     base revision with the head, and on a push to `main` those are the same
+#     commit, so that half has nothing to compare and is vacuous here; the
+#     per-file literal ceilings it also reports are ADVISORY until the
+#     baseline activates them;
+#   - the declared version parses as a PEP 440 version, so a malformed bump is
+#     caught here rather than by a tag that carries it;
+#   - the BUILT wheel installs, imports and starts -- in both install shapes
+#     the project ships -- using the repository's own `scripts/smoke_wheel.py`,
+#     on EVERY interpreter the package claims.
+#
+# WHAT THE LAST ITEM ADDS, stated precisely, because an earlier draft of this
+# file claimed it was "the one check `ci.yml` structurally cannot make" and
+# that was wrong: `ci.yml`'s `packaging-smoke` job builds a wheel and runs
+# the SAME script on 3.12, 3.13 and 3.14. What the gate adds is not the check
+# and it is not the coverage; it is LATENCY, and the release branch.
+#
+#   - LATENCY: this file's jobs are CREATED the moment the push lands, while
+#     `ci.yml`'s heavy jobs are only created after that run's 13-second
+#     `changes` classifier wins a runner slot (measured p50 12.5 minutes), so
+#     the gate's verdict arrives while the matrix is still queued -- and the
+#     matrix's own jobs do not exist yet. That is a queue-position advantage,
+#     not priority: the gate still waited 12.2 minutes for its first slot.
+#   - THE RELEASE BRANCH: `ci.yml`'s push list is `[main]` only, so on
+#     `release-next*` it runs nothing at all. This file is the only CI the
+#     release branch has, and the bump is amended there.
+#
+# The SOURCE-TREE half of the original claim is still true and is why the
+# artifact check is here at all: the unit suite and `server-sanity` run
+# against the SOURCE TREE, and v0.77.0 shipped to PyPI unstartable on Python
+# 3.14 with every source-tree gate green.
+name: Release Gate
+
+on:
+  push:
+    branches:
+      - main
+      # The release branch. `ci.yml`'s push list is `[main]` only, so today a
+      # push to the release branch runs NOTHING, and the release owner has to
+      # dispatch `ci.yml` by hand and get a 25-job run queued behind every
+      # feature branch in the account. This trigger is what makes the gate
+      # automatic at the moment the owner amends the bump.
+      #
+      # BOTH spellings, because they are two different branches: `release-next`
+      # is the floating line the versioned branch is cut from (an ancestor of
+      # `release-next-0-83-0`), and `release-next-*` is the versioned line
+      # itself. A bump amended on the floating line is the EARLIEST moment the
+      # release owner can have a verdict, so the gate has to fire there too.
+      - release-next
+      - 'release-next-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per (ref, commit), and NEVER cancelled. A release gate that can
+# be cancelled is not a gate, and a group keyed by SHA cannot be evicted by a
+# later run the way a per-ref group can: the later run simply gets its own
+# group and both complete.
+#
+# WHAT THIS BLOCK DOES NOT DO, stated so the block is not read as a bound it
+# does not provide: it does not SERIALISE the gates. Two pushes to `main` are
+# two commits, so they get two groups and two gates run concurrently. A
+# per-ref group WOULD bound that, and it was rejected for a measured reason:
+# a concurrency group holds one run in progress and only ONE pending, so a
+# third push to `main` would EVICT the pending gate -- and an evicted gate is
+# exactly the failure this file exists to prevent. A gate that is never
+# evicted is worth more than a bound on how many gates run at once, and the
+# gate is four short jobs, so the burst is small and the pushes are
+# operator-paced.
+concurrency:
+  group: release-gate-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  # The version and catalogue invariants, byte for byte the ones
+  # `publish.yml`'s `release-invariants` job asserts before it builds
+  # anything. They are repeated here rather than shared because the two files
+  # answer different questions at different times: `publish.yml` asks "is the
+  # thing being PUBLISHED sound?", and this asks "is the thing being CUT
+  # sound?". Duplicating two short scripts is cheaper than a reusable
+  # workflow that would make the publish path depend on this file's shape.
+  release-invariants:
+    name: Release invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # NODE IS PINNED, and it is not optional. `scripts/i18n/generate.py` is a
+      # Python wrapper around a Node program (`scripts/i18n/emit.mjs`), and
+      # the bytes it emits are a function of the Node's ICU data, not of the
+      # Node's major alone: on ICU 77.1 the same source emits vi-VN "Th 2"
+      # where the committed table has "Thú 2", and `generate.py --check` then
+      # fails. `publish.yml` and `ci.yml` both pin Node 24 for exactly this
+      # reason, so this job must pin it too -- otherwise the gate and the
+      # matrix would disagree about the same commit the first time the
+      # runner image's Node moved under them.
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # The version parser is INSTALLED, not assumed. `packaging` is not
+      # part of the standard library, and the first version of this gate
+      # hand-rolled a regex that rejected eight PEP 440-valid spellings
+      # (`1.0.0-rc1`, `v1.0.0`, `1.0.0+local` and the digit-less pre/post/dev
+      # forms among them). Declaring the dependency is the fix: a gate must
+      # not carry a private, narrower idea of what a version is.
+      - name: Install the version parser
+        run: python -m pip install --quiet packaging
+
+      - name: Verify the commit under test and the release invariants
+        run: |
+          set -euo pipefail
+          # The commit under test IS the commit that was pushed. On a tag
+          # event this is the thing that can move underneath a build; on a
+          # push it is cheap insurance that the checkout and the event agree.
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          # A version that will not parse is a version a tag cannot carry.
+          # Parsed with `packaging`, which the step above INSTALLS, so this is
+          # the whole of PEP 440 rather than a private subset of it.
+          python -c "import tomllib,pathlib,packaging.version as pv; v=tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']; pv.Version(v); print('declared version:', v)"
+          python scripts/i18n/generate.py --check
+          python scripts/i18n/check.py
+
+  # The artifact itself. Two slots, and the two jobs above run CONCURRENTLY
+  # with this one rather than in sequence, so the gate's wall time is the
+  # slower of the two and not their sum: under a saturated account a serial
+  # chain of two cheap jobs is a gate that waits twice.
+  release-artifact:
+    name: Build and start the release artifact (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # 25, not 15, because this job is TWO sequential network-dependent
+    # operations -- a wheel build and a wheel install that resolves from
+    # PyPI -- and `ci.yml` budgets them separately (10 minutes for the build,
+    # 10 for the smoke). One shared 15-minute budget meant a slow resolve in
+    # the build phase ate the smoke's budget, and the smoke is the part that
+    # can catch a broken artifact.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # EVERY interpreter the package claims, and the reason is a measured
+        # defect rather than a policy. `requires-python` is ">=3.12" and the
+        # classifiers name 3.12, 3.13 and 3.14. v0.77.0 shipped to PyPI
+        # unstartable on 3.14 while every 3.12 and 3.13 run was green, because
+        # under PEP 649 the class-body annotation is evaluated lazily and the
+        # 3.12 interpreter evaluates it eagerly -- the upstream commit says
+        # exactly this: "a runtime import test alone cannot gate this". A gate
+        # that smoked the wheel on 3.12 alone therefore reported GREEN on the
+        # precise defect class it exists to catch; reproduced, with the
+        # v0.77.0 regression restored in the wheel, the same
+        # `scripts/smoke_wheel.py` passes on 3.12 and raises TypeError on
+        # 3.14. So the gate runs the smoke on the full declared range, the
+        # same set `ci.yml`'s `packaging-smoke` uses and for the same reason.
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build --wheel --outdir dist/release-gate
+
+      # The repository's own artifact check, unchanged: it installs the built
+      # wheel into a throwaway venv, imports it from OUTSIDE the checkout so
+      # the source tree cannot satisfy the import, and starts it in both
+      # install shapes the project ships (base, and the `server` extra).
+      # `packaging-smoke` in `ci.yml` runs the same script; running it here
+      # as well is deliberate, because the release gate must be able to say
+      # "the artifact starts" without waiting for a pull request's matrix.
+      - name: Install and start the built wheel
+        run: python scripts/smoke_wheel.py --wheel dist/release-gate/local_operator-*.whl

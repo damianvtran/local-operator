@@ -4254,8 +4254,19 @@ class ServingSessionHandle(SessionHandle):
         the standing fallback (that is its whole purpose — a normal landing
         never displaces a stored title) and never re-arms itself.
         """
-        from local_operator.session import naming
+        from local_operator.session import auto_tag, naming
 
+        # Auto-tagging is a FIRST-NAME path only. The heal's job is to upgrade
+        # a Tier 3 fallback title, and the attempt that stored that fallback
+        # already settled the intent; reading the sidecar again here would let
+        # a retry claim tags after the row has been visible — and corrected —
+        # in the list.
+        intent = None if heal else self._auto_tag_intent()
+        tag_contract = (
+            await asyncio.to_thread(auto_tag.live_contract, intent.root)
+            if intent is not None
+            else None
+        )
         try:
             acceptance = await naming.generate_title_acceptance(
                 text,
@@ -4264,10 +4275,20 @@ class ServingSessionHandle(SessionHandle):
                 # classification layer has no attribute and the cascade hedges
                 # instead of asking. See ``naming.title_fit_check``.
                 fit_check=getattr(self._session, "title_fit_check", None),
+                tag_contract=tag_contract,
             )
         except Exception:  # noqa: BLE001 — naming is decoration; never fail a turn
             logger.debug("mobile conversation naming failed", exc_info=True)
             return
+        if intent is not None and acceptance.title:
+            # Any returned title spends the intent — including the Tier 3
+            # opener fallback, which carries no model tags but is still the
+            # answer this attempt settled on. Only a title-less answer (the
+            # sentinel, a failed call) keeps the sidecar for a retry. ``settle``
+            # is the one write and it never raises; a revision conflict inside
+            # it is a human edit winning rather than a failure worth surfacing
+            # from a detached task, and the heal path never reads the intent.
+            await asyncio.to_thread(auto_tag.settle, intent, acceptance.tags)
         title = acceptance.title
         existing = getattr(self._session, "conversation_name", "")
         if not title or (existing and not heal):
@@ -4295,6 +4316,32 @@ class ServingSessionHandle(SessionHandle):
         self._session.set_conversation_name(title, user_set=False)
         self._refresh_state()
         self._notify()
+
+    def _auto_tag_intent(self) -> Any:
+        """The child's fork-time auto-tag intent, or ``None`` when not asked for.
+
+        Read from the session's OWN store, the same root the fork branch lands
+        a clone in (:func:`_fork_store`): the desktop route writes the sidecar
+        beside the child it created, so a runtime served out of another store
+        must look there rather than at this process's default root. The
+        sidecar is READ, not spent — :func:`auto_tag.settle` clears it only
+        after the naming attempt that accepted a title, which leaves a failed
+        call's intent for the next prompt's naming retry.
+
+        This ONE read stays on the loop deliberately. It is a bounded read of
+        a sub-kilobyte sidecar, and the first-name worker's latency is pinned
+        by the serving tests' loop-turn budget: a ``to_thread`` hop here delays
+        the title by a full thread round trip even on the no-intent path. The
+        registry read (``auto_tag.live_contract``) is the unbounded one and
+        stays off the loop.
+        """
+        from local_operator.session import auto_tag
+
+        session_id = str(getattr(self._session, "session_id", "") or "")
+        if not session_id:
+            return None
+        root = self._config_dir or _fork_store(self._session)
+        return auto_tag.read(root, session_id)
 
     def _maybe_heal_name(self) -> None:
         """Spend the one-shot Tier 3 self-heal at a completed turn, if armed.
@@ -5146,10 +5193,19 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
-        elif (
-            current is not None
-            and current.reasoning_effort
-            and current.reasoning_effort != current.reasoning_default_effort
+        elif current is not None and (
+            (
+                current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+            )
+            # OR THE CONVERSATION'S HELD CHOICE, which is the half that was
+            # missing. A trip through a route that cannot express the level
+            # leaves the SPEC at ``None``; the choice is still real (see
+            # ``Session.chosen_effort``), and a switch made from that route
+            # used to arrive here with nothing to carry and fall to the new
+            # model's seed — the observed "switch away from an aggregator and
+            # Max becomes High".
+            or getattr(self._session, "chosen_effort", None)
         ):
             # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
             #
@@ -5178,17 +5234,41 @@ class ServingSessionHandle(SessionHandle):
             # model that cannot express it lands on its nearest rung instead
             # of one it rejects -- the same stale-level clamp the ``if effort``
             # arm above applies.
+            # THE CHOICE OUTRANKS THE SPEC. The spec's level can be a CLAMP
+            # (a carry onto a narrower ladder leaves `xhigh` there while the
+            # conversation still chose `max`), and preferring it here carried
+            # the clamp onward — the reverse of the defect M1a named, and what
+            # made a round trip through a narrow route lose `max` even after
+            # the clamp stopped being RECORDED as the choice. The spec is
+            # consulted only when no choice is held (a legacy sender that set
+            # a non-seed level through `set_model` directly).
+            carry_level = getattr(self._session, "chosen_effort", None) or (
+                current.reasoning_effort
+                if current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+                else None
+            )
             carried = resolve_effort_in(
                 spec.reasoning_efforts,
                 spec.reasoning_default_effort,
-                current.reasoning_effort,
+                carry_level,
             )
             if carried is not None:
                 spec = spec.model_copy(update={"reasoning_effort": carried})
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
-        self._session.set_model(spec, explicit=True)
+        #
+        # ``effort_choice`` is passed ONLY when the CALLER named a level: a
+        # level-less switch carries one (or clamps it for display) without
+        # deciding anything, and letting ``set_model`` infer a choice from the
+        # resulting spec would record a failover clamp as the user's choice
+        # (review round 1, M1). An explicit ``auto`` is a withdrawal, which
+        # ``_normalise_effort_choice`` turns into ``None``.
+        switch: dict[str, Any] = {"explicit": True}
+        if effort:
+            switch["effort_choice"] = effort
+        self._session.set_model(spec, **switch)
         self._refresh_state()
         # The claim follows the model it is about: a switch can land on a
         # provider this host has no credential for, and a reader must not keep
@@ -5617,7 +5697,9 @@ class ServingSessionHandle(SessionHandle):
                 raise ValueError(f"{spec.model_id} has no reasoning-effort levels; drop --effort")
             ladder = ", ".join(spec.reasoning_efforts)
             raise ValueError(f"{spec.model_id} accepts {ladder} \u2014 not '{effort}'")
-        self._session.set_model(spec.model_copy(update={"reasoning_effort": effort}))
+        self._session.set_model(
+            spec.model_copy(update={"reasoning_effort": effort}), effort_choice=effort
+        )
         self._refresh_state()
         return f"effort: {effort}"
 
@@ -9962,6 +10044,13 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
         self._publish_subagents()
+        for name, value in (("set_waiting", self.waiting_on()), ("set_jobs", self.job_counts())):
+            publish = getattr(server, name, None)
+            if callable(publish):
+                try:
+                    publish(value)
+                except Exception:  # noqa: BLE001 — presence must not fail a turn
+                    logger.debug("could not publish the job presence", exc_info=True)
 
     def _publish_session_started(self) -> None:
         """Flip the record's ``started`` bit once a real turn has run.
@@ -9980,6 +10069,19 @@ class ServingSessionHandle(SessionHandle):
             setter(True)
         except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
             logger.debug("could not publish the started state", exc_info=True)
+
+    def waiting_on(self) -> int:
+        """Read the foreground wait snapshot, never infer it from busy."""
+        return getattr(self._session, "_waiting_on", 0)
+
+    def job_counts(self) -> int | None:
+        """Count only background tools: task rows already belong to the roster."""
+        try:
+            return sum(
+                row.status == "running" and row.type != "task" for row in self._session.jobs.list()
+            )
+        except Exception:  # noqa: BLE001 — unknown is not a measured zero
+            return None
 
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories, or ``(None, None)``.

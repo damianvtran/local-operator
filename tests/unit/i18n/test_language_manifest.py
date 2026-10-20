@@ -336,6 +336,101 @@ def test_allowance_growth_reports_only_added_key_ids(i18n_check) -> None:
     assert i18n_check.allowance_growth(base, head) == {("fr", "demo", "demo.two")}
 
 
+def _allowance_growth_repo(
+    tmp_path: Path,
+    i18n_check,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    english: dict[str, str] | None,
+) -> tuple[Path, str]:
+    """A one-commit repo whose base allowance records ``fr/demo: demo.one``.
+
+    ``english`` writes the base English catalogue; ``None`` leaves the
+    directory absent so the base-English read cannot succeed. The module
+    under test is pointed at the fixture tree through ``monkeypatch`` so the
+    session-scoped import cannot leak into another test.
+    """
+    repo = tmp_path / "repo"
+    (repo / "i18n").mkdir(parents=True)
+    (repo / "i18n" / "coverage-allowance.json").write_text(
+        json.dumps({"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}),
+        encoding="utf-8",
+    )
+    if english is not None:
+        catalogue = repo / "local_operator" / "i18n" / "catalogues" / "en"
+        catalogue.mkdir(parents=True)
+        (catalogue / "demo.json").write_text(json.dumps(english), encoding="utf-8")
+    git = ["git", "-c", "user.name=i18n", "-c", "user.email=i18n@example.invalid"]
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    monkeypatch.setattr(i18n_check, "REPO", repo)
+    monkeypatch.setattr(i18n_check, "ALLOWANCE", repo / "i18n" / "coverage-allowance.json")
+    return repo, base_sha
+
+
+def _record_debt(repo: Path, missing: list[str]) -> None:
+    allowance = repo / "i18n" / "coverage-allowance.json"
+    allowance.write_text(
+        json.dumps({"pairs": [{"locale": "fr", "namespace": "demo", "missing": missing}]}),
+        encoding="utf-8",
+    )
+
+
+def test_allowance_growth_accepts_recorded_debt_when_english_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """Recording debt in a change that adds no English copy is permitted.
+
+    The base and head English key sets are identical, so nothing is being
+    landed untranslated; the added rows only record debt the tree already
+    carried (this branch's case).
+    """
+    repo, base_sha = _allowance_growth_repo(
+        tmp_path, i18n_check, monkeypatch, english={"demo.title": "Demo"}
+    )
+    _record_debt(repo, ["demo.one", "demo.title"])
+    assert i18n_check.check_allowance_growth(base_sha) == []
+
+
+def test_allowance_growth_rejects_debt_for_copy_new_since_the_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """New English copy plus an allowance row for it in one diff is growth.
+
+    This is the laundering vector: the change adds the English key and hides
+    it in the allowance in the same diff, so the entry must fail and name the
+    key.
+    """
+    repo, base_sha = _allowance_growth_repo(
+        tmp_path, i18n_check, monkeypatch, english={"demo.title": "Demo"}
+    )
+    # The head catalogue gains the new English key, as the introducing PR would.
+    head_catalogue = repo / "local_operator" / "i18n" / "catalogues" / "en" / "demo.json"
+    head_catalogue.write_text(
+        json.dumps({"demo.title": "Demo", "demo.added_after_base": "New"}), encoding="utf-8"
+    )
+    _record_debt(repo, ["demo.one", "demo.added_after_base"])
+    assert i18n_check.check_allowance_growth(base_sha) == [
+        "allowance growth: added fr/demo: demo.added_after_base"
+    ]
+
+
+def test_allowance_growth_fails_conservatively_without_base_english(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, i18n_check
+) -> None:
+    """An unreadable English key set keeps every addition red and says so."""
+    repo, base_sha = _allowance_growth_repo(tmp_path, i18n_check, monkeypatch, english=None)
+    _record_debt(repo, ["demo.one", "demo.unknown"])
+    assert i18n_check.check_allowance_growth(base_sha) == [
+        "allowance growth: added fr/demo: demo.unknown"
+    ]
+    assert "English catalogues unreadable" in capsys.readouterr().out
+
+
 def test_allowance_growth_skips_without_a_base_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
 ) -> None:
@@ -372,3 +467,239 @@ def test_allowance_growth_notes_missing_default_inside_git(
     monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     assert i18n_check.check_allowance_growth() == []
     assert "allowance growth: skipped (no base ref)" in capsys.readouterr().out
+
+
+def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A locale with no catalogue at base cannot be translated, so its debt is lawful.
+
+    Without this carve-out the manifest gate (which checks every language in
+    the manifest) and the growth ratchet (which rejects added rows when
+    English grows) are mutually unsatisfiable for any change that adds
+    English copy: a deadlock rather than a ratchet.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.fresh"]}]}
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.existing"},
+        inactive_locales={"ur"},
+    )
+    assert got == set()
+
+
+def test_allowance_growth_rejects_a_removed_translation(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """Deleting a translation and recording debt is growth, not debt recording.
+
+    The key was present at base and missing at head with English unchanged,
+    which is the ``translate-then-drop`` route: it must fail even though no
+    English key moved.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: {"demo.one"})
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.one"},
+        inactive_locales=set(),
+    )
+    assert got == {("fr", "demo", "demo.one")}
+
+
+def test_allowance_growth_fails_closed_when_the_base_catalogue_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A corrupt base catalogue must not be mistaken for an absent one.
+
+    ``ABSENT`` means the namespace was uncarried, so the key was genuinely
+    missing and recording it is lawful. ``None`` means the file exists but
+    could not be read — an unverifiable base. Treating that as absence would
+    let a dropped translation's debt be recorded with both gates green,
+    which is a fail-open in the one rule that exists to stop exactly that.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.one"},
+        inactive_locales=set(),
+    )
+    assert got == {("fr", "demo", "demo.one")}
+
+
+def test_allowance_growth_permits_debt_when_the_namespace_was_uncarried(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """An uncarried namespace is a genuine absence, not an unreadable base."""
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: set())
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.one"},
+        inactive_locales=set(),
+    )
+    assert got == set()
+
+
+def test_allowance_growth_rejects_new_english_for_a_newly_activated_locale(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A locale that gains its first catalogue cannot bank new English as debt.
+
+    ``inactive`` is computed at the base ref, so without intersecting it with
+    the locales that carry a catalogue at HEAD, a change could give an
+    uncarried locale its first namespace and record brand-new English there
+    with both gates green — bypassing "new English must be translated" via
+    the base-ref view of inactivity.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.new"]}]}
+    monkeypatch.setattr(i18n_check.catalogues, "locales", lambda: ("ur",))
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.existing"},
+        inactive_locales={"ur"},
+    )
+    assert got == {("ur", "demo", "demo.new")}
+
+
+def test_allowance_growth_still_permits_debt_for_a_locale_left_uncarried(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """The carve-out survives for a locale that is still uncarried at HEAD."""
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "zh-CN", "namespace": "demo", "missing": ["demo.new"]}]}
+    monkeypatch.setattr(i18n_check.catalogues, "locales", lambda: ("fr", "es"))
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.existing"},
+        inactive_locales={"ur", "zh-CN"},
+    )
+    assert got == set()
+
+
+def test_allowance_growth_sees_a_translation_moved_to_a_parent_namespace(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """Presence is a property of the locale, not of one namespace.
+
+    A key moved from ``demo.nested`` to ``demo`` would look absent if the
+    check only read the base file for the namespace the debt is recorded
+    under — ``demo`` was never carried at base — so a dropped translation
+    would pass as pre-existing debt.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.nested.one"]}]}
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: {"demo.nested.one"})
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.nested.one"},
+        inactive_locales=set(),
+    )
+    assert got == {("fr", "demo", "demo.nested.one")}
+
+
+def _git_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """An environment that can commit without touching the operator's keychain.
+
+    The system gitconfig carries ``credential.helper = osxkeychain``; a test
+    rig that leaks a credential lookup opens a macOS prompt, so both config
+    layers are neutralised and an identity is supplied explicitly.
+    """
+    import os
+
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "i18n test",
+        "GIT_AUTHOR_EMAIL": "i18n@example.invalid",
+        "GIT_COMMITTER_NAME": "i18n test",
+        "GIT_COMMITTER_EMAIL": "i18n@example.invalid",
+    }
+    for key in ("TMPDIR", "LANG", "LC_ALL"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
+def test_locale_keys_at_ref_separates_absent_from_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """The detection layer itself is exercised, not stubbed.
+
+    Round 5's mutation proof: every other test here stubs the probe wholesale,
+    so re-collapsing "unreadable" into "absent" would leave the suite green.
+    This one reads real git objects: a readable catalogue, an uncarried
+    locale, and a corrupt file must produce three different answers.
+    """
+    import subprocess
+
+    env = _git_env(monkeypatch)
+    repo = tmp_path / "repo"
+    catalogue = repo / "local_operator" / "i18n" / "catalogues"
+    (catalogue / "fr").mkdir(parents=True)
+    (catalogue / "fr" / "demo.json").write_text('{"demo.one": "Un"}', encoding="utf-8")
+
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+
+    run("init", "-q")
+    run("add", "-A")
+    run("commit", "-q", "-m", "base")
+    good = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, env=env
+    ).stdout.strip()
+
+    monkeypatch.setattr(i18n_check, "REPO", repo)
+    assert i18n_check._locale_keys_at_ref(good, "fr") == {"demo.one"}
+    assert i18n_check._locale_keys_at_ref(good, "ur") == set()
+
+    (catalogue / "fr" / "broken.json").write_text("{not json", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "corrupt")
+    corrupt = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, env=env
+    ).stdout.strip()
+    assert i18n_check._locale_keys_at_ref(corrupt, "fr") is None
+
+
+def test_allowance_growth_skips_rather_than_fails_outside_a_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A repo-less fixture must skip even under a pull-request event.
+
+    CI exports ``GITHUB_EVENT_NAME=pull_request`` for the whole job, and every
+    checker test points ``REPO`` at a temp directory that is not a git
+    repository. The fail-closed branch is for a real tree whose base did not
+    resolve; reaching it from a fixture made nineteen planted-literal tests
+    red on a tree that was otherwise green.
+    """
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    monkeypatch.setattr(i18n_check, "REPO", plain)
+    assert i18n_check.check_allowance_growth(None) == []

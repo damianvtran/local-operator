@@ -22,9 +22,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # TWENTY-THREE: the union plus independently audited P3a/P3b namespaces,
-    # the scratchpad-hygiene slice's hi wire.settings row, and P4a's audited
-    # tui.viewer row (including its keyboard-hint audit refresh).
+    # TWENTY-FOUR: the union plus independently audited P3a/P3b namespaces,
+    # the scratchpad-hygiene slice's hi wire.settings row, P4a's audited
+    # tui.viewer row (including its keyboard-hint audit refresh), and the
+    # i18n lane's audited `wire.memory` row for the namespace translated in
+    # five active locales.
     # Base is twelve (the Wave-3 ten retain their audited source pins). Main
     # added a wire.settings row for the hub-setting deletion and the LOH-19
     # review slice added a tui.review row; the earlier branch added a
@@ -38,12 +40,13 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # silently admit an unrelated held namespace or discard the previous audit
     # history.
     # P3b adds its 35-key tui.team_authoring namespace after independent audit.
-    # The remote_compute six-key wire.settings delta adds its independently
-    # audited row on top — TWENTY-FOUR. The S3e remote-compute wave adds one
-    # row per carried namespace (`cli.exec_remote_help`, `wire.remote_compute`)
-    # — TWENTY-SIX. The pin still exists so a held namespace cannot ride in on
-    # an unrelated audited union.
-    assert len(hindi) == 26
+    # The audited `hi/wire.memory` row from main and the remote_compute six-key
+    # wire.settings delta's independently audited row each add one on top --
+    # TWENTY-FIVE. The S3e remote-compute wave adds one row per carried
+    # namespace (`cli.exec_remote_help`, `wire.remote_compute`) -- TWENTY-SEVEN.
+    # The pin stays cardinal so a held namespace cannot ride in on an unrelated
+    # audited union.
+    assert len(hindi) == 27
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

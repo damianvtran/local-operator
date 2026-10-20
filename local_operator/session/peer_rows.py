@@ -556,18 +556,17 @@ def _read(
     # its root.
     network_names = _network_names(root) if root is not None else {}
     rows: list[SessionRow] = []
-    # KEYED BY ``(owner_device, session_id)``, AND THE FIRST ROW FOR A KEY WINS (review
-    # round 1, MINOR 2). The duplicates this collapses are one device's own answer
-    # repeated per shared network, so they are the same row and the order decides
-    # nothing. Keying on the id ALONE was global across devices: two devices reporting
-    # one id — which is the permanent routing ambiguity the mesh exists to prevent
-    # (``relay._op_session_create``) — collapsed to a single row silently, filed under
-    # the first device's heading, and a user's two conversations looked like one. With
-    # the device in the key every case this function is FOR still collapses (same
-    # device, same id, one row per membership) and the cross-device collision stays
-    # two rows, which is the routing ambiguity being visible rather than hidden.
+    # Key by (owner_device, session_id), not id alone: a cross-device collision
+    # is a routing ambiguity the reader must see, not silently collapse. Within
+    # that key the first non-stored row wins, then a stored fallback if necessary.
     seen: set[tuple[str, str]] = set()
-    for peer_row in raw:
+    # The relay can answer with a stored fallback before a live row for the
+    # same device/id (for example through two shared network memberships). The
+    # previous first-wins pass kept that fallback and painted an executing
+    # session idle. Prefer any non-stored measurement first; stable sorting
+    # retains first-wins for otherwise equivalent membership duplicates. The
+    # device remains in the key so two devices claiming one id stay visible.
+    for peer_row in sorted(raw, key=lambda row: getattr(row, "state", "") == "stored"):
         session_id = str(getattr(peer_row, "session_id", "") or "")
         device_id = str(getattr(peer_row, "device_id", "") or "")
         if not session_id or (device_id, session_id) in seen:
@@ -592,6 +591,10 @@ def _read(
                 # them.
                 str(getattr(peer_row, "conversation_name", "") or UNTITLED_CONVERSATION),
                 live_state=_live_state(peer_row),
+                waiting_on=getattr(peer_row, "waiting_on", 0),
+                jobs_running=getattr(peer_row, "jobs_running", None),
+                subagents_running=getattr(peer_row, "subagents_running", None),
+                subagents_queued=getattr(peer_row, "subagents_queued", None),
                 pending=getattr(peer_row, "pending", None),
                 kind=str(getattr(peer_row, "kind", "") or ""),
                 locality="remote",
@@ -690,6 +693,10 @@ def _live_state(peer_row: object) -> str:
       session is ``idle``, never ``attached``.
     """
     state = str(getattr(peer_row, "state", "") or "")
+    # Mixed-version relays can forward the first reaping scan's dead record.
+    # A gone pid is cold, never the wedged diagnostic that says process alive.
+    if state == "stale":
+        return ""
     if state in ("busy", "idle", "attached", "wedged"):
         return state
     if state == "stored":
