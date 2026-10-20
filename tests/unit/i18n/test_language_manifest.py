@@ -481,7 +481,7 @@ def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
     """
     base = {"pairs": []}
     head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.fresh"]}]}
-    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
     got = i18n_check.allowance_growth(
         base,
         head,
@@ -503,7 +503,7 @@ def test_allowance_growth_rejects_a_removed_translation(
     """
     base = {"pairs": []}
     head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
-    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: {"demo.one": "traduit"})
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: {"demo.one"})
     got = i18n_check.allowance_growth(
         base,
         head,
@@ -527,7 +527,7 @@ def test_allowance_growth_fails_closed_when_the_base_catalogue_is_unreadable(
     """
     base = {"pairs": []}
     head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
-    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
     got = i18n_check.allowance_growth(
         base,
         head,
@@ -544,7 +544,7 @@ def test_allowance_growth_permits_debt_when_the_namespace_was_uncarried(
     """An uncarried namespace is a genuine absence, not an unreadable base."""
     base = {"pairs": []}
     head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
-    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: i18n_check.ABSENT)
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: set())
     got = i18n_check.allowance_growth(
         base,
         head,
@@ -569,7 +569,7 @@ def test_allowance_growth_rejects_new_english_for_a_newly_activated_locale(
     base = {"pairs": []}
     head = {"pairs": [{"locale": "ur", "namespace": "demo", "missing": ["demo.new"]}]}
     monkeypatch.setattr(i18n_check.catalogues, "locales", lambda: ("ur",))
-    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
     got = i18n_check.allowance_growth(
         base,
         head,
@@ -587,7 +587,7 @@ def test_allowance_growth_still_permits_debt_for_a_locale_left_uncarried(
     base = {"pairs": []}
     head = {"pairs": [{"locale": "zh-CN", "namespace": "demo", "missing": ["demo.new"]}]}
     monkeypatch.setattr(i18n_check.catalogues, "locales", lambda: ("fr", "es"))
-    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: None)
     got = i18n_check.allowance_growth(
         base,
         head,
@@ -596,3 +596,26 @@ def test_allowance_growth_still_permits_debt_for_a_locale_left_uncarried(
         inactive_locales={"ur", "zh-CN"},
     )
     assert got == set()
+
+
+def test_allowance_growth_sees_a_translation_moved_to_a_parent_namespace(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """Presence is a property of the locale, not of one namespace.
+
+    A key moved from ``demo.nested`` to ``demo`` would look absent if the
+    check only read the base file for the namespace the debt is recorded
+    under — ``demo`` was never carried at base — so a dropped translation
+    would pass as pre-existing debt.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.nested.one"]}]}
+    monkeypatch.setattr(i18n_check, "_locale_keys_at_ref", lambda *a, **k: {"demo.nested.one"})
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.nested.one"},
+        inactive_locales=set(),
+    )
+    assert got == {("fr", "demo", "demo.nested.one")}

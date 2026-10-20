@@ -615,11 +615,6 @@ def _check_context_sidecar(
 # ---------------------------------------------------------------------------
 
 
-#: Sentinel for "the namespace is not carried at the base ref". Distinct
-#: from ``None``, which means "present but unreadable".
-ABSENT = "ABSENT"
-
-
 def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     """Every ``(locale, namespace, key)`` the allowance records as missing."""
     ids: set[tuple[str, str, str]] = set()
@@ -631,37 +626,41 @@ def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     return ids
 
 
-def _base_catalogue(ref: str, locale: str, namespace: str) -> dict[str, str] | str | None:
-    """One locale's catalogue for one namespace at ``ref``.
+def _locale_keys_at_ref(ref: str, locale: str) -> set[str] | None:
+    """Every key the locale carries in ANY namespace at ``ref``, or ``None``.
 
-    Three outcomes, and the difference between the last two is load-bearing:
+    Presence is asked of the whole locale, not of the namespace the debt is
+    recorded under. A key moved from a nested namespace to its parent would
+    otherwise look absent at base — the target namespace was never carried —
+    and a dropped translation would pass as pre-existing debt.
 
-    - a ``dict``: the file exists and parsed;
-    - ``ABSENT``: the file does not exist, so the namespace is uncarried and
-      every key is genuinely missing there;
-    - ``None``: the file exists but could not be read or parsed. That is an
-      ERROR, not an absence — treating it as absence would let a corrupt
-      base bless debt for a translation that was actually present, which is
-      the fail-open this function exists to avoid.
+    Unreadable returns ``None`` so the caller fails closed.
     """
-    path = f"local_operator/i18n/catalogues/{locale}/{namespace}.json"
-    # ``ls-tree`` rather than ``cat-file -e``: the latter reports an
-    # unavailable blob (deleted object, or a partial clone without it) the
-    # same way it reports a missing path, which would turn an unreadable
-    # base into a clean "absent" and reopen the fail-open below.
-    listing = _git("ls-tree", "--name-only", ref, "--", path)
+    listing = _git(
+        "ls-tree",
+        "-r",
+        "--name-only",
+        ref,
+        "--",
+        f"local_operator/i18n/catalogues/{locale}",
+    )
     if listing.returncode != 0:
         return None
-    if not listing.stdout.strip():
-        return ABSENT
-    shown = _git("show", f"{ref}:{path}")
-    if shown.returncode != 0:
-        return None
-    try:
-        data = json.loads(shown.stdout)
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+    keys: set[str] = set()
+    for path in listing.stdout.splitlines():
+        if not path.endswith(".json") or path.endswith(catalogues.CONTEXT_SUFFIX):
+            continue
+        shown = _git("show", f"{ref}:{path}")
+        if shown.returncode != 0:
+            return None
+        try:
+            messages = json.loads(shown.stdout)
+        except ValueError:
+            return None
+        if not isinstance(messages, dict):
+            return None
+        keys.update(messages)
+    return keys
 
 
 def allowance_growth(
@@ -722,16 +721,14 @@ def allowance_growth(
             # New English copy. An active locale must translate it.
             growth.add((locale, namespace, key))
             continue
-        messages = _base_catalogue(ref, locale, namespace)
-        if messages is None:
-            # Unreadable base catalogue: fail rather than assume absence.
+        carried = _locale_keys_at_ref(ref, locale)
+        if carried is None:
+            # Unreadable base for this locale: fail rather than assume absence.
             growth.add((locale, namespace, key))
             continue
-        if messages == ABSENT:
-            # Namespace uncarried at base: the key was already missing.
-            continue
-        if key in messages:
-            # Present at base, missing at head: a translation was removed.
+        if key in carried:
+            # Present somewhere in this locale at base, missing at head: a
+            # translation was removed, including via a namespace move.
             growth.add((locale, namespace, key))
     return growth
 
@@ -914,6 +911,11 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
         if _git("rev-parse", "--is-inside-work-tree").returncode == 0:
             return [f"allowance growth: explicit base ref cannot be resolved: {base}"]
     if ref is None:
+        if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+            # A pull request always has a base. If it did not resolve, the
+            # comparison is impossible and skipping would disable the gate
+            # exactly when someone could exploit it.
+            return ["allowance growth: base ref cannot be resolved on a pull request"]
         print(
             # i18n: ignore checker diagnostic (operator tooling output, English-only)
             "allowance growth: skipped (no base ref)"
@@ -934,6 +936,8 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     try:
         base_data = json.loads(shown.stdout)
         head_data = json.loads(ALLOWANCE.read_text(encoding="utf-8"))
+        if not isinstance(head_data, dict) or not isinstance(base_data, dict):
+            return ["allowance growth: allowance root must be a JSON object"]
         base_english = _english_keys_at_ref(ref)
         head_english = _english_keys_in_tree()
         if base_english is None or head_english is None:
