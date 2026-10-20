@@ -645,8 +645,14 @@ def _base_catalogue(ref: str, locale: str, namespace: str) -> dict[str, str] | s
       the fail-open this function exists to avoid.
     """
     path = f"local_operator/i18n/catalogues/{locale}/{namespace}.json"
-    exists = _git("cat-file", "-e", f"{ref}:{path}")
-    if exists.returncode != 0:
+    # ``ls-tree`` rather than ``cat-file -e``: the latter reports an
+    # unavailable blob (deleted object, or a partial clone without it) the
+    # same way it reports a missing path, which would turn an unreadable
+    # base into a clean "absent" and reopen the fail-open below.
+    listing = _git("ls-tree", "--name-only", ref, "--", path)
+    if listing.returncode != 0:
+        return None
+    if not listing.stdout.strip():
         return ABSENT
     shown = _git("show", f"{ref}:{path}")
     if shown.returncode != 0:
@@ -701,11 +707,16 @@ def allowance_growth(
         return set()
     if ref is None or base_english is None:
         return added
-    inactive = inactive_locales or set()
+    # Exempt only while the locale STILL carries no catalogue. One that gains
+    # its first catalogue in this change is translatable from that moment, so
+    # recording brand-new English as debt there would bypass the "new English
+    # must be translated" rule through a base-ref view of inactivity.
+    head_locales = set(catalogues.locales())
+    inactive = (inactive_locales or set()) - head_locales
     growth: set[tuple[str, str, str]] = set()
     for locale, namespace, key in added:
         if locale in inactive:
-            # Untranslatable at base: recording it is the only lawful act.
+            # Untranslatable at base and still uncarried: recording is lawful.
             continue
         if key not in base_english:
             # New English copy. An active locale must translate it.
@@ -716,7 +727,7 @@ def allowance_growth(
             # Unreadable base catalogue: fail rather than assume absence.
             growth.add((locale, namespace, key))
             continue
-        if messages is ABSENT:
+        if messages == ABSENT:
             # Namespace uncarried at base: the key was already missing.
             continue
         if key in messages:
@@ -908,9 +919,18 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
             "allowance growth: skipped (no base ref)"
         )
         return []
-    shown = _git("show", f"{ref}:i18n/coverage-allowance.json")
-    if shown.returncode != 0:
+    allowance_path = "i18n/coverage-allowance.json"
+    present = _git("ls-tree", "--name-only", ref, "--", allowance_path)
+    if present.returncode != 0:
+        # Cannot tell whether the base carried an allowance. Failing open
+        # here would silently disable the growth check for the whole run.
+        return [f"allowance growth: base ref {ref} cannot be inspected"]
+    if not present.stdout.strip():
+        # The base had no allowance file: this change introduces it.
         return []
+    shown = _git("show", f"{ref}:{allowance_path}")
+    if shown.returncode != 0:
+        return [f"allowance growth: base allowance at {ref} cannot be read"]
     try:
         base_data = json.loads(shown.stdout)
         head_data = json.loads(ALLOWANCE.read_text(encoding="utf-8"))
