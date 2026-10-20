@@ -386,7 +386,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # Deliberate cost of that reference being one read away; the same tool's
     # schema is the whole of ``scripts/bench_context_budget.py``'s raise
     # (measurement recorded there), so the two ledgers move together.
-    "tags": 522,
+    "tags": 527,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than

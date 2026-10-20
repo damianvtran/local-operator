@@ -955,7 +955,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(
                 op="create",
-                blurb="One category; duplicate/case/blank/reserved names are refused.",
+                blurb="One category; blank, reserved, oversized or duplicate names are refused.",
                 fields=("name",),
             ),
             ToolDocOp(
@@ -978,8 +978,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "Caps: at most 32 categories; names 1-24 characters, unique "
             "case-insensitively, with `Untagged` reserved; at most 8 categories "
             "per session. `primary` must be one of the assigned names (or "
-            "omitted, which leaves the first). An empty `tags` list clears the "
-            "session's assignments.\n"
+            "omitted, which keeps the current primary, else the first). An empty "
+            "`tags` list clears the session's assignments.\n"
             "Delegated and hidden sessions are taggable; a remote/mesh session is "
             "refused with the route's `409 session_is_remote` and the device that "
             "holds it. Every result names the categories and the session, so the "
