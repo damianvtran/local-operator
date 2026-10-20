@@ -146,6 +146,10 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("local_operator.hub_sync.service.build_clients", fake_clients)
     app = FastAPI()
     app.state.config_manager = ConfigManager(root)
+    # The ONE manager the app hands to every route (``get_config_manager`` reads
+    # ``app.state``), exposed so a test can prove the PROCESS's view was refreshed
+    # rather than inferring it from a response body alone.
+    holder["manager"] = app.state.config_manager
     app.state.env_config = EnvConfig()
     app.include_router(desktop_hub.router)
     app.include_router(desktop_sessions.router)
@@ -225,6 +229,93 @@ async def test_a_public_pull_installs_every_file_and_reads_back_the_contract(api
     # A public fetch is anonymous: the client carried no credential.
     (call,) = holder["anon"].calls
     assert call["with_credential"] is False
+
+
+async def test_a_pull_that_chooses_download_reports_subscribe_off_everywhere(api) -> None:
+    """A pull with ``subscribe: false`` answers OFF -- not "on until restart".
+
+    THE DEFECT this pins: the managed transaction materializes the initial policy
+    through its OWN ``ConfigManager`` (``ManagedSkillStorage._finalize`` ->
+    ``materialize_policy``), so the request's manager -- the ONE ``app.state``
+    hands to every route, and therefore the one ``GET /hub/links`` reads -- kept
+    its pre-write snapshot. A user who chose Download (subscribe off) was shown
+    "subscribed" in the pull response AND in the inventory until the process
+    restarted, while ``config.yml`` on disk already said ``subscribe: false``.
+    ``subscribe: true`` could never expose it: the creation default is also true.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    # 1. The pull response's OWN row.
+    assert row["policy"]["subscribe"] is False
+    assert row["policy"]["auto_push"] is False
+
+    # 2. The inventory in the SAME process -- no restart, no fresh manager.
+    listed = await client.get("/v1/desktop/hub/links?kind=skill")
+    assert listed.status_code == 200, listed.text
+    (inventory_row,) = listed.json()["result"]["links"]
+    assert inventory_row["link_id"] == row["link_id"]
+    assert inventory_row["policy"]["subscribe"] is False
+
+    # 3. What is actually persisted: the file was never the problem, the
+    #    process's copy of it was.
+    persisted = pol.read_policy(read_config_values(root) or {}, linked_identity(row))
+    assert persisted.policy.subscribe is False and persisted.policy.auto_push is False
+    assert persisted.revision == row["policy"]["revision"]
+
+    # 4. The manager the routes share (app.state's) is the thing that was stale
+    #    and the fix is what makes it agree with disk.
+    values = holder["manager"].get_config().values
+    assert pol.read_policy(values, linked_identity(row)).policy.subscribe is False
+
+
+async def test_a_pull_that_keeps_subscribe_on_still_reports_on(api) -> None:
+    """The control: a refresh must publish what was stored, not a constant OFF."""
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    assert row["policy"]["subscribe"] is True
+    listed = await client.get("/v1/desktop/hub/links?kind=skill")
+    (inventory_row,) = listed.json()["result"]["links"]
+    assert inventory_row["policy"]["subscribe"] is True
+
+
+async def test_a_pull_serves_the_policy_revision_the_next_edit_expects(api) -> None:
+    """No spurious ``policy-revision-changed`` on a link nothing has touched.
+
+    A policy revision is a CONTENT digest, so a stale projection does not merely
+    mislabel a bit: it serves a digest over ``subscribe: true`` that no writer can
+    ever match. The operator's first edit of the link then 409s as if someone else
+    had changed it.
+    """
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    pull = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert pull.status_code == 200, pull.text
+    row = pull.json()["result"]["link"]
+
+    patched = await client.patch(
+        f"/v1/desktop/hub/links/{row['link_id']}",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "expected_policy_revision": row["policy"]["revision"],
+            "subscribe": True,
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["result"]["policy"]["subscribe"] is True
 
 
 async def test_an_unversioned_renderer_source_is_completed_not_refused(api) -> None:

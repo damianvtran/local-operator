@@ -2812,6 +2812,32 @@ def install_skill(
             if not installed:
                 _settle_staged_after_failure()
 
+        # 7f. REFRESH THE PROCESS'S CONFIG VIEW BEFORE PROJECTING THE ROW (the
+        #     stale-policy defect). The committed transaction materializes the
+        #     initial policy in ``ManagedSkillStorage._finalize`` through a
+        #     SHORT-LIVED ``ConfigManager`` it builds for itself, so the manager
+        #     this request holds -- the ONE ``app.state`` hands to every route,
+        #     and therefore the one ``GET /hub/links`` and the next policy PATCH
+        #     read -- still holds the pre-write snapshot. Without this reload a
+        #     pull that chose Download (``subscribe: false``) answered
+        #     ``subscribe: true`` in its OWN row and in the inventory until the
+        #     process restarted, while config.yml already said false (the
+        #     creation default is also true, so only an OFF pull could expose
+        #     it). A policy revision is a CONTENT digest, so the same staleness
+        #     also served a revision over subscribe=true that no writer could
+        #     ever match: the operator's first edit 409'd
+        #     ``policy-revision-changed`` on a link nothing had touched.
+        #
+        #     Reloaded HERE, at the one install path that commits a policy this
+        #     way, rather than inside ``links_snapshot``: the inventory is a pure
+        #     read of whatever manager it is given and other callers
+        #     (``subscribe_skill``, the policy PATCH) write through that SAME
+        #     manager, so a reload in the reader would re-read the file on every
+        #     inventory call to cover one writer. ``installed`` is only true on a
+        #     committed transaction, so a refused install leaves the manager
+        #     alone (its staged grant was already reverted through it above).
+        ctx.config_manager.reload()
+
         # 8. The response the desktop contract expects: the directional report
         #    the UI reads (applied + link_id + direction) and the ordinary
         #    inventory rows -- the same builders every other surface consumes.
