@@ -32,9 +32,17 @@ import {
 	useState,
 	type Ref,
 } from "react";
-import { getAttentionUnread, getDirectories, markAllSeen, setSessionPin, startSession } from "../api";
+import {
+	getAttentionUnread,
+	getDirectories,
+	getTags,
+	markAllSeen,
+	setSessionPin,
+	startSession,
+} from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
 import { SessionTagLine } from "../components/session-tag-line";
+import { SessionGroupToggle } from "../components/session-group-toggle";
 import {
 	PIN_AND_TAGS_HINT_TEXT,
 	SessionTagsSheet,
@@ -61,7 +69,9 @@ import { shortenHome } from "../lib/format";
 import { LIBRARY_LABEL } from "../lib/library-copy";
 import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
-import type { SessionSummary } from "../types";
+import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
+import { groupByPrimaryTag, hasGroupedRows } from "../lib/session-grouping";
+import type { SessionSummary, TagCatalogueEntry } from "../types";
 import { cn } from "../lib/cn";
 
 /** What a successful bulk clear says it did — naming every bucket it missed.
@@ -1209,6 +1219,103 @@ export function SessionListScreen() {
 	/* A RELAY capability, and the only gate: `features.session_tags` is core's
 	   build fact and is `1` on released relays whose routes would 404 here. */
 	const tagsAvailable = capabilities?.session_tags?.available === true;
+
+	/* S2b GROUPING IS A LOCAL VIEW PREFERENCE, READ ONCE AT MOUNT. It defaults
+	   off and survives reloads/sign-out like the theme and wide-view preferences
+	   (see `session-group-pref`); the capability remains the gate, so a saved
+	   preference on a relay without tags leaves no control and no grouping. */
+	const [groupEnabled, setGroupEnabled] = useState(getGroupTags);
+	const [catalogue, setCatalogue] = useState<TagCatalogueEntry[] | null>(null);
+	const [catalogueError, setCatalogueError] = useState(false);
+	/* PENDING IS PER ATTEMPT, NOT "NO CATALOGUE YET". A refocus or a retry after a
+	   failure runs while a cached catalogue keeps painting its (now stale)
+	   groups, and the reader still needs to know a read is in flight — QA round
+	   2, Q-r2-1, where the retry after a 500 showed no status at all because the
+	   cached list made the read invisible. */
+	const [cataloguePending, setCataloguePending] = useState(false);
+	const [catalogueAttempt, setCatalogueAttempt] = useState(0);
+	const groupingOn = tagsAvailable && groupEnabled;
+
+	/* THE CATALOGUE IS READ ON ENABLE AND ON REFOCUS, never per SSE frame. Group
+	   membership comes from each row's own `primary`, which the list stream keeps
+	   current, so a tag edit regroups live without a request. The visibility
+	   refresh catches categories created on another surface while the phone was
+	   away; rows are regrouped from the store in the same commit. */
+	useEffect(() => {
+		if (!groupingOn) {
+			/* A disable abandons whatever read was in flight and must not leave
+			   the flag set for the next enable. `catalogueBusy` is gated on
+			   `groupingOn` too, so this is bookkeeping rather than a visible
+			   state — but a flag that only ever flips true is how this defect
+			   came back the first time. */
+			setCataloguePending(false);
+			return;
+		}
+		/* EVERY ATTEMPT STARTS HERE — enable, retry, refocus — so the flag has one
+		   funnel and cannot describe an attempt that is not running. */
+		setCataloguePending(true);
+		let cancelled = false;
+		getTags()
+			.then((response) => {
+				if (cancelled) return;
+				setCatalogue(response.tags);
+				setCatalogueError(false);
+				setCataloguePending(false);
+			})
+			.catch(() => {
+				if (cancelled) return;
+				setCatalogueError(true);
+				setCataloguePending(false);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [groupingOn, catalogueAttempt]);
+	useEffect(() => {
+		if (!groupingOn) return;
+		const refresh = () => {
+			if (document.visibilityState === "visible") {
+				setCatalogueAttempt((attempt) => attempt + 1);
+			}
+		};
+		document.addEventListener("visibilitychange", refresh);
+		return () => document.removeEventListener("visibilitychange", refresh);
+	}, [groupingOn]);
+	const toggleGrouping = () => {
+		const next = !groupEnabled;
+		setGroupEnabled(next);
+		setGroupTags(next);
+		/* A fresh enable starts from the flat view until the catalogue answers; an
+		   error belongs to the attempt before. A cached catalogue from an earlier
+		   enable is refreshed in the background while it keeps painting. */
+		setCatalogueError(false);
+	};
+	const retryCatalogue = () => {
+		/* CLEARING THE ERROR IS PART OF THE RETRY, not just the success: the status
+		   line then reads `loading tags…` for the attempt instead of leaving the
+		   failure on screen until the answer lands. A second failure puts the
+		   error back through the same effect. */
+		setCatalogueError(false);
+		setCatalogueAttempt((attempt) => attempt + 1);
+	};
+	/* THE GROUPED VIEW REPLACES Active/Previous ONLY WHEN ALL FOUR HOLD: the
+	   capability, the preference, no search, and a usable catalogue. While the
+	   catalogue loads (or after a failed read) the ordinary sections stay on
+	   screen rather than an empty grouped shell; a list where no unpinned row has
+	   a resolvable primary stays flat too (`hasGroupedRows`). A non-empty query
+	   is always the normal filtered view — grouping returns when it clears. */
+	const groupingApplied =
+		groupingOn && query === "" && catalogue !== null && !catalogueError;
+	const groups = groupingApplied ? groupByPrimaryTag(rest, catalogue) : [];
+	const showGroups = hasGroupedRows(groups);
+	/* THE TWO HINTS THE TOGGLE CAN CARRY (round 1, D3/Q-1 and U2/Q-2). Both leave
+	   the list exactly as the reader found it and change only the status line: a
+	   read still outstanding (against the cached catalogue too, QA round 2
+	   Q-r2-1), and a non-empty search holding the grouping off while the
+	   preference stays on. Neither is a reason to disable the control or to paint
+	   a grouped shell with nothing in it. */
+	const catalogueBusy = groupingOn && cataloguePending;
+	const groupingPaused = groupingOn && query !== "";
 	/* Busy is about THIS row's action, not about any request: a press on one row
 	   never disables another row's sheet. */
 	const pinBusy = pinRow !== null && pinPending.has(pinRow.session_id);
@@ -1463,6 +1570,21 @@ export function SessionListScreen() {
 						placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
+					{/* THE GROUP TOGGLE, on its own line under the search field: at 390px
+					    the field's row has no width to spare for a 44px target without
+					    shrinking a destination name. Capability-gated, so a relay without
+					    tags leaves NO control behind. `aria-pressed` carries the state and
+					    the static accessible name says what the control groups by. */}
+					{tagsAvailable ? (
+						<SessionGroupToggle
+							grouped={groupEnabled}
+							busy={catalogueBusy}
+							failed={groupingOn && catalogueError}
+							paused={groupingPaused}
+							onToggle={toggleGrouping}
+							onRetry={retryCatalogue}
+						/>
+					) : null}
 					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live
 					    further down the scroller, and a control left inside the scrolling
 					    content is reachable only at the top of the list — measured at y=-179,
@@ -1662,18 +1784,31 @@ export function SessionListScreen() {
 									{pinned.map(renderCard)}
 								</section>
 							) : null}
-							{active.length > 0 ? (
-								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.active")}</h2>
-									{active.map(renderCard)}
-								</section>
-							) : null}
-							{previous.length > 0 ? (
-								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.previous")}</h2>
-									{previous.map(renderCard)}
-								</section>
-							) : null}
+							{showGroups
+								? groups.map((group) => (
+										<section key={group.key}>
+											<h2 className="truncate px-2 py-1 text-meta font-medium text-ink-muted">
+												{group.label}
+											</h2>
+											{group.rows.map(renderCard)}
+										</section>
+									))
+								: (
+										<>
+											{active.length > 0 ? (
+												<section>
+													<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.active")}</h2>
+													{active.map(renderCard)}
+												</section>
+											) : null}
+											{previous.length > 0 ? (
+												<section>
+													<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.previous")}</h2>
+													{previous.map(renderCard)}
+												</section>
+											) : null}
+										</>
+									)}
 							{/* The case where EVERY section is empty: a query that matched none, or
 							    every row pinned away — pinned rows are not empty, so this arm is the
 							    one where the screen would otherwise be a wordless void. */}
