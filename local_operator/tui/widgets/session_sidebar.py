@@ -699,6 +699,16 @@ class SessionSidebar(Widget, can_focus=True):
         #: carry the row, or 0.0 for none. See `set_current`'s `_reveal_current`
         #: and `_land_pending_reveal`.
         self._pending_reveal_until: float = 0.0
+        #: A reveal that arrived before this widget had a viewport. The app's
+        #: catalog worker can land `set_current`/`set_entries` between
+        #: `display = True` and the first layout, when `size.height` is still 0;
+        #: `_reveal` cannot price a scroll then, so it records the intent here
+        #: and `on_resize` honors it on the first real geometry. Without this the
+        #: reveal silently became "offset = last row" and the one-row window it
+        #: created was permanent (`page_size` at the last row is 1 by
+        #: construction, and `set_entries`' clamp only ever lowers the offset to
+        #: that row).
+        self._reveal_deferred: bool = False
         self.display = False
 
     @property
@@ -761,7 +771,21 @@ class SessionSidebar(Widget, can_focus=True):
         bottom-aligned window the wheel clamp settles on — BEFORE committing
         to either. The bisection is the same question at any offset; this is
         the one place it is asked, so the two callers cannot drift.
+
+        NO VIEWPORT, NO WINDOW (the not-yet-laid-out case). `size.height` is 0
+        before the widget's first layout, and the arithmetic below would then
+        describe a one-row page. That is not a smaller page, it is a page the
+        widget has no evidence for: every caller that reads `visible_entries`
+        pre-layout (prewarm's candidate set, `_reveal`'s guess) would be told
+        that all but one row are hidden when the truth is that the viewport is
+        unknown. So the pre-layout answer is the whole remaining order: nothing
+        can be said to be off a page that does not exist yet. The first layout
+        re-derives this property against the real height, and `_reveal`
+        defers its scroll (`_reveal_deferred`) rather than pinning an offset
+        that only a one-row page could justify.
         """
+        if self.size.height <= 0:
+            return max(1, len(self.entries) - offset)
         chrome = self._header_lines(offset)
         low = max(1, self.size.height - 1 - (0 if chrome else 1) - chrome)
         # No window can be taller than the sidebar, nor longer than the order
@@ -1566,7 +1590,23 @@ class SessionSidebar(Widget, can_focus=True):
         `end` key — moved the offset to 17 with `page_size` 23 against a row at
         40. Both land it after the walk, which is why the correction belongs in
         this one mechanism rather than at the arrival's call site.
+
+        A REVEAL NEEDS A VIEWPORT. Before the first layout (`size.height == 0`)
+        `page_size` is the whole remaining order by design (see
+        `_page_size_at`), so the guess would be honest but the walk could not
+        be: scrolling is a statement about a screen that does not exist yet.
+        Record the intent instead and let `on_resize` run this same method on
+        the first real geometry. Deferring rather than guessing is what keeps
+        the one-row window from forming: the old arithmetic on a 0-height
+        widget resolved `page_size` to 1 and pinned the offset to the LAST row,
+        where a one-row page size is self-consistent — so no later poll could
+        recover it (measured: `offset=5, page_size=1, visible=1` over 20 idle
+        polls on a six-row catalog).
         """
+        if self.size.height <= 0:
+            self._reveal_deferred = True
+            self._sync_animation()
+            return
         index = self._cursor_index()
         self._offset = max(min(self._offset, index), index - self.page_size + 1)
         while self._offset < index and index >= self._offset + self.page_size:
@@ -2397,6 +2437,28 @@ class SessionSidebar(Widget, can_focus=True):
         self.refresh()
 
     def on_resize(self, event: events.Resize) -> None:
+        """Re-derive the window against the new geometry.
+
+        THE ONE PLACE A DEFERRED REVEAL LANDS. Before the first layout
+        (`size.height == 0`), `page_size` describes the whole remaining order
+        rather than a fake one-row viewport (`_page_size_at`), and `_reveal`
+        cannot scroll; it arms `_reveal_deferred` instead. This method is the
+        only consumer of that flag. Keep it the class's only `on_resize`: a
+        second definition elsewhere in the body would silently win (the later
+        one binds), and the flag would never land. `size` is already the new
+        geometry when the event is dispatched (`Widget._size_updated` assigns
+        before posting `Resize`).
+
+        The ordinary clamp below stays for every other resize: the page size is
+        a function of height, so a taller frame can make the old offset name
+        rows past the end. A deferred reveal runs first and returns (it clamps
+        its own landing and repaints); there is nothing for the plain clamp to
+        do on top of a reveal that just priced this exact height.
+        """
+        if self._reveal_deferred and self.size.height > 0:
+            self._reveal_deferred = False
+            self._reveal()
+            return
         self._offset = min(self._offset, max(0, len(self.entries) - self.page_size))
         self._sync_animation()
 
