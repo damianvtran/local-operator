@@ -5897,6 +5897,8 @@
       "payoff": "2027-02-28",
       "missing": [
         "wire.remote_compute.alone",
+        "wire.remote_compute.api_override",
+        "wire.remote_compute.api_override_invalid",
         "wire.remote_compute.bad_repo",
         "wire.remote_compute.bad_sha",
         "wire.remote_compute.cancelled",
@@ -5923,6 +5925,7 @@
         "wire.remote_compute.no_capacity",
         "wire.remote_compute.no_credit",
         "wire.remote_compute.only_with",
+        "wire.remote_compute.preview_not_enabled",
         "wire.remote_compute.replayed",
         "wire.remote_compute.retrying",
         "wire.remote_compute.run_identity_mismatch",
@@ -13477,6 +13480,8 @@
       "payoff": "2027-03-31",
       "missing": [
         "wire.remote_compute.alone",
+        "wire.remote_compute.api_override",
+        "wire.remote_compute.api_override_invalid",
         "wire.remote_compute.bad_repo",
         "wire.remote_compute.bad_sha",
         "wire.remote_compute.cancelled",
@@ -13503,6 +13508,7 @@
         "wire.remote_compute.no_capacity",
         "wire.remote_compute.no_credit",
         "wire.remote_compute.only_with",
+        "wire.remote_compute.preview_not_enabled",
         "wire.remote_compute.replayed",
         "wire.remote_compute.retrying",
         "wire.remote_compute.run_identity_mismatch",

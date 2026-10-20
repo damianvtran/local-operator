@@ -118,6 +118,22 @@ response named — confirmed against the request, never assumed from what this
 client asked for — and a response naming another network is refused instead of
 reported as this network's run.
 
+**Testing against a non-production Radient.** `LOP_REMOTE_COMPUTE_API_URL` moves
+the remote-compute API base off production, and only remote compute: the tunnel
+client stays pinned to the production host, because that is where a tunnel's
+credential is expected. The value must be an `https://` URL; `http://` is
+accepted only for `127.0.0.1`, `::1` or `localhost`, where the connection never
+leaves this machine. Userinfo, a query string and a fragment are refused, and a
+trailing slash is dropped. While the variable is set, one line on stderr names
+the host the request will go to, so a login sent somewhere other than production
+is never silent; stdout is unchanged. An unusable value is refused with one
+sentence and exit 1 — it never falls back to production.
+
+**403 means the preview does not cover this account.** Remote compute is
+admitted per Radient account, so a login outside the preview allowlist is
+answered with `403`; the command says that in one sentence and exits 1. No
+retry, idempotency key or flag changes it.
+
 **Exit codes.**
 
 | Code | Meaning |

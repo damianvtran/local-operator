@@ -30,6 +30,7 @@ from local_operator.network import store
 from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import cli as remote_cli
+from local_operator.remote_compute import config as config_module
 from local_operator.remote_compute.arguments import LOCAL_ONLY_FLAGS
 
 RUN_ID = "run_01HZX"
@@ -1014,6 +1015,64 @@ def test_capacity_and_credit_have_their_own_sentences(
         )
         assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
         assert sentence in capsys.readouterr().err
+
+
+def test_a_403_says_the_preview_does_not_cover_this_account(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """403 is the server-side preview allowlist, and the body never reaches the user."""
+    origin.responses.append(httpx.Response(403, json={"error": "acct_not_allowlisted"}))
+    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not enabled for this Radient account yet (preview)" in captured.err
+    assert "acct_not_allowlisted" not in captured.err
+
+
+def test_an_override_warns_once_and_leaves_stdout_to_the_run_id(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The destination warning is stderr-only; a `| jq` on stdout is unaffected."""
+    monkeypatch.setattr(config_module, "_announced", set())
+    monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", "http://127.0.0.1:8123")
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 0
+    captured = capsys.readouterr()
+    assert captured.out == RUN_ID + "\n"
+    lines = [
+        line for line in captured.err.splitlines() if line.startswith("Remote compute is using")
+    ]
+    assert len(lines) == 1
+    assert lines[0].startswith("Remote compute is using 127.0.0.1:8123 ")
+    assert str(origin.requests[0].url).startswith("http://127.0.0.1:8123")
+
+
+def test_an_unusable_override_refuses_and_sends_nothing(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A refusal, not a silent fall back to production."""
+    monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", "http://staging.example.invalid")
+    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "LOP_REMOTE_COMPUTE_API_URL" in captured.err
+    assert "remote compute did not start" in captured.err
+    assert origin.requests == []
 
 
 # ---------------------------------------------------------------------------
