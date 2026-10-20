@@ -139,6 +139,99 @@ def test_the_warning_names_exactly_the_address_contacted(
     assert captured.err == _t(_wr.api_override(host=address)) + "\n"
 
 
+#: One digit past CPython's bound on a decimal ``int()`` conversion (4300),
+#: which is why the port is capped at five digits by the PATTERN rather than by
+#: relying on the conversion to fail.
+_TOO_LONG_PORT = "https://h.example:" + "9" * 4301
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        (_TOO_LONG_PORT, "a port int() refuses outright"),
+        ("https://xn--a.example", "an xn-- label that decodes to nothing"),
+        ("https://xn--0.example", "nor is this one a punycode encoding"),
+        ("https://XN--a.example", "the A-label prefix is case-insensitive"),
+    ],
+)
+def test_a_value_only_the_build_would_refuse_is_refused_where_it_was_parsed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str, why: str
+) -> None:
+    """E5-1: httpx must never be the one to discover an unusable base.
+
+    A 4301-digit port used to reach a bare ``int()`` and a non-decoding
+    ``xn--`` label used to reach ``httpx.URL``; both raise, neither is the
+    typed refusal, and the CLI reports a raised exception as the generic
+    "remote compute failed" with nothing the operator can act on. Each of these
+    is refused here instead, with no line announced for a host nothing will
+    contact.
+    """
+    monkeypatch.setenv(ENV_VAR, value)
+    # A TRIPWIRE, not a second assertion: if the guard lets any of these
+    # through to the ``httpx.URL`` backstop, the build is reached and the test
+    # fails here rather than passing on the backstop's typed refusal.
+    monkeypatch.setattr(
+        config_module.httpx,
+        "URL",
+        lambda url: pytest.fail(f"httpx.URL was reached with {url!r}"),
+    )
+    with pytest.raises(InvalidApiOverride):
+        resolve_api_url()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "", why
+
+
+def test_a_decodable_alabel_is_still_a_hostname(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The rule is "decodes", not "has the prefix": refuse only what cannot."""
+    monkeypatch.setenv(ENV_VAR, "https://xn--bcher-kva.example")
+    assert resolve_api_url() == "https://xn--bcher-kva.example"
+    assert capsys.readouterr().err == _t(_wr.api_override(host="xn--bcher-kva.example")) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "address"),
+    [
+        # E5-2 — one address, many spellings: ``ipaddress`` answers the
+        # question, so a spelling this list does not happen to contain is not
+        # refused for that reason.
+        ("http://[0:0:0:0:0:0:0:1]:8123", "[0:0:0:0:0:0:0:1]:8123"),
+        ("http://[::0001]:8123", "[::0001]:8123"),
+        # ``127.0.0.0/8`` is loopback beyond the one literal a text list held.
+        ("http://127.0.0.2:8123", "127.0.0.2:8123"),
+        ("http://127.255.255.254", "127.255.255.254"),
+        # The name is still allowed by name.
+        ("http://localhost:8123", "localhost:8123"),
+    ],
+)
+def test_every_loopback_spelling_may_be_used_over_cleartext(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str, address: str
+) -> None:
+    monkeypatch.setenv(ENV_VAR, value)
+    assert resolve_api_url() == value.rstrip("/")
+    assert capsys.readouterr().err == _t(_wr.api_override(host=address)) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("http://0.0.0.0:8123", "every interface is not this machine"),
+        ("http://127.1:8123", "a short form the resolver would expand"),
+        ("http://2130706433:8123", "nor is the integer form a literal here"),
+        ("http://[::]:8123", "the unspecified address is not loopback"),
+    ],
+)
+def test_a_host_that_is_not_loopback_is_still_refused_over_cleartext(
+    monkeypatch: pytest.MonkeyPatch, value: str, why: str
+) -> None:
+    monkeypatch.setenv(ENV_VAR, value)
+    with pytest.raises(InvalidApiOverride) as caught:
+        resolve_api_url()
+    assert ENV_VAR in str(caught.value), why
+
+
 def test_an_httpx_refusal_never_escapes_as_anything_but_the_typed_one(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -158,6 +251,26 @@ def test_an_httpx_refusal_never_escapes_as_anything_but_the_typed_one(
         resolve_api_url()
     # And nothing was announced for a base the client will not use.
     assert capsys.readouterr().err == ""
+
+
+def test_the_backstop_does_not_swallow_a_failure_outside_the_build_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E5-3 — ``except Exception`` hid this module's bugs as the operator's.
+
+    Only ``InvalidURL``/``ValueError``/``UnicodeError`` mean "this value cannot
+    be made into a URL". Anything else raised by ``httpx.URL`` is a defect
+    here, and reporting it as an unusable override would send the operator to
+    check a variable that was never the problem.
+    """
+
+    def explode(url: str) -> object:
+        raise RuntimeError(f"a bug in this module: {url!r}")
+
+    monkeypatch.setattr(config_module.httpx, "URL", explode)
+    monkeypatch.setenv(ENV_VAR, "https://staging.example.invalid")
+    with pytest.raises(RuntimeError):
+        resolve_api_url()
 
 
 def test_the_warning_is_printed_once_per_process(

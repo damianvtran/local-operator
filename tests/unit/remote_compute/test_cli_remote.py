@@ -16,6 +16,8 @@ and NO cancel request was sent — an interrupted watch must not kill work.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import closing
@@ -26,12 +28,16 @@ import httpx
 import pytest
 
 from local_operator import cli as cli_module
+from local_operator.i18n.keys import wire_remote_compute as _wr
+from local_operator.i18n.text import tr
 from local_operator.network import store
 from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import cli as remote_cli
 from local_operator.remote_compute import config as config_module
 from local_operator.remote_compute.arguments import LOCAL_ONLY_FLAGS
+
+_t = tr("wire.remote_compute")
 
 RUN_ID = "run_01HZX"
 KEY = "key-fixed"
@@ -1118,6 +1124,76 @@ def test_an_unusable_override_refuses_and_sends_nothing(
     assert "LOP_REMOTE_COMPUTE_API_URL" in captured.err
     assert "remote compute did not start" in captured.err
     assert origin.requests == []
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "https://h.example:" + "9" * 4301,
+        "https://xn--a.example",
+        "https://xn--0.example",
+    ],
+    ids=["port-too-long", "alabel-xn--a", "alabel-xn--0"],
+)
+def test_a_base_refused_at_parse_time_reaches_the_operator_as_the_typed_sentence(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    override: str,
+) -> None:
+    """E5-1 through the CLI: one keyed sentence, and nothing was sent.
+
+    These three used to raise from inside the resolver (a bare ``int()`` on a
+    port longer than CPython's digit bound, and an ``xn--`` label that is not a
+    punycode encoding reaching ``httpx.URL``). A raised exception is not the
+    typed refusal, so the CLI printed the generic "remote compute failed" with
+    nothing to act on. The refusal must be the override's own sentence and the
+    origin must see no request at all.
+    """
+    monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", override)
+    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _t(_wr.api_override_invalid()) + "\n"
+    assert origin.requests == []
+
+
+#: The real entry point (``[project.scripts] lop``), driven in a child process.
+_LOP_ENTRY = "from local_operator.cli import main; raise SystemExit(main())"
+
+
+def test_a_real_lop_process_refuses_an_undecodable_alabel_and_says_only_why(
+    enabled: None, network: NetworkRecord, signed_in: int
+) -> None:
+    """E5-1 END TO END: the refusal survives the real process boundary.
+
+    The in-process tests above patch the module seams; this one proves the
+    installed entry point refuses the value on its own — exit 1, ONE line on
+    stderr, that line the keyed sentence, no receipt on stdout, no "remote
+    compute failed:" fallback and no traceback. The child is isolated exactly
+    like the parent (its own ``HOME`` and config root, which is where the
+    signed-in row and the mesh record it needs already live) and every
+    ``CMUX_*``/``LOP_*`` variable is stripped so the test cannot read or move
+    the operator's live environment; the one override is set by the test.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env["LOP_REMOTE_COMPUTE_API_URL"] = "https://xn--a.example"
+    result = subprocess.run(
+        [sys.executable, "-c", _LOP_ENTRY, *BASE, *HOSTING, "--detach", "do it"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=Path(__file__).resolve().parents[3],
+    )
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == [_t(_wr.api_override_invalid())]
+    assert "remote compute failed" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 # ---------------------------------------------------------------------------
