@@ -99,12 +99,12 @@ BASIS_VALUES = frozenset({BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED, BAS
 BASIS_META: Mapping[str, Mapping[str, Any]] = {
     BASIS_BILLED: {"label": "billed", "source_class": "paygo", "marker": "billed"},
     BASIS_SUBSCRIPTION: {
-        "label": "API-equivalent",
+        "label": "included",
         "source_class": "subscription",
-        "marker": "API-equivalent · subscription",
+        "marker": "included · API-equivalent",
         "note": (
-            "You're on a subscription, so API-equivalent amounts are list-price "
-            "equivalents — not what you are charged."
+            "Covered by your plan — the amount is the API list-price equivalent, "
+            "not money charged."
         ),
     },
     BASIS_ESTIMATED: {"label": "estimated", "source_class": "paygo", "marker": "estimated"},
@@ -787,6 +787,19 @@ class ChildrenSnapshot:
     #: case: children that ran in an earlier process are not re-readable, so
     #: the block may not present their spend as fully accounted (review m4/Q9).
     reason: str = ""
+    by_basis: Mapping[str, int] | None = None
+
+
+def _child_basis_micro(children: ChildrenSnapshot) -> dict[str, int]:
+    """Normalize old/partial child producers without inventing a payment basis."""
+    remaining = max(0, int(children.total_micro))
+    result = {}
+    for basis in (BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED):
+        value = min(remaining, max(0, int((children.by_basis or {}).get(basis, 0))))
+        result[basis] = value
+        remaining -= value
+    result[NOT_TRACKED_MICRO] = remaining
+    return result
 
 
 def _identity_bases(entry: Mapping[str, Any]) -> list[str]:
@@ -1395,7 +1408,11 @@ def _breakdown_sections(
     ):
         subagent_bases = _stated_bases(child_records)
         if children.total_micro > 0:
-            subagent_bases.add(BASIS_NOT_TRACKED)
+            subagent_bases.update(
+                BASIS_NOT_TRACKED if key == NOT_TRACKED_MICRO else key
+                for key, value in _child_basis_micro(children).items()
+                if value
+            )
         by_agent.append(
             _breakdown_entry(
                 "subagents",
@@ -1435,7 +1452,11 @@ def _breakdown_sections(
         inference_bases = _stated_bases(inference_named)
         inference_bases.update(_inference_half_bases(inference))
         if int(children.total_micro) > 0:
-            inference_bases.add(BASIS_NOT_TRACKED)
+            inference_bases.update(
+                BASIS_NOT_TRACKED if key == NOT_TRACKED_MICRO else key
+                for key, value in _child_basis_micro(children).items()
+                if value
+            )
         by_source.append(
             _breakdown_entry(
                 CHANNEL_INFERENCE,
@@ -1695,10 +1716,20 @@ def combine(
                 record_not_tracked_micro += value
             inference_attributed += value
     by_basis[NOT_TRACKED_MICRO] = (
-        max(0, int(inference.micro) - inference_attributed)
-        + max(0, children_total_micro)
-        + record_not_tracked_micro
+        max(0, int(inference.micro) - inference_attributed) + record_not_tracked_micro
     )
+
+    child_bases = _child_basis_micro(children)
+    for record in child_records:
+        if record.amount_micro is not None:
+            basis = (
+                record.billing_basis
+                if record.billing_basis in (BASIS_BILLED, BASIS_SUBSCRIPTION, BASIS_ESTIMATED)
+                else NOT_TRACKED_MICRO
+            )
+            child_bases[basis] += int(record.amount_micro)
+    for basis, micro in child_bases.items():
+        by_basis[basis] += micro
 
     rows = _inference_rows(inference) + _channel_rows(records)
     breakdown = _breakdown_sections(
@@ -1718,6 +1749,7 @@ def combine(
         "rows": rows,
         "children": {
             "total_micro": int(children_total_micro),
+            "by_basis": child_bases,
             "knowledge": children_knowledge,
             # The user-facing reason when the children block cannot vouch for
             # itself (a resumed parent whose earlier children are not

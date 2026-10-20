@@ -16,6 +16,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { resumeSession, searchSessions } from "../api";
+import { SessionTagLine } from "../components/session-tag-line";
 import { formatRelative } from "../lib/format";
 import { resumeRefusalText } from "../lib/refusal";
 import { navigate } from "../router";
@@ -144,6 +145,15 @@ export function PastSessionsScreen() {
 								<span className="block truncate font-mono text-mono-sm text-ink-dim">
 									{s.id}
 								</span>
+								{/* The same static tag line the live list carries, and
+								    READ ONLY: a past conversation has no live row to
+								    long-press, and assignment lives with the conversation
+								    in the list. Rendering nothing when untagged keeps this
+								    history row's height independent of its tags. */}
+								<SessionTagLine
+									tags={s.tags ?? []}
+									primary={s.primary ?? null}
+								/>
 							</div>
 							{/* The timestamp gets its OWN shrink-0 slot: appended to the
 							   truncating id it was always the part clipped away, and

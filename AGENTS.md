@@ -1647,6 +1647,126 @@ downgrade gate that install is refused before it starts (0.64.4 is strictly
 older than the pointer's install), so the mistake is loud — the fix is
 unchanged, advance the clone's own `main` first.
 
+### A green run is a function of the tree it was computed against
+
+**The tag target is the bump's MERGE commit** — which is what "Mechanics, in
+order" step 4 already does with
+`--target "$(git -C ~/local-operator rev-parse origin/main)"`, once the bump
+has merged and `origin/main` has been fetched. **Never the bump
+branch's own head**, which is a different SHA and is not what ships.
+
+**And a green run is a function of the tree it was computed against.** A
+verdict from an earlier head is not evidence about a later one, even when the
+later head differs only in a file the verdict never read. So the pre-tag
+proofs are re-run **at the final bump head, after the re-verification** — not
+reused from an earlier head of the same branch. Two different trees, two
+different proofs, and neither is reusable from the other.
+
+**Re-verifying the bump branch against current `main` is a merge, not a
+rebase.** Fetch `origin/main`, merge it into the bump branch, and let the
+bump PR's own merge produce the SHA that is tagged. A rebase rewrites the
+bump branch's commits, so the SHA the tag would name is no longer the one the
+owner reviewed. The existing rule for a moved base — prove the content is
+unchanged with `git range-diff` plus byte-identical `+`/`-` line sets, then
+run one convergence round over `<old-head>..<new-head>` — applies here too.
+
+**A hint tells you WHEN TO LOOK; the gate tells you WHEN YOU MAY ACT.** A
+merge waiting on CI has two stages, and the first is a cheap proxy: a count
+that reached zero, a file that appeared, a branch tip that moved. Each says
+look now, and each can be satisfied while the gate still fails — a hint
+satisfied by a partial state fires exactly when you must **not** act. The
+authorisation is the gate's own verdict, computed against the tree that will
+be merged. **Never a proxy where a gate is available**: a merge authorised by
+a proxy rather than by the gate is a merge nobody checked.
+
+**And name the slow gate, because the fast gate is not the slow gate.** The
+`i18n` job runs two scripts — `scripts/i18n/generate.py --check` and
+`scripts/i18n/check.py` — and the second of them cannot see a class of debt
+the unit test does see. `check.py` **skips a namespace a locale does not
+carry** and validates only the files that are present, demanding full key
+parity for each one it does find; the unit test in
+`tests/unit/i18n/test_language_manifest.py` compares **key-by-key** and
+treats an absent namespace as all-missing. Measured on `main` at
+`8497001139`: the fast gate **exits 0** and the slow gate **reports 52**
+unlisted entries — 14 of them the `wire.memory.capture.locators` pair across
+seven locales, 38 of them `tui.viewer`. And the three numbers about the same
+debt do not agree: **the allowance** (`i18n/coverage-allowance.json`)
+**records** 105 missing `wire.memory` entries (7 locale pairs x 15); **the
+coverage gate** — the name this file already gives
+`tests/unit/i18n/test_language_manifest.py` — **reports** the ones the
+allowance does not list; and the fast script reports **none** of that
+namespace, because `wire.memory` is absent from every locale and an absent
+namespace is skipped. (That last clause is about `wire.memory` specifically:
+`tui.viewer` is present and complete in five locales and absent from only
+`ur` and `zh-CN`, which is where its 38 unlisted entries come from.)
+**A green fast job is evidence of consistency, not of correctness**, and a
+count from one of those three is not interchangeable with a count from
+another.
+
+So the slow gate is the one that carries the assertion, and it is the one
+that has to be named in the authorisation — and the allowance's own rules,
+stated above, are what that slow gate enforces. **And a skipped job is not
+evidence**: on a change the classifier scopes away from the unit tree, the
+`i18n` job and the unit shards are both skipped, so an authorisation that
+names them has to say which tree actually ran them, or it names a check that
+never happened.
+
+Note what that makes the allowance load-bearing: a catalogue file that is
+**present and partial** is judged by both gates, the fast one demanding every
+key, the slow one only the mismatches. And the slow gate asserts **three
+sets**, which is why an allowance edit is not a single move: a
+key that is missing and **unrecorded** is `unlisted`, and a recorded key that
+is **no longer missing** is `stale`, and a listed pair the gate no longer
+checks at all is `unknown`. So carrying the keys that were unlisted
+clears the pair on its own — one move. But carrying keys that were **listed**
+turns those entries stale, and the pair stays red until the allowance is
+**shrunk** to match, which is the shrink-only rule above. Shrinking on its
+own never helps an unrecorded key, because removing a record does not
+translate anything. A partial translation is therefore not a state either
+gate can be asked about in isolation.
+
+**Read the mechanism before you write the trigger.** A trigger written from
+the shape of a fix you assumed is a trigger that waits on a signal which
+cannot arrive, or fires on a state that is worse than the problem. Read the
+code that implements the fix, then write the trigger against what that code
+actually does.
+
+**And check that the domain you evaluated is the domain you are asserting
+about.** This is the same defect as the two gates above, and it wears several
+costumes. A fast job that evaluates present files, reporting on a debt that
+lives in absent ones. A check run over a narrower set than its name implies,
+reported as green. A suite run only over changed files, quoting a total. A
+status read from every SHA the branch ever had, instead of the head that will
+merge. In each case the evidence is real and the scope is wrong, and a scope
+that is wrong in either direction — too narrow or too broad — turns a green
+into a claim nobody checked. **The scope is the claim.**
+
+**And a bound is only as good as the data it projects from — and a bound
+cannot tell you when that data is stale.** A ceiling derived from a weight
+manifest is exactly as trustworthy as the manifest. Measured in this
+repository on 2026-10-19, the unit tree's heaviest shard projected **7,232 s**
+from `tests/durations.json` at `8497001139`, against roughly **4,470 s** from
+the refreshed manifest in `#2689` applied to the same tree — an overstatement
+of about **62%** — so a shard ceiling and its own guard agreed with each other
+about a number neither had re-derived. (Those figures are quoted to the
+precision that matters; the same quantity measured on three trees the same
+night came out at 7,232 / 7,239 and 4,466 / 4,469 s, so a reader who needs
+the third digit should re-measure on the tree in front of them — which is the
+point of the paragraph.)
+
+**The cause is worth naming, because it is not "stale entries":** there were
+**no orphaned manifest entries at all**, and the inflation came from the
+other direction — **630 of that tree's 1,703 unit test files carried no
+measurement**, and each was charged the **30.786 s** fallback. A manifest
+that is merely incomplete therefore reads as *more* work, not less, and the
+conservatism is invisible: nothing in the failure says which of the 630
+files it was guessing about. **When a derived bound fails, the first question
+is not which constant to raise. It is how much of the data behind that bound
+was measured, and when, and by what.** Raising the constant makes the check
+pass on that data; measuring more of it makes the data right — and the two
+produce different numbers, which is why the failure cannot tell you which
+one you are looking at.
+
 ### Installing over a live fleet
 
 Two routes exist, and which one a command takes is decided by the install

@@ -206,7 +206,7 @@ describe("SessionStatus — the published spend object (PR-2)", () => {
 		);
 	});
 
-	it("lists channel rows with their own amounts and the sub-equiv marker", () => {
+	it("lists channel rows with their own amounts and the included marker", () => {
 		const { container } = render(
 			<SessionStatus
 				projection={projection({
@@ -242,12 +242,12 @@ describe("SessionStatus — the published spend object (PR-2)", () => {
 			"claude-sonnet-5-5 $0.900",
 			"image $0.100",
 			"tts $\u2014",
-			"gpt-5.4 $0.0050 sub-equiv",
+			"gpt-5.4 $0.0050 included",
 		]);
-		// The sub-equiv qualifier is its own dim span — the money must never be
+		// The included qualifier is its own dim span — the money must never be
 		// read as billed dollars.
 		const marker = container.querySelector('[data-testid="session-status-channels"] .text-ink-dim');
-		expect(marker?.textContent).toBe(" sub-equiv");
+		expect(marker?.textContent).toBe(" included");
 	});
 
 	it("states an untracked session in plain words, never an implied $0", () => {

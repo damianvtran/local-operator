@@ -124,7 +124,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				/* The second line is FACTS, not an alarm: muted like the spend cell
 				   above it, wrapping on a 390-px screen rather than shedding chips
 				   silently. Every amount here is the backend's own row amount —
-				   never a re-sum of the total — and `sub-equiv` marks subscription
+				   never a re-sum of the total — and `included` marks subscription
 				   quota so it cannot be read as billed dollars (design §5.1). ROWS
 				   DRAW ALWAYS (the desktop M-4 gate): a marker-less session that
 				   carries recovered rows shows them, and the untracked disclosure
@@ -138,7 +138,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 						<span key={`${chip.label}-${index}`} data-testid="session-status-channel">
 							{chip.label} {chip.text}
 							{chip.subEquivalent ? (
-								<span className="text-ink-dim"> sub-equiv</span>
+								<span className="text-ink-dim"> included</span>
 							) : null}
 						</span>
 					))}
