@@ -582,7 +582,7 @@ class DelegatedResult(CleanupResult):
     #: nested rows included.
     copy_candidates: int = 0
     copy_candidate_bytes: int = 0
-    #: Bytes the arm PROVED and planned (matched files only).
+    #: Bytes a real run actually TOOK (taken removals only; a dry run's plan).
     copy_reclaimed_bytes: int = 0
     copy_budget_exhausted: bool = False
     #: Why the arm did not run, when it did not: ``None``, ``"disabled"`` (its
@@ -755,8 +755,10 @@ class NonGitCopyReport:
     candidates: list[NonGitCopyCandidate] = field(default_factory=list)
     window_hours: float = float(DEFAULT_DELEGATED_MAX_AGE_HOURS)
     references: tuple[str, ...] = ()
-    #: ``None``, or ``"no reference repository"`` when nothing was configured
-    #: and no in-pad repository qualified for ANY candidate.
+    #: ``None``; ``"no store"`` when ``sessions/`` does not exist yet (a fresh
+    #: install); ``"no reference repository"`` when nothing was configured and
+    #: no in-pad repository qualified; ``"holds unreadable"`` when the hold
+    #: list could not be parsed.
     skipped: str | None = None
     #: Accumulated only on the zero-candidate path (the vacuous guard); 0 when
     #: the scan had candidates and never needed the figure.
@@ -1836,22 +1838,25 @@ def _blob_sha1(path: Path, size: int) -> str:
     return digest.hexdigest()
 
 
-def _merged_tree(repo: str) -> tuple[str, dict[str, str]] | None:
+def _merged_tree(repo: str, *, format_checked: bool = False) -> tuple[str, dict[str, str]] | None:
     """``(trunk sha, {relative path: blob sha})`` for a repo's MERGED trunk.
 
     ``None`` when the repo does not qualify: no trunk resolving (``origin/HEAD``,
     else ``origin/main``, else ``origin/master``), a non-``sha1`` object format
     (the blob ids this arm computes are SHA-1; a SHA-256 repository would
     silently match nothing — see :func:`_reference_format_refusal`), a
-    ``ls-tree`` failure, or a listing past the parse bounds. Reads TREE OBJECTS
-    ONLY — never blobs and never the working tree — for two measured reasons:
-    the operator's own
-    ``~/local-operator-ui`` is dirty, and a dirty worktree must not disqualify
+    ``ls-tree`` failure, or a listing past the parse bounds. ``format_checked``
+    lets a caller that already asked :func:`_reference_format_refusal` avoid a
+    second ``git rev-parse`` per reference per pad (review: it ran twice).
+
+    Reads TREE OBJECTS ONLY — never blobs and never the working tree — for two
+    measured reasons: the operator's own ``~/local-operator-ui`` is dirty, and
+    a dirty worktree must not disqualify
     (or taint) a proof about COMMITTED content; and a ``--filter=blob:none``
     partial clone must never be asked to fetch a missing blob (``ls-tree``
     cannot). No clean-worktree requirement belongs here on purpose.
     """
-    if _reference_format_refusal(repo) is not None:
+    if not format_checked and _reference_format_refusal(repo) is not None:
         return None
     trunk = ""
     for name in ("origin/HEAD", "origin/main", "origin/master"):
@@ -1960,23 +1965,20 @@ def _repos_in(directory: Path) -> list[Path]:
     return repos
 
 
-def _has_copy_shaped_child(scratchpad: Path) -> bool:
-    """Whether a scratchpad directory holds a child the copy arm could try.
+def _copy_shaped_children(children: Iterable[os.DirEntry[str]]) -> bool:
+    """Whether any depth-1 entry is one the copy arm can reach (unsized).
 
-    A cheap, UNSIZED gate used before any reference is resolved: a pad with no
-    such child has nothing the arm could prove, so it must not pay the
-    scratchpad walk and the ``ls-tree`` calls. The shape is the candidate rule
-    minus the size proof (a real directory, not a symlink, no ``.git`` at its
-    root — that is the merged-clean arm's — and not a refused segment name,
-    which the shape arm takes whole).
+    The gate MUST mirror the walk's own reachability (review 1). The walk
+    keeps a refused-segment directory whole — but when its relative path has
+    an evidence segment it still DESCENDS into it, so a copy under
+    ``evidence-build/base-repo`` is attempted with this arm. A gate that
+    stopped at the refused name resolved no references and silently skipped
+    the pad (reproduced: a 55 MB provable copy left untouched). A depth-1
+    directory is therefore copy-shaped when it is not a git tree and either is
+    not a refused segment or carries an evidence segment.
     """
     from local_operator.scratchpad import _is_refused_segment  # LAZY: write vocabulary
 
-    try:
-        with os.scandir(scratchpad) as entries:
-            children = sorted(entries, key=lambda entry: entry.name)
-    except OSError:
-        return False
     for entry in children:
         try:
             if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
@@ -1985,12 +1987,28 @@ def _has_copy_shaped_child(scratchpad: Path) -> bool:
                 continue
             if os.path.lexists(os.path.join(entry.path, ".git")):
                 continue
-            if _is_refused_segment(entry.name):
+            if _is_refused_segment(entry.name) and not _has_evidence_segment(entry.name):
                 continue
         except OSError:
             continue
         return True
     return False
+
+
+def _has_copy_shaped_child(scratchpad: Path) -> bool:
+    """Whether a scratchpad directory holds a child the copy arm could try.
+
+    A cheap, UNSIZED gate used before any reference is resolved: a pad with no
+    such child has nothing the arm could prove, so it must not pay the
+    scratchpad walk and the ``ls-tree`` calls. See
+    :func:`_copy_shaped_children` for the shape itself.
+    """
+    try:
+        with os.scandir(scratchpad) as entries:
+            children = sorted(entries, key=lambda entry: entry.name)
+    except OSError:
+        return False
+    return _copy_shaped_children(children)
 
 
 def _reference_repos(scratchpad: Path, references: Iterable[str]) -> list[Path]:
@@ -2322,7 +2340,7 @@ class _CopyArm:
         if real in self.resolved:
             resolved = self.resolved[real]
         else:
-            resolved = _merged_tree(real)
+            resolved = _merged_tree(real, format_checked=True)
             self.resolved[real] = resolved
         if resolved is None:
             return None
@@ -2503,6 +2521,12 @@ def scan_non_git_copies(
     try:
         with os.scandir(sessions_dir) as entries:
             sessions = [entry for entry in entries if entry.is_dir(follow_symlinks=False)]
+    except FileNotFoundError:
+        # A FRESH INSTALL has no sessions directory yet: an honest empty
+        # report, not an error. Only a store that EXISTS and cannot be read is
+        # the instrument failing (review 2).
+        report.skipped = "no store"
+        return report
     except OSError as exc:
         # AN UNREADABLE STORE IS NEVER AN EMPTY STORE (review B3a): "nothing to
         # reclaim" for a directory nobody could list is the silent-success
@@ -2526,7 +2550,7 @@ def scan_non_git_copies(
     def resolve(repo: str) -> tuple[str, dict[str, str]] | None:
         real = os.path.realpath(repo)
         if real not in merged_cache:
-            merged_cache[real] = _merged_tree(real)
+            merged_cache[real] = _merged_tree(real, format_checked=True)
         return merged_cache[real]
 
     configured_trees: list[tuple[str, dict[str, str]]] = []
@@ -2558,8 +2582,25 @@ def scan_non_git_copies(
             root_guard = "the session directory is itself a git tree"
         # THE CHEAP GATE FIRST: a pad with no depth-1 candidate shape needs no
         # in-pad repository walk at all. That walk (up to CONTENT_MAX_ENTRIES)
-        # for every pad was the other half of the 30-minute cost.
-        if not _has_copy_shaped_child(pad):
+        # for every pad was the other half of the 30-minute cost. Scan once and
+        # KEEP the failure: an unreadable pad used to vanish silently
+        # (candidates=0, errors=0, exit 0), so the operator never learned the
+        # scan could not look at it (review 3).
+        try:
+            with os.scandir(pad) as entries:
+                pad_children = sorted(entries, key=lambda entry: entry.name)
+        except OSError as exc:
+            report.errors += 1
+            report.candidates.append(
+                NonGitCopyCandidate(
+                    session=session_dir.name,
+                    path=os.path.relpath(pad, sessions_dir).replace(os.sep, "/"),
+                    error=True,
+                    reason=f"scratchpad cannot be read ({exc.__class__.__name__})",
+                )
+            )
+            continue
+        if not _copy_shaped_children(pad_children):
             continue
         trees = list(configured_trees)
         pad_refusal = configured_refusal
@@ -2598,7 +2639,17 @@ def scan_non_git_copies(
                     if os.path.lexists(os.path.join(entry.path, ".git")):
                         continue  # the merged-clean arm's own candidate
                     if _is_refused_segment(entry.name):
-                        continue  # the shape arm takes it whole
+                        relative = os.path.relpath(entry.path, os.fspath(pad))
+                        if not _has_evidence_segment(relative):
+                            continue  # the shape arm takes it whole
+                        # A REFUSED EVIDENCE NAME IS STILL DESCENDED INTO: the
+                        # pass keeps the directory and lets the copy arm try
+                        # its children. Mirror that here or the report would
+                        # hide the very copy the pass reclaims (review 1).
+                        if not allowed or depth >= CONTENT_MAX_DEPTH:
+                            continue
+                        stack.append((entry.path, depth + 1, ancestor, allowed))
+                        continue
                 except OSError:
                     continue
                 if not allowed or depth >= CONTENT_MAX_DEPTH:
@@ -2643,7 +2694,14 @@ def scan_non_git_copies(
                 else:
                     outcome = _copy_outcome(proof)
                     proof_ok = proof.ok
-                    waiting = proof_ok and within_window and not root_guard
+                    # WAITING means the PASS would take it as soon as the
+                    # window passes: a non-delegated or non-reapable session
+                    # never would, so it is a keep with its own reason (review
+                    # 4). Otherwise the waiting summary counted rows the pass
+                    # can never act on.
+                    waiting = (
+                        proof_ok and within_window and not root_guard and delegated and deletable
+                    )
                     would = proof_ok and not within_window and deletable and not root_guard
                     if root_guard:
                         # The pass keeps the whole pad before any copy proof;
@@ -3843,8 +3901,6 @@ def run_delegated_pass(
             result.content_kept.extend((name, reason) for reason in outcome.kept)
             result.copy_candidates += outcome.copy_candidates
             result.copy_candidate_bytes += outcome.copy_candidate_bytes
-            # Proven bytes are what the plan PLANNED; a real run may remove
-            # fewer and counts the failure as an error, as every arm does.
             result.copy_reclaimed_bytes += outcome.copy_reclaimed_bytes
             if outcome.copy_deferred:
                 result.copy_budget_exhausted = True

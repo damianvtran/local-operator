@@ -789,15 +789,67 @@ def test_the_copy_report_lists_the_class_and_removes_nothing(store: Path, capsys
     out = capsys.readouterr().out
     assert "== Non-git copies (read-only) ==" in out
     assert "1 candidate(s) (top-level directories)" in out
-    assert "would reclaim now: 1 session(s)" in out
-    assert "waiting for the 48h window: 0 session(s)" in out
+    assert "would reclaim now: 1 session(s) (1 candidate(s))" in out
+    assert "waiting for the 48h window: 0 session(s) (0 candidate(s))" in out
     assert "kept: 0 candidate(s)" in out
     assert "proof: a file is recoverable" in out
-    assert "operator holds: none configured" in out
+    assert "operator holds: none configured (add session ids to" in out
     # The nested candidate prints its parent path, so ``base-repo`` cannot be
     # mistaken for the refused ``qa`` row above it (design C5).
     assert "would reclaim  copycat" in out and "qa/base-repo" in out
     assert (copy / "payload").exists(), "the report removes nothing"
+
+
+def test_the_copy_report_on_a_fresh_install_is_an_honest_empty_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """No sessions/ yet is a fresh install, not a broken scan (review 2)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert sessions_cleanup_command(_args(dry_run=True, report_non_git_copies=True)) == 0
+
+    out = capsys.readouterr().out
+    assert "no session store yet: nothing to reclaim" in out
+    assert "0 candidate(s)" in out
+
+
+def test_the_copy_report_prints_an_unreadable_hold_list_once(store: Path, capsys: Any) -> None:
+    """The hold line says it; the old second warning line is gone (nit)."""
+    reference, _copy = _copy_session(store)
+    _config(store, delegated={"non_git_copies": {"hold_sessions": 42}})
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert out.count("operator holds: unreadable") == 1
+    assert "holds unreadable: fix" not in out
+
+
+def test_a_capped_copy_report_says_how_many_rows_are_shown(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail names the cap, not a claim about nested refusals (nit)."""
+    import local_operator.cli as cli
+
+    reference, copy = _copy_session(store)
+    extra = copy.parent.parent / "second"
+    extra.mkdir()
+    os.link(copy / "payload", extra / "payload")
+    monkeypatch.setattr(cli, "_COPY_REPORT_TEXT_ROWS", 1)
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    assert "1 of 3 rows shown" in capsys.readouterr().out
 
 
 def test_the_copy_report_shows_a_configured_operator_hold(store: Path, capsys: Any) -> None:
@@ -855,6 +907,25 @@ def test_the_normal_dry_run_says_the_copy_arm_is_off(store: Path, capsys: Any) -
         "--report-non-git-copies --dry-run previews the class; hold sessions with "
         "session.cleanup.delegated.non_git_copies.hold_sessions)" in out
     )
+
+
+def test_the_copy_report_exits_3_on_an_unreadable_pad(store: Path, capsys: Any) -> None:
+    """A pad the scan cannot list is an error, not a silent empty row (review 3)."""
+    reference, _copy = _copy_session(store)
+    pad = store / "sessions" / "copycat" / "scratchpad"
+    os.chmod(pad, 0o000)
+    try:
+        assert (
+            sessions_cleanup_command(
+                _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+            )
+            == 3
+        )
+    finally:
+        os.chmod(pad, 0o755)
+
+    out = capsys.readouterr().out
+    assert "scratchpad cannot be read" in out
 
 
 def test_the_copy_report_exits_3_when_a_candidate_could_not_be_scanned(
