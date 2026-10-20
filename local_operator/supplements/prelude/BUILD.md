@@ -26,11 +26,11 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | theme-flip ground: the ROOT element paints `--lo-canvas`, dark fallback `#121212` | 2,056 | 8,047 | 10,103 | 4,573 |
 | numeric cells: finite-only bar/line scales and labelled bar gaps | 2,056 | 8,170 | 10,226 | 4,602 |
 | v5 remediation: silent nulls, centred series gaps, labelled line gaps + shared-code trims | 2,056 | 8,077 | 10,133 | 4,607 |
-| v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,114 | 9,992 | 4,602 |
+| v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,124 | 10,002 | 4,606 |
 
 Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
-1,272 B raw / **6 B gzip**. Relative to v3: −111 B raw / +29 B gzip; relative to the
-reviewed v5: −141 B raw / −5 B gzip. `PRELUDE_VERSION` **6** is what a served document
+1,262 B raw / **2 B gzip**. Relative to v3: −101 B raw / +33 B gzip; relative to the
+reviewed v5: −131 B raw / −1 B gzip. `PRELUDE_VERSION` **6** is what a served document
 re-derives under. The theme-flip ground and its wait for `[data-ready]` are documented in
 `prelude.src.css`; they are unchanged by this repair.
 
@@ -81,14 +81,14 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 6 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 2 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in the 6 B gzip headroom this pair
+`e.source!==parent` check drops it today). None of that fits in the 2 B gzip headroom this pair
 has left. Lane N either injects a native-only shim at assembly time without touching this shared
 pair, or revisits the cap in its own PR with measured numbers.
 
