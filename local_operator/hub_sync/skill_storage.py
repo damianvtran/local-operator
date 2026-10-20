@@ -245,6 +245,12 @@ class ManagedSkillStorage:
         notify = checkpoint or (lambda _phase: None)
         with config_write_lock(self.config_dir):
             self.recover(local_id=identity.local_id)
+            # A completed-then-crashed unpull leaves an intent marker (and its
+            # tombstone) behind. Content is about to be written, so settle it
+            # FIRST: an old marker left lying would later let a genuine loss be
+            # read as a deliberate absence. Settling also aborts a marker whose
+            # rename never happened, which leaves the content this call expects.
+            self._recover_unpull_locked(local_id=identity.local_id)
             current_record = read_baseline(self.config_dir, "skill", identity.local_id)
             current = self._document(alias)
             # ALIAS OWNERSHIP IS DURABLE, NOT LIVE-DIRECTORY-LOCAL. A crash
@@ -397,6 +403,10 @@ class ManagedSkillStorage:
         not a delete, so a retried request must not fail on its own earlier effect.
         """
         with config_write_lock(self.config_dir):
+            # Settle a crashed PULL first, exactly as a reader does: its journal
+            # may be mid-swap, and unpull must see the real destination (or none)
+            # instead of refusing a stale state.
+            self.recover(local_id=local_id)
             self._recover_unpull_locked(local_id=local_id)
             record = read_baseline(self.config_dir, "skill", local_id)
             if record is None or record.identity is None or record.local_alias is None:
@@ -437,12 +447,19 @@ class ManagedSkillStorage:
                 },
             )
             os.replace(destination, tombstone)
+            # A rename changes entries in BOTH directories: the removal in the
+            # skills root and the addition in the backups root. Syncing only one
+            # leaves a power-loss window where the tombstone is absent and the
+            # state write lands anyway -- the fourth case, a link that reports
+            # content it cannot show.
             _sync_directory(self.root)
+            _sync_directory(tombstone.parent)
             self._record_absent(record)
             marker.unlink(missing_ok=True)
             # Deleting the tombstone is allowed once the state is durable: the
             # link no longer points at those bytes and no reader resolves them.
             shutil.rmtree(tombstone, ignore_errors=True)
+            _sync_directory(tombstone.parent)
             settled = read_baseline(self.config_dir, "skill", local_id)
             return settled if settled is not None else replace(record, content_state="absent")
 

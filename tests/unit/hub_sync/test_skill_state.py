@@ -9,6 +9,7 @@ helpers.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +317,162 @@ def test_recovery_aborts_an_unpull_that_never_renamed(tmp_path: Path) -> None:
     assert (storage.config_dir / "skills" / document.name / "SKILL.md").exists()
     record = prov.read_baseline(storage.config_dir, "skill", identity.local_id)
     assert record is not None and record.content_state == "present"
+
+
+def test_unpull_settles_a_crashed_pull_journal_first(tmp_path: Path) -> None:
+    """Review round 1 nit: a prepared pull must not make unpull refuse."""
+
+    storage, _hub, ctx, identity, document = _present_link(tmp_path)
+    record = prov.read_baseline(storage.config_dir, "skill", identity.local_id)
+    assert record is not None
+    policy = pol.read_policy(read_config_values(storage.config_dir) or {}, identity)
+    storage.journal.prepare(
+        identity,
+        "pull",
+        before_fingerprint=storage.snapshot(identity.local_id).fingerprint,
+        after_fingerprint="f" * 64,
+        payload={
+            "adapter": "managed-skill",
+            "local_alias": document.name,
+            "baseline": record.to_json(),
+            "policy_revision": policy.revision,
+            "automatic": False,
+        },
+    )
+
+    row = svc.unpull_skill(ctx, link_id=identity.link_id)
+
+    assert row["link"]["content_state"] == "absent"
+    assert not storage.journal.pending(kind="skill", local_id=identity.local_id)
+
+
+def test_a_stale_unpull_marker_cannot_mask_a_later_genuine_loss(tmp_path: Path) -> None:
+    """Review round 1 MAJOR: the marker must be settled by the content write.
+
+    An unpull can land rename + state write and die before deleting its marker.
+    If the user re-pulls instead of re-clicking unpull, the old marker AND its
+    tombstone used to survive; a later genuine loss then matched the crash case
+    and was recorded as a deliberate absence. The pull must settle them first.
+    """
+
+    import json
+    import shutil
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    svc.install_skill(
+        ctx, hub_source=base, hub_id=HUB_ID, visibility="public", tenant_id=None, alias=ALIAS
+    )
+    record = _record(ctx.config_dir)
+    assert record.identity is not None
+
+    # Unpull completed, then "crashed" before deleting marker and tombstone.
+    svc.unpull_skill(ctx, link_id=record.identity.link_id)
+    marker = ManagedSkillStorage(ctx.config_dir).unpull_marker(record.local_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    operation = "b" * 32
+    tombstone = ctx.config_dir / "hub" / "backups" / f"skill-{record.local_id}-unpull-{operation}"
+    tombstone.mkdir(parents=True, exist_ok=True)
+    (tombstone / "SKILL.md").write_text("the unpulled copy\n")
+    marker.write_text(
+        json.dumps(
+            {
+                "operation": operation,
+                "local_id": record.local_id,
+                "alias": ALIAS,
+                "tombstone": tombstone.name,
+            }
+        )
+    )
+
+    # Re-pull, not re-unpull: the content write settles the stale intent.
+    svc.install_skill(
+        ctx, hub_source=base, hub_id=HUB_ID, visibility="public", tenant_id=None, alias=ALIAS
+    )
+    assert not marker.exists()
+    assert not tombstone.exists()
+
+    # Now the fresh copy is genuinely lost. No evidence says it was removed, so
+    # it must stay the error it always was -- not become "absent".
+    shutil.rmtree(ctx.config_dir / "skills" / ALIAS)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    assert check.verdict == "unavailable" and check.reason == "local-concurrent-edit"
+    stored = _record(ctx.config_dir)
+    assert stored.content_state == "present"
+
+
+def test_replace_local_on_an_absent_link_refuses(tmp_path: Path) -> None:
+    """'Keep my side' has no side to keep: refuse by name, write nothing."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    checks = svc.check_items(ctx, kinds=("skill",))
+
+    report = svc.apply_items(ctx, kind="skill", checks=checks, replace="local", allow_llm=False)
+
+    (result,) = report.reports
+    assert result.outcome == "refused" and result.error_class == "merge-refused"
+    assert "no local copy" in result.message
+    assert not (ctx.config_dir / "skills" / ALIAS).exists()
+    assert _record(ctx.config_dir).content_state == "absent"
+
+
+def test_kind_order_is_agent_then_team_then_skill_everywhere(tmp_path: Path) -> None:
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    root = tmp_path / "profile"
+    ctx = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=lambda _tenant: None,
+    )
+    base = "https://example.invalid/v1"
+    fields = {
+        "agent": {"instructions": "i", "description": "d"},
+        "team": {
+            "description": "d",
+            "manager": "m",
+            "members": [],
+            "instructions": "",
+            "project": "",
+        },
+        "skill": _input()[1].to_json(),
+    }
+    for kind in ("skill", "team", "agent"):
+        local_id = f"{kind[0]}1"
+        identity = LinkIdentity(kind, local_id, base, "public", None, f"h-{kind}")
+        record = prov.make_record(kind, local_id, identity.hub_id, None, fields[kind], "pull")
+        prov.write_baseline(
+            root,
+            replace(
+                record,
+                identity=identity,
+                local_alias="zz-skill" if kind == "skill" else None,
+                content_state="absent" if kind == "skill" else "present",
+            ),
+        )
+
+    def fold(doc: dict[str, Any]) -> None:
+        items = doc.setdefault("items", {})
+        for kind in ("skill", "team", "agent"):
+            items[f"{kind}:{kind[0]}1"] = {
+                "kind": kind,
+                "name": kind,
+                "local_id": f"{kind[0]}1",
+                "state": "available",
+            }
+
+    st.StatusStore(root).mutate(fold)
+    assert [item["kind"] for item in svc.status_snapshot(ctx)["items"]] == [
+        "agent",
+        "team",
+        "skill",
+    ]
+    assert [link["kind"] for link in svc.links_snapshot(ctx)["links"]] == [
+        "agent",
+        "team",
+        "skill",
+    ]
 
 
 def test_a_check_on_an_absent_link_fetches_and_reports_available(tmp_path: Path) -> None:

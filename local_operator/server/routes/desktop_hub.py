@@ -513,9 +513,12 @@ async def links(
     """The full local-only links inventory: every link, healthy or not. No network.
 
     Gated on the ``hub_links:1`` capability so an older renderer never sees rows
-    it cannot act on; the legacy ``/hub/updates`` projection is unchanged. Skill
-    rows are NEW and capability-gated: an old typed agent/team-only consumer asks
-    for its kinds explicitly, so ``?kind=agent|team`` never returns a skill row.
+    it cannot act on. Skill rows are NEW and capability-gated HERE: an old typed
+    agent/team-only consumer asks for its kinds explicitly, so
+    ``?kind=agent|team`` never returns a skill row. The ``/hub/updates``
+    projection keeps its shape but DOES list skill rows now (that is the surface
+    a skill failure is retried from); this route's own kind filter is what keeps
+    the typed inventory clean.
     """
 
     from local_operator.hub_sync import service as svc
