@@ -237,7 +237,7 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
                     "" if reachable else peer_reason_words(str(entry.get("reason") or ""))
                 ),
                 "last_seen_at": seen,
-                "session_count": counts.get(device_id, 0),
+                "session_count": counts.get(device_id, 0) if reachable else None,
                 "rtt_ms": RTT_MS,
                 "build": dict(build) if isinstance(build, dict) else {},
                 "capabilities": list(capabilities) if isinstance(capabilities, list) else [],
@@ -246,6 +246,7 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
         if reachable and not current["reachable"]:
             current["reachable"] = True
             current["unreachable_reason"] = ""
+            current["session_count"] = counts.get(device_id, 0)
         elif not reachable and not current["reachable"] and not current["unreachable_reason"]:
             # The FIRST non-empty reason wins: every entry for one device describes
             # the same condition, and a device unreachable in one network and never
@@ -486,8 +487,11 @@ def remote_session_rows(
             # honest False rather than a claim that it is unarchived.
             "archived": bool(getattr(row, "archived", False)),
             "degraded": [],
-            "subagents_running": None,
-            "subagents_queued": None,
+            "waiting_on": row.waiting_on,
+            "jobs_running": row.jobs_running,
+            "subagents_running": row.subagents_running,
+            "subagents_queued": row.subagents_queued,
+            "live_state": row.live_state,
             "locality": "remote",
             "owner_device": str(getattr(row, "owner_device", "") or ""),
             "owner_device_name": str(getattr(row, "owner_device_name", "") or ""),
@@ -500,7 +504,7 @@ def remote_session_rows(
             "placement": None,
             "origin": None,
             "last_synced_at": None,
-            "active": False,
+            "active": bool(row.pending or row.live_state or row.waiting_on > 0),
             # The transport's own state token, in this list's vocabulary
             # (``session.catalog.live_state_from_flags``'s four words), or "" for
             # a cold row — the same spellings the local half publishes.
