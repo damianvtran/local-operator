@@ -496,7 +496,7 @@
   "wire.settings.remote_compute.title": "Cómputo remoto",
   "wire.settings.remote_compute_enabled.choice.false.description": "solo local",
   "wire.settings.remote_compute_enabled.choice.true.description": "se permiten ejecuciones remotas",
-  "wire.settings.remote_compute_enabled.help": "Vista previa: envía tu trabajo al cómputo alojado por Radient en tu malla.",
+  "wire.settings.remote_compute_enabled.help": "Vista previa: envía trabajo al cómputo alojado por Radient en tu malla.",
   "wire.settings.remote_compute_enabled.label": "Cómputo remoto",
   "wire.settings.retired.description": "Claves que se leen pero ya no hacen nada.",
   "wire.settings.retired.title": "Retiradas",
