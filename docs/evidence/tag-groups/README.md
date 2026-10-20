@@ -7,7 +7,7 @@ commit on `feat/tui-tag-command`.
 ## How these were captured
 
 The rig is a scratch script, not a repo script: it seeds `SessionSidebar` with six
-`SessionRow`s (one pinned, two active, three previous) and calls the repo's own
+`SessionRow`s (one pinned, one active, four previous) and calls the repo's own
 capture helper:
 
 ```sh
