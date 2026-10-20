@@ -327,7 +327,12 @@ def test_an_unusable_provider_records_the_failure_and_a_future_retry_the_sidebar
     (exposed,) = svc.status_snapshot(ctx)["items"]
     assert exposed["error_class"] == "provider-error"
     assert exposed["error_subclass"] == "request"
-    assert exposed["state"] == "available"  # indicator stays; the user resolves it
+    # A carried error is FAILED in the projection and counted (QA F3): the
+    # indicator no longer depends on a consumer also reading ``error_class``.
+    # The row stays retryable (attempts/next_retry_at above) for the user to
+    # resolve; "failed" is the state, not a dead end.
+    assert exposed["state"] == "failed"
+    assert svc.status_snapshot(ctx)["counts"]["failed"] == 1
     assert exposed["next_retry_at"] == item["next_retry_at"]
 
 
