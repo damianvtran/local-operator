@@ -2548,6 +2548,8 @@ def _execute_restart_script(
     hide_net: bool = False,
     unreadable_pre: bool = False,
     hang_kill: bool = False,
+    dispatch_argv: list[str] | None = None,
+    seed_receipt: bool = True,
 ) -> tuple[dict[str, Any], list[Any], float]:
     """Run the shipped RESTART_SOURCE against a redirected /proc and fake systemd.
 
@@ -2571,8 +2573,9 @@ def _execute_restart_script(
     if unreadable_pre:
         (proc / "9000" / "fd").chmod(0o000)
     root = tmp_path / "var/lib/lop-action-supervisor"
-    root.mkdir(parents=True)
-    (root / "action-server.service.json").write_text(json.dumps(_installer_receipt()))
+    root.mkdir(parents=True, exist_ok=True)
+    if seed_receipt:
+        (root / "action-server.service.json").write_text(json.dumps(_installer_receipt()))
     calls: list[Any] = []
     state = {"main": 9000, "now": 0.0}
 
@@ -2600,20 +2603,26 @@ def _execute_restart_script(
     def sleep(seconds: float) -> None:
         state["now"] += seconds
 
+    # MODEL THE REAL INTERPRETER, not the old seam. ``python3 -c <source> a b``
+    # gives sys.argv == ['-c', 'a', 'b']: the source is NEVER an argv element.
+    if dispatch_argv is not None:
+        assert dispatch_argv[0] == "python3" and dispatch_argv[1] == "-c"
+        source = dispatch_argv[2]
+        argv = ["-c", *dispatch_argv[3:]]
+    else:
+        source = guest_supervisor.RESTART_SOURCE
+        argv = [
+            "-c",
+            "action-server.service",
+            "5000",
+            guest_supervisor.RESTART_RESULT_PATH,
+            "777",
+        ]
     modules = {
         "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
         "os": SimpleNamespace(readlink=os.readlink, sysconf=lambda name: 100),
         "subprocess": SimpleNamespace(check_output=check_output),
-        "sys": SimpleNamespace(
-            argv=[
-                "-c",
-                guest_supervisor.RESTART_SOURCE,
-                "action-server.service",
-                "5000",
-                guest_supervisor.RESTART_RESULT_PATH,
-                "777",
-            ]
-        ),
+        "sys": SimpleNamespace(argv=argv),
         "time": SimpleNamespace(monotonic=lambda: state["now"], sleep=sleep),
     }
     real_import = builtins.__import__
@@ -2622,7 +2631,7 @@ def _execute_restart_script(
         return modules[name] if name in modules else real_import(name, *args, **kwargs)
 
     exec(
-        guest_supervisor.RESTART_SOURCE,
+        source,
         {"__builtins__": {**vars(builtins), "__import__": importer}},
     )
     result_path = tmp_path / str(guest_supervisor.RESTART_RESULT_PATH).lstrip("/")
@@ -2655,22 +2664,47 @@ def test_restart_script_kills_all_then_starts_and_reports_a_fresh_mainpid(
     assert record["token"] == 777
 
 
-def test_restart_result_validates_the_five_key_receipt_the_installer_writes(
+def _installer_written_receipt(tmp_path: Path) -> Path:
+    """Run the REAL install, then one REAL capture, and return the receipt file.
+
+    The installer writes the five-key empty envelope; only the capture hook
+    appends a record. Hand-building that file is how the report-only fields
+    slipped into a fixture the guest never produces.
+    """
+    install, _ = _script_guest(tmp_path)
+    install()
+    path = tmp_path / "var/lib/lop-action-supervisor/action-server.service.json"
+    modules = {
+        "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
+        "os": SimpleNamespace(environ={}),
+        "subprocess": SimpleNamespace(
+            run=lambda *a, **k: (_ for _ in ()).throw(OSError("journal unavailable"))
+        ),
+        "sys": SimpleNamespace(argv=["capture.py", "action-server.service"]),
+    }
+    real_import = builtins.__import__
+
+    def importer(name: str, *args: Any, **kwargs: Any) -> Any:
+        return modules[name] if name in modules else real_import(name, *args, **kwargs)
+
+    exec(
+        guest_supervisor.CAPTURE_SOURCE,
+        {"__builtins__": {**vars(builtins), "__import__": importer}},
+    )
+    return path
+
+
+def test_restart_result_validates_the_receipt_the_installer_actually_writes(
     tmp_path: Path,
 ) -> None:
-    """The capture file has five keys; NRestarts/ActiveEnter are report-only.
+    """BLOCKER 2's fixture is the installer's file, not a hand-written one.
 
-    Requiring the report-only fields on the on-disk file made every restart
-    ``receipt_unavailable``. This fixture is the installer's actual shape.
+    The installer persists five keys; ``systemd_nrestarts`` and
+    ``systemd_active_enter`` are report-only, added in memory. The restart
+    must add them itself or the host can never validate the envelope.
     """
-    payload, _, _ = _execute_restart_script(
-        tmp_path,
-        on_kill=lambda proc: _write_listeners(proc, {}),
-        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
-    )
-    on_disk = json.loads(
-        (tmp_path / "var/lib/lop-action-supervisor/action-server.service.json").read_text()
-    )
+    path = _installer_written_receipt(tmp_path)
+    on_disk = json.loads(path.read_text())
     assert set(on_disk) == {
         "schema_version",
         "records",
@@ -2678,11 +2712,61 @@ def test_restart_result_validates_the_five_key_receipt_the_installer_writes(
         "baseline_nrestarts",
         "baseline_active_enter",
     }
+    assert on_disk["captured_exits"] == 1
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        seed_receipt=False,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
+    )
     assert payload["receipt"]["systemd_nrestarts"] == 1
     assert payload["receipt"]["systemd_active_enter"] == 200
     record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
     assert record["status"] == "verified"
-    assert record["latest_restart"] == 42
+    assert record["latest_restart"] == on_disk["records"][-1]["restart"]
+
+
+def test_restart_argument_order_is_one_contract() -> None:
+    service = guest_supervisor.restart_service_argv("action-server.service", 5000, 777)
+    assert guest_supervisor.RESTART_ARGUMENT_ORDER == (
+        "unit",
+        "port",
+        "result_path",
+        "token",
+    )
+    assert service[-4:] == [
+        "action-server.service",
+        "5000",
+        guest_supervisor.RESTART_RESULT_PATH,
+        "777",
+    ]
+
+
+def test_the_built_dispatch_executes_with_the_real_python_argv(tmp_path: Path) -> None:
+    """BLOCKER: run the argv the REAL builder produces, through an exec stand-in.
+
+    ``python3 -c <source> a b c`` gives sys.argv == ['-c', 'a', 'b', 'c']; the
+    source is not an argv element. The old seam injected it at argv[1], which
+    is why 135 green tests could not see the off-by-one.
+    """
+    built = guest_supervisor.restart_command("action-server.service", "pw", 777)
+    shell = built[-1]
+    service = guest_supervisor.restart_service_argv("action-server.service", 5000, 777)
+    assert "systemd-run" in shell
+    assert "--collect" in shell
+    assert "--scope" not in shell, "a scope would put the restart back in the target cgroup"
+    assert "--unit=lop-supervisor-restart-777" in shell
+    assert "action-server.service 5000 %s 777" % guest_supervisor.RESTART_RESULT_PATH in shell
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        dispatch_argv=service[4:],
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
+    )
+    record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "verified"
+    assert record["token"] == 777
+    assert record["fresh"] is True
 
 
 def test_restart_script_reports_the_survivor_and_the_host_refuses_it(

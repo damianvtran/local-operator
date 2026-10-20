@@ -94,6 +94,12 @@ RESTART_GUEST_DEADLINE_S = 7.0
 #: action server is back. The token ties a result to the dispatch that asked for
 #: it, so a stale file from an earlier restart cannot be read as this one.
 RESTART_RESULT_PATH = "/var/lib/lop-action-supervisor/restart-result.json"
+
+#: Positional contract between ``restart_service_argv`` and ``RESTART_SOURCE``.
+#: CPython's ``-c`` puts the command string where argv[0] would be and the
+#: first real argument at argv[1], so the script unpacks ``sys.argv[1:]`` in
+#: exactly this order. One tuple, not two literals that can drift.
+RESTART_ARGUMENT_ORDER = ("unit", "port", "result_path", "token")
 RESTART_DISPATCH_TIMEOUT_S = 15.0
 RESTART_RESULT_TIMEOUT_S = 5.0
 RESTART_RESULT_INTERVAL_S = 0.25
@@ -418,10 +424,14 @@ print(json.dumps({'unit': unit, 'installed': True}))
 RESTART_SOURCE = r"""
 import errno, json, os, pathlib, re, subprocess, sys, time
 
-UNIT = sys.argv[2]
-PORT = int(sys.argv[3])
-RESULT = pathlib.Path(sys.argv[4])
-TOKEN = int(sys.argv[5])
+# ``python3 -c <source> a b c`` gives sys.argv == ['-c', 'a', 'b', 'c']:
+# the source occupies argv[0], so the arguments start at argv[1]. The builder
+# (``restart_service_argv``) appends them in RESTART_ARGUMENT_ORDER.
+unit, port, result_path, token = sys.argv[1:5]
+UNIT = unit
+PORT = int(port)
+RESULT = pathlib.Path(result_path)
+TOKEN = int(token)
 DEADLINE = time.monotonic() + 6.0
 KILL_GRACE = 2.0
 VERIFY = 4.0
@@ -533,6 +543,18 @@ def main_pid():
             return int(line[8:])
     return 0
 
+def acceptable(pid, new_main, new_main_start):
+    # The same rule the host derives: postdates the kill AND descends from it.
+    if kill_ticks <= 0 or new_main <= 0 or new_main_start < kill_ticks:
+        return False
+    try:
+        ppid, start = stat_of(pid)
+    except OSError:
+        return False
+    if start < kill_ticks:
+        return False
+    return pid == new_main or new_main in ancestors(ppid)
+
 # A result left by an earlier dispatch must not be read as this one.
 try:
     RESULT.unlink()
@@ -580,9 +602,30 @@ if pre_complete:
     # receipt): a verification that consumes the whole budget would report
     # new_main_pid=0 and lose the evidence that explains the refusal.
     until = min(time.monotonic() + VERIFY, DEADLINE - 0.8)
+    last_main_poll = -1.0
     while time.monotonic() < until:
         post, post_complete = owners()
-        if post and not (set(pre) & set(post)):
+        now = time.monotonic()
+        if now - last_main_poll >= 0.5:
+            try:
+                new_main = main_pid()
+            except Exception:
+                new_main = 0
+            new_main_start = 0
+            if new_main > 0:
+                try:
+                    _, new_main_start = stat_of(new_main)
+                except OSError:
+                    new_main_start = 0
+            last_main_poll = now
+        # ACCEPTANCE IN THE LOOP, not the round-1 set difference. A dying
+        # holder can fork a worker the pre scan never saw; stopping on that
+        # pid would report the stale holder as the outcome while a genuine
+        # new listener was still binding. Only a postdating descendant of the
+        # new MainPID ends the poll early; anything else keeps waiting.
+        if (post_complete and post and new_main > 0 and
+                new_main_start >= kill_ticks and
+                all(acceptable(pid, new_main, new_main_start) for pid in post)):
             break
         time.sleep(0.1)
     owner_records, detail_complete = describe(post[:8])
@@ -924,23 +967,30 @@ def restart_command(
     writes its verdict to ``RESTART_RESULT_PATH``; this command only dispatches
     it and may legitimately lose its HTTP response when the kill lands.
     """
+    return _privileged_fragment(shlex.join(restart_service_argv(unit, port, token)), password)
+
+
+def restart_service_argv(unit: str, port: int, token: int) -> list[str]:
+    """The exact argv systemd-run execs, in RESTART_ARGUMENT_ORDER.
+
+    ``--collect`` and the transient-unit name keep the restart OUT of the
+    target cgroup; ``--scope`` here would place it back inside and let the
+    all-process kill reap its own executor (round-2 blocker 1).
+    """
     name = "lop-supervisor-restart-%d" % token
-    fragment = shlex.join(
-        [
-            "systemd-run",
-            "--quiet",
-            "--collect",
-            "--unit=" + name,
-            "python3",
-            "-c",
-            RESTART_SOURCE,
-            unit,
-            str(port),
-            RESTART_RESULT_PATH,
-            str(token),
-        ]
-    )
-    return _privileged_fragment(fragment, password)
+    return [
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        "--unit=" + name,
+        "python3",
+        "-c",
+        RESTART_SOURCE,
+        unit,
+        str(port),
+        RESTART_RESULT_PATH,
+        str(token),
+    ]
 
 
 def restart_result_command(password: str) -> Sequence[str]:
