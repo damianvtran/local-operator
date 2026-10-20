@@ -269,12 +269,12 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: the authority; raise this number only with a fresh measurement.
 #:
 #: RAISED BY 16 B for §14's ``notify`` (origin-aware notifications), from 2,145
-#: to 2,161, and that is the whole of this feature's ceiling spend. MEASURED on
-#: this head by serializing the arm's own frame twice — once as the shipped
-#: fixture leaves it, and once with ``notify`` dropped from the attention state
-#: — with the second reading 1,050,721 B, exactly the total this comment's
-#: 2,145 already stood for (1,048,576 + 2,145). So the delta is 16 B and it is
-#: ADDITIVE here: the released arm's catalogue is already pinned at
+#: to 2,161, and that is the whole of this feature's ceiling spend. MEASURED
+#: by serializing the arm's own frame twice — once as the shipped fixture
+#: leaves it, and once with ``notify`` dropped from the attention state — with
+#: the second reading exactly the total this comment's 2,145 already stood for
+#: (1,048,576 + 2,145). So the delta is 16 B and it is ADDITIVE here: the
+#: released arm's catalogue is already pinned at
 #: ``MODEL_CATALOGUE_FLOOR_ROWS`` (the frame is over the line even at the
 #: floor), so nothing else can absorb the bytes.
 #:
@@ -287,14 +287,19 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: RAISED BY 16 B for slice 4's monitors snapshot key (design §12), from 2,161
 #: to 2,177, and that is the whole of that slice's spend on this arm. MEASURED
 #: on this head by the arm's own arithmetic rather than restated: the released
-#: frame serialized at 1,050,753 B — 1,048,576 + 2,177 exactly, 16 B over the
-#: reading this comment's 2,161 stood for (1,050,737). The 16 B is the
-#: serialized key in full — ``"monitors": []`` and the separator that leaves
-#: with it — a fixed-width EMPTY list: the charged-list treatment is the
-#: ``populated`` entry's, and nothing about it grows with the session. It is
-#: ADDITIVE here for the same reason as ``notify``: the released arm's
-#: catalogue is already pinned at ``MODEL_CATALOGUE_FLOOR_ROWS``, so nothing
-#: else can absorb the bytes.
+#: frame serialized at 1,050,732 B — 21 B UNDER the 1,048,576 + 2,177 this
+#: constant reserves, because the fixture below pays TWO charges out of one
+#: free-text pool (origin/main's 127 B title-filler charge AND the effort
+#: field's 323 B goal-filler charge), so this head's worst case sits below the
+#: line origin/main's fixture reached exactly. The CONSTANT is unchanged: 2,177
+#: is the reserved excess and the assertion below is a CEILING, so the 21 B is
+#: headroom against the next field that legitimately needs it, not a licence
+#: to spend it. The 16 B is the serialized key in full — ``"monitors": []`` and
+#: the separator that leaves with it — a fixed-width EMPTY list: the
+#: charged-list treatment is the ``populated`` entry's, and nothing about it
+#: grows with the session. It is ADDITIVE here for the same reason as
+#: ``notify``: the released arm's catalogue is already pinned at
+#: ``MODEL_CATALOGUE_FLOOR_ROWS``, so nothing else can absorb the bytes.
 _RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_177
 
 #: No comms node: these released children have no lineage, which is the smaller
