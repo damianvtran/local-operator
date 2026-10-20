@@ -404,9 +404,7 @@ async def test_auto_tag_records_nothing_for_a_peer_held_fork(tmp_path: Path) -> 
     app = _app(tmp_path, remote)
     root = tmp_path / "cfg"
     (root / "sessions" / CHILD_ID).mkdir(parents=True)
-    app.state.desktop_sessions.bridges["s1"].remote_row = SimpleNamespace(
-        owner_device="peer-a"
-    )
+    app.state.desktop_sessions.bridges["s1"].remote_row = SimpleNamespace(owner_device="peer-a")
 
     async with _client(app) as client:
         response = await client.post(
