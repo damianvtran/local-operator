@@ -57,13 +57,54 @@ class CapacityUnavailable(RemoteComputeError):
     """503 — capacity or substrate is unavailable; the same call may work later."""
 
 
+class NetworkMismatch(RemoteComputeError):
+    """The run Radient answered with is not the network's run.
+
+    A run is keyed by the network it was submitted through, so a response that
+    names ANOTHER network — or names none at all — is not evidence the work
+    landed where it was addressed. There is no retry that repairs that: the run
+    exists, it is just not this tenant's, and treating it as one would report
+    another network's work as this network's receipt.
+
+    A MISSING ``network_id`` IS A MISMATCH, deliberately. The field is in the
+    public contract, so its absence is a response this client cannot verify;
+    accepting it would mean a build that silently stops checking the tenant.
+    """
+
+
+class InvalidIdempotencyKey(RemoteComputeError):
+    """A key this client will not put in the header, and WHY, as a code.
+
+    The reason is a machine code rather than a sentence because each reason has
+    its own remedy and the copy is keyed, so the wording lives in the locale
+    catalogues and the client (which has no locale) only classifies. Refused
+    here rather than left to the server: a 400 after submission cannot tell the
+    operator which of their keys was wrong.
+
+    ``reason`` is ``empty``, ``too_long`` or ``not_printable``; ``max_bytes`` is
+    the contract bound, carried so the surface can name it without importing the
+    client's constant into its copy.
+    """
+
+    def __init__(self, reason: str, *, max_bytes: int = 0) -> None:
+        super().__init__(f"the idempotency key is {reason}")
+        self.reason = reason
+        self.max_bytes = max_bytes
+
+
 class Unreachable(RemoteComputeError):
     """The request never produced a response (DNS, TLS, timeout, refused).
 
     Typed rather than left as the raw ``httpx`` error so a caller can report
-    "could not reach Radient" without importing the transport's exception tree,
-    and so the chain (``__cause__``) stays available for anyone who needs the
-    underlying fault.
+    "could not reach Radient" without importing the transport's exception tree.
+
+    THE CHAIN IS CUT ON PURPOSE (``raise ... from None`` at the raise site). An
+    ``httpx`` transport error carries the REQUEST it failed on, and that request
+    carries the ``Authorization`` header — so keeping ``__cause__`` available, as
+    this class used to argue for, put a bearer one ``traceback.format_exception``
+    away from any log or support paste. The redaction rule at the top of this
+    module wins over the debugging convenience: the fault is reported by its
+    TYPE in this sentence, and the raw chain is never re-attached.
     """
 
 
@@ -83,7 +124,9 @@ __all__ = [
     "CapacityUnavailable",
     "IdempotencyConflict",
     "InsufficientCredit",
+    "InvalidIdempotencyKey",
     "InvalidRequest",
+    "NetworkMismatch",
     "RemoteComputeError",
     "RunNotFound",
     "Unreachable",

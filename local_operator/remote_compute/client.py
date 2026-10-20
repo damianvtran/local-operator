@@ -42,6 +42,8 @@ from local_operator.providers.auth_store import (
 )
 from local_operator.remote_compute.errors import (
     ERROR_BY_STATUS,
+    InvalidIdempotencyKey,
+    NetworkMismatch,
     RemoteComputeError,
     Unreachable,
 )
@@ -52,6 +54,15 @@ from local_operator.tunnels.errors import LoginRequired
 
 #: Where the run endpoints live, relative to the API host.
 RUNS_PATH = "/v1/remote-compute/runs"
+
+#: The keys the v1 response envelope may carry, and nothing else.
+#:
+#: The envelope is ``{"result": <payload>}``, optionally with a documented
+#: ``message`` beside it. Membership is checked as a WHOLE-KEY-SET test rather
+#: than "does a ``result`` key exist", because the run object has top-level
+#: fields of its own and a run that ever carried one called ``result`` would be
+#: truncated to that field by the narrower rule.
+ENVELOPE_KEYS: frozenset[str] = frozenset({"result", "message"})
 
 #: The contract's bound on ``Idempotency-Key``: 1 to 128 BYTES.
 MAX_IDEMPOTENCY_KEY_BYTES = 128
@@ -67,6 +78,13 @@ TERMINAL_RUN_STATUSES: frozenset[str] = frozenset(
     {"succeeded", "failed", "cancelled", "canceled", "expired"}
 )
 
+#: Every status this build can NAME: the two non-terminal ones plus the
+#: terminal set.
+#:
+#: Anything outside it is a status this client cannot read, and the watch says
+#: so once rather than pretending it is one of these.
+KNOWN_RUN_STATUSES: frozenset[str] = frozenset({"queued", "running"}) | TERMINAL_RUN_STATUSES
+
 
 def new_idempotency_key() -> str:
     """A fresh key per invocation; a retry reuses it through ``--idempotency-key``."""
@@ -74,17 +92,23 @@ def new_idempotency_key() -> str:
 
 
 def check_idempotency_key(key: str) -> str:
-    """The contract's 1..128-BYTE rule, checked before a request is composed.
+    """The contract's header rule, checked before a request is composed.
 
     BYTES, not characters: the header is bytes on the wire, and a 100-character
-    key of non-ASCII script is over the limit the server enforces. Refused here
-    so the caller learns which key was wrong, rather than getting a bare 400
-    after the work was addressed.
+    key of non-ASCII script is over the limit the server enforces. PRINTABLE
+    ASCII only, for the same reason at the other end of the range — a key with a
+    newline or a control byte is not a header value, and a server that accepts
+    it would be storing a key no retry can reproduce byte-for-byte.
+
+    A refusal carries a REASON CODE (see :class:`InvalidIdempotencyKey`) rather
+    than a sentence: the caller is a CLI whose copy is keyed per locale.
     """
     if not isinstance(key, str) or not key:
-        raise ValueError("an idempotency key is required")
+        raise InvalidIdempotencyKey("empty")
     if len(key.encode("utf-8")) > MAX_IDEMPOTENCY_KEY_BYTES:
-        raise ValueError(f"the idempotency key is longer than {MAX_IDEMPOTENCY_KEY_BYTES} bytes")
+        raise InvalidIdempotencyKey("too_long", max_bytes=MAX_IDEMPOTENCY_KEY_BYTES)
+    if any(not 0x20 <= ord(character) <= 0x7E for character in key):
+        raise InvalidIdempotencyKey("not_printable")
     return key
 
 
@@ -98,10 +122,11 @@ def _run_path(run_id: str) -> str:
 def _decoded(response: httpx.Response) -> Any:
     """The result payload, unwrapped from the ``{"result": ...}`` envelope.
 
-    The API's envelope is shared with every other v1 endpoint on this host; a
-    bare payload is accepted too because the run endpoints document the RUN as
-    the response body and an envelope is a transport detail this client should
-    not make a caller think about.
+    ONLY AN ENVELOPE IS UNWRAPPED. The test is that the payload's whole key set
+    is a subset of :data:`ENVELOPE_KEYS` and names ``result``; anything else is
+    the payload itself. The narrower "a ``result`` key exists" rule truncated
+    any object that happened to have a top-level field of that name, and the run
+    object is exactly the kind of thing that grows fields.
     """
     try:
         payload = response.json()
@@ -109,9 +134,30 @@ def _decoded(response: httpx.Response) -> Any:
         raise RemoteComputeError(
             "Radient returned an invalid remote-compute response."
         ) from failure
-    if isinstance(payload, dict) and "result" in payload:
+    if isinstance(payload, dict) and "result" in payload and payload.keys() <= ENVELOPE_KEYS:
         return payload["result"]
     return payload
+
+
+def _confirm_network(payload: dict[str, Any], *, expected: str) -> str:
+    """The run's network, refused as a typed mismatch when it is not ``expected``.
+
+    Returns the value the SERVER sent, so a caller that reports a network is
+    reporting what Radient confirmed rather than what it asked for; the two are
+    equal here by construction, but only this one is evidence.
+    """
+    returned = payload.get("network_id")
+    if not isinstance(returned, str) or not returned:
+        raise NetworkMismatch(
+            "Radient returned a remote run without a network id, so it cannot be "
+            "confirmed as this network's run."
+        )
+    if returned != expected:
+        raise NetworkMismatch(
+            "Radient returned a remote run from a different network than the one it "
+            "was submitted to."
+        )
+    return returned
 
 
 def _failed(status: int) -> RemoteComputeError | LoginRequired:
@@ -196,6 +242,7 @@ class RemoteComputeClient:
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        empty_body_ok: bool = False,
     ) -> Any:
         headers = await self._headers()
         if idempotency_key is not None:
@@ -210,16 +257,21 @@ class RemoteComputeClient:
                 timeout=30,
                 follow_redirects=False,
             )
-        except httpx.HTTPError as failure:
-            # Re-raised as a typed error with the cause kept: `httpx`'s own
-            # hierarchy is a transport detail, and `__cause__` is where the real
-            # fault (a timeout, a refused connection) still lives.
+        except httpx.HTTPError:
+            # ``from None``, deliberately: the httpx error carries the request it
+            # failed on, and that request carries the Authorization header, so a
+            # kept chain puts a bearer one traceback away from a log. The fault
+            # is named by this sentence instead; see ``errors.Unreachable``.
             raise Unreachable(
                 "Radient could not be reached for this remote-compute request."
-            ) from failure
+            ) from None
         # Never surface a provider body — see the module docstring.
         if response.status_code >= 400:
             raise _failed(response.status_code)
+        if empty_body_ok and not response.content.strip():
+            # A cancel answers 204 (or a bodiless 200) on success, and a bodiless
+            # success is not a malformed response.
+            return {}
         return _decoded(response)
 
     async def create_run(
@@ -242,12 +294,25 @@ class RemoteComputeClient:
         )
         if not isinstance(payload, dict):
             raise RemoteComputeError("Radient returned an invalid remote-compute response.")
+        # The tenant is CONFIRMED off the response, not assumed from the request:
+        # a server that answered with another network's run would otherwise be
+        # reported as this network's receipt.
+        _confirm_network(payload, expected=request.network_id)
         return payload
 
-    async def get_run(self, run_id: str) -> dict[str, Any]:
+    async def get_run(self, run_id: str, *, expected_network: str | None = None) -> dict[str, Any]:
+        """One run by id, and — when the caller names the network — its tenant confirmed.
+
+        ``expected_network`` exists for the watch loop, which is following a run
+        it already submitted: a poll that starts answering about a different
+        network's run must stop the watch with a typed failure rather than
+        reporting that run's status as the one being watched.
+        """
         payload = await self._request("GET", _run_path(run_id))
         if not isinstance(payload, dict):
             raise RemoteComputeError("Radient returned an invalid remote-compute response.")
+        if expected_network is not None:
+            _confirm_network(payload, expected=expected_network)
         return payload
 
     async def list_runs(
@@ -268,8 +333,13 @@ class RemoteComputeClient:
         return await self._request("GET", "", params=params)
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
-        """Cancel a run. Idempotent: cancelling a finished run is not an error."""
-        payload = await self._request("POST", _run_path(run_id) + "/cancel")
+        """Cancel a run. Idempotent: cancelling a finished run is not an error.
+
+        A bodiless 2xx (204, or a 200 with no body) is SUCCESS: the cancel
+        endpoint documents no response body, and reading the absence as a
+        malformed response turned a cancel that worked into an error report.
+        """
+        payload = await self._request("POST", _run_path(run_id) + "/cancel", empty_body_ok=True)
         if not isinstance(payload, dict):
             raise RemoteComputeError("Radient returned an invalid remote-compute response.")
         return payload
@@ -291,12 +361,27 @@ def run_id(payload: dict[str, Any]) -> str:
     return identifier
 
 
+def run_network(payload: dict[str, Any]) -> str:
+    """The run's network AS THE SERVER RETURNED IT, or a typed refusal.
+
+    Read after :meth:`RemoteComputeClient.create_run` has confirmed it, so this
+    is the value a receipt may call confirmed; it is never the caller's
+    expectation.
+    """
+    network = payload.get("network_id")
+    if not isinstance(network, str) or not network:
+        raise NetworkMismatch("Radient returned a remote run without a network id.")
+    return network
+
+
 def is_terminal(payload: dict[str, Any]) -> bool:
     """Whether polling may stop for this run."""
     return run_status(payload) in TERMINAL_RUN_STATUSES
 
 
 __all__ = [
+    "ENVELOPE_KEYS",
+    "KNOWN_RUN_STATUSES",
     "MAX_IDEMPOTENCY_KEY_BYTES",
     "RUNS_PATH",
     "TERMINAL_RUN_STATUSES",
@@ -305,5 +390,6 @@ __all__ = [
     "is_terminal",
     "new_idempotency_key",
     "run_id",
+    "run_network",
     "run_status",
 ]

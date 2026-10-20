@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -94,6 +95,28 @@ class RunCreateRequest:
 #: The compute sizes ``POST /v1/remote-compute/runs`` accepts.
 RUN_SIZES: tuple[str, ...] = ("s", "m", "l")
 
+#: A full commit SHA: exactly 40 hexadecimal characters.
+#:
+#: ``--sha`` is a COMMIT, not a ref. A branch name or an abbreviated hash reads
+#: the same in a body and is resolved by the far end at a moment this caller
+#: cannot see, so the commit that ran might not be the one that was asked for.
+COMMIT_SHA_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
+
+#: The URL forms a remote run can check out: ``https://``, ``ssh://``, or the
+#: scp-like ``git@host:path`` spelling. Anything else (a local path, ``git://``,
+#: ``file://``) either cannot be reached from the far end or names this disk.
+REPO_URL_PATTERN = re.compile(r"(?:https://|ssh://)[^\s]+|git@[^\s:]+:[^\s]+")
+
+
+def is_commit_sha(value: object) -> bool:
+    """Whether ``value`` is a full 40-hex commit SHA."""
+    return isinstance(value, str) and COMMIT_SHA_PATTERN.fullmatch(value) is not None
+
+
+def is_repo_url(value: object) -> bool:
+    """Whether ``value`` is a repository URL the far end can clone."""
+    return isinstance(value, str) and REPO_URL_PATTERN.fullmatch(value) is not None
+
 
 @dataclasses.dataclass(frozen=True)
 class RunSpec:
@@ -137,10 +160,18 @@ class RunSpec:
             raise ValueError(
                 f"unknown remote run size {self.size!r}; the sizes are {', '.join(RUN_SIZES)}"
             )
+        # A BOOL IS AN INT to ``isinstance`` and to ``math.isfinite``, so
+        # ``max_hours=True`` used to pass as one hour and ``budget_usd=False`` as
+        # a zero budget. Both are type errors in the body, not choices.
+        if isinstance(self.max_hours, bool) or not isinstance(self.max_hours, (int, float)):
+            raise ValueError(f"max_hours must be a positive number, got {self.max_hours!r}")
         if not math.isfinite(self.max_hours) or self.max_hours <= 0:
             raise ValueError(f"max_hours must be a positive number, got {self.max_hours!r}")
         if self.budget_usd is not None and (
-            not math.isfinite(self.budget_usd) or self.budget_usd < 0
+            isinstance(self.budget_usd, bool)
+            or not isinstance(self.budget_usd, (int, float))
+            or not math.isfinite(self.budget_usd)
+            or self.budget_usd < 0
         ):
             raise ValueError(f"budget_usd must be zero or more, got {self.budget_usd!r}")
 

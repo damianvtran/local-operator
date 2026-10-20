@@ -38,7 +38,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import sys
+import time
 from typing import Any
 
 import httpx
@@ -55,29 +57,50 @@ from local_operator.remote_compute.arguments import (
     is_set,
 )
 from local_operator.remote_compute.client import (
+    KNOWN_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
     RemoteComputeClient,
     check_idempotency_key,
     new_idempotency_key,
     run_id,
+    run_network,
     run_status,
 )
 from local_operator.remote_compute.errors import (
     CapacityUnavailable,
     IdempotencyConflict,
     InsufficientCredit,
+    InvalidIdempotencyKey,
     InvalidRequest,
+    NetworkMismatch,
     RunNotFound,
     Unreachable,
 )
-from local_operator.remote_compute.request import RunCreateRequest
+from local_operator.remote_compute.request import (
+    RunCreateRequest,
+    is_commit_sha,
+    is_repo_url,
+)
 from local_operator.tunnels import api as tunnels_api
 from local_operator.tunnels.errors import LoginRequired
 
 _t = tr("wire.remote_compute")
 
-#: Seconds between two ``GET /runs/:id`` reads while watching a run.
+#: The first wait between two ``GET /runs/:id`` reads while watching a run.
 POLL_INTERVAL_SECONDS = 2.0
+
+#: The longest wait the backoff will reach, so a slow run is still noticed.
+POLL_MAX_INTERVAL_SECONDS = 30.0
+
+#: How long the watch will wait at most before it gives up on the bound.
+#:
+#: ``max_hours`` is the RUN's own bound, enforced by the server; this is the
+#: margin past it after which a watch can no longer learn anything the run's
+#: deadline did not already decide.
+WATCH_MARGIN_SECONDS = 300.0
+
+#: ``time.monotonic``, named so a test can move the watch's clock without sleeping.
+_monotonic = time.monotonic
 
 #: The defaults the flags fall back to when the operator does not pass them.
 #:
@@ -107,6 +130,35 @@ def _http_client() -> httpx.AsyncClient:
 _sleep = asyncio.sleep
 
 
+def _poll_delay(interval: float) -> float:
+    """The next wait: ×1.5, jittered ±10%, never past the cap.
+
+    The jitter is not decoration: several sessions watching runs that were
+    submitted together would otherwise poll on the same second forever. The cap
+    is applied AFTER the jitter so the bound is a real bound.
+    """
+    return min(POLL_MAX_INTERVAL_SECONDS, interval * 1.5 * random.uniform(0.9, 1.1))
+
+
+def _hours(value: float) -> str:
+    """``2.0`` → ``"2"``: the copy's unit is hours, so a trailing ``.0`` is noise."""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _key_refusal(failure: InvalidIdempotencyKey) -> int:
+    """One sentence per reason the key was refused, all of them local.
+
+    The client supplies the REASON rather than a sentence because these are
+    keyed messages (see ``errors.InvalidIdempotencyKey``); this is the surface
+    that owns their wording.
+    """
+    if failure.reason == "empty":
+        return _refuse(_t(_wr.key_empty()))
+    if failure.reason == "too_long":
+        return _refuse(_t(_wr.key_too_long(max_bytes=str(failure.max_bytes))))
+    return _refuse(_t(_wr.key_not_printable()))
+
+
 def _report(failure: BaseException) -> int:
     """One sentence per typed failure — and never a word of a provider body.
 
@@ -116,6 +168,10 @@ def _report(failure: BaseException) -> int:
     """
     if isinstance(failure, LoginRequired):
         return _refuse(str(failure))
+    if isinstance(failure, InvalidIdempotencyKey):
+        return _key_refusal(failure)
+    if isinstance(failure, NetworkMismatch):
+        return _refuse(_t(_wr.network_mismatch()))
     if isinstance(failure, Unreachable):
         return _refuse(_t(_wr.unreachable()))
     if isinstance(failure, InsufficientCredit):
@@ -159,26 +215,53 @@ async def _cancel_run(credential: int, identifier: str) -> dict[str, Any]:
         return await RemoteComputeClient(http, credential_id=credential).cancel_run(identifier)
 
 
-async def _watch(credential: int, submitted: dict[str, Any]) -> dict[str, Any]:
-    """Poll until a terminal status, printing each TRANSITION once.
+async def _watch(
+    credential: int, submitted: dict[str, Any], *, max_hours: float
+) -> dict[str, Any] | None:
+    """Poll until a terminal status; ``None`` when the watch's bound is reached.
 
     Prints transitions rather than every read: a run that sits in ``running``
     for forty minutes would otherwise write a line every two seconds into a log
     nobody reads, and the transitions are what a person is waiting for.
+
+    THE WAIT BACKS OFF and the watch is BOUNDED by the run's own ``max_hours``
+    plus a small margin. Two separate reasons: fixed-rate polling for hours is
+    load nobody asked for, and a run past its server-side deadline can no longer
+    change, so a watch that kept asking would never end. Reaching the bound is
+    REPORTED by the caller (the run is still running and it says how to check
+    it) rather than looking like a finished run.
+
+    A status this build cannot name is NOT terminal — stopping early would report
+    a still-burning run as finished — and it is announced once, as unknown, so a
+    run stuck in a vocabulary this client does not share is visible.
     """
     identifier = run_id(submitted)
+    network = run_network(submitted)
     current_status = run_status(submitted)
     print(_t(_wr.status_line(status=current_status)))
+    announced_unknown: set[str] = set()
+    if current_status not in KNOWN_RUN_STATUSES:
+        print(_t(_wr.status_unknown(status=current_status)))
+        announced_unknown.add(current_status)
+    deadline = _monotonic() + max_hours * 3600.0 + WATCH_MARGIN_SECONDS
+    interval = POLL_INTERVAL_SECONDS
     payload = submitted
     async with _http_client() as http:
         client = RemoteComputeClient(http, credential_id=credential)
         while current_status not in TERMINAL_RUN_STATUSES:
-            await _sleep(POLL_INTERVAL_SECONDS)
-            payload = await client.get_run(identifier)
+            if _monotonic() >= deadline:
+                return None
+            await _sleep(interval)
+            interval = _poll_delay(interval)
+            payload = await client.get_run(identifier, expected_network=network)
             updated = run_status(payload)
             if updated != current_status:
-                print(_t(_wr.status_line(status=updated)))
                 current_status = updated
+                if updated in KNOWN_RUN_STATUSES:
+                    print(_t(_wr.status_line(status=updated)))
+                elif updated not in announced_unknown:
+                    print(_t(_wr.status_unknown(status=updated)))
+                    announced_unknown.add(updated)
     return payload
 
 
@@ -233,9 +316,32 @@ def _submit(args: argparse.Namespace) -> int:
     sha = getattr(args, "sha", None)
     if not repo or not sha:
         return _refuse(_t(_wr.needs_repo()))
+    # SHAPE, not just presence: a branch name or a local path reads as a valid
+    # argument and then fails at the far end, after submission.
+    if not is_repo_url(repo):
+        return _refuse(_t(_wr.bad_repo()))
+    if not is_commit_sha(sha):
+        return _refuse(_t(_wr.bad_sha()))
     prompt = getattr(args, "command", None)
     if not prompt or not str(prompt).strip():
         return _refuse(_t(_wr.needs_prompt()))
+    # BEFORE THE CREDENTIAL READ (E8), because these key refusals are local: an
+    # operator whose invocation is already wrong should not first be told the
+    # token endpoint could not be reached. An EMPTY `--idempotency-key` is
+    # refused rather than replaced with a fresh key: the operator asked for a
+    # retry to collide with an earlier submission, and a minted key would submit
+    # the work a second time.
+    key_argument = getattr(args, "idempotency_key", None)
+    try:
+        key = (
+            check_idempotency_key(key_argument)
+            if key_argument is not None
+            else new_idempotency_key()
+        )
+    except InvalidIdempotencyKey as failure:
+        # Through ``_report`` so there is ONE mapping from a typed failure to a
+        # sentence, whether it was refused here or inside the client.
+        return _report(failure)
     try:
         credential = _credential()
     except ValueError as failure:
@@ -255,6 +361,9 @@ def _submit(args: argparse.Namespace) -> int:
         hosting, model = resolve_hosting_model_dry(exec_args)
     except ValueError as failure:
         return _refuse(_t(_wr.failed(error=str(failure))))
+    max_hours = (
+        DEFAULT_MAX_HOURS if getattr(args, "max_hours", None) is None else float(args.max_hours)
+    )
     try:
         spec = RunSpec(
             prompt=str(prompt),
@@ -263,21 +372,19 @@ def _submit(args: argparse.Namespace) -> int:
             hosting=hosting,
             model=model,
             size=getattr(args, "size", None) or DEFAULT_SIZE,
-            max_hours=(
-                DEFAULT_MAX_HOURS
-                if getattr(args, "max_hours", None) is None
-                else float(args.max_hours)
-            ),
+            max_hours=max_hours,
             budget_usd=getattr(args, "budget_usd", None),
             name=getattr(args, "name", None),
         )
-        key = check_idempotency_key(getattr(args, "idempotency_key", None) or new_idempotency_key())
     except ValueError as failure:
         return _refuse(_t(_wr.failed(error=str(failure))))
     request = spec.bind(binding)
     try:
         submitted = asyncio.run(_create_run(credential, request, key))
         identifier = run_id(submitted)
+        # AS THE SERVER RETURNED IT: the receipt may only claim what the response
+        # confirmed, never what this client asked for.
+        network = run_network(submitted)
     except KeyboardInterrupt:
         # A Ctrl-C here may land after the request was sent, so the run may
         # exist: saying nothing is right, sending a cancel is not.
@@ -285,18 +392,23 @@ def _submit(args: argparse.Namespace) -> int:
     except (ValueError, OSError) as failure:
         return _report(failure)
     if getattr(args, "detach", False):
+        # The run id ALONE on stdout, so `id=$(lop exec --remote --detach ...)`
+        # captures exactly the id. The receipt — key included — goes to stderr.
+        print(identifier)
         print(
             _t(
                 _wr.detached(
                     run_id=identifier,
-                    network_id=request.network_id,
+                    network_id=network,
                     idempotency_key=key,
                 )
-            )
+            ),
+            file=sys.stderr,
         )
         return 0
+    print(_t(_wr.submitted(run_id=identifier, network_id=network)))
     try:
-        final = asyncio.run(_watch(credential, submitted))
+        final = asyncio.run(_watch(credential, submitted, max_hours=max_hours))
     except KeyboardInterrupt:
         print(_t(_wr.interrupted(run_id=identifier)))
         # 130 is the SIGINT convention this CLI already uses for a quiet cancel,
@@ -304,6 +416,11 @@ def _submit(args: argparse.Namespace) -> int:
         return 130
     except (ValueError, OSError) as failure:
         return _report(failure)
+    if final is None:
+        # Never silent: the run has outlived this command's watch, and the
+        # operator is told so AND how to ask again.
+        print(_t(_wr.still_running(run_id=identifier, max_hours=_hours(max_hours))))
+        return 0
     status = run_status(final)
     print(_t(_wr.finished(run_id=identifier, status=status)))
     return 0 if status == "succeeded" else 1
@@ -334,6 +451,8 @@ __all__ = [
     "DEFAULT_SIZE",
     "LOCAL_ONLY_FLAGS",
     "POLL_INTERVAL_SECONDS",
+    "POLL_MAX_INTERVAL_SECONDS",
     "REMOTE_ONLY_FLAGS",
+    "WATCH_MARGIN_SECONDS",
     "remote_command",
 ]

@@ -2,56 +2,56 @@
   "cli.exec_remote_help.budget_usd": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for budget_usd. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for budget_usd. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.cancel": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for cancel. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for cancel. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.detach": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for detach. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for detach. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.idempotency_key": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for idempotency_key. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for idempotency_key. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.max_hours": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for max_hours. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for max_hours. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.network": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for network. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for network. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.remote": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for remote. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for remote. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.repo": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for repo. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for repo. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.sha": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for sha. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for sha. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.size": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for size. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for size. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "cli.exec_remote_help.status": {
     "role": "argparse exec argument help for the --remote surface",
     "tone": "instructional, preserve the existing meaning",
-    "note": "Help for status. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. This namespace is EN-only until an independent translation/audit wave carries it; English fallback must not change locale eligibility."
+    "note": "Help for status. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   }
 }
