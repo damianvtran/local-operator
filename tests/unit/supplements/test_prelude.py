@@ -63,12 +63,12 @@ GZIP_CAP = 4608
 #: cannot magnify a bounded height past the 480 px clamp; the dark fallback's hairline is
 #: #333; the light color-scheme reset returns; `.row` is removed as the measured trim. The
 #: reduced-motion enforcement moved to the validator. CSS 1,866 B, JS 8,145 B, pair
-#: 10,019 B raw / 4,605 B gzip, 3 B under the unchanged cap.
-PINNED_CSS_BYTES = 1833
-PINNED_JS_BYTES = 8186
-PINNED_GZIP_BYTES = 4605
-PINNED_DIGEST = "bcf976f0373b53e3f44737ff5c9c914d3d15d7556880bbef019ba78702f7ade9"
-PINNED_VERSION = 7
+#: 10,019 B raw / 4,601 B gzip, 7 B under the unchanged cap.
+PINNED_CSS_BYTES = 1849
+PINNED_JS_BYTES = 8170
+PINNED_GZIP_BYTES = 4601
+PINNED_DIGEST = "7866e13fbfe2222315242d545c014df2dc35b09a6f667deeab349cf17d4c9261"
+PINNED_VERSION = 8
 
 
 @pytest.fixture
@@ -701,6 +701,37 @@ def test_the_wide_horizontal_plot_fits_the_480_px_frame_the_ui_clamps(tmp_path: 
     assert out["svgAttrW"] == out["svgW"], "the SVG must not upscale past its viewBox"
 
 
+#: A vertical four-bar chart: the 810 px case the desktop UI reproduced. The host seeds the
+#: frame from `height_hint` (320), the prelude derives 0.45 x W (363 at 810), so the body is
+#: 379 and the first layout overflowed a 373 px box. The chart then narrowed by 15 px,
+#: shrank 7 px and reported 373 -- a scrollbar feedback lock.
+_VERTICAL = "LO.bar(document.getElementById('c'),'d1',{x:'name',y:'price'})"
+_VERTICAL_DATA = {
+    "d1": {
+        "columns": ["name", "price"],
+        "rows": [["alpha", 4], ["beta", 7], ["gamma", 2], ["delta", 9]],
+    }
+}
+
+
+@pytest.mark.parametrize("width", [620, 810, 1200])
+def test_a_vertical_chart_reports_the_body_height_including_its_padding(
+    width: int, tmp_path: Path
+) -> None:
+    """Operator 2026-10-20: the app seeds 320, the first layout is 379, Chromium adds a
+    scrollbar, the narrower chart reports 373, and the bar stays. The report must be the
+    body's natural height (SVG + 16 px padding), not the root's current box; the browser
+    frame in the evidence set proves the scrollbar is gone."""
+    out = _run(_bar_scenario(_VERTICAL_DATA, width, draw=_VERTICAL), tmp_path)
+    resizes = [p for p in out["posts"] if p.get("t") == "resize"]
+    assert resizes, out["posts"]
+    assert resizes[-1]["h"] == out["svgH"] + 16, (width, resizes[-1], out["svgH"])
+    assert out["svgH"] == (365 if width == 810 else 279 if width == 620 else 396), (
+        width,
+        out["svgH"],
+    )
+
+
 @pytest.mark.parametrize("bars", [3, 9, 10, 40])
 @pytest.mark.parametrize("width", [360, 620, 900, 1200, 1440])
 def test_the_rendered_height_is_bounded_across_the_matrix(
@@ -777,3 +808,4 @@ def test_a_light_mode_push_resets_native_chrome() -> None:
     push on a dark-OS host must reset color-scheme so they are not painted dark."""
     css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
     assert ":root[data-mode=light]{color-scheme:light}" in css
+    assert "html{visibility:hidden;overflow:hidden}" in css

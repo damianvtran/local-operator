@@ -13,7 +13,7 @@
    the wrong colour. The dark FALLBACK is the UA dark canvas, paired with the light default above
    (`#fff` is the UA light canvas): a host that pushes no canvas token renders what it rendered
    before, and one that pushes it overrides this through the inline style the push sets. */
-html{visibility:hidden}html[data-ready]{visibility:visible;background:var(--lo-canvas)}
+html{visibility:hidden;overflow:hidden}html[data-ready]{visibility:visible;background:var(--lo-canvas)}
 *{box-sizing:border-box}body{margin:0;padding:8px 2px;background:transparent;color:var(--lo-ink);font:13px/1.5 var(--font-sans);font-variant-numeric:tabular-nums}
 p{margin:0 0 6px}
 figure{margin:0}figcaption{font-size:12px;color:var(--lo-ink-muted);margin-top:4px}
