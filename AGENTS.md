@@ -1709,16 +1709,20 @@ stated above, are what that slow gate enforces. **And a skipped job is not
 evidence**: on a change the classifier scopes away from the unit tree, the
 `i18n` job and the unit shards are both skipped, so an authorisation that
 names them has to say which tree actually ran them, or it names a check that
-never happened. Note what that makes the
-allowance load-bearing: a catalogue file that is **present and partial** is
-judged by both gates, the fast one demanding every key, the slow one only
-the missing ones. And the slow one goes green in two moves, not one — the
-file must carry every key that was **unlisted**, and the allowance must then
-be **shrunk** to match, which is the shrink-only rule above. Shrinking alone
-leaves the unlisted keys failing, because the allowance records what is
-missing and the coverage gate fails on what is missing *and unrecorded*. A
-partial translation is therefore not a state either gate can be asked about
-in isolation.
+never happened.
+
+Note what that makes the allowance load-bearing: a catalogue file that is
+**present and partial** is judged by both gates, the fast one demanding every
+key, the slow one only the mismatches. And the slow gate counts **two
+different errors**, which is why an allowance edit is not a single move: a
+key that is missing and **unrecorded** is `unlisted`, and a recorded key that
+is **no longer missing** is `stale`. So carrying the keys that were unlisted
+clears the pair on its own — one move. But carrying keys that were **listed**
+turns those entries stale, and the pair stays red until the allowance is
+**shrunk** to match, which is the shrink-only rule above. Shrinking on its
+own never helps an unrecorded key, because removing a record does not
+translate anything. A partial translation is therefore not a state either
+gate can be asked about in isolation.
 
 **Read the mechanism before you write the trigger.** A trigger written from
 the shape of a fix you assumed is a trigger that waits on a signal which
@@ -1735,6 +1739,19 @@ status read from every SHA the branch ever had, instead of the head that will
 merge. In each case the evidence is real and the scope is wrong, and a scope
 that is wrong in either direction — too narrow or too broad — turns a green
 into a claim nobody checked. **The scope is the claim.**
+
+**And a bound is only as good as the data it projects from — and a bound
+cannot tell you when that data is stale.** A ceiling derived from a weight
+manifest is exactly as trustworthy as the manifest, and the check cannot
+distinguish "the work grew to meet the ceiling" from "the manifest was
+describing work that no longer exists". Measured in this repository on
+2026-10-19: `tests/durations.json` projected 7220 s of serial weight for the
+unit tree against 4466 s measured from real CI timings — an overstatement of
+about 62% — so a shard ceiling and its own guard agreed with each other
+about a number neither had re-derived. **When a derived bound fails, the
+first question is not which constant to raise. It is when the data behind
+that bound was last measured, and by what.** Raising the constant makes the
+check pass on that data; re-measuring makes the data right.
 
 ### Installing over a live fleet
 
