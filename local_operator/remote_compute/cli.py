@@ -54,7 +54,8 @@ import httpx
 
 from local_operator.exec_mode import ExecArgs, resolve_hosting_model_dry
 from local_operator.i18n.keys import wire_remote_compute as _wr
-from local_operator.i18n.text import tr
+from local_operator.i18n.resolve import resolve_language
+from local_operator.i18n.text import set_active_locale, tr
 from local_operator.network.types import MeshRefusal
 from local_operator.remote_compute import RunSpec, is_enabled, resolve_network
 from local_operator.remote_compute.arguments import (
@@ -581,8 +582,42 @@ def _report_finished(final: dict[str, Any], *, identifier: str) -> int:
     return EXIT_BY_OUTCOME.get(outcome, EXIT_UNKNOWN_OUTCOME)
 
 
+def _install_locale() -> None:
+    """Point this process's catalogue at the operator's language before any copy.
+
+    ``cli.main`` dispatches here before the TUI's boot path exists, so nothing
+    has called ``set_active_locale`` yet and every ``tr`` resolver below — these
+    refusals and ``config._announce``'s warning — would render English whatever
+    ``language:`` says. The chain is the TUI's own (config → ``LOP_LANG`` → OS →
+    ``en``, filtered to the shipped set) so the two surfaces cannot disagree,
+    and an unshipped locale already resolves to ``en`` inside the resolver.
+
+    WHY IT IS SWALLOWED: this is copy, not work. A language lookup that fails is
+    worth rendering English over, never worth refusing a run somebody asked the
+    far end to execute, so a resolver failure leaves the process on ``en``.
+
+    COST: one config read (a watched snapshot when this process has a watcher,
+    a ``ConfigManager`` when it does not — the CLI case), which ``_submit``'s own
+    ``is_enabled`` read already pays for. ``i18n.resolve`` is free to import at
+    module level here: ``i18n.text`` already imports it, so the module graph is
+    unchanged.
+    """
+    locale = "en"
+    try:
+        locale = resolve_language()
+    except Exception:  # noqa: BLE001 — a locale is copy; it never blocks the command
+        locale = "en"
+    try:
+        set_active_locale(locale)
+    except Exception:  # noqa: BLE001 — same reason: the command continues on English
+        pass
+
+
 def remote_command(args: argparse.Namespace) -> int:
     """The single entry point ``cli.main`` calls for every remote invocation."""
+    # BEFORE THE FIRST ``_t`` RENDER, and before ``resolve_api_url`` — whose
+    # override warning is copy too and is printed from the client's constructor.
+    _install_locale()
     status_id = getattr(args, "remote_status", None)
     cancel_id = getattr(args, "remote_cancel", None)
     if status_id or cancel_id:

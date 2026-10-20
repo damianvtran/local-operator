@@ -19,8 +19,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ import pytest
 
 from local_operator import cli as cli_module
 from local_operator.i18n.keys import wire_remote_compute as _wr
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import active_locale, set_active_locale, tr
 from local_operator.network import store
 from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore
@@ -89,6 +91,26 @@ def isolated_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     return root
+
+
+@pytest.fixture(autouse=True)
+def pinned_language(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the locale every command in this file resolves, and restore it.
+
+    ``remote_command`` derives its locale from the same chain the TUI boots
+    through, whose last step is the MACHINE's language: without this, the
+    English assertions below would fail on a developer's French Mac and the
+    file would depend on whose laptop ran it. ``LOP_LANG`` is the chain's step
+    after ``config.language``, so it pins the default and still lets a written
+    ``language:`` win in the tests that exercise it.
+
+    The active locale is process-wide, so it is restored on exit: these tests
+    move it, and the next file in the same worker must not inherit the move.
+    """
+    monkeypatch.setenv("LOP_LANG", "en")
+    before = active_locale()
+    yield
+    set_active_locale(before)
 
 
 @pytest.fixture()
@@ -1194,6 +1216,192 @@ def test_a_real_lop_process_refuses_an_undecodable_alabel_and_says_only_why(
     assert result.stderr.splitlines() == [_t(_wr.api_override_invalid())]
     assert "remote compute failed" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The language the copy is rendered in (QA Q-1)
+# ---------------------------------------------------------------------------
+
+#: The sentences pinned below, copied VERBATIM from the shipped catalogues.
+#:
+#: Pinned by value on purpose. Deriving them through ``_t`` would resolve under
+#: whatever locale the command just left active, so a missing install would
+#: compare English against English and pass — the exact bug these tests exist
+#: to catch.
+_FR_PREVIEW = "Le calcul distant n’est pas encore activé pour ce compte Radient (aperçu)."
+_FR_WARNING = (
+    "Le calcul distant envoie vos identifiants Radient et vos requêtes à {host} au lieu de "
+    "l’API Radient par défaut, car LOP_REMOTE_COMPUTE_API_URL est défini. Supprimez cette "
+    "variable sauf si vous contrôlez cet hôte."
+)
+_HI_WARNING = (
+    "रिमोट कंप्यूट आपका Radient लॉगिन और अनुरोध डिफ़ॉल्ट Radient API के बजाय {host} पर भेज रहा है, "
+    "क्योंकि LOP_REMOTE_COMPUTE_API_URL सेट है। यदि आप उस होस्ट को नियंत्रित नहीं करते, तो इसे "
+    "अनसेट करें।"
+)
+_EN_PREVIEW = "Remote compute is not enabled for this Radient account yet (preview)."
+_EN_UNCONFIRMED = "network unconfirmed: this device cannot tell which network this run belongs to."
+
+
+def _set_config_language(root: Path, locale: str) -> None:
+    """Write the ``language:`` the resolution chain reads, as the app persists it."""
+    (root / "config.yml").write_text(f"values:\n  language: {locale}\n", encoding="utf-8")
+
+
+def _copy(stderr: str) -> list[str]:
+    """The lines the CLI itself wrote, without the transport's request log.
+
+    ``httpx`` writes one INFO record per request to the root logger, which the
+    suite sends to stderr; it is ambient to every command in this file and
+    says nothing about the copy under test. The assertions below are about the
+    sentences, so they compare against that filter rather than against the raw
+    stream.
+    """
+    return [line for line in stderr.splitlines() if " - INFO - HTTP Request: " not in line]
+
+
+class _Refusing(BaseHTTPRequestHandler):
+    """A real socket that answers every request with the preview 403."""
+
+    def do_GET(self) -> None:  # noqa: N802 — the base class's spelling
+        body = json.dumps({"error": "acct_not_allowlisted"}).encode("utf-8")
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base signature
+        """Silence the request log: it would land in the parent's stderr."""
+
+
+@pytest.fixture()
+def refusing_origin() -> Iterator[str]:
+    """A loopback origin for the child process, on a port the OS picks."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Refusing)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_a_refusal_is_rendered_in_the_language_the_config_asks_for(
+    isolated_roots: Path,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``language: fr`` reaches the copy on a CLI path, with no TUI to set it.
+
+    ``cli.main`` dispatches to ``remote_command`` before any boot path runs, so
+    nothing had called ``set_active_locale`` and every ``tr`` resolver here
+    rendered English regardless of the setting.
+    """
+    _set_config_language(isolated_roots, "fr")
+    origin.responses.append(httpx.Response(403, json={"error": "acct_not_allowlisted"}))
+    assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 1
+    assert _copy(capsys.readouterr().err) == [_FR_PREVIEW]
+
+
+def test_the_override_warning_is_rendered_in_the_configured_language(
+    isolated_roots: Path,
+    signed_in: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The warning is printed from the client's constructor, which is *after*
+    the install — asserted INSIDE the transport so the ordering is proven, and
+    in Hindi so a locale cannot be a coincidence with the default."""
+    _set_config_language(isolated_roots, "hi")
+    monkeypatch.setattr(config_module, "_announced", set())
+    monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", "http://127.0.0.1:8123")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(capsys.readouterr().err)
+        answer = {"msg": "Run", "result": {"id": RUN_ID, "status": "running"}}
+        return httpx.Response(200, json=answer)
+
+    def client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(remote_cli, "_http_client", client)
+    assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 0
+    assert seen == [_HI_WARNING.format(host="127.0.0.1:8123") + "\n"]
+
+
+def test_no_language_configured_keeps_the_copy_english(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The ordinary case, unchanged: no ``language:`` key anywhere means English."""
+    origin.responses.append(httpx.Response(403, json={"error": "acct_not_allowlisted"}))
+    assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 1
+    assert _copy(capsys.readouterr().err) == [_EN_PREVIEW]
+
+
+def test_a_resolver_that_raises_leaves_english_and_the_command_still_runs(
+    isolated_roots: Path,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A broken language lookup is copy, never a refusal.
+
+    The config asks for French, so English output proves the FALLBACK rather
+    than the absence of a setting, and exit 0 proves the run was read anyway.
+    """
+    _set_config_language(isolated_roots, "fr")
+
+    def explode() -> str:
+        raise RuntimeError("no language available")
+
+    monkeypatch.setattr(remote_cli, "resolve_language", explode)
+    origin.responses.append(
+        httpx.Response(200, json={"msg": "Run", "result": {"id": RUN_ID, "status": "running"}})
+    )
+    assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"id": RUN_ID, "status": "running"}
+    assert _copy(captured.err) == [_EN_UNCONFIRMED]
+
+
+def test_a_real_lop_process_renders_the_configured_language(
+    isolated_roots: Path, signed_in: int, refusing_origin: str
+) -> None:
+    """Q-1 ACROSS THE PROCESS BOUNDARY: ``language: fr``, a real socket, a 403.
+
+    In-process tests set the locale on the same object they assert through;
+    only a child proves the install happens before the copy on the entry point
+    an operator runs. The listener is on loopback, so the override the test
+    sets is the one the base rules allow, and the warning it triggers is the
+    second thing that must be French.
+    """
+    _set_config_language(isolated_roots, "fr")
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env["LOP_REMOTE_COMPUTE_API_URL"] = refusing_origin
+    result = subprocess.run(
+        [sys.executable, "-c", _LOP_ENTRY, "exec", "--remote-status", RUN_ID],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=Path(__file__).resolve().parents[3],
+    )
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+    assert _copy(result.stderr) == [
+        _FR_WARNING.format(host=refusing_origin.removeprefix("http://")),
+        _FR_PREVIEW,
+    ]
 
 
 # ---------------------------------------------------------------------------
