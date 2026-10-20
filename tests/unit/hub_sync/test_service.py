@@ -1195,8 +1195,15 @@ def test_auto_apply_holds_a_merge_that_would_empty_text_the_hub_has(env) -> None
     assert "held for review" not in manual.message  # manual stays available
 
 
-def test_the_legacy_updates_projection_never_lists_skill_rows(env) -> None:
-    """Q7: typed older consumers of /hub/updates must never receive a skill row."""
+def test_the_updates_projection_lists_skill_rows_beside_the_other_kinds(env) -> None:
+    """Skill failures live on the SAME surface as agents and teams now.
+
+    The operator's brief requires a subscribed skill's failure to be visible in
+    ``/v1/desktop/hub/updates`` and retryable through the same channel, so the
+    projection lists and counts a skill row exactly like an agent row. Kinds it
+    has never heard of are still excluded, which is what keeps an older
+    consumer's shape intact.
+    """
 
     ctx, _hub, _agents, _t, root = env
 
@@ -1204,11 +1211,17 @@ def test_the_legacy_updates_projection_never_lists_skill_rows(env) -> None:
         items = doc.setdefault("items", {})
         items["agent:a1"] = {"kind": "agent", "name": "a", "local_id": "a1", "state": "available"}
         items["skill:s1"] = {"kind": "skill", "name": "s", "local_id": "s1", "state": "available"}
+        items["mystery:x1"] = {
+            "kind": "mystery",
+            "name": "x",
+            "local_id": "x1",
+            "state": "available",
+        }
 
     st.StatusStore(root).mutate(fold)
     snapshot = svc.status_snapshot(ctx)
-    assert {row["kind"] for row in snapshot["items"]} == {"agent"}
-    assert snapshot["counts"]["available"] == 1  # the skill row is not counted either
+    assert {row["kind"] for row in snapshot["items"]} == {"agent", "skill"}
+    assert snapshot["counts"]["available"] == 2
 
 
 def test_the_check_records_the_agent_revision_and_serving_base(env) -> None:

@@ -51,7 +51,19 @@ LEGACY_SCHEMA = 1
 #: Last N pre-apply backups kept per item (A9.3).
 BACKUPS_KEPT = 5
 
-RecordedBy = Literal["pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown"]
+RecordedBy = Literal[
+    "pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown", "subscribe"
+]
+
+#: Whether this link's managed content exists locally (``present``) or was never
+#: installed / deliberately removed (``absent``). Membership of the hub is the
+#: LINK, not its bytes: subscribing records the origin + policy without writing
+#: a copy, and unpulling removes the copy without unlinking. Absence is therefore
+#: an EXPLICIT recorded state, "the directory is missing" is not evidence of it --
+#: a genuinely lost directory must keep raising as the error it always was.
+#: Records written before this field existed carry content, so a missing key
+#: reads as ``present`` and every one of them behaves exactly as before.
+ContentState = Literal["present", "absent"]
 
 #: ``recorded_by`` of a record that LINKS an item to a hub id without vouching for
 #: what the two sides had in common (``lop teams link`` over a differing copy). The
@@ -287,6 +299,10 @@ class BaselineRecord:
     #: this is per-artifact migration metadata, not another policy database.
     legacy_subscribe_hint: bool | None = None
     scope_known: bool = True
+    #: See ``ContentState``: an absent record keeps its baseline and policy and
+    #: has no managed directory. Only an explicit write may move it, and only
+    #: the managed-skill writer (install/apply) may move it back to ``present``.
+    content_state: ContentState = "present"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
@@ -309,6 +325,7 @@ class BaselineRecord:
             "local_alias": self.local_alias,
             "legacy_subscribe_hint": self.legacy_subscribe_hint,
             "scope_known": self.scope_known,
+            "content_state": self.content_state,
         }
 
 
@@ -529,6 +546,9 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
     lineage = raw.get("lineage", "unknown")
     if lineage not in ("clean", "unknown", "mixed-lineage"):
         return None
+    content_state = raw.get("content_state", "present")
+    if content_state not in ("present", "absent"):
+        return None
     return BaselineRecord(
         kind=kind,
         local_id=local_id,
@@ -546,6 +566,7 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
         local_alias=local_alias,
         legacy_subscribe_hint=hint,
         scope_known=scope_known,
+        content_state=content_state,
     )
 
 
