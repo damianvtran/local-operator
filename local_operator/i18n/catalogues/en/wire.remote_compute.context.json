@@ -29,10 +29,40 @@
     "tone": "plain, one sentence; commands and flags stay verbatim",
     "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
-  "wire.remote_compute.finished": {
+  "wire.remote_compute.finished_succeeded": {
     "role": "CLI runtime message for lop exec --remote",
     "tone": "plain, one sentence; commands and flags stay verbatim",
-    "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+    "note": "The watch's closing line. One key per OUTCOME rather than a shared sentence with a substituted word, so each locale owns the grammar of its own verb. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_failed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line for a run whose task failed. One key per OUTCOME, so the locale owns its own verb phrase. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_expired": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line for a run that hit its deadline. 'expired' means the server's maximum run time ended the run, not that a credential expired. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_cancelled": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line for a run a user cancelled (outcome `cancelled`, which is not a status word). {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_unknown": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "The watch's closing line when the run stopped but the server named no outcome this build can read (absent, or outside the four known ones). It must not claim success or failure. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_exit_code": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{exit_code} is the server's integer exit code, printed as text; it is a number and is never translated or localised. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.finished_charged": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{amount} is the charged figure EXACTLY as the server reported it (for example 0.42, or a JSON cost breakdown). Never reformat, convert or recompute it: this client does not know the price. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "wire.remote_compute.interrupted": {
     "role": "CLI runtime message for lop exec --remote",
@@ -74,10 +104,30 @@
     "tone": "plain, one sentence; commands and flags stay verbatim",
     "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
+  "wire.remote_compute.retrying": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Printed once when the run's status is `error`. The server retries an errored run, so the sentence must read as 'still going', never as a failure or as the end of the watch. No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
   "wire.remote_compute.status_line": {
     "role": "CLI runtime message for lop exec --remote",
     "tone": "plain, one sentence; commands and flags stay verbatim",
     "note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_network_matched": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{network_id} is the run's network as the server returned it, and this device resolved the same one, so the sentence may state a match. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_network_mismatch": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "{network_id} is the run's network as the server returned it and it is NOT this device's, so the sentence must be a warning, not a refusal. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.status_network_unconfirmed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "No placeholder. The device could not resolve a network to compare, or the run named none; say the network is unconfirmed rather than implying either match or mismatch. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "wire.remote_compute.unknown_run": {
     "role": "CLI runtime message for lop exec --remote",
@@ -132,6 +182,6 @@
   "wire.remote_compute.still_running": {
     "role": "CLI runtime message for lop exec --remote",
     "tone": "plain, one sentence; commands and flags stay verbatim",
-    "note": "Printed when the watch reaches the run's max_hours plus a margin: the run is still going, the command exits 0, and the remedy is the named command. {max_hours} is a stringified number. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+    "note": "{max_hours} is the limit the SERVER admitted the run with (it may cap what was asked for), so the sentence describes the server's bound. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   }
 }

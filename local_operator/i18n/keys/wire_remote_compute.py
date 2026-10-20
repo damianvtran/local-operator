@@ -45,8 +45,32 @@ def failed(*, error: str) -> Msg:
     return Msg("wire.remote_compute.failed", {"error": error})
 
 
-def finished(*, run_id: str, status: str) -> Msg:
-    return Msg("wire.remote_compute.finished", {"run_id": run_id, "status": status})
+def finished_cancelled(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.finished_cancelled", {"run_id": run_id})
+
+
+def finished_charged(*, amount: str) -> Msg:
+    return Msg("wire.remote_compute.finished_charged", {"amount": amount})
+
+
+def finished_exit_code(*, exit_code: str) -> Msg:
+    return Msg("wire.remote_compute.finished_exit_code", {"exit_code": exit_code})
+
+
+def finished_expired(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.finished_expired", {"run_id": run_id})
+
+
+def finished_failed(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.finished_failed", {"run_id": run_id})
+
+
+def finished_succeeded(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.finished_succeeded", {"run_id": run_id})
+
+
+def finished_unknown(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.finished_unknown", {"run_id": run_id})
 
 
 def interrupted(*, run_id: str) -> Msg:
@@ -97,8 +121,24 @@ def only_with(*, flag: str) -> Msg:
     return Msg("wire.remote_compute.only_with", {"flag": flag})
 
 
+def retrying() -> Msg:
+    return Msg("wire.remote_compute.retrying", {})
+
+
 def status_line(*, status: str) -> Msg:
     return Msg("wire.remote_compute.status_line", {"status": status})
+
+
+def status_network_matched(*, network_id: str) -> Msg:
+    return Msg("wire.remote_compute.status_network_matched", {"network_id": network_id})
+
+
+def status_network_mismatch(*, network_id: str) -> Msg:
+    return Msg("wire.remote_compute.status_network_mismatch", {"network_id": network_id})
+
+
+def status_network_unconfirmed() -> Msg:
+    return Msg("wire.remote_compute.status_network_unconfirmed", {})
 
 
 def status_unknown(*, status: str) -> Msg:

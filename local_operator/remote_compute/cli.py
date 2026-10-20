@@ -26,6 +26,13 @@ hours on the far end and killing it from a keyboard interrupt is not something
 this command was asked to do. The goodbye sentence names ``--remote-cancel``
 instead.
 
+THE WATCH ENDS ON A TERMINAL STATUS, NOT ON A STATUS THAT READS LIKE SUCCESS.
+The contract separates the two: ``stopped``/``deleted`` say the run is over, and
+``outcome`` says how it went (succeeded, failed, expired, cancelled). So the
+finished line reports the OUTCOME and the exit code is mapped from it — a run
+that stopped because its deadline expired is a failure of the task, however
+cleanly the run itself stopped. The mapping is :data:`EXIT_BY_OUTCOME`.
+
 COPY LIVES IN A NAMESPACE OF ITS OWN (``wire.remote_compute`` /
 ``cli.exec_remote_help``) rather than in ``wire.exec`` / ``cli.exec_help``, and
 that is deliberate: an English edit to a namespace a locale already CARRIES
@@ -57,13 +64,19 @@ from local_operator.remote_compute.arguments import (
     is_set,
 )
 from local_operator.remote_compute.client import (
+    KNOWN_RUN_OUTCOMES,
     KNOWN_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
+    CreatedRun,
     RemoteComputeClient,
+    charged_amount,
     check_idempotency_key,
     new_idempotency_key,
+    run_exit_code,
     run_id,
+    run_max_hours,
     run_network,
+    run_outcome,
     run_status,
 )
 from local_operator.remote_compute.errors import (
@@ -101,6 +114,32 @@ WATCH_MARGIN_SECONDS = 300.0
 
 #: ``time.monotonic``, named so a test can move the watch's clock without sleeping.
 _monotonic = time.monotonic
+
+#: The process exit code for each way a run can end.
+#:
+#: ``1`` is this CLI's ordinary failure and ``130`` belongs to the watch being
+#: interrupted (``docs/EXEC.md``), so the two ways a run can end badly get codes
+#: of their own rather than being folded into ``1``: a script driving ``lop``
+#: needs to tell "the task failed" from "it hit its deadline" and from "someone
+#: cancelled it without asking". Anything else — no outcome, or one this build
+#: cannot read — is ``1``, because it is certainly not a success.
+EXIT_BY_OUTCOME: dict[str, int] = {
+    "succeeded": 0,
+    "failed": 1,
+    "expired": 3,
+    "cancelled": 4,
+}
+
+#: The exit code for a terminal run whose outcome this build cannot read.
+EXIT_UNKNOWN_OUTCOME = 1
+
+#: The keys a GET body cannot carry, filtered from ``--remote-status`` anyway.
+#:
+#: Defence in depth, not a response to a known leak: the contract returns
+#: ``run_token`` and ``tunnel`` only on the create, where this CLI never stores
+#: them. A status command prints a whole run to stdout, so the two fields are
+#: dropped by name rather than trusted to never arrive.
+SECRET_RUN_FIELDS = ("run_token", "tunnel")
 
 #: The defaults the flags fall back to when the operator does not pass them.
 #:
@@ -199,7 +238,7 @@ def _credential() -> int:
 
 async def _create_run(
     credential: int, request: RunCreateRequest, idempotency_key: str
-) -> dict[str, Any]:
+) -> CreatedRun:
     async with _http_client() as http:
         client = RemoteComputeClient(http, credential_id=credential)
         return await client.create_run(request, idempotency_key=idempotency_key)
@@ -215,8 +254,26 @@ async def _cancel_run(credential: int, identifier: str) -> dict[str, Any]:
         return await RemoteComputeClient(http, credential_id=credential).cancel_run(identifier)
 
 
+def _explain(status: str, announced: set[str]) -> None:
+    """One extra sentence the FIRST time a status is seen, and no more.
+
+    ``error`` is not terminal — the server retries it — so it gets a sentence
+    that says so rather than being left to look like a failure the watch failed
+    to stop on. An unrecognised status gets its own sentence for the same
+    reason. Both are announced once per distinct value: a run that sits in
+    ``error`` for twenty minutes would otherwise write the same line every poll.
+    """
+    if status in announced:
+        return
+    announced.add(status)
+    if status == "error":
+        print(_t(_wr.retrying()))
+    elif status not in KNOWN_RUN_STATUSES:
+        print(_t(_wr.status_unknown(status=status)))
+
+
 async def _watch(
-    credential: int, submitted: dict[str, Any], *, max_hours: float
+    credential: int, submitted: dict[str, Any], *, bound_hours: float
 ) -> dict[str, Any] | None:
     """Poll until a terminal status; ``None`` when the watch's bound is reached.
 
@@ -231,19 +288,22 @@ async def _watch(
     REPORTED by the caller (the run is still running and it says how to check
     it) rather than looking like a finished run.
 
+    ``bound_hours`` is the SERVER's ``max_hours``, not the requested one: the
+    server may cap a request, and a watch bounded by a longer number than the
+    run can live would wait for a deadline that has already passed.
+
     A status this build cannot name is NOT terminal — stopping early would report
     a still-burning run as finished — and it is announced once, as unknown, so a
-    run stuck in a vocabulary this client does not share is visible.
+    run stuck in a vocabulary this client does not share is visible. ``error``
+    is the same shape for a different reason: the server retries it.
     """
     identifier = run_id(submitted)
     network = run_network(submitted)
     current_status = run_status(submitted)
     print(_t(_wr.status_line(status=current_status)))
-    announced_unknown: set[str] = set()
-    if current_status not in KNOWN_RUN_STATUSES:
-        print(_t(_wr.status_unknown(status=current_status)))
-        announced_unknown.add(current_status)
-    deadline = _monotonic() + max_hours * 3600.0 + WATCH_MARGIN_SECONDS
+    announced: set[str] = set()
+    _explain(current_status, announced)
+    deadline = _monotonic() + bound_hours * 3600.0 + WATCH_MARGIN_SECONDS
     interval = POLL_INTERVAL_SECONDS
     payload = submitted
     async with _http_client() as http:
@@ -257,27 +317,62 @@ async def _watch(
             updated = run_status(payload)
             if updated != current_status:
                 current_status = updated
-                if updated in KNOWN_RUN_STATUSES:
-                    print(_t(_wr.status_line(status=updated)))
-                elif updated not in announced_unknown:
-                    print(_t(_wr.status_unknown(status=updated)))
-                    announced_unknown.add(updated)
+                print(_t(_wr.status_line(status=updated)))
+                _explain(updated, announced)
     return payload
 
 
-def _run_options_set(args: argparse.Namespace) -> bool:
-    """Whether a run-submitting flag was passed alongside a remote command."""
-    return any(is_set(getattr(args, name, None)) for name, _ in REMOTE_ONLY_FLAGS) or bool(
-        getattr(args, "command", None)
-    )
+def _run_options_set(args: argparse.Namespace, *, allow: tuple[str, ...] = ()) -> bool:
+    """Whether a run-submitting flag was passed alongside a remote command.
+
+    ``allow`` exists for ``--network``: it selects a tenant rather than asking
+    for work, so ``--remote-status --network home`` is a question about a
+    network, not a composed command. Every other run flag stays refused.
+    """
+    return any(
+        is_set(getattr(args, name, None)) for name, _ in REMOTE_ONLY_FLAGS if name not in allow
+    ) or bool(getattr(args, "command", None))
 
 
-def _remote_status(identifier: str | None) -> int:
-    """``--remote-status``: the run as JSON, or a typed refusal.
+def _without_secrets(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run without the two fields that are secrets when they appear at all."""
+    return {key: value for key, value in payload.items() if key not in SECRET_RUN_FIELDS}
+
+
+def _network_verdict(payload: dict[str, Any], *, network: str | None) -> str:
+    """Whether this run is a run of THIS device's network, in one sentence.
+
+    A NAMED network is resolved first, so ``--network home`` asks about the
+    network the operator meant rather than about whichever one happens to be
+    the default. With no name the default resolution answers (one network means
+    that one; anything else is a refusal, which is not a network to compare
+    against). A refusal here is NOT a failure of the command: the run was read
+    successfully, and saying "unconfirmed" is the honest report of a device that
+    cannot tell whose network the run belongs to.
+    """
+    returned = payload.get("network_id")
+    if not isinstance(returned, str) or not returned:
+        return _t(_wr.status_network_unconfirmed())
+    try:
+        binding = resolve_network(network)
+    except MeshRefusal:
+        return _t(_wr.status_network_unconfirmed())
+    if binding.network_id == returned:
+        return _t(_wr.status_network_matched(network_id=returned))
+    return _t(_wr.status_network_mismatch(network_id=returned))
+
+
+def _remote_status(identifier: str | None, *, network: str | None = None) -> int:
+    """``--remote-status``: the run as JSON, then whether its network is ours.
 
     Does NOT require the preview switch: reading a run this account already
     owns is not sending work, and a switch turned off after submission must not
     hide the state of work that is still running.
+
+    THE NETWORK LINE IS SEPARATE FROM THE JSON so the JSON stays a faithful
+    print of the run: a caller parsing stdout gets the server's document, and a
+    person gets the one thing the document cannot say — whether this device can
+    vouch for it. The two secret fields are dropped from the print.
     """
     if not identifier:
         return _refuse(_t(_wr.alone()))
@@ -287,7 +382,8 @@ def _remote_status(identifier: str | None) -> int:
         return 130
     except (ValueError, OSError) as failure:
         return _report(failure)
-    print(json.dumps(payload, ensure_ascii=False))
+    print(json.dumps(_without_secrets(payload), ensure_ascii=False))
+    print(_network_verdict(payload, network=network))
     return 0
 
 
@@ -380,7 +476,8 @@ def _submit(args: argparse.Namespace) -> int:
         return _refuse(_t(_wr.failed(error=str(failure))))
     request = spec.bind(binding)
     try:
-        submitted = asyncio.run(_create_run(credential, request, key))
+        created = asyncio.run(_create_run(credential, request, key))
+        submitted = created.run
         identifier = run_id(submitted)
         # AS THE SERVER RETURNED IT: the receipt may only claim what the response
         # confirmed, never what this client asked for.
@@ -407,8 +504,14 @@ def _submit(args: argparse.Namespace) -> int:
         )
         return 0
     print(_t(_wr.submitted(run_id=identifier, network_id=network)))
+    # THE SERVER'S BOUND WINS. It may cap ``--max-hours``, and a watch bounded
+    # by the number this command asked for would outlive a run that can no
+    # longer change — asking a dead run's status until a deadline it never had.
+    bound_hours = run_max_hours(submitted)
+    if bound_hours is None:
+        bound_hours = max_hours
     try:
-        final = asyncio.run(_watch(credential, submitted, max_hours=max_hours))
+        final = asyncio.run(_watch(credential, submitted, bound_hours=bound_hours))
     except KeyboardInterrupt:
         print(_t(_wr.interrupted(run_id=identifier)))
         # 130 is the SIGINT convention this CLI already uses for a quiet cancel,
@@ -418,12 +521,39 @@ def _submit(args: argparse.Namespace) -> int:
         return _report(failure)
     if final is None:
         # Never silent: the run has outlived this command's watch, and the
-        # operator is told so AND how to ask again.
-        print(_t(_wr.still_running(run_id=identifier, max_hours=_hours(max_hours))))
+        # operator is told so AND how to ask again. The hours quoted are the
+        # ones the bound was computed from, so the sentence matches the wait.
+        print(_t(_wr.still_running(run_id=identifier, max_hours=_hours(bound_hours))))
         return 0
-    status = run_status(final)
-    print(_t(_wr.finished(run_id=identifier, status=status)))
-    return 0 if status == "succeeded" else 1
+    return _report_finished(final, identifier=identifier)
+
+
+def _report_finished(final: dict[str, Any], *, identifier: str) -> int:
+    """The finished line, its optional detail, and the exit code for the outcome.
+
+    A terminal STATUS ends the watch; the OUTCOME is what the run did, and it is
+    the outcome that decides the exit code. Reporting the status alone would
+    print "stopped" for a task that succeeded and for one that expired.
+
+    The exit code and the charge each get a line of their own rather than being
+    pushed into the finished sentence: either can be absent, and five copies of
+    the same sentence with and without two clauses is how a locale goes stale.
+    """
+    outcome = run_outcome(final)
+    finished = {
+        "succeeded": _wr.finished_succeeded,
+        "failed": _wr.finished_failed,
+        "expired": _wr.finished_expired,
+        "cancelled": _wr.finished_cancelled,
+    }.get(outcome if outcome in KNOWN_RUN_OUTCOMES else "", _wr.finished_unknown)
+    print(_t(finished(run_id=identifier)))
+    code = run_exit_code(final)
+    if code is not None:
+        print(_t(_wr.finished_exit_code(exit_code=str(code))))
+    charge = charged_amount(final)
+    if charge is not None:
+        print(_t(_wr.finished_charged(amount=charge)))
+    return EXIT_BY_OUTCOME.get(outcome, EXIT_UNKNOWN_OUTCOME)
 
 
 def remote_command(args: argparse.Namespace) -> int:
@@ -433,12 +563,16 @@ def remote_command(args: argparse.Namespace) -> int:
     if status_id or cancel_id:
         # The two commands are READ-ONLY or single-purpose: a prompt or any run
         # flag beside one of them is a composed command that would silently drop
-        # half of what was typed, so it is refused instead.
+        # half of what was typed, so it is refused instead. ``--network`` is the
+        # exception for ``--remote-status``: it names the network to compare the
+        # run against, which changes no run and sends no work.
         if (status_id and cancel_id) or is_set(getattr(args, "remote", None)):
             return _refuse(_t(_wr.alone()))
-        if _run_options_set(args):
+        if _run_options_set(args, allow=("network",) if status_id else ()):
             return _refuse(_t(_wr.alone()))
-        return _remote_status(status_id) if status_id else _remote_cancel(cancel_id)
+        if status_id:
+            return _remote_status(status_id, network=getattr(args, "network", None))
+        return _remote_cancel(cancel_id)
     if not is_set(getattr(args, "remote", None)):
         # A remote-only flag without --remote: name the flag that was typed.
         spelling = first_set(args, REMOTE_ONLY_FLAGS) or "--detach"
