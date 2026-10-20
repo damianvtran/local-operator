@@ -15,13 +15,16 @@ OperatorApp via run_test.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.harness.types import Usage
+from tests.loop_callback_spans import CallbackSpans
 
 
 @pytest.fixture
@@ -65,9 +68,11 @@ class StallRecorder:
 
     * ``time.thread_time`` (CPU) is per-thread and excludes time asleep or
       waiting on the GIL, so a sample is large only when the loop thread
-      genuinely ran without yielding — never merely because the machine was
-      busy. This is the same statistic ``tests/unit/tools/
-      test_loop_liveness.py`` adopted for ``LoopCpuProbe``. It is the clock
+      genuinely ran BETWEEN probe wakes — never merely because the machine
+      was busy. Multiple callbacks/task steps can run in that interval; the
+      sample does not prove one uninterrupted callback. This is the same
+      statistic ``tests/unit/tools/test_loop_liveness.py`` adopted for
+      ``LoopCpuProbe``. It is the clock
       that sees the reconnect regression (a synchronous 60 MB transcript
       parse, ~90-130 ms of CPU on the loop) and is blind to OS scheduler
       starvation (the flake that produced 525 ms and 668 ms wall gaps on
@@ -110,15 +115,18 @@ class StallRecorder:
     below the canonical 5 s freeze.
     """
 
-    def __init__(self, stall_ms: float = STALL_MS) -> None:
+    def __init__(
+        self, stall_ms: float = STALL_MS, *, callbacks: CallbackSpans | None = None
+    ) -> None:
         self.stall_ms = stall_ms
+        self._callbacks = callbacks
         self.cpu_stalls: list[float] = []
         self.wall_stalls: list[float] = []
         self._task: asyncio.Task[None] | None = None
         #: Worst wake stretch seen inside the noise window, or None if no
         #: window was measured; see :meth:`begin_noise_window`.
         self.noise_floor_ms: float | None = None
-        #: Loop-thread CPU calibration ratio from :meth:`calibrate_cpu`;
+        #: Wall/CPU descheduling ratio from :meth:`calibrate_cpu`;
         #: 1.0 until measured, so uncalibrated callers keep fixed ceilings.
         self.cpu_calibration_ratio: float = 1.0
         self._noise_open = False
@@ -126,12 +134,16 @@ class StallRecorder:
     async def _probe(self) -> None:
         last_cpu = time.thread_time()
         last_wall = time.perf_counter()
+        if self._callbacks is not None:
+            self._callbacks.take_window()
         while True:
             await asyncio.sleep(TICK_S)
             now_cpu = time.thread_time()
             now_wall = time.perf_counter()
             cpu_gap_ms = (now_cpu - last_cpu) * 1000.0
             wall_gap_ms = (now_wall - last_wall) * 1000.0
+            if self._callbacks is not None:
+                self._callbacks.observe_window(cpu_gap_ms, wall_gap_ms)
             if self._noise_open and (
                 self.noise_floor_ms is None or wall_gap_ms > self.noise_floor_ms
             ):
@@ -159,20 +171,30 @@ class StallRecorder:
             pass
         self._task = None
 
-    def calibrate_cpu(self, burn_ms: float = 50.0) -> float:
-        """Measure this loop thread's CPU throughput before the turn.
+    def measurement_summary(self) -> dict[str, object]:
+        """Persist bounded evidence on passing CI cells too, without re-profiling."""
+        return {
+            "worst_cpu_ms": max(self.cpu_stalls, default=0.0),
+            "worst_wall_ms": max(self.wall_stalls, default=0.0),
+            "noise_floor_ms": self.noise_floor_ms,
+            "wall_cpu_descheduling_ratio": self.cpu_calibration_ratio,
+            "callbacks": self._callbacks.summary() if self._callbacks is not None else None,
+        }
 
-        WHY a second estimator beside the wake-stretch floor: the floor is
-        measured while the loop is IDLE (pumping pauses), so it names how
-        late a wake can land, not how fast the loop thread executes CPU
-        work while a turn is running — descheduling and slow silicon
-        stretch a CPU sum without any single idle wake being late, which
-        is how a healthy 539 ms reading crossed the 500 ms ceiling the
-        floor had kept at 500. This leg burns a FIXED amount of loop-thread
-        CPU (timed with ``thread_time``, the LoopCpuProbe clock in
-        ``tests/unit/tools/test_loop_liveness.py``) and returns wall/CPU:
+    def calibrate_cpu(self, burn_ms: float = 50.0) -> float:
+        """Measure this thread's wall/CPU descheduling ratio before the turn.
+
+        The idle wake floor and this ratio were introduced after an S2
+        reading of 539 ms crossed the 500 ms ceiling. Neither measurement
+        establishes which production callback consumed that CPU. This leg
+        burns a FIXED amount of loop-thread CPU (timed with ``thread_time``,
+        the LoopCpuProbe clock in ``tests/unit/tools/test_loop_liveness.py``)
+        and returns wall/CPU:
         ~1.0 on an uncontended runner, >1.0 exactly when this thread is
-        not getting the CPU its clock says it used. The burn is a tight
+        not getting the CPU its clock says it used. This is NOT a throughput
+        calibration: it fixes elapsed CPU, not completed work, so slower silicon
+        can still return ~1.0. The existing formula is retained; diagnostic
+        attribution must not silently widen the liveness contract. The burn is a tight
         allocation-free arithmetic loop, so no GC pause of its own lands
         in the interval (that probe deducts GC because it samples OTHER
         work; here there is nothing to deduct). Call BEFORE :meth:`start`
@@ -233,14 +255,18 @@ class StallRecorder:
         suffix = f" [{context}]" if context else ""
         worst_cpu = max(self.cpu_stalls) if self.cpu_stalls else 0.0
         worst_wall = max(self.wall_stalls) if self.wall_stalls else 0.0
+        if self._callbacks is not None and (
+            worst_cpu >= cpu_ceiling_ms or worst_wall >= wall_ceiling_ms
+        ):
+            suffix += "\ncallback attribution: " + json.dumps(self._callbacks.summary())
         assert worst_cpu < cpu_ceiling_ms, (
-            f"event loop consumed {worst_cpu:.0f} ms of CPU without yielding "
+            f"event loop consumed {worst_cpu:.0f} ms of CPU between probe ticks "
             f"(ceiling {cpu_ceiling_ms:.0f} ms); "
             f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
             f"{suffix}"
         )
         assert worst_wall < wall_ceiling_ms, (
-            f"event loop blocked for {worst_wall:.0f} ms of wall time "
+            f"event loop probe wake gap was {worst_wall:.0f} ms of wall time "
             f"(ceiling {wall_ceiling_ms:.0f} ms); "
             f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
             f"{suffix}"
@@ -287,17 +313,15 @@ class StallRecorder:
         bound_wall = wall_ceiling_ms
         context = ""
         if noise_floor_ms is not None:
-            # The calibrated ceiling scales the fixed bar by the loop
-            # thread's own measured throughput (see :meth:`calibrate_cpu`)
-            # instead of raising the constant: the file's history above is
-            # the warning that the next slower runner beats any new fixed
-            # number. The NOISE_CPU_CAP_MS cap is unchanged, so a genuinely
-            # long CPU burst still reds on every runner.
+            # Preserve the existing bound formula while adding diagnostics.
+            # This wall/CPU ratio measures descheduling, not fixed-work CPU
+            # throughput; attribution must not masquerade as a new calibration.
+            # The CPU/wall caps still reject the canonical hostile controls.
             calibrated_cpu = cpu_ceiling_ms * self.cpu_calibration_ratio
             bound_cpu = min(max(NOISE_K * noise_floor_ms, calibrated_cpu), NOISE_CPU_CAP_MS)
             bound_wall = min(max(NOISE_K * noise_floor_ms, wall_ceiling_ms), NOISE_WALL_CAP_MS)
             context = (
-                f"noise floor {noise_floor_ms:.0f} ms, CPU calibration "
+                f"noise floor {noise_floor_ms:.0f} ms, wall/CPU descheduling ratio "
                 f"x{self.cpu_calibration_ratio:.2f} -> CPU bound {bound_cpu:.0f} ms, "
                 f"wall bound {bound_wall:.0f} ms "
                 f"(K={NOISE_K:g}, caps {NOISE_CPU_CAP_MS:.0f}/{NOISE_WALL_CAP_MS:.0f}, "
@@ -1226,7 +1250,9 @@ async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> N
 
 
 @pytest.mark.asyncio
-async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
+async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
+    record_property: Callable[[str, object], None],
+) -> None:
     """S2: a streamed reply with tool batches, from submit to ``agent_end``,
     leaves no loop stall above the bar — the reported 'sending a message
     freezes the UI until processed'. The pricing leg is made hostile the same
@@ -1234,10 +1260,9 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     scales with the run's own measured noise floor (the idle leg below; the
     constants and the CI dataset behind them sit beside NOISE_K): on a quiet
     machine it is the calibrated 500 ms, on a loaded runner the bound rides
-    the runner's own wake noise and its measured loop-thread CPU throughput
-    (the calibration leg below — the idle floor alone cannot see a slow or
-    descheduled loop thread, which is the estimator flaw behind the healthy
-    539 ms reading that crossed the unscaled 500 ms ceiling)."""
+    the runner's own wake noise and its measured wall/CPU descheduling ratio.
+    That ratio does not measure fixed-work throughput. Callback diagnostics
+    explain future oversized samples without changing the cumulative contract."""
     from local_operator.harness.types import (
         AgentEndEvent,
         AgentStartEvent,
@@ -1261,65 +1286,76 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     configure.invalidate_model_info_cache()
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        recorder = StallRecorder()
-        # CPU calibration BEFORE start(): the probe must not record its own
-        # burn, and the ratio must describe this thread before the turn.
-        recorder.calibrate_cpu()
-        await recorder.start()
-        # The run's own noise floor, measured before the turn: pump the idle
-        # app for a spell — timers, paints, the same pump the turn will use —
-        # with none of the turn's legs on it. The worst wake stretch observed
-        # here is what the turn's CPU-sum reading is allowed to ride on; the
-        # constants and the CI dataset behind them are beside NOISE_K.
-        recorder.begin_noise_window()
-        for _ in range(12):
-            await pilot.pause(0.05)
-        recorder.end_noise_window()
-        # A turn with message text, a tool batch, per-call usage reports, and
-        # an unpriceable model on the components — the exact surface the
-        # freeze was reported on.
-        session.emit(AgentStartEvent())
-        message = Message.assistant("streaming answer")
-        session.emit(MessageStartEvent(message=message))
-        session.emit(MessageUpdateEvent(message=message, delta="streaming answer"))
-        session.emit(MessageEndEvent(message=message))
-        usage = Usage(input_tokens=10_000, output_tokens=2_000, context_tokens=10_200)
-        app.post_message(ContextUsageReported(10_200, usage))
-        session.emit(
-            ToolExecutionStartEvent(tool_call_id="t1", tool_name="bash", args={"command": "ls"})
-        )
-        session.emit(
-            ToolExecutionEndEvent(
-                tool_call_id="t1",
-                tool_name="bash",
-                result=ToolResult(tool_call_id="t1", tool_name="bash"),
-            )
-        )
-        session.emit(AgentEndEvent())
-        for _ in range(20):
-            await pilot.pause(0.05)
-        await recorder.stop()
-        # Drain the background refresh BEFORE detaching the stub: the thread
-        # is mid-sleep inside it, and restoring the real discovery + clearing
-        # the memo while it runs leaves either a poisoned memo entry or a
-        # thread fetching against a swapped module for the next test.
+    try:
+        with CallbackSpans(asyncio.get_running_loop()) as callbacks:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                recorder = StallRecorder(callbacks=callbacks)
+                # CPU calibration BEFORE start(): the probe must not record its own
+                # burn, and the ratio must describe this thread before the turn.
+                recorder.calibrate_cpu()
+                try:
+                    await recorder.start()
+                    # The run's own noise floor, measured before the turn: pump the idle
+                    # app for a spell — timers, paints, the same pump the turn will use —
+                    # with none of the turn's legs on it. The worst wake stretch observed
+                    # here is what the turn's CPU-sum reading is allowed to ride on; the
+                    # constants and the CI dataset behind them are beside NOISE_K.
+                    recorder.begin_noise_window()
+                    for _ in range(12):
+                        await pilot.pause(0.05)
+                    recorder.end_noise_window()
+                    # A turn with message text, a tool batch, per-call usage reports, and
+                    # an unpriceable model on the components — the exact surface the
+                    # freeze was reported on.
+                    session.emit(AgentStartEvent())
+                    message = Message.assistant("streaming answer")
+                    session.emit(MessageStartEvent(message=message))
+                    session.emit(MessageUpdateEvent(message=message, delta="streaming answer"))
+                    session.emit(MessageEndEvent(message=message))
+                    usage = Usage(input_tokens=10_000, output_tokens=2_000, context_tokens=10_200)
+                    app.post_message(ContextUsageReported(10_200, usage))
+                    session.emit(
+                        ToolExecutionStartEvent(
+                            tool_call_id="t1", tool_name="bash", args={"command": "ls"}
+                        )
+                    )
+                    session.emit(
+                        ToolExecutionEndEvent(
+                            tool_call_id="t1",
+                            tool_name="bash",
+                            result=ToolResult(tool_call_id="t1", tool_name="bash"),
+                        )
+                    )
+                    session.emit(AgentEndEvent())
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                finally:
+                    await recorder.stop()
+                    # JUnit retains this on PASS and FAIL; future CI evidence
+                    # must not require another profiling run to read the clocks.
+                    record_property("s2_loop_liveness", json.dumps(recorder.measurement_summary()))
+                # Loaded bar (500 ms CPU / 2 s wall): this path has legitimate loop
+                # CPU from Textual layout (413 ms recorded on CI), and the
+                # reconnect/connect tests are the ones that assert the strict 50 ms
+                # CPU bar against the parse regression. Bench numbers were recorded in
+                # bench/before.json vs after.json — out of the tree now, one `git show`
+                # away at ba225070 (AGENTS.md, "Evidence goes on the PR, never into the
+                # repository").
+                recorder.assert_no_stall_loaded(noise_floor_ms=recorder.noise_floor_ms)
+
+    finally:
+        # Keep the stub installed until its background reader has drained, even
+        # when the turn/assertion raises. Never poison another test's cold memo.
         slow.latency_s = 0.0
-        for _ in range(200):
-            if slow.in_flight == 0:
-                break
-            await asyncio.sleep(0.02)
-        discovery.available_models = original  # type: ignore[assignment]
-        configure.invalidate_model_info_cache()
-        # Loaded bar (500 ms CPU / 2 s wall): this path has legitimate loop
-        # CPU from Textual layout (413 ms recorded on CI), and the
-        # reconnect/connect tests are the ones that assert the strict 50 ms
-        # CPU bar against the parse regression. Bench numbers were recorded in
-        # bench/before.json vs after.json — out of the tree now, one `git show`
-        # away at ba225070 (AGENTS.md, "Evidence goes on the PR, never into the
-        # repository").
-        recorder.assert_no_stall_loaded(noise_floor_ms=recorder.noise_floor_ms)
+        try:
+            for _ in range(200):
+                if slow.in_flight == 0:
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            discovery.available_models = original  # type: ignore[assignment]
+            configure.invalidate_model_info_cache()
 
 
 @pytest.mark.asyncio
