@@ -14,7 +14,7 @@ vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
-		useSessions: () => ({ sessions: [] as SessionSummary[], connected: true }),
+		useSessions: () => ({ sessions: [] as SessionSummary[], connected: true, revision: 0 }),
 		useCapabilities: () => capability,
 		retainSessionListStream: () => () => {},
 	};

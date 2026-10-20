@@ -24,8 +24,10 @@ import type {
 	LibraryListing,
 	LibraryTag,
 	SessionSummary,
+	SessionTagsResponse,
 	SlashCommand,
 	SubagentDetail,
+	TagsResponse,
 	TranscriptEntry,
 } from "./types";
 
@@ -194,6 +196,36 @@ export function getDirectories(): Promise<Directories> {
 
 export function getPastSessions(): Promise<{ sessions: PastSession[] }> {
 	return request("/api/sessions/past");
+}
+
+/** The SHARED conversation-tag registry (`GET /api/tags`), read only.
+
+    There is deliberately no catalogue write here: identity (create/rename) lives
+    with the desktop app and agent callers, and a second implementation of it on
+    the phone is how the two surfaces start disagreeing. `order` is the
+    registry's own ordering field; the sheet renders rows in it. */
+export function getTags(): Promise<TagsResponse> {
+	return request("/api/tags");
+}
+
+/** Assign a conversation's tags as DESIRED STATE.
+
+    `{tags, primary}` and nothing else: the relay refuses a body without
+    `primary` (never a silent re-primary) or with an unknown key. Sending the
+    state wanted rather than a delta is the property that makes a retry land on
+    the same assignment, and `[]` + `null` is the clear. The answer is the store's
+    canonical read-back — paint it rather than the request, because the store may
+    have pruned a category deleted between the catalogue read and this write. */
+export function setSessionTags(
+	sessionId: string,
+	tags: string[],
+	primary: string | null,
+): Promise<SessionTagsResponse> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/tags`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ tags, primary }),
+	});
 }
 
 /** Search past sessions by name, id, or conversation body (the /resume
