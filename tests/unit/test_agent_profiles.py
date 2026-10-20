@@ -617,7 +617,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Stamped from the packaged reviewer at install, before the simulated move.
-    assert verdict.installed_version == "1.3.3"
+    assert verdict.installed_version == "1.3.4"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -755,7 +755,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's version, untouched by the body-only move.
-    assert verdict.installed_version == verdict.packaged_version == "1.3.3"
+    assert verdict.installed_version == verdict.packaged_version == "1.3.4"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 
