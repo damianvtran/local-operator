@@ -13,9 +13,14 @@ WHAT THIS FILE PINS, and why each cell exists:
 - a payload that does not name the key it claims is dropped whole.
 
 The delivery cells run two REAL relays on loopback roots (the ``devices``
-fixture in ``test_relay_e2e``), so the copy is exercised over the real broker,
-never a direct function call, and the member side uses the same
-``auth_store_factory`` seam S3's cells use (one process, two roots).
+fixture in ``test_relay_e2e``), so the copy is exercised over real relays and
+the real store/sealing path, never a direct function call. **The unit run takes
+the documented KEYFILE FALLBACK, not a broker-served key**: no lop session is
+registered with a broker, so a broker would deny the caller and
+``master_key_for`` reads the key file. Broker custody is covered by the broker
+suite; the relay, re-sealing and provenance coverage here is not broker-specific.
+The member side uses the same ``auth_store_factory`` seam S3's cells use (one
+process, two roots).
 """
 
 from __future__ import annotations
@@ -42,9 +47,10 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
     devices,
 )
 
-# The delivery cells run two REAL relays and copy over the real broker; the
-# suite's autouse gate is for ordinary store reads. Review round 1, F-2.
-pytestmark = pytest.mark.allow_secret_broker
+# The unit run takes the keyfile fallback: no session is registered, so a
+# broker would deny every read. The autouse gate stays on -- review round 2
+# measured zero successful broker RPCs even with the daemons spawned, so there
+# was no broker-served coverage to restore.
 
 #: The secret both relay cells copy: a name that is not a provider's, so nothing
 #: else in the tree claims it.
@@ -85,7 +91,8 @@ def secret_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
 
     A's secret is SHARED with B before the cells run — the same shape
     ``sync_mesh`` uses for the api-key class — so the copy itself arrives over
-    the real broker on the cells' own exchange.
+    the real relay on the cells' own exchange. The store side takes the keyfile
+    fallback (see the module docstring); no broker session is registered here.
     """
     pair_devices = request.getfixturevalue("devices")
     server_a, server_b, host, port = pair_devices
@@ -139,9 +146,11 @@ def secret_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
         yield mesh
     finally:
         server_b.stop()
-        # THE PER-SIDE BROKERS DIE HERE, because nothing else can reach them. These
-        # cells drive the REAL broker (the copy path goes through it), so each side's
-        # store starts a detached `brokerd` under its own root; the suite-wide sweep in
+        # THE PER-SIDE STOPS ARE A BACKSTOP, because nothing else can reach these
+        # roots. The copy path takes the keyfile fallback (no session is registered,
+        # so a broker would deny and `master_key_for` reads the key file) and the
+        # autouse gate starts no daemon; but if a future cell opts into a real broker
+        # under these roots, the suite-wide sweep in
         # ``tests/conftest.py`` cannot see those roots — its candidates come from
         # ``tmp_path``, and this module only ever reaches ``tmp_path`` through fixtures
         # (``secret_mesh`` and the network suite's ``root``), so ``item.funcargs``
