@@ -10,7 +10,7 @@ incredibly slick", did not align with the message column, and had "a weird bar o
 **Base:** `origin/main` at `4da76988b5` (prelude v5) for the three-width before set.
 **Round-1 head:** `ce84e17e2d` (prelude v6) for the many-bar before set — the case the first
 round did not cover.
-**After:** this remediation, prelude v7 (`b227c3ed80`).
+**After:** this remediation, prelude v7 (`b227c3ed80`) for the shape set and v8 (`fbd90306e0`) for the vertical scroll-lock set.
 
 This directory lives on an evidence-only branch so the PR branch carries no evidence files.
 It is not merged.
@@ -57,3 +57,21 @@ and its type with the column, paint a scrollbar at the right edge (and sometimes
 and leave the grid louder than the bars. The v7 after frames keep one compact bar band, fit the
 label column to the longest label, end the two-tick axis on 0.6, put every value outside its
 bar, and suppress value/last-category labels only when a 14 px label cannot fit the band.
+
+## v8 scroll-lock — vertical four-bar chart
+
+The operator's "weird bar on the right" was a VERTICAL four-bar chart at an 810 px column.
+The host seeds `height_hint` 320, but the prelude's first layout at 810 is 363 px; with the
+16 px body padding the document is 379 px. A 373 px host box therefore added a 15 px
+scrollbar, the chart narrowed and shrank 7 px, and `size()` reported 373 — a settled feedback
+lock. `html{overflow:hidden}` removes the scrollbar; `size()` reports `body.offsetHeight`.
+
+| case | before (v7) | after (v8) |
+|---|---|---|
+| 810, seed 373 | `810×373`, scrollbar 15 px, SVG `791×356` | `810×379`, scrollbar 0, SVG `806×363` |
+| 620, seed 320 | — | `620×293`, scrollbar 0, SVG `616×277` |
+| 1200, seed 320 | — | `1200×412`, scrollbar 0, SVG `880×396` |
+
+Frames: `vertical-before-810.png` (strip at the right edge), `vertical-after-620.png`,
+`vertical-after-810.png`, `vertical-after-1200.png` (no strip). `render_vertical.py` builds a
+host that resizes the iframe from the prelude's `resize` post, starting at the seed height.
