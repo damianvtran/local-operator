@@ -1575,24 +1575,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # payload shape the nit asked for, and every variant that keeps it fails. The
 # raise is chosen to keep the payload clue AND leave margin, not to fit by
 # deleting the thing the nit was about.
-# RAISED 31,025 -> 31,614 for the Team Bridge agent channel tool (#2665),
-# stated with the arithmetic because this guard exists to make that an explicit
-# decision, not an unrelated budget increase. Measured with THIS script on the
-# clean arm (env -i, isolated HOME), same machine, both trees:
-#   8714b008c1  base (origin/main)             86,204 chars = ~31,009 billed
-#   head, after the round-1 prose trim         87,123 chars = ~31,339 billed
-#   = +919 chars of ``tool_schemas`` vs base (58,694 -> 59,613) = ~+330 billed;
-#     every other counter byte-identical. The trim took 476 chars out FIRST
-#     (wire description 376 -> 221, two model docstrings to one line each).
-# The residual is STRUCTURAL, not prose: four op literals, eleven parameter
-# entries and the nested ``ChannelMemberParams`` model are the minimum a model
-# needs to call channels/create/post/history, and every field is load-bearing
-# (name/topic/visibility are request facts; members is the invite shape).
-# The ceiling was set from the first (non-clean) reading at 31,559 + the
-# 55-token band; the clean re-measure is 31,339, so it leaves 275 tokens of
-# headroom rather than 55. CI's clean arm agrees at 31,339 for this head, so
-# the ceiling is kept (a tighten is not part of this remediation).
-BUDGET_BILLED_TOKENS = 31_614
+# RAISED to 31,466 for the Team Bridge agent channel tool (#2665), measured with
+# THIS script on the merged base a68b18bdb5 in an isolated HOME:
+#   top arm:   87,323 chars = ~31,411 billed  -> 31,411 + 55-token band = 31,466
+#   child arm: 79,182 chars = ~28,483 billed  -> 28,483 + 55-token band = 28,538
+# The channel tool adds the four ops (channels/create/post/history), eleven
+# parameters and the nested member model; every field is load-bearing (name,
+# topic and visibility are request facts, members is the invite shape). The
+# prose was trimmed before this raise; what remains is structural.
+BUDGET_BILLED_TOKENS = 31_466
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1704,7 +1695,7 @@ BUDGET_BILLED_TOKENS = 31_614
 #   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
 #     arm: the channel tool is in every session's surface, children included,
 #     and no child counter moved. Ceiling = measured head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 28_466
+BUDGET_CHILD_BILLED_TOKENS = 28_538
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
