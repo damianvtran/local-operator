@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from local_operator import resume
 from local_operator.library import identity, service
 from local_operator.library.metadata import MetadataStore
 from local_operator.session.attachments import cache_media
@@ -376,3 +377,26 @@ def test_scope_final_keeps_generated_and_highlighted_assets(tmp_path, monkeypatc
         pass
     else:  # pragma: no cover
         raise AssertionError("a cursor minted for another scope must be refused")
+
+
+def test_occurrence_session_title_is_the_stored_name_not_the_opening_line(
+    tmp_path, monkeypatch
+) -> None:
+    """End to end through the service: the response carries the session's name.
+
+    The UI renders ``occurrences[0].session_title`` as the conversation
+    reference, so the index's precedence has to survive the projection. Asserted
+    on the wire dict, not on the index internals.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    path = tmp_path / "brief.md"
+    path.write_text("# hi")
+    opening = "Can you review Victor's message in non-urgent-tech-support"
+    build(root, [user_row("u0", 0.5, opening), *write_rows("w1", 1, path)])
+    resume.write_session_title(
+        root / "sessions" / SESSION, "Victor support triage", user_set=False, past_names=[]
+    )
+
+    row = listing(root, service.Query())["rows"][0]
+
+    assert row["occurrences"][0]["session_title"] == "Victor support triage"

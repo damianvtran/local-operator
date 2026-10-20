@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from local_operator import resume
 from local_operator.library import identity, index, service
 from local_operator.session.attachments import cache_media
 
@@ -627,3 +628,83 @@ def test_a_truncated_partial_index_is_not_ready_even_when_its_rows_are(
     index._write(path, payload)
     index._CACHE.clear()
     assert index.catalog_for_read(root).state == "building"
+
+
+#: The opening user line from the operator's report: a long request that is
+#: emphatically not the session's name. The Library used to label every
+#: occurrence with it, because ``scan.title`` is ``sanitize_prompt_line(texts[0])``
+#: and the index let it beat the stored title.
+OPENING = (
+    "Can you review Victor's message in non-urgent-tech-support, and delegate to a minervadev team"
+)
+
+
+def test_a_stored_title_beats_the_opening_line(tmp_path, monkeypatch) -> None:
+    """The occurrence's conversation reference is the session's NAME.
+
+    Regression: a session whose transcript opens with a long request and whose
+    sidecar holds a generated name was shown under the opening line, so the
+    Library read as a transcript excerpt rather than a conversation reference.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    directory = session(root, SESSION, [user_row("u0", 0.5, OPENING), *write_rows("w1", 1, saved)])
+    resume.write_session_title(directory, "Victor support triage", user_set=False, past_names=[])
+
+    catalog = index.build_catalog(root, budget_s=None)
+
+    (occurrence,) = catalog.assets[0].occurrences
+    assert occurrence.title == "Victor support triage"
+
+
+def test_an_untitled_session_keeps_the_opening_line_fallback(tmp_path, monkeypatch) -> None:
+    """No stored title anywhere: the scan's opening-line capture is the label.
+
+    The fallback exists for sessions written before titles were journalled, and
+    dropping it would leave those occurrences with no conversation reference.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    opening = "Please review Victor's message"
+    session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, saved)])
+
+    catalog = index.build_catalog(root, budget_s=None)
+
+    assert catalog.assets[0].occurrences[0].title == opening
+
+
+def test_a_rename_refreshes_a_cached_entry_without_a_transcript_change(
+    tmp_path, monkeypatch
+) -> None:
+    """``/rename`` must reach the Library on the next build, not the next turn.
+
+    A rename writes the sidecar and deliberately leaves the transcript and the
+    directory mtime alone, so the cached entry's journal signature still matches
+    and only the title comparison can notice. Before the fix this build served
+    the cached opening-line title indefinitely.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    opening = "Please review Victor's message"
+    directory = session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, saved)])
+    first = index.build_catalog(root, budget_s=None)
+    assert first.assets[0].occurrences[0].title == opening
+
+    before = (directory / "transcript.jsonl").stat()
+    directory_mtime = directory.stat().st_mtime_ns
+    resume.write_session_title(
+        directory, "Victor support triage", user_set=True, past_names=[opening]
+    )
+    # The point of the test: nothing the journal signature reads moved. (The
+    # sidecar write restores the directory mtime only at whole-second precision
+    # — it saves ``st_mtime`` as a float — and the signature never reads it.)
+    after = (directory / "transcript.jsonl").stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert int(directory.stat().st_mtime) == int(directory_mtime / 1_000_000_000)
+
+    second = index.build_catalog(root, budget_s=None)
+
+    assert second.assets[0].occurrences[0].title == "Victor support triage"
