@@ -2812,6 +2812,101 @@
       },
       "status": "passed",
       "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 beda64bf3d9d3877805e43a24e2d20502fca08d1164096e4fe7a0c8a7ed77700."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (feature commit 091db91ef names none)",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MINOR fixed: enabled.help measured 74 cells, exactly the 74-cell /settings detail line at 80x24 (rendered, not estimated) and past the ~67-cell en budget, so the row had no margin; tightened to 'Vista previa: envía trabajo al cómputo alojado por Radient en tu malla.' (71). 'malla' for mesh matches the catalogue's network/mesh_updates keys; 'solo local' / 'se permiten ejecuciones remotas' accepted as idiomatic tú register; no unresolved blocker/major."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (feature commit 091db91ef names none)",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. vous register: description's bare 'exécute' (3rd person / tu imperative) fixed to the guide's infinitive action form 'exécuter'; help 'envoie' -> 'envoyer'. enabled.help measured 80 cells, past the 74-cell 80x24 detail line, and 'hébergé par Radient' cannot fit it, so it is now 'Aperçu : envoyer votre travail au calcul de Radient dans votre maillage.' (73) — same referent, 'Aperçu' + U+202F kept; description keeps 'calcul hébergé par Radient'. No unresolved blocker/major."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (feature commit 091db91ef names none)",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. term consistency fixed inside one feature: description's 'Предварительный просмотр' -> 'Предпросмотр', the form the same feature's help and the namespace's static.title ('Предпросмотры файлов') use. enabled.help measured 83 cells, past the 74-cell 80x24 line; now 'Предпросмотр: работа уходит на вычислительные ресурсы Radient в меш-сети.' (73), keeping the description's precise term and dropping the possessive rather than the noun. 'меш-сети' matches the catalogue. No unresolved blocker/major."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (feature commit 091db91ef names none)",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MAJOR fixed: enabled.help 'आपका काम … भेजता है' made the work the sender (verb agreed with काम); now 'आपके काम को … भेजता है' with the mesh clause moved before the compute phrase. 1 MAJOR fixed: description's participle 'होस्ट किए कंप्यूट' is not grammatical without 'गए' and the agent was unmarked -> 'Radient द्वारा होस्ट किए गए कंप्यूट'; 'बँधा होगा' (future) -> '… से जुड़ा होता है' (present fact). प्रीव्यू kept: it is this namespace's preview term (static.title, tui_theme.help); help is 66 cells. No unresolved blocker/major."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (feature commit 091db91ef names none)",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MAJOR fixed: description and help said 'máy tính do Radient vận hành' (a computer), while the setting is compute and the title already says 'Tính toán'; now 'hạ tầng tính toán do Radient vận hành' / 'hạ tầng tính toán Radient'. enabled.help measured 86 cells, past the 74-cell 80x24 line; now 'Bản xem trước: gửi việc tới hạ tầng tính toán Radient trong mạng mesh.' (70). 'mạng mesh' matches the vi guide's recorded setting form; 'Bản xem trước' matches tui.viewer. No unresolved blocker/major."
     }
   ]
 }
