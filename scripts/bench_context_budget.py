@@ -1575,7 +1575,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # payload shape the nit asked for, and every variant that keeps it fails. The
 # raise is chosen to keep the payload clue AND leave margin, not to fit by
 # deleting the thing the nit was about.
-BUDGET_BILLED_TOKENS = 31_025
+# RAISED 31,025 -> 31,100 for evidence-attachment discoverability, stated with
+# the arithmetic because this guard exists to make that an explicit decision.
+# Measured by THIS script on an isolated HOME at each tree, same machine:
+#   608fbaa01c  base (origin/main)        86,204 chars = ~31,009 billed  PASS, 16 headroom
+#   c5400d7df9  evidence-attachment head   86,404 chars = ~31,081 billed  FAIL by 56
+#   = +200 chars of ``tool_schemas``, ALL of it the ``project`` tool's
+#     ``attach`` description: when to use it (before/after frame, chart or data
+#     extract, log excerpt), that files are copied into the store, and the
+#     10-file/5 MB cap. The field existed but named no occasion, which is why
+#     agents recorded progress without the evidence beside it; trimming the
+#     occasion to fit 45 chars of headroom would delete the change. The raise
+#     is stated in the PR thread for a reviewer to verify before it settles.
+BUDGET_BILLED_TOKENS = 31_100
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1680,7 +1692,13 @@ BUDGET_BILLED_TOKENS = 31_025
 # audio pair and on the same measurement pass (child arm measured 27,688 billed
 # on this head). The two ceilings move together because the pair is in every
 # session's surface, child included; the difference between them is unchanged.
-BUDGET_CHILD_BILLED_TOKENS = 28_100
+# RAISED 28,100 -> 28,175 with ``BUDGET_BILLED_TOKENS`` above, same change and
+# same measurement pass: the child arm carries ``project`` too and moves by the
+# SAME +200 chars of ``tool_schemas`` — measured with this script's child arm:
+#   608fbaa01c  base (origin/main)  78,063 chars = ~28,080 billed  PASS, 20 headroom
+#   c5400d7df9  head               78,263 chars = ~28,152 billed  FAIL by 52
+# Ceiling = head + 23, the same margin shape as the top arm.
+BUDGET_CHILD_BILLED_TOKENS = 28_175
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
