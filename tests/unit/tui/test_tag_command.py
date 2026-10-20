@@ -22,6 +22,7 @@ from local_operator.session.session_tags import (
     write_categories,
 )
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.sidebar_tags import read_tag_groups, write_tag_groups
 from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession
 
@@ -88,7 +89,11 @@ async def test_bare_tag_opens_the_current_conversations_list() -> None:
 
         editor = app._editor()
         assert editor.text == "/tag "
-        rows = editor.picker.suggestions()
+        rows = [
+            (name, choice)
+            for name, choice in editor.picker.suggestions()
+            if isinstance(choice, ArgumentChoice)
+        ]
         assert [(name, choice.display, choice.detail) for name, choice in rows] == [
             ("Review", "[x] Review", "Primary")
         ]
