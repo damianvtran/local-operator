@@ -1,0 +1,20 @@
+{
+  "wire.remote_compute.alone": "--remote-status and --remote-cancel are commands of their own: run one on its own, without --remote or other run options.",
+  "wire.remote_compute.cancelled": "Remote run {run_id} is cancelled.",
+  "wire.remote_compute.conflict": "That idempotency key was already used with a different request body. Pass a new one with --idempotency-key.",
+  "wire.remote_compute.detached": "Remote run {run_id} submitted to network {network_id}.\nIdempotency key: {idempotency_key}\nFollow it: lop exec --remote-status {run_id}\nCancel it: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.disabled": "Remote compute is off. Turn it on with `lop config edit remote_compute.enabled true`, then run this again.",
+  "wire.remote_compute.failed": "remote compute failed: {error}",
+  "wire.remote_compute.finished": "Remote run {run_id} finished: {status}.",
+  "wire.remote_compute.interrupted": "Stopped watching run {run_id}; it is still running remotely. Cancel it with: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.invalid_request": "Radient rejected the request as invalid. That is a bug in this client, not something to retype.",
+  "wire.remote_compute.local_only": "{flag} only makes sense for a local run, so it cannot be combined with --remote.",
+  "wire.remote_compute.needs_prompt": "--remote needs a prompt: pass the task as the one positional argument.",
+  "wire.remote_compute.needs_repo": "--remote needs --repo <url> and --sha <commit>: this run never uploads local files, so name the repository and commit to check out.",
+  "wire.remote_compute.no_capacity": "Radient has no remote-compute capacity right now; try again later.",
+  "wire.remote_compute.no_credit": "Radient has no compute credit for this account, so the run was not admitted.",
+  "wire.remote_compute.only_with": "{flag} only applies with --remote.",
+  "wire.remote_compute.status_line": "status: {status}",
+  "wire.remote_compute.unknown_run": "Radient has no such remote run for the selected login.",
+  "wire.remote_compute.unreachable": "Radient could not be reached; check the network and try again."
+}
