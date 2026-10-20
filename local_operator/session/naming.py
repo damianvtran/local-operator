@@ -679,8 +679,7 @@ def parse_title(raw: str) -> str | None:
 #: ``[^<]*`` rather than a lazy ``.*?`` so a malformed reply cannot swallow a
 #: second element into the tag body; the body is then validated strictly.
 _TRAILING_TAGS_RE = re.compile(
-    r"</title\s*>[ \t\r\n]*"
-    r"(?P<block><tags\s*>(?P<body>[^<]*)</tags\s*>)[ \t\r\n]*\Z",
+    r"</title\s*>[ \t\r\n]*" r"(?P<block><tags\s*>(?P<body>[^<]*)</tags\s*>)[ \t\r\n]*\Z",
     re.IGNORECASE,
 )
 
