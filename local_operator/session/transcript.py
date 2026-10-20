@@ -2175,6 +2175,8 @@ class Transcript:
         preserved_turns_cap: int | None = None,
         preserved_turns_dropped: int = 0,
         preserved_turns_shed: int = 0,
+        carried_asks: list[dict[str, Any]] | None = None,
+        carried_decisions: list[dict[str, Any]] | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -2211,6 +2213,16 @@ class Transcript:
         turn: when it WAS a stored turn, the persist path journalled it inside
         the replayed suffix and each pass re-counted it, doubling the reported
         figure on every resume.
+
+        ``carried_asks`` / ``carried_decisions`` are the pass's COUNT-bounded
+        retention tiers: the asks still waiting on the operator and the most
+        recently created decision facts. They ride the marker rather than the
+        verbatim user-turn block because that block is token-capped with
+        oldest-first eviction, and a still-blocked question must never lose a
+        slot to newer chatter. Both lists are OPTIONAL and additive: a record
+        without them (every record written before this existed) replays with no
+        carried tier, which is the old behaviour. Re-reading live state on every
+        pass is the writer's job — this method only stores what it was handed.
         """
         payload: dict[str, Any] = {
             "summary": summary,
@@ -2230,6 +2242,12 @@ class Transcript:
             payload["preserved_turns_dropped"] = preserved_turns_dropped
         if preserved_turns_shed > 0:
             payload["preserved_turns_shed"] = preserved_turns_shed
+        # Omitted rather than spelled as empty lists: "nothing to carry" and
+        # "this record predates the tier" must read the same on replay.
+        if carried_asks:
+            payload["carried_asks"] = carried_asks
+        if carried_decisions:
+            payload["carried_decisions"] = carried_decisions
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
@@ -4175,6 +4193,28 @@ def replay_entries(
                     message.id = turn_id
                 message.provider_payload = preserved_turn_payload(turn)
                 prefix.append(message)
+        # The carried tier — asks still waiting and the newest decisions — rides
+        # BESIDE the verbatim block, never inside it. That block is token-capped
+        # with oldest-first eviction, so a still-blocked question placed there
+        # could be pushed out by newer chatter; this tier is count-bounded and
+        # is rebuilt from live state on every pass. It is synthesized here from
+        # the marker payload by the SAME renderer the live commit used, so a
+        # resumed context matches the one it resumed from message for message.
+        from local_operator.compaction.carry import (
+            CARRIED_ASKS_KEY,
+            CARRIED_DECISIONS_KEY,
+            render_carried_tier,
+        )
+
+        if compaction.payload.get(CARRIED_ASKS_KEY) or compaction.payload.get(
+            CARRIED_DECISIONS_KEY
+        ):
+            carried = render_carried_tier(
+                compaction.payload.get(CARRIED_ASKS_KEY),
+                compaction.payload.get(CARRIED_DECISIONS_KEY),
+            )
+            if carried is not None:
+                prefix.append(carried)
         # The first kept entry normally sits BEFORE the compaction marker
         # (messages are persisted as they happen; the marker comes last),
         # so the scan covers the whole transcript. If the id no longer
@@ -4199,6 +4239,14 @@ def replay_entries(
             _apply_prune(message, notice)
         kept.append(message)
     if compaction is not None:
+        # A carried block is synthesized by every pass, never stored; filter a
+        # stray copy out of the kept window so a build that once journalled one
+        # cannot accumulate a second copy per resume (the elision-notice class
+        # of defect, with the sign flipped: silent growth instead of a wrong
+        # count).
+        from local_operator.compaction.carry import is_carried_tier
+
+        kept = [message for message in kept if not is_carried_tier(message)]
         # Reapply the epoch's capture-elision record to the KEPT window. The
         # live pass elided superseded captures from the projection it sent
         # and recorded their stable addresses (producer scope, stream,
