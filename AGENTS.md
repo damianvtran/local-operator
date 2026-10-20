@@ -1650,8 +1650,9 @@ unchanged, advance the clone's own `main` first.
 ### A green run is a function of the tree it was computed against
 
 **The tag target is the bump's MERGE commit** — which is what "Mechanics, in
-order" step 4 already does with `--target "$(git rev-parse origin/main)"`,
-once the bump has merged and `origin/main` has been fetched. **Never the bump
+order" step 4 already does with
+`--target "$(git -C ~/local-operator rev-parse origin/main)"`, once the bump
+has merged and `origin/main` has been fetched. **Never the bump
 branch's own head**, which is a different SHA and is not what ships.
 
 **And a green run is a function of the tree it was computed against.** A
@@ -1689,29 +1690,51 @@ treats an absent namespace as all-missing. Measured on `main` at
 `8497001139`: the fast gate **exits 0** and the slow gate **reports 52**
 unlisted entries — 14 of them the `wire.memory.capture.locators` pair across
 seven locales, 38 of them `tui.viewer`. And the three numbers about the same
-debt do not agree: the **coverage gate** (`i18n/coverage-allowance.json`,
-named above) **records** 105 missing `wire.memory` entries (7 locale pairs x
-15), the slow test **reports** the ones the allowance does not list, and the
-fast script reports **none** of it, because the namespace is absent from
-every locale and an absent namespace is skipped. **A green fast job is
-evidence of consistency, not of correctness**, and a count from one of those
-three is not interchangeable with a count from another.
+debt do not agree: **the allowance** (`i18n/coverage-allowance.json`)
+**records** 105 missing `wire.memory` entries (7 locale pairs x 15); **the
+coverage gate** — the name this file already gives
+`tests/unit/i18n/test_language_manifest.py` — **reports** the ones the
+allowance does not list; and the fast script reports **none** of that
+namespace, because `wire.memory` is absent from every locale and an absent
+namespace is skipped. (That last clause is about `wire.memory` specifically:
+`tui.viewer` is present and complete in five locales and absent from only
+`ur` and `zh-CN`, which is where its 38 unlisted entries come from.)
+**A green fast job is evidence of consistency, not of correctness**, and a
+count from one of those three is not interchangeable with a count from
+another.
 
 So the slow gate is the one that carries the assertion, and it is the one
 that has to be named in the authorisation — and the allowance's own rules,
-stated above, are what that slow gate enforces. Note what that makes the
+stated above, are what that slow gate enforces. **And a skipped job is not
+evidence**: on a change the classifier scopes away from the unit tree, the
+`i18n` job and the unit shards are both skipped, so an authorisation that
+names them has to say which tree actually ran them, or it names a check that
+never happened. Note what that makes the
 allowance load-bearing: a catalogue file that is **present and partial** is
 judged by both gates, the fast one demanding every key, the slow one only
-the missing ones — and the slow one passes only once the allowance has been
-**shrunk** to match, which is the shrink-only rule above. A partial
-translation is therefore not a state either gate can be asked about in
-isolation.
+the missing ones. And the slow one goes green in two moves, not one — the
+file must carry every key that was **unlisted**, and the allowance must then
+be **shrunk** to match, which is the shrink-only rule above. Shrinking alone
+leaves the unlisted keys failing, because the allowance records what is
+missing and the coverage gate fails on what is missing *and unrecorded*. A
+partial translation is therefore not a state either gate can be asked about
+in isolation.
 
 **Read the mechanism before you write the trigger.** A trigger written from
 the shape of a fix you assumed is a trigger that waits on a signal which
 cannot arrive, or fires on a state that is worse than the problem. Read the
 code that implements the fix, then write the trigger against what that code
 actually does.
+
+**And check that the domain you evaluated is the domain you are asserting
+about.** This is the same defect as the two gates above, and it wears several
+costumes. A fast job that evaluates present files, reporting on a debt that
+lives in absent ones. A check run over a narrower set than its name implies,
+reported as green. A suite run only over changed files, quoting a total. A
+status read from every SHA the branch ever had, instead of the head that will
+merge. In each case the evidence is real and the scope is wrong, and a scope
+that is wrong in either direction — too narrow or too broad — turns a green
+into a claim nobody checked. **The scope is the claim.**
 
 ### Installing over a live fleet
 
