@@ -28,6 +28,15 @@ ACTION_SERVER_PORT = 5000
 #: it can still print partial evidence before the host abandons it.
 LAYOUT_BUDGET_S = 4.0
 
+#: The guest's OWN subprocess deadline for the probe, and the reason the socket
+#: deadline is not ``LAYOUT_BUDGET_S``: ``guest_deadline_for`` subtracts the
+#: 10 s transport margin, so a 4 s socket timeout asks the guest to finish in
+#: 1 s -- less than the script's 3 s internal deadline, which would cut a
+#: loaded guest off before it could print anything. The provider derives the
+#: socket timeout from this value; ``_run_bounded`` keeps the 4 s HOST budget
+#: authoritative regardless of how long the guest side is allowed.
+LAYOUT_GUEST_DEADLINE_S = 3.5
+
 #: Refusals decided by what the guest's units look like. The install command's
 #: other refusals (journal policy, an existing hook, a oneshot service) already
 #: name a property of a discovered unit, so they need no process layout. This is
@@ -393,7 +402,6 @@ def unit_record(unit):
 socket_pids = inode_pids(listening_inodes(PORT))
 fallback = server_ancestor()
 pid = socket_pids[0] if socket_pids else fallback
-source = 'socket' if socket_pids else ('ancestry' if fallback else None)
 chain = ancestry(pid) if pid else []
 server = None
 names = []
@@ -412,13 +420,11 @@ if pid and chain:
     except OSError:
         pass
 units = [unit_record(name) for name in names[:8]]
-differs = None
-if socket_pids and units:
-    differs = all(unit['main_pid'] != socket_pids[0] for unit in units)
-print(json.dumps({'schema_version': 1, 'port': PORT, 'pid_source': source,
-                  'socket_pids': socket_pids[:8], 'server': server,
-                  'ancestry': chain, 'units': units,
-                  'socket_pid_differs_from_main_pid': differs}))
+# Only raw observations leave the guest. Derived claims (which pid owns the
+# socket, whether every MainPID agrees) are recomputed host-side from these,
+# so a guest cannot assert a contradiction into the evidence file.
+print(json.dumps({'schema_version': 1, 'socket_pids': socket_pids[:8], 'server': server,
+                  'ancestry': chain, 'units': units}))
 """
 
 REPORT_SOURCE = r"""
@@ -663,14 +669,18 @@ def _layout_pid(value: object) -> int | None:
     return value if type(value) is int and value > 0 else None
 
 
-def layout_record(output: str) -> dict[str, Any]:
+def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]:
     """Parse and whitelist one layout capture.
 
     Every field is re-validated on this side, because the guest could print any
     document it likes. Unknown keys are dropped, strings are bounded and
     stripped of control characters, and enum-shaped fields fall back to a
-    neutral word. Raises ``SupervisorOutputUnparseable`` when no layout document
-    is present; callers turn that into ``empty_layout('unparseable')``.
+    neutral word. Derived claims (``pid_source``, the socket-owner comparison,
+    the probed port) are recomputed from RAW fields and the host's own request,
+    never taken from the guest: a capture that says ``differs=false`` beside a
+    unit MainPID that is missing must not be able to assert agreement it never
+    observed. Raises ``SupervisorOutputUnparseable`` when no layout document is
+    present; callers turn that into ``empty_layout('unparseable')``.
     """
 
     value = parse_output(output, is_layout_payload)
@@ -737,22 +747,37 @@ def layout_record(output: str) -> dict[str, Any]:
                 "cgroup": _layout_text(server.get("cgroup"), 512),
             }
     sockets = [pid for pid in (value.get("socket_pids") or [])[:8] if _layout_pid(pid) is not None]
-    port = value.get("port")
-    if type(port) is not int or not 0 < port < 65536:
-        port = ACTION_SERVER_PORT
-    differs = value.get("socket_pid_differs_from_main_pid")
+    socket_pid = sockets[0] if sockets else None
+    # ``pid_source`` is a statement about this capture, not a guest opinion:
+    # "socket" means the recorded server proc is the socket owner, "ancestry"
+    # means no socket owner was found but an ancestor was, and anything the
+    # guest claims on top of a contradiction is undetermined.
+    if socket_pid is not None and server_record is not None and server_record["pid"] == socket_pid:
+        pid_source: str | None = "socket"
+    elif server_record is not None and not sockets:
+        pid_source = "ancestry"
+    else:
+        pid_source = None
+    # Three-state, and TRUE only when every unit's MainPID was observed and
+    # none matches: a missing MainPID could be the socket owner, so claiming a
+    # difference from missing data would mislead the next supervision design.
+    differs: bool | None = None
+    if socket_pid is not None and units:
+        known = [unit["main_pid"] for unit in units if unit["main_pid"] is not None]
+        if socket_pid in known:
+            differs = False
+        elif len(known) == len(units):
+            differs = True
     record: dict[str, Any] = {
         "schema_version": 1,
         "status": "ok",
-        "port": port,
-        "pid_source": (
-            value.get("pid_source") if value.get("pid_source") in ("socket", "ancestry") else None
-        ),
+        "port": port if type(port) is int and 0 < port < 65536 else ACTION_SERVER_PORT,
+        "pid_source": pid_source,
         "socket_pids": sockets,
         "server": server_record,
         "ancestry": ancestry,
         "units": units[:8],
-        "socket_pid_differs_from_main_pid": differs if type(differs) is bool else None,
+        "socket_pid_differs_from_main_pid": differs,
     }
     # The frozen key set is the contract the provider writes; keeping it here
     # means a future guest field cannot appear in the evidence unannounced.

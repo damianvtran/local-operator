@@ -72,6 +72,7 @@ from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
+    GUEST_TRANSPORT_MARGIN_S,
     GuestServerRecovered,
     InstructionUnavailable,
     bounded_observation_cause,
@@ -900,11 +901,17 @@ class AwsProvider:
         episode continues with the unchanged refusal.
         """
         budget = guest_supervisor.LAYOUT_BUDGET_S
+        # The socket deadline is NOT the shared budget. The guest's subprocess
+        # deadline is ``guest_deadline_for`` of this value (margin subtracted),
+        # and it must exceed LAYOUT_SOURCE's own 3 s deadline or a loaded guest
+        # is killed before it can print; ``_run_bounded`` still abandons the
+        # whole capture at ``budget``, which stays the authority.
+        socket_timeout = guest_supervisor.LAYOUT_GUEST_DEADLINE_S + GUEST_TRANSPORT_MARGIN_S
         try:
             outcome = guest_loss._run_bounded(
                 {
                     "layout": lambda: self._run_guest_command(
-                        guest_supervisor.layout_command(password), timeout=budget
+                        guest_supervisor.layout_command(password), timeout=socket_timeout
                     )
                 },
                 budget,

@@ -24,7 +24,10 @@ from typing import Any, Callable
 import pytest
 from lop_osworld_v2_adapter import guest_disk, guest_supervisor
 from lop_osworld_v2_adapter.providers import aws as aws_mod
-from lop_osworld_v2_adapter.providers.base import GuestServerRecovered
+from lop_osworld_v2_adapter.providers.base import (
+    GuestServerRecovered,
+    guest_deadline_for,
+)
 
 from tests.unit.evaluation.adapters.osworld.test_action_wait_order import (
     _adapter,
@@ -1287,10 +1290,9 @@ def test_restart_history_must_agree_with_independent_systemd_view(changes: dict[
 
 
 def _layout_payload(**overrides: Any) -> dict[str, Any]:
+    """The raw fields LAYOUT_SOURCE prints -- no derived claims."""
     payload: dict[str, Any] = {
         "schema_version": 1,
-        "port": 5000,
-        "pid_source": "socket",
         "socket_pids": [9000],
         "server": {
             "pid": 9000,
@@ -1313,7 +1315,6 @@ def _layout_payload(**overrides: Any) -> dict[str, Any]:
                 "load_state": "loaded",
             }
         ],
-        "socket_pid_differs_from_main_pid": True,
     }
     payload.update(overrides)
     return payload
@@ -1380,9 +1381,49 @@ def test_exclusive_ownership_refusal_records_the_guest_layout(
         assert layout["server"] == _layout_payload()["server"]
         assert layout["ancestry"] == _layout_payload()["ancestry"]
         assert layout["socket_pids"] == [9000]
+        # Derived host-side, never accepted from the guest.
+        assert layout["port"] == guest_supervisor.ACTION_SERVER_PORT
+        assert layout["pid_source"] == "socket"
         assert layout["socket_pid_differs_from_main_pid"] is True
-        # Install first, then exactly one bounded layout probe.
-        assert timeouts == [15.0, guest_supervisor.LAYOUT_BUDGET_S]
+        # Install first; the capture uses a socket deadline DERIVED from the
+        # guest's intended deadline, not the 4 s host budget (which would ask
+        # the guest to finish in 1 s), and one bounded probe.
+        assert timeouts[0] == 15.0
+        assert guest_deadline_for(timeouts[1]) == guest_supervisor.LAYOUT_GUEST_DEADLINE_S
+
+
+def test_a_loaded_guest_capture_completes_inside_the_host_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ~2.5 s guest (a loaded AMI) must return a layout, not a timeout.
+
+    The guest deadline is derived from LAYOUT_GUEST_DEADLINE_S; with the old
+    ``timeout=LAYOUT_BUDGET_S`` the body was 1 s and this capture was killed
+    before it could print. The host budget stays 4 s.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+
+        def layout() -> guest_disk.CommandResult:
+            time.sleep(2.5)
+            return guest_disk.CommandResult(0, json.dumps(_layout_payload()), "")
+
+        _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("service does not exclusively own action server"),
+            layout,
+        )
+        started = time.monotonic()
+        provider._install_guest_supervisor(_plan())
+        elapsed = time.monotonic() - started
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["cause"] == "service does not exclusively own action server"
+        assert report["layout"]["status"] == "ok"
+        assert report["layout"]["server"] == _layout_payload()["server"]
+        assert elapsed < guest_supervisor.LAYOUT_BUDGET_S
 
 
 def test_no_listening_socket_falls_back_to_the_ancestry_and_records_no_unit(
@@ -1392,12 +1433,10 @@ def test_no_listening_socket_falls_back_to_the_ancestry_and_records_no_unit(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         payload = _layout_payload(
-            pid_source="ancestry",
             socket_pids=[],
             server={"pid": 8000, "ppid": 1, "comm": "python3", "cgroup": "/system.slice"},
             ancestry=[{"pid": 8000, "ppid": 1, "comm": "python3"}],
             units=[],
-            socket_pid_differs_from_main_pid=None,
         )
         _scripted_commands(
             provider,
@@ -1423,7 +1462,6 @@ def test_a_socket_owner_outside_any_unit_is_still_recorded(
         payload = _layout_payload(
             server={"pid": 9000, "ppid": 8000, "comm": "python3", "cgroup": "/system.slice"},
             units=[],
-            socket_pid_differs_from_main_pid=None,
         )
         _scripted_commands(
             provider,
@@ -1436,6 +1474,8 @@ def test_a_socket_owner_outside_any_unit_is_still_recorded(
         assert report["layout"]["server"]["cgroup"] == "/system.slice"
         assert report["layout"]["units"] == []
         assert report["layout"]["socket_pids"] == [9000]
+        assert report["layout"]["pid_source"] == "socket"
+        assert report["layout"]["socket_pid_differs_from_main_pid"] is None
 
 
 def test_a_hung_layout_capture_is_bounded_and_leaves_the_refusal(
@@ -1539,37 +1579,108 @@ def test_a_planted_secret_never_reaches_the_layout_file(
         assert json.loads(raw)["layout"]["status"] == "ok"
 
 
+def test_layout_record_recomputes_guest_derived_claims() -> None:
+    """A payload's own port/pid_source/differs are ignored, not trusted."""
+    payload = _layout_payload(
+        port=22,
+        pid_source="ancestry",
+        socket_pid_differs_from_main_pid=True,
+    )
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["port"] == guest_supervisor.ACTION_SERVER_PORT
+    assert record["pid_source"] == "socket"
+    # unit MainPID 8001 is known and differs from socket owner 9000.
+    assert record["socket_pid_differs_from_main_pid"] is True
+
+    # The guest still claims a difference, but the only unit's MainPID is the
+    # socket owner: the host must report agreement it can prove.
+    payload["units"][0]["main_pid"] = 9000
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_pid_differs_from_main_pid"] is False
+
+    # A server proc that is not the socket owner is not "socket"-sourced.
+    payload["server"]["pid"] = 7000
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["pid_source"] is None
+
+
+def test_unknown_main_pid_is_undetermined_not_a_difference() -> None:
+    """M2: missing MainPID data must never be reported as ``true``."""
+    payload = _layout_payload()
+    payload["units"][0]["main_pid"] = None
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_pid_differs_from_main_pid"] is None
+
+    # One unknown unit beside a known non-matching one: still undetermined.
+    second = {**payload["units"][0], "unit": "other.service", "main_pid": 8001}
+    payload["units"].append(second)
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_pid_differs_from_main_pid"] is None
+
+    # A known match settles it regardless of the other unit's missing value.
+    second["main_pid"] = 9000
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_pid_differs_from_main_pid"] is False
+
+    # No socket owner at all is also undetermined.
+    payload["socket_pids"] = []
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_pid_differs_from_main_pid"] is None
+
+
 def test_layout_record_drops_unknown_keys_and_neutralizes_malformed_fields() -> None:
     payload = {
         "schema_version": 1,
         "status": "pretending-to-be-ok",
         "argv": ["--secret"],
+        "socket_pids": [9000, 9000.0, "9001", True, 0, -1],
         "units": [
             {
                 "unit": "action-server.service",
-                "main_pid": "8000",
-                "exec_start": "python3\nmain.py",
+                "main_pid": 8001.0,
+                "exec_start": "python3\nmain.py\x00",
                 "type": "invented",
                 "control_group": "/system.slice/action-server.service",
                 "sub_state": "Not A State",
                 "load_state": "loaded",
                 "environment": {"PASSWORD": "x"},
-            }
+            },
+            {"unit": "../evil.service", "main_pid": 1},
+            {"unit": "bool.service", "main_pid": True, "sub_state": "running"},
+            "not a dict",
         ],
-        "ancestry": [{"pid": 9000, "ppid": True, "comm": "python3\rmain"}],
-        "unknown": "dropped",
+        "ancestry": [{"pid": 9000, "ppid": True, "comm": "python3\rmain\x00"}],
+        "server": {"pid": 9000, "ppid": 8000, "comm": "python3", "cgroup": "/system.slice"},
     }
-    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
-    assert "unknown" not in record and "argv" not in record
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["status"] == "ok"
+    assert record["socket_pids"] == [9000]
+    assert [unit["unit"] for unit in record["units"]] == ["action-server.service", "bool.service"]
+    assert all(unit["main_pid"] is None for unit in record["units"])
     unit = record["units"][0]
     assert "environment" not in unit
-    assert unit["main_pid"] is None
     assert unit["exec_start"] == "python3main.py"
     assert unit["type"] == "other"
     assert unit["sub_state"] == "other"
     # True is not PID 1.
     assert record["ancestry"][0]["ppid"] is None
     assert record["ancestry"][0]["comm"] == "python3main"
+    assert "argv" not in record
+    assert record["socket_pid_differs_from_main_pid"] is None
+
+
+def test_layout_record_caps_every_list() -> None:
+    payload = _layout_payload(
+        units=[
+            {**_layout_payload()["units"][0], "unit": f"u{index}.service"} for index in range(20)
+        ],
+        ancestry=[{"pid": 1000 + index, "ppid": 1, "comm": "x"} for index in range(20)],
+        socket_pids=[10000 + index for index in range(20)],
+    )
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert len(record["units"]) == 8
+    assert len(record["ancestry"]) == 16
+    assert len(record["socket_pids"]) == 8
 
 
 def _execute_layout_script(tmp_path: Path, *, listening: bool) -> dict[str, Any]:
@@ -1632,23 +1743,24 @@ def _execute_layout_script(tmp_path: Path, *, listening: bool) -> dict[str, Any]
 
 def test_layout_script_reports_the_socket_owner_and_never_argv(tmp_path: Path) -> None:
     payload = _execute_layout_script(tmp_path, listening=True)
-    assert payload["pid_source"] == "socket"
     assert payload["socket_pids"] == [9000]
     assert payload["server"]["pid"] == 9000
     assert [member["pid"] for member in payload["ancestry"]] == [9000, 8000, 1]
     assert payload["units"][0]["main_pid"] == 8001
-    assert payload["socket_pid_differs_from_main_pid"] is True
-    # The one encoded path in the fake cmdline is never emitted: no argv field.
+    # The script emits no derived claim and no argv.
+    assert set(payload) == {"schema_version", "socket_pids", "server", "ancestry", "units"}
     assert "--do-not-emit" not in json.dumps(payload)
-    assert (
-        guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))["status"]
-        == "ok"
-    )
+    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "ok"
+    assert record["pid_source"] == "socket"
+    assert record["port"] == guest_supervisor.ACTION_SERVER_PORT
+    assert record["socket_pid_differs_from_main_pid"] is True
 
 
 def test_layout_script_falls_back_to_ancestry_when_nothing_listens(tmp_path: Path) -> None:
     payload = _execute_layout_script(tmp_path, listening=False)
-    assert payload["pid_source"] == "ancestry"
     assert payload["socket_pids"] == []
     assert payload["server"]["pid"] == 8000
-    assert payload["socket_pid_differs_from_main_pid"] is None
+    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["pid_source"] == "ancestry"
+    assert record["socket_pid_differs_from_main_pid"] is None
