@@ -7202,3 +7202,36 @@ def test_a_stopped_thread_runs_no_delegated_sweep(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop
     )
     assert called == []
+
+
+@pytest.mark.asyncio
+async def test_voice_section_follows_the_voice_probe_and_off_is_byte_identical(
+    tmp_path: Path,
+) -> None:
+    from local_operator.session.transcript import Transcript
+
+    class Index:
+        async def select(self, query, **kwargs):
+            return []
+
+    hooks = session_factory._KnowledgeHooks(index=cast(Any, Index()))
+    state = {"on": False, "raise": False}
+
+    def probe() -> bool:
+        if state["raise"]:
+            raise OSError("unreadable slot")
+        return state["on"]
+
+    transcript = Transcript(tmp_path / "knowledge")
+    plain = session_factory._make_system_blocks_provider([], transcript, hooks)
+    probed = session_factory._make_system_blocks_provider([], transcript, hooks, voice_probe=probe)
+    baseline = await plain()
+    assert await probed() == baseline
+    assert "<voice>" not in "".join(baseline)
+    state["on"] = True
+    held = await probed()
+    assert "<voice>" in held[3] and held[:3] == baseline[:3]
+    state["on"] = False
+    assert await probed() == baseline
+    state["on"], state["raise"] = True, True
+    assert await probed() == baseline

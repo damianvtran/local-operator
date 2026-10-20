@@ -63,6 +63,12 @@ _TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$",
 _EMPHASIS = re.compile(r"(\*\*|__|\*|_|~~)(?=\S)(.+?)(?<=\S)\1")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _WHITESPACE = re.compile(r"\s+")
+_BLANK_LINE = re.compile(r"\n[ \t]*\n")
+#: A paragraph's first token: ``Spoken:`` or ``**Spoken:**`` (the model bolds it
+#: now and then). Paragraph start only, so the word mid-sentence is not a marker.
+_SPOKEN_LABEL = re.compile(
+    r"\s*(?:\*\*\s*Spoken\s*:\s*\*\*|\*\*\s*Spoken\s*\*\*\s*:|Spoken\s*:)", re.IGNORECASE
+)
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 
 
@@ -153,6 +159,26 @@ def cap(text: str, max_chars: int) -> Speakable:
     return Speakable(text=spoken, truncated=True)
 
 
+def select_spoken(text: str) -> str:
+    """The LAST ``Spoken:`` paragraph with its label dropped, else ``text`` whole.
+
+    The ``<voice>`` system section (``prompts_api.VOICE_BLOCK``) asks the model to
+    end each reply with that paragraph. Fences are masked first so a ``Spoken:``
+    inside a code block is neither a marker nor split by a blank line in the code.
+    An empty summary falls back to the whole text, the pre-summary behaviour.
+    """
+    masked = _FENCE.sub(f" {CODE_PLACEHOLDER} ", text)
+    for paragraph in reversed(_BLANK_LINE.split(masked)):
+        label = _SPOKEN_LABEL.match(paragraph)
+        if label is None:
+            continue
+        body = paragraph[label.end() :]
+        # An empty LAST marker does not reach back to an earlier summary: the
+        # model's final word is the one that was meant to be heard.
+        return body if clean(body) else text
+    return text
+
+
 def speakable(text: str, *, max_chars: int = DEFAULT_MAX_SPOKEN_CHARS) -> Speakable:
-    """Clean then cap: the one call ``/voice/text`` makes."""
-    return cap(clean(text), normalise_max_chars(max_chars))
+    """Select the summary, clean, then cap: the one call ``/voice/text`` makes."""
+    return cap(clean(select_spoken(text)), normalise_max_chars(max_chars))

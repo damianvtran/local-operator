@@ -904,6 +904,18 @@ def _ask_queue_queued() -> bool:
     return policy.enabled()
 
 
+#: Model-facing English, never translated. ``Spoken:`` is the marker
+#: ``voice/speakable.py`` selects; keep the two in step.
+VOICE_BLOCK = (
+    "<voice>\n"
+    "This conversation is in voice mode: your replies are read aloud. End every "
+    "reply that answers the user with a paragraph that begins `Spoken:`, at most "
+    "two sentences, written for the ear (no lists, code, links or symbols). The "
+    "rest of the reply stays on screen.\n"
+    "</voice>"
+)
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -924,6 +936,7 @@ def build_system_blocks(
     host_has_browser: bool | None = None,
     host_has_console: bool | None = None,
     deferred_tools: Collection[str] = (),
+    voice: bool = False,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -1202,6 +1215,13 @@ def build_system_blocks(
             interactive, _interactivity_channel(tools, channel), queued_ask=_ask_queue_queued()
         )
         tail = f"{tail}\n\n{body}"
+    if voice:
+        # Tail, not head: the head is the frozen cached prefix, and the session
+        # journals a later tail-section change as one ``[session-state]`` record
+        # (enable adds one, disable adds one, nothing per turn). A head edit would
+        # invalidate the prefix cache on every toggle. Absent when voice is off, so
+        # a session without voice renders byte-identical blocks (S1, L5).
+        tail = f"{tail}\n\n{VOICE_BLOCK}"
     names = [name for name in (credentials or ()) if name]
     if names:
         # Names only. The values live in process memory and are injected into
@@ -1281,6 +1301,7 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("agent", "<agent>"),
     ("run", "<configuration-run>"),
     ("interactivity", "<interactivity>"),
+    ("voice", "<voice>"),
     ("credentials", "<session-credentials>"),
     ("memory_suggestions", "<memory_suggestions>"),
     ("memory_hint", "<memory_hint"),
@@ -1344,6 +1365,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "agent": "Agent",
     "run": "Configuration run",
     "interactivity": "Interactivity",
+    "voice": "Voice mode",
     "credentials": "Session credentials",
     "memory_suggestions": "Memory suggestions (untrusted)",
     "memory_hint": "Compaction memory",

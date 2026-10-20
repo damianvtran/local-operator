@@ -52,9 +52,9 @@ class VoiceUtteranceResult(BaseModel):
     """``POST /v1/desktop/voice/utterance`` 200.
 
     ``path`` is the ``text_origin`` the caller named for the words (``qwen_s2s``:
-    the rig's Parakeet final), or ``None`` for the plain text door. For a
-    recording it is the STT rung's token (``provider_stt_groq``, ...), recorded
-    as the message's ``input_path``.
+    the rig's Parakeet final; ``local_moonshine``: the voice page's Moonshine final),
+    or ``None`` for the plain text door. For a recording it is the STT rung's token
+    (``provider_stt_groq``, ...), recorded as the message's ``input_path``.
     """
 
     text: str
