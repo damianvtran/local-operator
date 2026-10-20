@@ -198,6 +198,19 @@ def deletable_origins() -> frozenset[str]:
 #: still matters. Gated BY the record switch, in addition to its own (the
 #: content phase is part of the same delegated class).
 DEFAULT_DELEGATED_SCRATCHPAD_ENABLED = True
+
+#: The content layer's FOURTH arm — plain non-git directory copies — is OFF by
+#: default, unlike the two above. WHY: the other two arms match a shape the
+#: WRITE policy itself refuses (a write could not have put a ``node_modules``
+#: or a ``.pytest_cache`` there) or a tree git can PROVE is merged; a non-git
+#: directory has neither property, so this arm earns its trust per file
+#: (path+blob proof against a merged tree, see ``delegated_retention``). That
+#: proof needs a reference repository, which fresh installs do not have — and
+#: an arm whose proof depends on machine-local configuration must not be armed
+#: by a default. An operator previews it with
+#: ``lop sessions cleanup --dry-run --report-non-git-copies`` before turning it on;
+#: the ``reference_repos`` key below names the trees it proves against.
+DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED = False
 #: Hours since the session's last activity (``retention.session_activity``)
 #: before a delegated session is reapable. 48 h outlives a weekend-length pause
 #: of a parent that is still going to ask its children for a result.
@@ -270,6 +283,24 @@ class CleanupPolicy:
     #: :attr:`delegated_enabled` so the record pass and the content phase can
     #: be turned off independently.
     delegated_scratchpad_enabled: bool = DEFAULT_DELEGATED_SCRATCHPAD_ENABLED
+    #: The content layer's FOURTH arm, the plain non-git copy collector (see
+    #: :data:`DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED`). Off by default: its
+    #: per-file proof needs a reference repository the operator names.
+    delegated_non_git_copies_enabled: bool = DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED
+    #: Where the copy arm looks for the MERGED trees its per-file proof checks
+    #: against, besides the repositories it finds inside the same pad. Absolute
+    #: paths, ``user`` already expanded here; empty means "none configured".
+    delegated_non_git_copy_references: tuple[str, ...] = ()
+    #: Session ids the operator has RESERVED from this arm — "this one is
+    #: mine". A held session's copy candidates are refused even when the proof
+    #: passes; it is the only per-session hold the harness has, and it exists
+    #: because a hold stated in conversation does not bind an automated pass.
+    delegated_non_git_copy_holds: tuple[str, ...] = ()
+    #: The hold list was PRESENT but unreadable (a number, a dict, a raising
+    #: read). The arm must then not run at all: an empty parsed list is
+    #: indistinguishable from "nothing held", and guessing that direction would
+    #: delete the very session the operator reserved.
+    delegated_non_git_copy_holds_unreadable: bool = False
 
     @property
     def has_any_limit(self) -> bool:
@@ -422,9 +453,16 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
         except Exception:  # noqa: BLE001 — a broken config is not a reason to run
             return default
 
+    # ``None`` means PRESENT-but-unreadable, not empty: the arm is skipped so a
+    # broken list can never be read as "nothing is held".
+    copy_holds = _delegated_copy_holds(getter)
     return CleanupPolicy(
         delegated_enabled=_delegated_enabled(getter),
         delegated_scratchpad_enabled=_delegated_scratchpad_enabled(getter),
+        delegated_non_git_copies_enabled=_delegated_non_git_copies_enabled(getter),
+        delegated_non_git_copy_references=_delegated_copy_references(getter),
+        delegated_non_git_copy_holds=copy_holds or (),
+        delegated_non_git_copy_holds_unreadable=copy_holds is None,
         delegated_max_age_hours=clamp_delegated_hours(
             _delegated_leaf(getter, "max_age_hours", DEFAULT_DELEGATED_MAX_AGE_HOURS)
         ),
@@ -460,15 +498,105 @@ def _delegated_scratchpad_enabled(getter: Callable[..., Any]) -> bool:
     return _delegated_switch(getter, DEFAULT_DELEGATED_SCRATCHPAD_ENABLED, "scratchpad", "enabled")
 
 
-def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) -> bool:
-    """One delegated-class switch, FAIL-CLOSED where the default is ON.
+def _delegated_non_git_copies_enabled(getter: Callable[..., Any]) -> bool:
+    """The content layer's COPY arm (see ``DEFAULT_..._NON_GIT_COPIES_...``).
 
-    Absent reads as ``default`` — both delegated switches default to ON. A
-    value that is present but is not a switch (``"banana"``) or a read that
-    raises reads as OFF: the parent switch can afford to read garbage as its
-    default because its default is off, these cannot — the cost of a kept
-    delegated session (record) or of kept pad content is bytes, the cost of a
-    reaped one is the incident.
+    Deliberately read through the same fail-closed switch helper even though
+    its default is OFF: absent reads ``False`` (the helper's ``default``), a
+    real switch reads as written, and garbage reads ``False`` — the same
+    direction as the two ON-by-default switches, for a different reason: this
+    arm's proof is machine-local, so an unreadable value must not arm it.
+    """
+    return _delegated_switch(
+        getter, DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED, "non_git_copies", "enabled"
+    )
+
+
+def _delegated_copy_references(getter: Callable[..., Any]) -> tuple[str, ...]:
+    """The copy arm's configured reference repositories, ``~`` expanded.
+
+    Reads ``session.cleanup.delegated.non_git_copies.reference_repos``. A
+    STRING is a path list split on ``os.pathsep`` (so an operator can write
+    one env-style line); a list/tuple of strings is taken as-is. Blank parts
+    are dropped, each path is ``expanduser``-ed, and ANYTHING ELSE — a number,
+    a dict, a read that raises — yields ``()``: this feeds a proof, and a
+    malformed value must read as "nothing configured", never as a guess.
+    """
+    try:
+        raw = getter(DELEGATED_PATH + ("non_git_copies", "reference_repos"), "")
+    except Exception:  # noqa: BLE001 — a broken config is not a reason to guess
+        return ()
+    if isinstance(raw, str):
+        parts: list[Any] = raw.split(os.pathsep)
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        return ()
+    references: list[str] = []
+    for part in parts:
+        if not isinstance(part, str):
+            continue
+        stripped = part.strip()
+        if not stripped:
+            continue
+        try:
+            references.append(os.path.expanduser(stripped))
+        except Exception:  # noqa: BLE001 — expanduser is pure, but never raise here
+            continue
+    return tuple(references)
+
+
+_HOLDS_ABSENT = object()
+
+
+def _delegated_copy_holds(getter: Callable[..., Any]) -> tuple[str, ...] | None:
+    """The copy arm's operator HOLDS, or ``None`` when the list is unreadable.
+
+    Reads ``session.cleanup.delegated.non_git_copies.hold_sessions``. A string
+    is split on ``os.pathsep`` and commas (an operator can write one line); a
+    list/tuple of strings is taken as-is. Blank parts are dropped.
+
+    THE THREE-WAY ANSWER IS THE SAFETY PROPERTY. Absent is legitimately ``()``.
+    A valid value is parsed. A PRESENT but malformed value — a number, a dict,
+    a list with a non-string, or a read that raises — is ``None``, and every
+    caller turns that into "the arm does not run". Reading it as ``()`` would
+    be the one wrong direction: "I cannot tell what is held" would become
+    "nothing is held", and the held session would be exactly the one reaped.
+    """
+    try:
+        raw = getter(DELEGATED_PATH + ("non_git_copies", "hold_sessions"), _HOLDS_ABSENT)
+    except Exception:  # noqa: BLE001 — an unreadable hold list is not "no holds"
+        return None
+    if raw is _HOLDS_ABSENT:
+        return ()
+    if isinstance(raw, str):
+        parts: list[Any] = raw.replace(os.pathsep, ",").split(",")
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        return None
+    holds: list[str] = []
+    for part in parts:
+        if not isinstance(part, str):
+            return None  # a list of numbers/dicts is not a hold list
+        stripped = part.strip()
+        if stripped:
+            holds.append(stripped)
+    return tuple(holds)
+
+
+def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) -> bool:
+    """One delegated-class switch: absent reads ``default``, garbage reads OFF.
+
+    The record and scratchpad switches default to ON; the non-git-copy arm
+    defaults to OFF. A value that is present but is not a switch
+    (``"banana"``) or a read that raises reads as OFF: the parent switch can
+    afford to read garbage as its default because its default is off, the
+    ON-defaulting switches cannot — the cost of a kept delegated session
+    (record) or of kept pad content is bytes, the cost of a reaped one is the
+    incident. The OFF-defaulting copy arm reads garbage as OFF for the
+    symmetric reason: its proof is machine-local and a broken value must not
+    arm it.
     """
     try:
         raw = getter(DELEGATED_PATH + names, _ABSENT)
