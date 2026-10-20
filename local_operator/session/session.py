@@ -22007,9 +22007,7 @@ class Session:
                 if policy(self._config_dir)["enabled"]:
                     decisions = read_recent_decisions(store_for(self._build_tool_context()))
             except Exception:  # noqa: BLE001 - carry nothing, never fail the pass
-                logger.warning(
-                    "carried decisions: read failed; carrying none", exc_info=True
-                )
+                logger.warning("carried decisions: read failed; carrying none", exc_info=True)
         return asks, decisions
 
     async def _finish_compaction(
@@ -22032,9 +22030,7 @@ class Session:
         compaction_api = plan.compaction_api
         try:
             self._begin_memory_capture(plan)
-            to_summarize = [
-                m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)
-            ]
+            to_summarize = [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
             # ``llm_history`` went through the capability strip (the summary
             # request must not carry images a text-only model cannot take),

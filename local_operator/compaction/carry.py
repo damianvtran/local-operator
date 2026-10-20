@@ -48,12 +48,8 @@ from typing import Any
 
 from local_operator.harness.types import Message, TextContent
 
-from .cutpoint import (
-    CARRIED_TIER_ID_PREFIX,
-    CARRIED_TIER_KEY,
-    RENDERED_INJECTION_KEY,
-    is_carried_tier as _is_carried_tier,
-)
+from .cutpoint import CARRIED_TIER_ID_PREFIX, CARRIED_TIER_KEY, RENDERED_INJECTION_KEY
+from .cutpoint import is_carried_tier as _is_carried_tier
 from .marker import replayed_user_message
 
 logger = logging.getLogger(__name__)
@@ -315,8 +311,6 @@ def render_carried_tier(
         if index:
             lines.append("")
         lines.extend(section)
-    message = replayed_user_message(
-        [TextContent(text="\n".join(lines))], CARRIED_TIER_ID_PREFIX
-    )
+    message = replayed_user_message([TextContent(text="\n".join(lines))], CARRIED_TIER_ID_PREFIX)
     message.provider_payload = {RENDERED_INJECTION_KEY: True, CARRIED_TIER_KEY: True}
     return message

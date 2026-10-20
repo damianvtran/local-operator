@@ -918,8 +918,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``recommend_`` prefixes a generated question id",
     ),
     "local_operator/compaction/cutpoint.py": (
-        1,
-        "``compaction-elision`` prefixes an elision id inside the transcript payload",
+        2,
+        "``compaction-elision`` prefixes an elision id inside the transcript payload; "
+        "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
+        "the live/replay context, never a filename or session entry",
     ),
     "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
