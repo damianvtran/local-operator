@@ -36120,7 +36120,19 @@ class OperatorApp(App[None]):
         dock has been told to re-arrange but has not finished, so the guard
         compares two stale numbers, agrees with itself, and returns.
         """
-        for panel in (self._usage_panel(), self._aside_panel(), self._keys_legend()):
+        # THE GOAL CARD IS IN THIS LIST FOR THE SAME REASON as the three below it:
+        # it is hosted in a ``width: auto`` container, so a terminal resize reaches
+        # the screen and never the card. It was omitted, and its pre-layout fit —
+        # including the ``-squeezed`` decision — survived a resize unchanged
+        # (measured at 80x12, run 39286870604 / job 118199298717). A card that
+        # keeps its old ground on a shorter terminal covers the composer, which is
+        # the one invariant it owes.
+        for panel in (
+            self._usage_panel(),
+            self._aside_panel(),
+            self._keys_legend(),
+            self._goal_panel(),
+        ):
             if panel is not None:
                 panel.sync_layout(force=force)
 
