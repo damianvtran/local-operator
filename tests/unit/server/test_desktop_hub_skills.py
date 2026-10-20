@@ -1042,6 +1042,15 @@ async def test_a_subscribe_links_without_installing_and_replays(api) -> None:
     assert record.local_alias == ALIAS and record.identity is not None
     assert record.recorded_by == "subscribe"
     assert record.fields == manifest()  # the remote text this link names
+    assert len(holder["anon"].calls) == 1
+
+    # The same request id replays the stored response: no second fetch, no
+    # second baseline (the receipts discipline every mutation shares).
+    replayed = await client.post("/v1/desktop/hub/skills/subscribe", json=body)
+    replayed_result = dict(replayed.json()["result"])
+    assert replayed_result.pop("replayed", None) is True
+    assert replayed_result == response.json()["result"]
+    assert len(holder["anon"].calls) == 1
 
     # The capability-gated inventory carries the state a client renders.
     listed = await client.get("/v1/desktop/hub/links", params={"kind": "skill"})
