@@ -68,6 +68,7 @@ later re-title.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
 import logging
@@ -662,6 +663,180 @@ def parse_title(raw: str) -> str | None:
     return _normalise_title_body(unwrapped)
 
 
+# ---------------------------------------------------------------------------
+# Tag contract (LOH-11 V2-3): the optional other half of the first-name call
+# ---------------------------------------------------------------------------
+
+#: A ``<tags>`` block is recognised in exactly one place: AFTER the closing
+#: ``</title>`` (same line or the next one) and as the FINAL block of the reply.
+#: Everywhere else it is title text — a ``<tags>`` string inside the title body
+#: is not stripped, and the structural gate rejects it as markup exactly as it
+#: did before tags existed. Restricting the match to a CLOSED title is what
+#: keeps an unclosed ``<title>Fix <tags>id</tags>`` from losing its angle
+#: brackets and being accepted as an untagged title: the old parser rejects
+#: that shape, and tag extraction must not become a bypass.
+#:
+#: ``[^<]*`` rather than a lazy ``.*?`` so a malformed reply cannot swallow a
+#: second element into the tag body; the body is then validated strictly.
+_TRAILING_TAGS_RE = re.compile(
+    r"</title\s*>[ \t\r\n]*" r"(?P<block><tags\s*>(?P<body>[^<]*)</tags\s*>)[ \t\r\n]*\Z",
+    re.IGNORECASE,
+)
+
+#: Separators inside the tag body: the contract spells commas, and a model that
+#: puts one tag per line is readable rather than wrong. NOT whitespace: category
+#: names legitimately contain spaces ("Q3 planning"), so splitting on a space
+#: would make every multi-word name unresolvable.
+_TAG_TOKEN_SPLIT_RE = re.compile(r"[,\n]+")
+
+#: A name the block cannot render safely. Newlines and control characters would
+#: break the one-line ``id: name`` list, and ``<``/``>`` would close or reopen
+#: the ``<available-tags>`` element itself — a category called
+#: ``</available-tags>`` would truncate the prompt block. Those categories are
+#: OMITTED from the rendered list deterministically (the store's name grammar is
+#: not narrowed: an existing name must not make a prompt malformed), and the
+#: model therefore never sees them. Ids still match if a caller sends one.
+_UNRENDERABLE_TAG_NAME_RE = re.compile(r"[<>\x00-\x1f\x7f]")
+
+#: The store's per-assignment cap, repeated here because the model's answer is
+#: parsed before any store call exists. A longer answer keeps its first 8 in
+#: caller order rather than being rejected whole: the title is the reason the
+#: call was made and must survive a surplus tag.
+MAX_ASSIGNED_TAGS = 8
+
+
+def tag_set_hash(tags: Sequence[tuple[str, str]]) -> str:
+    """SHA-256 over the canonical ``[{"id", "name"}]`` list, in display order.
+
+    Canonical means the ORDER THE REGISTRY HANDED US, encoded once with
+    compact separators as UTF-8; nothing sorts it, because a reorder is a real
+    change to the block the model reads — the store's primary fallback follows
+    display order, so reordering categories genuinely changes what a correct
+    answer may be. The hash identifies PROMPT BYTES, not a provider cache key:
+    this module adds no ``prompt_cache_key`` and the errand stays ``isolated``
+    (design §5.3), so no cache hit is claimed or measured here.
+    """
+    canonical = json.dumps(
+        [{"id": key, "name": name} for key, name in tags],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class TagContract:
+    """The categories a naming call may assign from, in display order.
+
+    Built by the caller that owns the LIVE registry (the naming worker); this
+    module never reads a store, exactly as it never reads a config. ``tags``
+    is ``(id, name)`` as the registry spells them, and the block it renders is
+    a stable prefix: the same set in the same order produces the same bytes on
+    every call, so a title-only caller's prompt is untouched and the tag-aware
+    prefix only moves when a category is added, renamed or reordered.
+    """
+
+    tags: tuple[tuple[str, str], ...]
+
+    @property
+    def hash(self) -> str:
+        """The stable identity of this set, carried in the block's attribute."""
+        return tag_set_hash(self.tags)
+
+    def block(self) -> str:
+        """The system-prompt block: the list, then the output contract.
+
+        The list is ``id: name`` in display order. Ids are preferred by the
+        output contract because a name is only unique case-insensitively and a
+        rename between the prompt and the write must not silently retarget an
+        assignment; exact names are accepted because models copy them more
+        reliably. Only the caller that supplies a contract gets this block.
+        A name the element cannot carry (angle brackets, control characters) is
+        omitted rather than escaped: the store's name grammar stays open, and a
+        malformed prompt would be the worse failure.
+        """
+        listed = "\n".join(
+            f"{key}: {name}"
+            for key, name in self.tags
+            if not _UNRENDERABLE_TAG_NAME_RE.search(name)
+        )
+        return (
+            f'<available-tags hash="{self.hash}">\n'
+            "Assign tags only from this list. Reply with <title>3 to 7 words</title>, "
+            "then <tags>ids or exact names, comma-separated</tags> after it. Omit "
+            "<tags> when nothing fits. Never invent a tag.\n"
+            f"{listed}\n"
+            "</available-tags>"
+        )
+
+
+def _tagged_system(system: str, tag_contract: TagContract | None) -> str:
+    """``system`` plus the tag block only when a caller supplied a contract.
+
+    The one place the tag block is appended, so a title-only caller
+    (``generate_retitle``, the on-demand refresh, ``generate_title``) is
+    byte-identical to the pre-tag prompt rather than relying on every call
+    site to pass ``None`` consistently.
+    """
+    if tag_contract is None:
+        return system
+    return f"{system}\n{tag_contract.block()}"
+
+
+def _split_trailing_tags(raw: str) -> tuple[str, str | None]:
+    """Split a recognised trailing tag block from the reply.
+
+    Returns ``(remainder, body)``. The remainder is what :func:`parse_title`
+    sees, and the block is removed FIRST because that order is the contract: a
+    same-line block makes the untagged path read markup as the title, while the
+    structural gate would reject the whole reply. ``body`` is ``None`` when no
+    block is recognised — a truncated ``<tags>a1b2`` is left in place, where the
+    title parser handles the reply as the markup it is.
+    """
+    match = _TRAILING_TAGS_RE.search(raw or "")
+    if match is None:
+        return raw or "", None
+    return (raw or "")[: match.start("block")] + (raw or "")[match.end() :], match.group("body")
+
+
+def _select_tags(body: str | None, tag_contract: TagContract | None) -> tuple[str, ...]:
+    """Resolve a tag block body to known category ids, in the model's order.
+
+    Ids are matched exactly; names case-insensitively against the contract's
+    own spelling. A body that IS exactly one name wins before the comma/newline
+    split, so a category the store allows to contain a separator ("Review,
+    final") stays selectable by its exact name; a body listing several tags
+    still splits. Unknown tokens are IGNORED — never created, never an error —
+    because the tags ride the title call and a bad tag half must not discard a
+    good title. Duplicates keep their first occurrence, and the cap keeps the
+    first ``MAX_ASSIGNED_TAGS``. An empty or entirely invalid body means "no
+    assignment", which is a valid answer, not a failure.
+    """
+    if tag_contract is None or not body or not body.strip():
+        return ()
+    by_id = {key: key for key, _ in tag_contract.tags}
+    by_name = {name.casefold(): key for key, name in tag_contract.tags}
+    stripped = body.strip()
+    if stripped in by_id:
+        return (stripped,)
+    whole = by_name.get(stripped.casefold())
+    if whole is not None:
+        return (whole,)
+    chosen: list[str] = []
+    for token in _TAG_TOKEN_SPLIT_RE.split(body):
+        token = token.strip()
+        if not token:
+            continue
+        key = by_id.get(token)
+        if key is None:
+            key = by_name.get(token.casefold())
+        if key is not None and key not in chosen:
+            chosen.append(key)
+            if len(chosen) == MAX_ASSIGNED_TAGS:
+                break
+    return tuple(chosen)
+
+
 def cut_on_a_word(text: str, max_chars: int) -> str:
     """``text`` shortened to ``max_chars``, on a word boundary, with an ellipsis.
 
@@ -802,10 +977,31 @@ CALL_CANCELLED = object()
 _LOGGED_ERROR_CHARS = 300
 
 
-async def _ask_for_title(
-    system: str, prompt: str, complete_fn, timeout: float
-) -> str | object | None:
-    """One bounded call. ``None`` is "no title"; :data:`CALL_FAILED` is a failure.
+@dataclass(frozen=True)
+class _TitleSample:
+    """One parsed naming reply: the title it named, plus the ids it chose.
+
+    ``tags`` is empty for every caller that supplied no tag contract, and for
+    a reply whose block was absent, truncated, invalid or entirely unknown. It
+    travels with the SAMPLE rather than being re-read at the accepted one
+    because only the answer whose title the cascade accepted may write tags: a
+    rejected first sample's ids must die with it.
+    """
+
+    title: str | None
+    tags: tuple[str, ...] = ()
+
+
+async def _ask_for_sample(
+    system: str,
+    prompt: str,
+    complete_fn,
+    timeout: float,
+    tag_contract: TagContract | None = None,
+) -> _TitleSample | object:
+    """One bounded call. ``_TitleSample(title=None)`` is "no title".
+
+    :data:`CALL_FAILED` is a failure, :data:`CALL_CANCELLED` a cancellation.
 
     Shared by :func:`generate_title`, :func:`generate_retitle` and
     :func:`refresh_title` so they have exactly one error policy between them.
@@ -869,7 +1065,32 @@ async def _ask_for_title(
             message = message[:_LOGGED_ERROR_CHARS] + "…"
         logger.warning("conversation naming call failed: %s: %s", type(exc).__name__, message)
         return CALL_FAILED
-    return parse_title(str(raw or ""))
+    return _parse_sample(str(raw or ""), tag_contract)
+
+
+def _parse_sample(raw: str, tag_contract: TagContract | None) -> _TitleSample:
+    """Parse tags BEFORE the title, per the output contract.
+
+    Order matters and is not an implementation detail: a same-line tag block
+    after ``</title>`` is markup the untagged title path would otherwise read
+    as the title, and the structural gate would then discard the whole reply.
+    With no contract the raw reply goes to :func:`parse_title` untouched, so a
+    title-only caller's parse is byte- and behaviour-identical.
+    """
+    if tag_contract is None:
+        return _TitleSample(title=parse_title(raw))
+    remainder, body = _split_trailing_tags(raw)
+    return _TitleSample(title=parse_title(remainder), tags=_select_tags(body, tag_contract))
+
+
+async def _ask_for_title(
+    system: str, prompt: str, complete_fn, timeout: float
+) -> str | object | None:
+    """The title half of :func:`_ask_for_sample`, for the title-only callers."""
+    sample = await _ask_for_sample(system, prompt, complete_fn, timeout)
+    if isinstance(sample, _TitleSample):
+        return sample.title
+    return sample
 
 
 def _errand_prompt(text: str) -> str:
@@ -1257,6 +1478,19 @@ TITLE_CORRECTIVE_ADDENDUM = (
     "Reply with plain words only — no tags, no brackets, no decorations; 3 to 7 words."
 )
 
+#: The tag-bearing twin of :data:`TITLE_CORRECTIVE_ADDENDUM`, used ONLY when the
+#: caller supplied a tag contract. The base addendum's "no tags" instruction
+#: would forbid the very block the tagged contract asks for, so the correction
+#: has to say which half was wrong: the TITLE was decorated, while the
+#: ``<tags>`` element is part of the answer. Appending it unconditionally would
+#: silently drop tagging on exactly the corrective path that exists to recover
+#: a bad first sample.
+TITLE_CORRECTIVE_ADDENDUM_TAGGED = (
+    "Your previous reply could not be used: the title contained markup or decoration. "
+    "Reply with plain words only inside <title> — no brackets, no decorations; 3 to 7 "
+    "words. Then keep one <tags> block after </title>, using only the listed ids or names."
+)
+
 #: Tier ids for :class:`TitleAcceptance`. ``generated`` means a model sample
 #: was accepted; ``fallback`` means the attempt exhausted its samples and Tier
 #: 3 produced the opener label (or nothing, when the opener was unusable);
@@ -1282,6 +1516,14 @@ class TitleAcceptance:
 
     title: str = ""
     tier: str = TIER_NONE
+    #: Category ids chosen by the SAME sample whose title was accepted.
+    #:
+    #: Empty whenever the caller supplied no tag contract, and on every
+    #: non-generated tier: a rejected sample's ids are discarded with it, and a
+    #: Tier 3 opener label came from no model answer at all. The caller writes
+    #: these only after re-validating the live registry; a title that was
+    #: accepted while its tags were invalid keeps its title and assigns nothing.
+    tags: tuple[str, ...] = ()
 
     @property
     def heal(self) -> bool:
@@ -1329,6 +1571,9 @@ async def _hedged_acceptance(
     complete_fn: Any,
     timeout: float,
     first_clean: str,
+    *,
+    tag_contract: TagContract | None = None,
+    first_tags: tuple[str, ...] = (),
 ) -> TitleAcceptance:
     """Tier 2, trigger B: one independent second sample, plain system prompt.
 
@@ -1339,16 +1584,20 @@ async def _hedged_acceptance(
     gate-clean (the verified sample; deterministic from the caller's point of
     view), with the first kept when the hedge is dirty, absent or failed. No
     further retry either way: the attempt's budget is spent.
+
+    Tags move with the sample that wins: the hedge's ids when IT is accepted,
+    the first sample's when the first is kept. Losing that association is how a
+    rejected sample's tags would land on an accepted title.
     """
-    second = await _ask_for_title(system, prompt, complete_fn, timeout)
+    second = await _ask_for_sample(system, prompt, complete_fn, timeout, tag_contract)
     if second is CALL_CANCELLED:
         return TitleAcceptance()
-    if isinstance(second, str):
-        second_clean = validate_generated_title(second, opener)
+    if isinstance(second, _TitleSample) and second.title is not None:
+        second_clean = validate_generated_title(second.title, opener)
         if second_clean is not None:
-            return TitleAcceptance(title=second_clean, tier=TIER_GENERATED)
+            return TitleAcceptance(title=second_clean, tier=TIER_GENERATED, tags=second.tags)
     logger.info("hedged naming sample was unusable; keeping the first accepted sample")
-    return TitleAcceptance(title=first_clean, tier=TIER_GENERATED)
+    return TitleAcceptance(title=first_clean, tier=TIER_GENERATED, tags=first_tags)
 
 
 async def _corrective_acceptance(
@@ -1362,6 +1611,7 @@ async def _corrective_acceptance(
     first_fit_answered: bool,
     opener_fallback: bool,
     excerpt: str,
+    tag_contract: TagContract | None = None,
 ) -> TitleAcceptance:
     """Tier 2, trigger A: one corrective resample, then Tier 3.
 
@@ -1372,12 +1622,25 @@ async def _corrective_acceptance(
     clean retry (the cascade's cap of two) — that is also why the gate-clean
     retry of a dirty FIRST sample is accepted without a check: no first
     fit-check answered, and the cap is not to be raised by the back door.
+
+    ``tag_contract`` selects the tag-bearing addendum. The title-only addendum
+    says "no tags", which is correct for a title-only call and would suppress
+    the block on a tag-aware one; when no contract is set the corrective system
+    is byte-identical to the pre-tag prompt.
     """
-    corrective_system = f"{system}\n{TITLE_CORRECTIVE_ADDENDUM}"
-    second = await _ask_for_title(corrective_system, prompt, complete_fn, timeout)
+    if tag_contract is None:
+        corrective_system = f"{system}\n{TITLE_CORRECTIVE_ADDENDUM}"
+    else:
+        corrective_system = f"{system}\n{TITLE_CORRECTIVE_ADDENDUM_TAGGED}"
+    second = await _ask_for_sample(corrective_system, prompt, complete_fn, timeout, tag_contract)
     if second is CALL_CANCELLED:
         return TitleAcceptance()
-    second_clean = validate_generated_title(second, opener) if isinstance(second, str) else None
+    sample = second if isinstance(second, _TitleSample) else None
+    second_clean = (
+        validate_generated_title(sample.title, opener)
+        if sample is not None and sample.title is not None
+        else None
+    )
     if second_clean is None:
         return _tier_three(opener, opener_fallback)
     if first_fit_answered and fit_check is not None:
@@ -1390,7 +1653,8 @@ async def _corrective_acceptance(
             # discard a clean title on the strength of a classifier that just
             # proved it cannot speak.
             logger.info("second fit check did not answer; accepting the corrected sample")
-    return TitleAcceptance(title=second_clean, tier=TIER_GENERATED)
+    tags = sample.tags if sample is not None else ()
+    return TitleAcceptance(title=second_clean, tier=TIER_GENERATED, tags=tags)
 
 
 def _tier_three(opener: str, opener_fallback: bool) -> TitleAcceptance:
@@ -1420,6 +1684,7 @@ async def _accept_generated_title(
     fit_check: TitleFitCheck | None,
     opener_fallback: bool,
     fit_excerpt: str = "",
+    tag_contract: TagContract | None = None,
 ) -> TitleAcceptance:
     """The Tier 0-3 controller described in the section header.
 
@@ -1434,25 +1699,38 @@ async def _accept_generated_title(
     fallback both speak of the opener, and a re-title has neither.
     """
     excerpt = fit_excerpt or opener
-    first = await _ask_for_title(system, prompt, complete_fn, timeout)
+    # The tag block rides the system PREFIX, once, for every sample of this
+    # attempt. With no contract this is the caller's system block untouched —
+    # the re-title and on-demand paths keep their exact pre-tag prompt bytes.
+    system = _tagged_system(system, tag_contract)
+    first = await _ask_for_sample(system, prompt, complete_fn, timeout, tag_contract)
     if first is CALL_CANCELLED or first is CALL_FAILED:
         # A cancelled or failed call is not a candidate: nothing to correct,
         # nothing to fall back from. The automatic callers already treat this
         # as "no title" (the latch/pending retries in the owners), unchanged.
         return TitleAcceptance()
 
-    if isinstance(first, str):
-        first_clean = validate_generated_title(first, opener)
+    if isinstance(first, _TitleSample) and first.title is not None:
+        first_clean = validate_generated_title(first.title, opener)
+        first_tags = first.tags
     else:
         first_clean = None
+        first_tags = ()
 
     if first_clean is not None:
         verdict = await _title_fit_verdict(fit_check, first_clean, excerpt)
         if verdict == TITLE_FITS:
-            return TitleAcceptance(title=first_clean, tier=TIER_GENERATED)
+            return TitleAcceptance(title=first_clean, tier=TIER_GENERATED, tags=first_tags)
         if verdict != TITLE_DOESNT_FIT:
             return await _hedged_acceptance(
-                system, prompt, opener, complete_fn, timeout, first_clean
+                system,
+                prompt,
+                opener,
+                complete_fn,
+                timeout,
+                first_clean,
+                tag_contract=tag_contract,
+                first_tags=first_tags,
             )
         return await _corrective_acceptance(
             system,
@@ -1464,9 +1742,10 @@ async def _accept_generated_title(
             first_fit_answered=True,
             opener_fallback=opener_fallback,
             excerpt=excerpt,
+            tag_contract=tag_contract,
         )
 
-    if isinstance(first, str):
+    if isinstance(first, _TitleSample) and first.title is not None:
         # Gate-rejected (dirty): the corrective retry is the whole point of
         # having a second sample. The first fit check never ran on this reply.
         return await _corrective_acceptance(
@@ -1479,6 +1758,7 @@ async def _accept_generated_title(
             first_fit_answered=False,
             opener_fallback=opener_fallback,
             excerpt=excerpt,
+            tag_contract=tag_contract,
         )
 
     # ``None``: the sentinel ("no topic"), an over-cap essay, an unclosed
@@ -1494,6 +1774,7 @@ async def generate_title_acceptance(
     *,
     timeout: float = TITLE_TIMEOUT_S,
     fit_check: TitleFitCheck | None = None,
+    tag_contract: TagContract | None = None,
 ) -> TitleAcceptance:
     """The first-name acceptance cascade for ``text`` (see the section header).
 
@@ -1503,6 +1784,14 @@ async def generate_title_acceptance(
     rather than trusted to callers, exactly as it is on :func:`generate_title`:
     a greeting must not spend a call, and every caller passing through one
     function is what makes that auditable.
+
+    ``tag_contract`` is the OPTIONAL half of the same call: when supplied, the
+    system prefix gains the ``<available-tags>`` block and the reply's trailing
+    tag block is parsed from the accepted sample (see :class:`TagContract`).
+    When it is None — every pre-V2-3 caller and the whole re-title path — the
+    prompt, the parser and the result are byte- and behaviour-identical to the
+    title-only feature. It never buys an extra provider call; the title cascade
+    already runs and tags ride it.
     """
     if is_low_signal(text):
         return TitleAcceptance()
@@ -1514,6 +1803,7 @@ async def generate_title_acceptance(
         timeout=timeout,
         fit_check=fit_check,
         opener_fallback=True,
+        tag_contract=tag_contract,
     )
 
 

@@ -626,9 +626,111 @@ def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     return ids
 
 
-def allowance_growth(base: dict[str, Any], head: dict[str, Any]) -> set[tuple[str, str, str]]:
-    """Keys HEAD records as missing that the base allowance did not."""
-    return _allowance_ids(head) - _allowance_ids(base)
+def _locale_keys_at_ref(ref: str, locale: str) -> set[str] | None:
+    """Every key the locale carries in ANY namespace at ``ref``, or ``None``.
+
+    Presence is asked of the whole locale, not of the namespace the debt is
+    recorded under. A key moved from a nested namespace to its parent would
+    otherwise look absent at base — the target namespace was never carried —
+    and a dropped translation would pass as pre-existing debt.
+
+    Unreadable returns ``None`` so the caller fails closed.
+    """
+    listing = _git(
+        "ls-tree",
+        "-r",
+        "--name-only",
+        ref,
+        "--",
+        f"local_operator/i18n/catalogues/{locale}",
+    )
+    if listing.returncode != 0:
+        return None
+    keys: set[str] = set()
+    for path in listing.stdout.splitlines():
+        if not path.endswith(".json") or path.endswith(catalogues.CONTEXT_SUFFIX):
+            continue
+        shown = _git("show", f"{ref}:{path}")
+        if shown.returncode != 0:
+            return None
+        try:
+            messages = json.loads(shown.stdout)
+        except ValueError:
+            return None
+        if not isinstance(messages, dict):
+            return None
+        keys.update(messages)
+    return keys
+
+
+def allowance_growth(
+    base: dict[str, Any],
+    head: dict[str, Any],
+    *,
+    ref: str | None = None,
+    base_english: set[str] | None = None,
+    inactive_locales: set[str] | None = None,
+) -> set[tuple[str, str, str]]:
+    """Added allowance entries that are growth in this change.
+
+    The shrink-only rule exists to stop untranslated copy being laundered
+    into the tree. An added entry is legitimate in exactly two cases:
+
+    1. **The debt was already real.** The ``(locale, namespace, key)`` was
+       genuinely missing at the base ref — the namespace was uncarried or
+       the key was absent — so this change only *records* what was already
+       true. Recording it is the whole point of the allowance: without it
+       the manifest gate is red about a fact it knows.
+    2. **The locale cannot carry a translation at all.** It has no catalogue
+       directory at the base ref, so a key it is missing is untranslatable
+       rather than untranslated. Refusing this would make the two gates
+       mutually unsatisfiable for every change that adds English copy — a
+       deadlock, not a ratchet.
+
+    Everything else is growth and must fail:
+
+    - a key that **is present** at base and missing at head: the change
+      deleted a translation to record debt, which is the reverse of the
+      rule (``translate-then-drop``);
+    - a new English key in an **active** locale: the copy is translatable,
+      so it must be translated rather than allowanced.
+
+    ``ref`` is the resolved base ref. ``None`` means the base tree could not
+    be read, so nothing is provably pre-existing and every added entry is
+    growth — an unverifiable comparison must not weaken the ratchet.
+    ``inactive_locales`` of ``None`` is treated as empty for the same
+    reason.
+    """
+    added = _allowance_ids(head) - _allowance_ids(base)
+    if not added:
+        return set()
+    if ref is None or base_english is None:
+        return added
+    # Exempt only while the locale STILL carries no catalogue. One that gains
+    # its first catalogue in this change is translatable from that moment, so
+    # recording brand-new English as debt there would bypass the "new English
+    # must be translated" rule through a base-ref view of inactivity.
+    head_locales = set(catalogues.locales())
+    inactive = (inactive_locales or set()) - head_locales
+    growth: set[tuple[str, str, str]] = set()
+    for locale, namespace, key in added:
+        if locale in inactive:
+            # Untranslatable at base and still uncarried: recording is lawful.
+            continue
+        if key not in base_english:
+            # New English copy. An active locale must translate it.
+            growth.add((locale, namespace, key))
+            continue
+        carried = _locale_keys_at_ref(ref, locale)
+        if carried is None:
+            # Unreadable base for this locale: fail rather than assume absence.
+            growth.add((locale, namespace, key))
+            continue
+        if key in carried:
+            # Present somewhere in this locale at base, missing at head: a
+            # translation was removed, including via a namespace move.
+            growth.add((locale, namespace, key))
+    return growth
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -677,6 +779,115 @@ def _resolve_allowance_base(base: str | None) -> str | None:
     return None
 
 
+def _english_keys_at_ref(ref: str) -> set[str] | None:
+    """Qualified key IDs in ``ref``'s English catalogues, or ``None``.
+
+    Read from the committed tree rather than the working copy: the question
+    is what English copy existed at the base, not what exists now. Any
+    unreadable piece (missing ref, unparsable file, interrupted listing)
+    returns ``None`` as a whole — a partial set would silently permit
+    entries the comparison could not verify.
+    """
+    listing = _git("ls-tree", "-r", "--name-only", ref, "--", "local_operator/i18n/catalogues/en")
+    if listing.returncode != 0:
+        return None
+    paths = [
+        path
+        for path in listing.stdout.splitlines()
+        if path.endswith(".json") and not path.endswith(catalogues.CONTEXT_SUFFIX)
+    ]
+    if not paths:
+        return None
+    keys: set[str] = set()
+    for path in paths:
+        shown = _git("show", f"{ref}:{path}")
+        if shown.returncode != 0:
+            return None
+        try:
+            messages = json.loads(shown.stdout)
+        except ValueError:
+            return None
+        if not isinstance(messages, dict):
+            return None
+        keys.update(messages)
+    return keys
+
+
+def _english_keys_in_tree() -> set[str] | None:
+    """Qualified key IDs in the working tree's English catalogues, or ``None``.
+
+    The head side of the comparison is the tree CI checks out, so a new key
+    counts as soon as the change adds it. Unreadable or empty means the
+    comparison cannot run and the caller must fail conservatively.
+    """
+    directory = REPO / "local_operator" / "i18n" / "catalogues" / "en"
+    paths = [
+        path
+        for path in directory.glob("*.json")
+        if not path.name.endswith(catalogues.CONTEXT_SUFFIX)
+    ]
+    if not paths:
+        return None
+    keys: set[str] = set()
+    for path in paths:
+        try:
+            messages = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(messages, dict):
+            return None
+        keys.update(messages)
+    return keys
+
+
+def _inactive_locales_at_ref(ref: str) -> set[str] | None:
+    """Language codes that carry no catalogue directory at ``ref``.
+
+    A locale with no ``catalogues/<code>/`` at the base cannot hold a
+    translation there, so a key it is missing is untranslatable rather than
+    untranslated. Those are the only locales for which adding allowance debt
+    in a change that also grows English copy is legitimate (see
+    ``allowance_growth``).
+
+    Read from ``i18n/languages.json`` at the same ref, skipping the source
+    language. Returns ``None`` when the manifest cannot be read, so the
+    caller treats the set as empty and the exemption cannot widen by
+    accident.
+    """
+    shown = _git("show", f"{ref}:i18n/languages.json")
+    if shown.returncode != 0:
+        return None
+    try:
+        manifest = json.loads(shown.stdout)
+    except ValueError:
+        return None
+    languages = manifest.get("languages") if isinstance(manifest, dict) else None
+    if not isinstance(languages, list):
+        return None
+    inactive: set[str] = set()
+    for entry in languages:
+        if not isinstance(entry, dict):
+            return None
+        code = entry.get("code")
+        if not isinstance(code, str) or not code:
+            return None
+        if code == "en":
+            continue
+        listing = _git(
+            "ls-tree",
+            "-r",
+            "--name-only",
+            ref,
+            "--",
+            f"local_operator/i18n/catalogues/{code}",
+        )
+        if listing.returncode != 0:
+            return None
+        if not listing.stdout.strip():
+            inactive.add(code)
+    return inactive
+
+
 def check_allowance_growth(base: str | None = None) -> list[str]:
     """Fail when HEAD adds missing-key entries relative to the base branch.
 
@@ -684,6 +895,13 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     stop someone editing the file, but an added entry becomes a red check that
     names the debt, so growth is a deliberate reviewed act rather than a
     silent escape. A base branch without the file is the introduction case.
+
+    An addition is permitted in two cases only (see ``allowance_growth``):
+    the key was already missing at the base ref, so this change records debt
+    the tree already carried; or the locale carries no catalogue at the base
+    ref, so the key is untranslatable rather than untranslated. It is growth
+    when a translation was removed, when the key is new English in an active
+    locale, or when the base cannot be read well enough to tell.
     """
     ref = _resolve_allowance_base(base)
     # A supplied ref is operator input, not a best-effort default: inside git,
@@ -693,20 +911,63 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
         if _git("rev-parse", "--is-inside-work-tree").returncode == 0:
             return [f"allowance growth: explicit base ref cannot be resolved: {base}"]
     if ref is None:
+        # Fail closed on a pull request ONLY where a base was supposed to
+        # resolve: a git work tree. A monkeypatched fixture, exported tarball
+        # or detached copy has no base ref by construction and must skip —
+        # which is the same carve-out the explicit-ref branch above already
+        # makes. Without the work-tree guard, every checker test running under
+        # CI's pull-request event fails on a repo-less temp directory.
+        if (
+            os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+            and _git("rev-parse", "--is-inside-work-tree").returncode == 0
+        ):
+            return ["allowance growth: base ref cannot be resolved on a pull request"]
         print(
             # i18n: ignore checker diagnostic (operator tooling output, English-only)
             "allowance growth: skipped (no base ref)"
         )
         return []
-    shown = _git("show", f"{ref}:i18n/coverage-allowance.json")
-    if shown.returncode != 0:
+    allowance_path = "i18n/coverage-allowance.json"
+    present = _git("ls-tree", "--name-only", ref, "--", allowance_path)
+    if present.returncode != 0:
+        # Cannot tell whether the base carried an allowance. Failing open
+        # here would silently disable the growth check for the whole run.
+        return [f"allowance growth: base ref {ref} cannot be inspected"]
+    if not present.stdout.strip():
+        # The base had no allowance file: this change introduces it.
         return []
+    shown = _git("show", f"{ref}:{allowance_path}")
+    if shown.returncode != 0:
+        return [f"allowance growth: base allowance at {ref} cannot be read"]
     try:
         base_data = json.loads(shown.stdout)
         head_data = json.loads(ALLOWANCE.read_text(encoding="utf-8"))
-        added = allowance_growth(base_data, head_data)
+        if not isinstance(head_data, dict) or not isinstance(base_data, dict):
+            return ["allowance growth: allowance root must be a JSON object"]
+        base_english = _english_keys_at_ref(ref)
+        head_english = _english_keys_in_tree()
+        if base_english is None or head_english is None:
+            new_english: set[str] | None = None
+        else:
+            new_english = head_english - base_english
+        inactive = _inactive_locales_at_ref(ref)
+        added = allowance_growth(
+            base_data,
+            head_data,
+            ref=None if new_english is None else ref,
+            base_english=base_english,
+            inactive_locales=inactive,
+        )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return [f"allowance growth: cannot compare allowances: {exc}"]
+    if new_english is None:
+        # Say so even when nothing was added: the verdict is only trustworthy
+        # if a reader knows the English key sets could not be read.
+        print(
+            # i18n: ignore checker diagnostic (operator tooling output, English-only)
+            "allowance growth: base or head English catalogues unreadable; "
+            "every added entry counts as growth (conservative fallback)"
+        )
     return [
         f"allowance growth: added {locale}/{namespace}: {key}"
         for locale, namespace, key in sorted(added)

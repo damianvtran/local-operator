@@ -761,3 +761,57 @@ async def test_batch_admission_backoff_is_jittered_and_bounded(monkeypatch):
     assert caught.value.details["error_type"] == "audio_rate_limited"
     assert len(requests) == 4
     assert sleeps == [1.75, 3.5, 7.0]
+
+
+def _decodable_wav(seconds: float = 0.5, rate: int = 8000) -> bytes:
+    """A real, decodable clip so the duration derivation has something to read."""
+    import struct
+
+    frames = b"\x00\x00" * int(rate * seconds)
+    header = (
+        b"RIFF"
+        + struct.pack("<I", 36 + len(frames))
+        + b"WAVEfmt "
+        + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+        + b"data"
+        + struct.pack("<I", len(frames))
+    )
+    return header + frames
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["sound_effect", "voiceover"])
+async def test_byok_legs_carry_a_duration_read_from_the_bytes(direction):
+    """REGRESSION: a BYOK record rendered NO PLAYER because duration_s was None.
+
+    ElevenLabs and OpenAI state no duration, so a leg that only reads a provider
+    field leaves the artifact without a length - and the sound card, which needs
+    one for the waveform and the clock, draws no player at all: a generated clip
+    the user cannot play, with no error. The duration is now derived from the
+    returned bytes, so assert it is present AND that it matches the bytes rather
+    than merely being non-null.
+    """
+    pytest.importorskip("miniaudio")
+    from local_operator.audiogen.peaks import compute_duration
+
+    audio = _decodable_wav(0.5)
+    expected = compute_duration(audio)
+    assert expected == pytest.approx(0.5, abs=1e-6)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=audio, headers={"content-type": "audio/wav"})
+
+    spec = _spec(direction, duration_s=0.5) if direction == "sound_effect" else _spec(direction)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        outcome = await audio_rungs.run_elevenlabs(
+            spec,
+            api_key="el-key",
+            handle=CancelHandle(),
+            emit=None,
+            pause=_fast_pause,
+            client=client,
+        )
+
+    asset = outcome.assets[0]
+    assert asset.duration_s is not None, "a BYOK asset without a duration renders no player"
+    assert asset.duration_s == pytest.approx(expected, abs=1e-9), "the bytes are the source"

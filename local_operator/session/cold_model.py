@@ -310,6 +310,26 @@ def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> Fronte
             else FrontendModelSpec(provider="", model_id="")
         )
         resolved = spec_for_target(base, FallbackTarget(saved.selector, saved.effort))
+        if saved.effort:
+            # THE COLD FRAME CLAMPS WHAT THE WARM RESTORE CLAMPS. A saved level
+            # is a durable record the catalogue can move under, and
+            # ``spec_for_target`` trusts an explicit target effort verbatim (a
+            # chain entry's, which the driver sends as-is). Passing the row's
+            # level through unclamped would paint ``max`` on a route whose
+            # ladder stops at ``high`` for the first frame, then heal to the
+            # clamp when the runtime's own spec arrived — the chip flicker this
+            # module exists to prevent (QA round 1, Q-1).
+            from local_operator.model.effort import resolve_effort_in
+
+            resolved = resolved.model_copy(
+                update={
+                    "reasoning_effort": resolve_effort_in(
+                        resolved.reasoning_efforts,
+                        resolved.reasoning_default_effort,
+                        saved.effort,
+                    )
+                }
+            )
     except Exception:  # noqa: BLE001 — metadata is best-effort; the pair is still an answer
         logger.debug("saved model metadata could not be resolved", exc_info=True)
         return bare

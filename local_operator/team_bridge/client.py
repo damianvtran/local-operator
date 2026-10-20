@@ -1498,11 +1498,31 @@ class TeamBridgeClient:
         )
 
     async def create_conversation(
-        self, body: Mapping[str, Any], *, access: OAuthAccess | None = None
+        self,
+        body: Mapping[str, Any],
+        *,
+        actor_endpoint_id: str | None = None,
+        origin_session_id: str | None = None,
+        access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """Create (or find, for a dm) a conversation. The body is the wire shape."""
+        """Create (or find, for a dm) a conversation. The body is the wire shape.
 
-        return await self._send("POST", "/messaging/conversations", body=body, access=access)
+        ``actor_endpoint_id`` makes this an AGENT act (contract §10.1): the
+        endpoint must be one the caller's account owns, AND the matching agent
+        member must appear in ``body["members"]`` — the server refuses an
+        actor create that attaches no such member (``rule=actor_required``)
+        and takes the display label from that entry. ``origin_session_id`` is
+        opaque provenance stored on the act only; it is never logged here.
+        Both fields are omitted when absent, so a human create serializes
+        exactly as it did before.
+        """
+
+        payload: dict[str, Any] = dict(body)
+        if actor_endpoint_id:
+            payload["actor_endpoint_id"] = actor_endpoint_id
+        if origin_session_id:
+            payload["origin_session_id"] = origin_session_id
+        return await self._send("POST", "/messaging/conversations", body=payload, access=access)
 
     async def conversation_lifecycle(
         self, conversation_id: str, action: str, *, access: OAuthAccess | None = None
@@ -1635,15 +1655,28 @@ class TeamBridgeClient:
         text: str,
         tenant_id: str | None = None,
         agent_label: str | None = None,
+        actor_endpoint_id: str | None = None,
+        origin_session_id: str | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """Append one message. ``client_ref`` is required and idempotent."""
+        """Append one message. ``client_ref`` is required and idempotent.
+
+        ``actor_endpoint_id`` sends AS that agent member: the server stores the
+        message with ``origin=agent`` and the member's display label. It
+        refuses ``agent_label`` on this path (provenance is the member row, not
+        a request field), so the two are never combined here. ``origin_session_id``
+        rides only as opaque provenance and is never logged.
+        """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
         if tenant_id:
             body["tenant_id"] = tenant_id
         if agent_label:
             body["agent_label"] = agent_label
+        if actor_endpoint_id:
+            body["actor_endpoint_id"] = actor_endpoint_id
+        if origin_session_id:
+            body["origin_session_id"] = origin_session_id
         return await self._send(
             "POST", f"/messaging/conversations/{conversation_id}/messages", body=body, access=access
         )
@@ -1715,6 +1748,32 @@ class TeamBridgeClient:
             body["muted"] = bool(muted)
         if notify is not None:
             body["notify"] = notify
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST", f"/messaging/conversations/{conversation_id}/read", body=body, access=access
+        )
+
+    async def conversation_notify(
+        self,
+        conversation_id: str,
+        *,
+        notify: Literal["all", "mention", "mute"],
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Set the caller's own notification policy (§10.1).
+
+        This is a read-row write like :meth:`conversation_read`, so it uses the
+        same ``POST …/read`` route; ``notify`` replaces the legacy ``muted``
+        boolean as the policy of record, and the server keeps the old flag in
+        sync for pre-enum readers. Another member's policy is never writable
+        or readable through this call.
+        """
+
+        if notify not in ("all", "mention", "mute"):
+            raise ValueError("notify must be 'all', 'mention' or 'mute' (§10.1)")
+        body: dict[str, Any] = {"notify": notify}
         if tenant_id:
             body["tenant_id"] = tenant_id
         return await self._send(

@@ -448,7 +448,9 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
             self.model = build_model_spec("anthropic", "claude-opus-5")
             self._stream_fn: Any = None
 
-        def set_model(self, spec, *, explicit: bool = False) -> None:  # noqa: ANN001
+        def set_model(
+            self, spec, *, explicit: bool = False, effort_choice: object = None
+        ) -> None:  # noqa: ANN001
             self.model = spec
 
         # ``SessionProtocol.credential_op``: the REAL verb table against a

@@ -473,6 +473,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "writes fail, so readers fall back to the stats fingerprint; the path is never "
         "a session directory or transcript.",
     ),
+    # The fork auto-tag sidecar is one REGULAR FILE inside the child's own
+    # session directory. Both paths are that fixed basename joined onto the
+    # directory: the temp is a sibling mkstemp file and the replace target is
+    # `auto-tag.json`, so neither call can rename or remove the directory
+    # itself. `clear` unlinks that same file. See `session/auto_tag.py`.
+    (
+        "local_operator/session/auto_tag.py::record_fork",
+        "os.replace",
+        "Atomic replacement of the fixed-basename auto-tag.json sidecar inside the "
+        "child's session directory; the source is its own sibling mkstemp FILE, "
+        "never a session directory.",
+    ),
+    (
+        "local_operator/session/auto_tag.py::record_fork",
+        "<path>.unlink",
+        "Removes only its own named mkstemp FILE after a failed replacement; never a "
+        "session directory or transcript.",
+    ),
+    (
+        "local_operator/session/auto_tag.py::clear",
+        "<path>.unlink",
+        "Removes only the fixed-basename auto-tag.json sidecar FILE after the naming "
+        "attempt; never a session directory or transcript.",
+    ),
     # -- the archive index: the pins store's row, for the pins store's reasons --
     # One file at the config root with a FIXED basename (`archived-sessions.json`
     # plus a pid-named sibling while it is written). No session id, no caller
@@ -852,6 +876,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/cleanup.py::_write_record",
         "<path>.unlink",
         "the tmp FILE of a failed record write",
+    ),
+    # The content pass's per-pad manifest. BOTH sides are regular FILES under
+    # `sessions/.cleanup-manifests/`: the target is `<UTC>-<session>.json` and
+    # the temporary is the same name with a leading `.` and a `.tmp` suffix,
+    # renamed in the manifest directory. Neither is a session directory, and
+    # the session's own content goes through `remove_scratchpad_entry`, not
+    # through this call.
+    (
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
+        "os.replace",
+        "tmp FILE -> manifest FILE under sessions/.cleanup-manifests; never a session dir",
+    ),
+    (
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
+        "<path>.unlink",
+        "Only this call's own .<name>.tmp regular FILE after a failed manifest write",
     ),
     # Store-maintenance completion metadata (2026-09-23). Startup passes the
     # AgentRegistry config root to this worker; session directories are its
@@ -3354,8 +3394,13 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
+        # never a session directory (the target is a regular file).
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
         # tmp -> tags/<type>/<id>.json under config_dir()/tags, never sessions/
         "local_operator/session/session_tags.py::_write",
+        # tmp -> auto-tag.json, a FILE inside the child's own session directory
+        "local_operator/session/auto_tag.py::record_fork",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
         "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)
