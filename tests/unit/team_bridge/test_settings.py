@@ -12,7 +12,7 @@ def test_defaults_when_the_section_is_absent():
     assert values.enabled is True
     assert values.onboarding == ""
     assert values.session == ""
-    assert values.default_enrollment == ""
+    assert values.default_enrollment == {}
 
 
 def test_reads_from_a_nested_config_document():
@@ -22,21 +22,22 @@ def test_reads_from_a_nested_config_document():
                 "enabled": True,
                 "onboarding": "seen",
                 "session": "sess-123",
-                "default_enrollment": "done",
+                "default_enrollment": {"acc_1": "done"},
             }
         }
     )
     assert values.enabled is True
     assert values.onboarding == "seen"
     assert values.session == "sess-123"
-    assert values.default_enrollment == "done"
+    assert values.default_enrollment == {"acc_1": "done"}
 
 
 def test_untrusted_values_normalise_fail_closed():
     """A hand-edited value must read as the shipped default, never crash.
 
-    ``enabled``: a non-bool reads as the default, which is ON under the
-    opt-out policy — the key that actually turns it off is a real ``false``.
+    ``enabled``: a non-bool in a PRESENT value reads as OFF — the ON default
+    writes consent upstream, so an unreadable value must not consent. Absence
+    is the shipped default (ON); the key that turns it off is a real ``false``.
     ``onboarding``: anything but ``seen`` reads as "not dismissed", which
     allows the one-time notice to show again rather than suppressing it.
     ``session``: a non-string (including a list from the key's earlier draft
@@ -55,13 +56,35 @@ def test_untrusted_values_normalise_fail_closed():
             }
         }
     )
-    assert values.enabled is True
+    assert values.enabled is False
     assert values.onboarding == ""
     assert values.session == ""
-    assert values.default_enrollment == ""
+    assert values.default_enrollment == {}
 
-    # A hand-edited STRING "false" is not an opt-out: only a real bool is.
-    assert tb.TeamBridgeSettings.from_values({"team_bridge": {"enabled": "false"}}).enabled is True
+    # A present-but-unreadable value FAILS CLOSED: the ON default performs a
+    # consent write, so a value the reader cannot parse must not be the thing
+    # that consents. Absence is the shipped default (ON).
+    assert tb.TeamBridgeSettings.from_values({"team_bridge": {"enabled": "false"}}).enabled is False
+    assert tb.TeamBridgeSettings.from_values({"team_bridge": {"enabled": None}}).enabled is False
+    assert tb.TeamBridgeSettings.from_values({}).enabled is True
+
+
+def test_the_default_enrollment_marker_is_per_account(tmp_path):
+    """One member enrolling must not suppress another on the same machine."""
+
+    from local_operator.config import ConfigManager
+
+    tb.record_default_enrollment(tmp_path, "acc_1")
+    tb.record_default_enrollment(tmp_path, "acc_2")
+    values = tb.TeamBridgeSettings.from_config(ConfigManager(tmp_path))
+
+    assert values.default_enrollment == {"acc_1": "done", "acc_2": "done"}
+    # A repeat is a no-op, not an error.
+    tb.record_default_enrollment(tmp_path, "acc_1")
+    assert tb.TeamBridgeSettings.from_config(ConfigManager(tmp_path)).default_enrollment == {
+        "acc_1": "done",
+        "acc_2": "done",
+    }
 
 
 def test_no_setting_can_disable_the_admission_gate():

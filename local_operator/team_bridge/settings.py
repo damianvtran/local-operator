@@ -23,7 +23,7 @@ default (now ON/opt-out for ``enabled``), never to an invented state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
@@ -52,16 +52,19 @@ DEFAULT_TEAM_BRIDGE_ONBOARDING = ""
 ONBOARDING_SEEN = "seen"
 
 #: ``team_bridge.default_enrollment`` — internal state (deliberately NOT a
-#: registry row, exactly like ``onboarding``): ``"done"`` records that this
-#: machine's opt-out-default enrollment ran. It is the memory that keeps the
-#: consent write to ONE: the server's endpoint is normally that memory, but an
-#: endpoint can disappear (a server-side reset), and without this marker a
-#: later status answer would read the same "eligible, no endpoint" state and
-#: consent again on the user's behalf. Any value other than ``DONE`` reads as
-#: "not enrolled by default" — the safe direction for a marker whose false
-#: reading costs one idempotent ``active`` write, never a missed opt-out (the
-#: local ``enabled`` key and the endpoint's own state are the opt-out gates).
-DEFAULT_TEAM_BRIDGE_ENROLLMENT = ""
+#: registry row, exactly like ``onboarding``): a mapping of ACCOUNT id to
+#: ``"done"`` recording that the opt-out default ran the consent write for that
+#: member. PER ACCOUNT on purpose: the default is a per-member product rule, so
+#: account A enrolling must not suppress account B on the same machine. It is
+#: the memory that keeps each consent write to ONE: the server's endpoint is
+#: normally that memory, but an endpoint can disappear (a server-side reset),
+#: and without this marker a later status answer would read the same "eligible,
+#: no endpoint" state and consent again on the user's behalf. Only a literal
+#: ``"done"`` under a non-empty account id counts; anything else reads as "not
+#: enrolled by default", the safe direction for a marker whose false reading
+#: costs one idempotent ``active`` write, never a missed opt-out (the local
+#: ``enabled`` key and the endpoint's own state are the opt-out gates).
+DEFAULT_TEAM_BRIDGE_ENROLLMENT: Mapping[str, str] = {}
 DEFAULT_ENROLLMENT_DONE = "done"
 
 #: ``team_bridge.session`` — the designated CoS session id (RFC §5.6/§13.6).
@@ -78,22 +81,39 @@ DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 
 
-def _bool(value: Any, default: bool) -> bool:
-    """A real bool, else the default (the ``hub_sync.settings._bool`` rule).
+#: Distinguishes "the key is absent" (the shipped default) from "the key is
+#: present and unreadable" (fail closed). ``None`` cannot carry that difference:
+#: a hand-edited ``team_bridge: {enabled: null}`` must not read as absent.
+_MISSING = object()
 
-    A hand-edited ``"false"`` string must neither mean True (``bool("false")``)
-    nor crash the reader: it is not a bool, so it reads as unset.
+
+def _enabled(value: Any) -> bool:
+    """The opt-out default, with a present-but-unreadable value reading OFF.
+
+    WHY THIS IS NOT ``_bool(value, DEFAULT)``. The default is ON, and ON performs
+    an upstream consent write; a torn/hand-edited value we cannot parse must not
+    be the thing that consents. Absent stays the shipped default (opt-out), a
+    real bool is itself, and anything else fails closed — the same direction
+    ``read_context`` already takes for a torn read.
     """
 
-    return value if isinstance(value, bool) else default
+    if value is _MISSING:
+        return DEFAULT_TEAM_BRIDGE_ENABLED
+    return value if isinstance(value, bool) else False
 
 
 def _onboarding(value: Any) -> str:
     return ONBOARDING_SEEN if value == ONBOARDING_SEEN else DEFAULT_TEAM_BRIDGE_ONBOARDING
 
 
-def _default_enrollment(value: Any) -> str:
-    return DEFAULT_ENROLLMENT_DONE if value == DEFAULT_ENROLLMENT_DONE else ""
+def _default_enrollment(value: Any) -> Mapping[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        account: DEFAULT_ENROLLMENT_DONE
+        for account, state in value.items()
+        if isinstance(account, str) and account.strip() and state == DEFAULT_ENROLLMENT_DONE
+    }
 
 
 def _session(value: Any) -> str:
@@ -126,7 +146,7 @@ class TeamBridgeSettings:
     enabled: bool = DEFAULT_TEAM_BRIDGE_ENABLED
     onboarding: str = DEFAULT_TEAM_BRIDGE_ONBOARDING
     session: str = DEFAULT_TEAM_BRIDGE_SESSION
-    default_enrollment: str = DEFAULT_TEAM_BRIDGE_ENROLLMENT
+    default_enrollment: Mapping[str, str] = field(default_factory=dict)
 
     @staticmethod
     def from_config(cm: "ConfigManager") -> "TeamBridgeSettings":
@@ -151,9 +171,7 @@ class TeamBridgeSettings:
         """The one place that says how the four keys are typed and defaulted."""
 
         return TeamBridgeSettings(
-            enabled=_bool(
-                get(ENABLED_PATH, DEFAULT_TEAM_BRIDGE_ENABLED), DEFAULT_TEAM_BRIDGE_ENABLED
-            ),
+            enabled=_enabled(get(ENABLED_PATH, _MISSING)),
             onboarding=_onboarding(get(ONBOARDING_PATH, DEFAULT_TEAM_BRIDGE_ONBOARDING)),
             session=_session(get(SESSION_PATH, DEFAULT_TEAM_BRIDGE_SESSION)),
             default_enrollment=_default_enrollment(
@@ -162,8 +180,8 @@ class TeamBridgeSettings:
         )
 
 
-def record_default_enrollment(config_dir: "Path") -> None:
-    """Record that the opt-out default ran the consent write on this machine.
+def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
+    """Record that the opt-out default ran the consent write for ``account_id``.
 
     Written through ``settings_io._store`` because this is INTERNAL state with
     no registry row (the same reason ``onboarding`` is hand-written): a public
@@ -173,16 +191,28 @@ def record_default_enrollment(config_dir: "Path") -> None:
     nested writer, so a concurrent hand edit to a sibling ``team_bridge`` key is
     not clobbered by this write.
 
-    Best-effort by contract: the caller (the status discipline) owns the
-    enrollment itself and must not fail a status read because a bookkeeping
-    write could not land.
+    Read-merge-write runs under the config write lock (not just the leaf write):
+    two members enrolling on the same machine must both land in the mapping, and
+    the second must not overwrite the first's entry. Best-effort by contract:
+    the caller owns the enrollment itself and must not fail a status read
+    because a bookkeeping write could not land.
     """
+
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("account_id must be a non-empty string")
 
     from local_operator import settings_io
     from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+    from local_operator.config_writer import config_write_lock
 
-    # The SAME pre-write guard every settings write uses: an unreadable document
-    # must abort before ConfigManager's recovery rename moves the user's file
-    # aside. A missing file is a first run and is allowed.
-    settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
-    settings_io._store(ConfigManager(config_dir), DEFAULT_ENROLLMENT_PATH, DEFAULT_ENROLLMENT_DONE)
+    with config_write_lock(Path(config_dir)):
+        # The SAME pre-write guard every settings write uses: an unreadable
+        # document must abort before ConfigManager's recovery rename moves the
+        # user's file aside. A missing file is a first run and is allowed.
+        settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
+        manager = ConfigManager(config_dir)
+        current = dict(TeamBridgeSettings.from_config(manager).default_enrollment)
+        if current.get(account_id) == DEFAULT_ENROLLMENT_DONE:
+            return
+        current[account_id] = DEFAULT_ENROLLMENT_DONE
+        settings_io._store(manager, DEFAULT_ENROLLMENT_PATH, current)

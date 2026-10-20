@@ -166,7 +166,7 @@ async def test_the_enabled_helper_wraps_instead_of_losing_its_tail() -> None:
         plain = view._detail_text.plain
         # The full sentence is on the band — wrapped, not truncated.
         assert " ".join(plain.split("\n")) == setting.help
-        assert "turn it off here." in plain
+        assert "eligible organization." in plain
         assert view._detail_two_line is True
         assert view._detail.styles.padding.top == 0
 

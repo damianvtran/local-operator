@@ -56,7 +56,6 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -654,7 +653,7 @@ async def put_settings(
 
 @router.get("/v1/desktop/team-bridge/directory", response_model=CRUDResponse[Any])
 async def get_directory(
-    tenant_id: str = Query(...),
+    tenant_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """One organization's member directory (§6.1), passed through untouched.
@@ -683,7 +682,7 @@ async def get_directory(
     # which must never ride ``lop serve``'s boot path (module docstring).
     from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
-    if re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+    if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
         _raise_read("invalid_request")
     client = TeamBridgeClient(config_manager.config_dir)
     try:
@@ -692,11 +691,6 @@ async def get_directory(
         _raise_sign_in(exc)
     except BridgeRefusal as exc:
         _raise_bridge(exc)
-    if not isinstance(payload, Mapping):
-        # The client's envelope check already refuses a non-object result; this
-        # is the same fail-closed answer one layer up, naming the server's
-        # unreadable shape instead of rendering it.
-        _raise_read("malformed_page")
     return reply(payload)
 
 
