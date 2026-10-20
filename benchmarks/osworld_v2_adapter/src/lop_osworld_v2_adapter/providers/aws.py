@@ -72,6 +72,7 @@ from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
+    GUEST_TRANSPORT_MARGIN_S,
     GuestServerRecovered,
     InstructionUnavailable,
     bounded_observation_cause,
@@ -861,6 +862,19 @@ class AwsProvider:
                     )
                     safe = guest_loss._scrub(str(reason)[:512], self._known_secret_values)
                     status["cause"] = safe or "installation reason withheld"
+                    # ADDITIVE ONLY: a unit-discovery refusal records why the
+                    # guest's units looked the way they did. The outcome and the
+                    # cause above are already final, and every failure below is
+                    # recorded as an absent/undetermined layout, never raised.
+                    if str(reason) in guest_supervisor.LAYOUT_REFUSALS:
+                        try:
+                            status["layout"] = self._capture_supervisor_layout(plan.client_password)
+                        except Exception:
+                            # The capture is additive evidence. A defect in the
+                            # diagnostic itself must not replace the refusal
+                            # reason the guest already gave (the outer handler
+                            # writes an exception TYPE into cause).
+                            status["layout"] = {"schema_version": 1, "status": "error"}
             else:
                 status["cause"] = "privilege escalation or installation command failed"
         except Exception as error:
@@ -874,6 +888,60 @@ class AwsProvider:
                 (self._cache_root / name).write_text(json.dumps(value, sort_keys=True) + "\n")
         except Exception:
             logger.warning("guest supervisor evidence unavailable")
+
+    def _capture_supervisor_layout(self, password: str) -> dict[str, Any]:
+        """Bounded, fail-open topology capture for a unit-discovery refusal.
+
+        The guest's install script already said WHICH refusal fired; this says
+        what the guest's process tree and units actually look like, so a
+        refusal can be designed against rather than guessed at. Bounded by ONE
+        shared deadline (``guest_loss._run_bounded``, the console-capture
+        helper): a hung transport, a hung guest, a malformed document or a
+        scrub it cannot vouch for each become a status-only record, and the
+        episode continues with the unchanged refusal.
+        """
+        budget = guest_supervisor.LAYOUT_BUDGET_S
+        # The socket deadline is NOT the shared budget. The guest's subprocess
+        # deadline is ``guest_deadline_for`` of this value (margin subtracted),
+        # and it must exceed LAYOUT_SOURCE's own 3 s deadline or a loaded guest
+        # is killed before it can print; ``_run_bounded`` still abandons the
+        # whole capture at ``budget``, which stays the authority.
+        socket_timeout = guest_supervisor.LAYOUT_GUEST_DEADLINE_S + GUEST_TRANSPORT_MARGIN_S
+        try:
+            outcome = guest_loss._run_bounded(
+                {
+                    "layout": lambda: self._run_guest_command(
+                        guest_supervisor.layout_command(
+                            password, port=guest_supervisor.ACTION_SERVER_PORT
+                        ),
+                        timeout=socket_timeout,
+                    )
+                },
+                budget,
+            )["layout"]
+        except Exception:
+            return guest_supervisor.empty_layout("error")
+        state, value = outcome
+        if state == "timeout":
+            return guest_supervisor.empty_layout("timeout")
+        if state != "ok" or getattr(value, "returncode", None) != 0:
+            return guest_supervisor.empty_layout("error")
+        try:
+            layout = guest_supervisor.layout_record(
+                value.stdout, port=guest_supervisor.ACTION_SERVER_PORT
+            )
+        except Exception:
+            # Includes SupervisorOutputUnparseable: guest text never explains
+            # itself into the record, only this fixed status does.
+            return guest_supervisor.empty_layout("unparseable")
+        try:
+            safe = guest_loss._scrub(json.dumps(layout), self._known_secret_values)
+            if safe is None:
+                return guest_supervisor.empty_layout("withheld")
+            scrubbed = json.loads(safe)
+        except Exception:
+            return guest_supervisor.empty_layout("withheld")
+        return scrubbed if isinstance(scrubbed, dict) else guest_supervisor.empty_layout("withheld")
 
     def _recover_guest_supervisor(
         self, delivery: str = "pre_action"
