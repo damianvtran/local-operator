@@ -35,7 +35,7 @@ from local_operator.session.errors import ForkRefused
 pytestmark = pytest.mark.asyncio
 
 TOKEN = "desktop-fork-cut-route-token"
-CHILD_ID = "child000001"
+CHILD_ID = "c0ffee000001"
 LANDED = "u1"
 
 REQUEST_ID = "3f2a1c40-0000-4000-8000-000000000001"
@@ -93,8 +93,9 @@ class FakeBridge:
 class FakePool:
     """``DesktopSessions``-shaped: the route's only door to a session."""
 
-    def __init__(self, bridges: dict[str, FakeBridge]) -> None:
+    def __init__(self, bridges: dict[str, FakeBridge], root: Path) -> None:
         self.bridges = bridges
+        self.root = root
 
     @contextlib.asynccontextmanager
     async def session(
@@ -109,8 +110,11 @@ class FakePool:
 
 def _app(tmp_path: Path, remote: FakeRemote) -> FastAPI:
     app = FastAPI()
-    app.state.config_manager = SimpleNamespace(config_dir=tmp_path / "cfg")
-    app.state.desktop_sessions = FakePool({"s1": FakeBridge(remote), CHILD_ID: FakeBridge(remote)})
+    root = tmp_path / "cfg"
+    app.state.config_manager = SimpleNamespace(config_dir=root)
+    app.state.desktop_sessions = FakePool(
+        {"s1": FakeBridge(remote), CHILD_ID: FakeBridge(remote)}, root
+    )
     app.include_router(desktop_lifecycle.router)
     return app
 
@@ -214,6 +218,8 @@ async def test_an_opening_message_still_rides_the_child_admission(tmp_path: Path
         {"request_id": REQUEST_ID, "boundary": "at_message", "entry_id": "u1"},  # not a boundary
         {"request_id": REQUEST_ID, "boundary": "at_entry", "entry_id": "u1", "extra": 1},
         {"request_id": REQUEST_ID, "boundary": "at_entry", "entry_id": "u" * 129},
+        # StrictBool: a truthy string is not a request this route can honour.
+        {"request_id": REQUEST_ID, "auto_tag": "yes"},
     ],
 )
 async def test_a_malformed_boundary_is_a_422_and_runs_nothing(tmp_path: Path, body) -> None:
@@ -315,3 +321,72 @@ async def test_a_failure_this_seam_does_not_know_keeps_the_owner_outage_path(
     assert body["text"] == RUNTIME_UNREACHABLE_MESSAGE
     # The owner's own words are never echoed: the vetted sentence stands in.
     assert "the owner's own words" not in response.text
+
+
+# -- V2-3: the fork's optional auto-tag intent ------------------------------
+
+
+async def test_auto_tag_records_the_childs_fork_time_revision(tmp_path: Path) -> None:
+    """The sidecar is the eligibility snapshot, written by the route that knew.
+
+    Its revision is the child's revision AT FORK TIME (zero for a fresh child),
+    not a value re-read when naming runs; that is what makes a pre-first-turn
+    manual edit win later.
+    """
+    remote = FakeRemote()
+    app = _app(tmp_path, remote)
+    root = tmp_path / "cfg"
+    (root / "sessions" / CHILD_ID).mkdir(parents=True)
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/desktop/sessions/s1/fork",
+            json={"request_id": REQUEST_ID, "auto_tag": True},
+        )
+
+    assert response.status_code == 200, response.text
+    sidecar = json.loads((root / "sessions" / CHILD_ID / "auto-tag.json").read_text())
+    assert sidecar == {"version": 1, "auto_tag": True, "tags_revision": "0"}
+    # The routed-slash wire is untouched: the flag never travels to the owner.
+    assert remote.slashes == [("fork", "")]
+
+
+async def test_auto_tag_absent_or_false_writes_no_sidecar(tmp_path: Path) -> None:
+    """An older client sends neither the key nor the sidecar; nothing changes."""
+    for index, body in enumerate(
+        ({"request_id": REQUEST_ID}, {"request_id": BLANK_REQUEST_ID, "auto_tag": False})
+    ):
+        remote = FakeRemote()
+        app = _app(tmp_path / str(index), remote)
+        root = tmp_path / str(index) / "cfg"
+        (root / "sessions" / CHILD_ID).mkdir(parents=True)
+        async with _client(app) as client:
+            response = await client.post("/v1/desktop/sessions/s1/fork", json=body)
+
+        assert response.status_code == 200, response.text
+        assert not (root / "sessions" / CHILD_ID / "auto-tag.json").exists(), body
+        assert remote.slashes == [("fork", "")]
+
+
+async def test_auto_tag_does_not_overwrite_an_already_tagged_child(tmp_path: Path) -> None:
+    """A child that arrives with tags gets no intent: human assignments win."""
+    remote = FakeRemote()
+    app = _app(tmp_path, remote)
+    root = tmp_path / "cfg"
+    (root / "sessions" / CHILD_ID).mkdir(parents=True)
+    (root / "tags" / "session").mkdir(parents=True)
+    (root / "tags" / "categories.json").write_text(
+        json.dumps({"version": 1, "categories": [{"id": "a1b2c3d4e5", "name": "Review"}]})
+    )
+    (root / "tags" / "session" / f"{CHILD_ID}.json").write_text(
+        json.dumps({"version": 1, "tags": ["a1b2c3d4e5"], "primary": "a1b2c3d4e5", "revision": 3})
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/desktop/sessions/s1/fork",
+            json={"request_id": REQUEST_ID, "auto_tag": True},
+        )
+
+    assert response.status_code == 200, response.text
+    assert not (root / "sessions" / CHILD_ID / "auto-tag.json").exists()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -88,6 +89,14 @@ class Fork(Input):
     #: real. Existence is checked against the conversation, so a foreign id is a
     #: refusal, never a fork of the wrong history.
     entry_id: str | None = Field(default=None, max_length=128)
+    #: Whether the child inherits the desktop UI's auto-tag intent. Added for
+    #: LOH-11 V2-3 with a default of false, which is the whole backward-compat
+    #: contract in this direction: an older client that never sends the key
+    #: forks exactly as it did before, and only a core that advertises
+    #: ``features.session_tags_auto_tag`` may be sent it at all — ``Input``
+    #: forbids unknown keys, so a newer client must ask the capability before
+    #: it sends one (see ``server/features.py``).
+    auto_tag: StrictBool = False
 
     @model_validator(mode="after")
     def target_matches_boundary(self):
@@ -477,6 +486,20 @@ async def fork(session_id: str, body: Fork, request: Request):
             payload = json.dumps({"entry_id": body.entry_id}) if body.entry_id else ""
             result = await bridge.remote.route_shared_slash("fork", payload)
             child_id = result["data"]["session_id"]
+            if body.auto_tag:
+                # Imported HERE, like the desktop tag routes' own store import:
+                # the naming graph (which ``auto_tag`` pulls in) stays off the
+                # server's boot path, and this branch runs only for the clients
+                # that asked for the feature. The sidecar is written HERE rather
+                # than by the runtime that forked because this route is the only
+                # place that knows the human enabled auto-tagging on this
+                # request. It records the child's fork-time revision, which is
+                # the eligibility snapshot the naming write is later conditioned
+                # on; it never raises, so a successful fork cannot become an
+                # error response merely because the marker could not be written.
+                from local_operator.session import auto_tag
+
+                await asyncio.to_thread(auto_tag.record_fork, host(request).root, child_id)
             data: dict[str, Any] = {
                 "session_id": child_id,
                 "parent_id": session_id,

@@ -26,6 +26,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.providers.model_access import REHOME_BUSY_REPLY
+from local_operator.session import auto_tag, naming, session_tags
 from local_operator.session.frontend_state import SlashResult as _SlashResult
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import (
@@ -4172,3 +4173,175 @@ async def test_rehome_reports_a_switch_that_did_not_take(monkeypatch: pytest.Mon
 
     assert detail == "kept: the switch did not take (still radient/auto)"
     assert session.model_label == "radient/auto"
+
+
+# -- V2-3: fork auto-tagging in the naming worker ---------------------------
+
+
+def _auto_tag_handle(tmp_path: Path) -> tuple[ServingSessionHandle, FakeSession]:
+    """A handle whose own config root IS ``tmp_path`` — the sidecar's store."""
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    # The store validates 12-hex session ids; the module default is a label.
+    session.session_id = "abcdef123456"
+    (tmp_path / "sessions" / session.session_id).mkdir(parents=True)
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path), config_dir=tmp_path)
+    return handle, session
+
+
+def _seed_categories(root: Path, *names: str) -> list[str]:
+    return [
+        item["id"] for item in session_tags.write_categories(root, [(None, name) for name in names])
+    ]
+
+
+async def _settle(handle: ServingSessionHandle) -> None:
+    """Wait for the detached naming worker, including its ``to_thread`` store work.
+
+    A few bare ``sleep(0)`` turns are not enough once the worker parks on a
+    thread for the tag write: the task must be awaited to its own completion,
+    or the assertions race the write's ``finally``.
+    """
+    await asyncio.sleep(0)
+    pending = list(handle._background_tasks)
+    if pending:
+        await asyncio.gather(*pending)
+
+
+@pytest.mark.asyncio
+async def test_the_fork_intent_rides_the_naming_call_and_assigns_once(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review, project = _seed_categories(tmp_path, "Review", "Project")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    reply = f"<title>Billing importer rewrite</title>" f"<tags>{review},{project}</tags>"
+    # Two samples: no fit seam means the clean first sample is HEDGED, and the
+    # second (verified) sample is the accepted one — so it must carry the tags
+    # this test expects to be written.
+    session.title_replies = [reply, reply]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    system, prompt = session._complete_calls[0]
+    assert "<available-tags" in system
+    assert "a1b2c3d4e5" not in prompt  # the tag list is prefix, not the excerpt
+    state = session_tags.read_entity_tags(tmp_path, "session", session.session_id)
+    assert state["tags"] == [review, project]
+    assert state["primary"] == review
+    assert auto_tag.read(tmp_path, session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_manual_add_then_clear_before_the_first_turn_wins(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review, _ = _seed_categories(tmp_path, "Review", "Project")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    # The human tags the fork and clears it again before the first turn. The
+    # VALUE is empty; the revision moved, and the sidecar's snapshot is stale.
+    session_tags.set_entity_tags(tmp_path, "session", session.session_id, [review], review)
+    session_tags.set_entity_tags(tmp_path, "session", session.session_id, [], None)
+    reply = f"<title>Billing importer rewrite</title><tags>{review}</tags>"
+    session.title_replies = [reply, reply]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert auto_tag.read(tmp_path, session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_category_deleted_during_the_call_is_dropped_at_write(
+    tmp_path: Path,
+) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review, project = _seed_categories(tmp_path, "Review", "Project")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+
+    async def complete(system: str, prompt: str) -> str:
+        # The provider call is long enough for the registry to move.
+        session_tags.write_categories(tmp_path, [(project, "Project")])
+        return f"<title>Billing importer rewrite</title><tags>{review}</tags>"
+
+    session.complete_once = complete  # type: ignore[method-assign]
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert [item["id"] for item in session_tags.read_categories(tmp_path)] == [project]
+
+
+@pytest.mark.asyncio
+async def test_without_an_intent_the_prompt_is_byte_identical(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    _seed_categories(tmp_path, "Review")
+    session.title_replies = [
+        "<title>Billing importer rewrite</title>",
+        "<title>Billing importer rewrite</title>",
+    ]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session._complete_calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_registry_spends_the_intent_without_a_block_or_write(
+    tmp_path: Path,
+) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    session.title_replies = [
+        "<title>Billing importer rewrite</title><tags>whatever</tags>",
+        "<title>Billing importer rewrite</title>",
+    ]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session._complete_calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert auto_tag.read(tmp_path, session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_no_accepted_title_writes_nothing_and_keeps_the_intent(
+    tmp_path: Path,
+) -> None:
+    """A failed/declined call is not the naming answer the intent is spent on."""
+    handle, session = _auto_tag_handle(tmp_path)
+    _seed_categories(tmp_path, "Review")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    session.title_replies = ["<title/>"]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == ""
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    # The latch allows one retry while unnamed; the intent rides it rather than
+    # being spent on an answer that never accepted a title.
+    assert auto_tag.read(tmp_path, session.session_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_heal_never_reads_the_fork_intent(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review = _seed_categories(tmp_path, "Review")[0]
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    session.title_replies = [
+        f"<title>Billing importer rewrite</title><tags>{review}</tags>",
+        f"<title>Billing importer rewrite</title><tags>{review}</tags>",
+    ]
+
+    await handle._name_conversation_worker("rewrite the billing importer", heal=True)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    assert session._complete_calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert auto_tag.read(tmp_path, session.session_id) is not None

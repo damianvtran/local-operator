@@ -665,3 +665,192 @@ def test_the_fit_state_carries_the_candidate_and_a_bounded_excerpt() -> None:
     assert "Candidate title" in state
     assert len(state) < 1200
     assert "\u2026" in state  # the module's one truncation marker
+
+
+# -- V2-3: the optional tag half of the first-name call ---------------------
+
+
+def _tag_contract() -> naming.TagContract:
+    """Three categories in display order, the shape the worker builds."""
+    return naming.TagContract(
+        (
+            ("a1b2c3d4e5", "Review"),
+            ("f6e5d4c3b2", "Project"),
+            ("0a1b2c3d4e", "Q3 planning"),
+        )
+    )
+
+
+def test_tag_set_hash_is_stable_and_moves_on_add_rename_and_reorder() -> None:
+    contract = _tag_contract()
+    base = naming.tag_set_hash(contract.tags)
+    assert base == naming.tag_set_hash(tuple(contract.tags))
+    assert base != naming.tag_set_hash(contract.tags[:2])
+    assert base != naming.tag_set_hash((("a1b2c3d4e5", "Renamed"),) + contract.tags[1:])
+    assert base != naming.tag_set_hash((contract.tags[1], contract.tags[0], contract.tags[2]))
+
+
+@pytest.mark.asyncio
+async def test_the_tag_block_is_a_stable_prefix_only_when_a_contract_is_supplied() -> None:
+    contract = _tag_contract()
+    replies = _Replies("<title>Fix the parser</title>", "<title>Fix the parser</title>")
+    fit = _FitCheck(naming.TITLE_FITS)
+    await naming.generate_title_acceptance(
+        "please repair the parser", replies, fit_check=fit, tag_contract=contract
+    )
+    await naming.generate_title_acceptance(
+        "please repair the parser", replies, fit_check=fit, tag_contract=contract
+    )
+
+    first, second = replies.calls
+    # Same set and order -> identical bytes, so the block is a stable prefix.
+    assert first == second
+    assert f'<available-tags hash="{contract.hash}">' in first[0]
+    assert "a1b2c3d4e5: Review\nf6e5d4c3b2: Project\n0a1b2c3d4e: Q3 planning" in first[0]
+    # The user half is unchanged: only the system prefix grew.
+    assert first[1] == "please repair the parser"
+
+    title_only = _Replies("<title>Fix the parser</title>")
+    await naming.generate_title_acceptance(
+        "please repair the parser", title_only, fit_check=_FitCheck(naming.TITLE_FITS)
+    )
+    assert title_only.calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert "<available-tags" not in title_only.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_same_line_and_newline_tag_blocks_parse_before_the_title() -> None:
+    contract = _tag_contract()
+    for raw in (
+        "<title>Fix the parser</title><tags>a1b2c3d4e5</tags>",
+        "<title>Fix the parser</title>\n<tags>a1b2c3d4e5</tags>",
+        "<title>Fix the parser</title>\n<tags>Review</tags>\n",
+    ):
+        replies = _Replies(raw)
+        acceptance = await naming.generate_title_acceptance(
+            "please repair the parser",
+            replies,
+            fit_check=_FitCheck(naming.TITLE_FITS),
+            tag_contract=contract,
+        )
+        assert acceptance.title == "Fix the parser", raw
+        assert acceptance.tags == ("a1b2c3d4e5",), raw
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_tag_block_keeps_the_title_and_assigns_nothing() -> None:
+    replies = _Replies("<title>Fix the parser</title>\n<tags>a1b2")
+    acceptance = await naming.generate_title_acceptance(
+        "please repair the parser", replies, tag_contract=_tag_contract()
+    )
+    assert acceptance.title == "Fix the parser"
+    assert acceptance.tags == ()
+
+
+@pytest.mark.asyncio
+async def test_tags_inside_the_title_body_are_title_text_and_the_gate_rejects_them() -> None:
+    replies = _Replies(
+        "<title>Fix <tags>a1b2c3d4e5</tags></title>",
+        "<title>Fix the parser</title>",
+    )
+    acceptance = await naming.generate_title_acceptance(
+        "please repair the parser", replies, tag_contract=_tag_contract()
+    )
+    # The first sample is rejected exactly as markup was rejected before tags;
+    # the corrective retry is tag-gated so it can still answer with a title.
+    assert acceptance.title == "Fix the parser"
+    assert acceptance.tags == ()
+    assert naming.TITLE_CORRECTIVE_ADDENDUM_TAGGED in replies.calls[1][0]
+    assert "<available-tags" in replies.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_only_the_accepted_samples_tags_are_kept() -> None:
+    # Dirty first sample whose tags are valid: its title loses, so its tags do.
+    replies = _Replies(
+        "<title><wrapped></title><tags>Review</tags>",
+        "<title>Recovered release triage</title>",
+    )
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, tag_contract=_tag_contract()
+    )
+    assert acceptance.title == "Recovered release triage"
+    assert acceptance.tags == ()
+
+    # The corrective sample's own tags are the ones written.
+    replies = _Replies(
+        "<title><wrapped></title><tags>Review</tags>",
+        "<title>Recovered release triage</title><tags>Project</tags>",
+    )
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, tag_contract=_tag_contract()
+    )
+    assert acceptance.title == "Recovered release triage"
+    assert acceptance.tags == ("f6e5d4c3b2",)
+
+
+@pytest.mark.asyncio
+async def test_a_dirty_hedge_keeps_the_first_samples_tags() -> None:
+    replies = _Replies(
+        "<title>First candidate</title><tags>Review</tags>",
+        "<title><wrapped></title><tags>Project</tags>",
+    )
+    fit = _FitCheck(naming.TITLE_CANT_TELL)
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, fit_check=fit, tag_contract=_tag_contract()
+    )
+    assert acceptance.title == "First candidate"
+    assert acceptance.tags == ("a1b2c3d4e5",)
+
+
+@pytest.mark.asyncio
+async def test_unknown_names_and_ids_assign_nothing_and_create_nothing() -> None:
+    for body in ("", "nope", "deadbeef00"):
+        replies = _Replies(f"<title>Fix the parser</title>\n<tags>{body}</tags>")
+        acceptance = await naming.generate_title_acceptance(
+            "please repair the parser", replies, tag_contract=_tag_contract()
+        )
+        assert acceptance.title == "Fix the parser", body
+        assert acceptance.tags == (), body
+
+
+@pytest.mark.asyncio
+async def test_tag_selection_dedupes_retains_order_and_caps_at_eight() -> None:
+    contract = naming.TagContract(tuple((f"{index:010x}", f"Tag {index}") for index in range(10)))
+    ids = [key for key, _ in contract.tags]
+    body = ",".join([ids[2], ids[0], ids[2]] + ids[3:11])
+    replies = _Replies(f"<title>Fix the parser</title><tags>{body}</tags>")
+    acceptance = await naming.generate_title_acceptance(
+        "please repair the parser",
+        replies,
+        fit_check=_FitCheck(naming.TITLE_FITS),
+        tag_contract=contract,
+    )
+    assert acceptance.tags == tuple([ids[2], ids[0]] + ids[3:9])
+
+
+@pytest.mark.asyncio
+async def test_tags_buy_no_extra_provider_call() -> None:
+    plain = _Replies("<title>Fix the parser</title>")
+    tagged = _Replies("<title>Fix the parser</title><tags>Review</tags>")
+    await naming.generate_title_acceptance("please repair the parser", plain)
+    await naming.generate_title_acceptance(
+        "please repair the parser", tagged, tag_contract=_tag_contract()
+    )
+    assert len(tagged.calls) == len(plain.calls)
+    assert len(plain.calls) == 2, "the title cascade's hedge is the only second call"
+
+
+@pytest.mark.asyncio
+async def test_the_retitle_prompt_and_corrective_addendum_stay_byte_identical() -> None:
+    replies = _Replies("<title><wrapped></title>", "<title>New theme</title>")
+    assert (
+        await naming.generate_retitle("Old theme", "new text", replies, turns=_theme_rows())
+        == "New theme"
+    )
+    assert replies.calls[0][0] == naming.THEME_SYSTEM_PROMPT
+    assert "<available-tags" not in replies.calls[0][0]
+    assert replies.calls[1][0] == (
+        f"{naming.THEME_SYSTEM_PROMPT}\n{naming.TITLE_CORRECTIVE_ADDENDUM}"
+    )
+    assert naming.TITLE_CORRECTIVE_ADDENDUM_TAGGED not in replies.calls[1][0]

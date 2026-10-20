@@ -4254,8 +4254,19 @@ class ServingSessionHandle(SessionHandle):
         the standing fallback (that is its whole purpose — a normal landing
         never displaces a stored title) and never re-arms itself.
         """
-        from local_operator.session import naming
+        from local_operator.session import auto_tag, naming
 
+        # Auto-tagging is a FIRST-NAME path only. The heal's job is to upgrade
+        # a Tier 3 fallback title, and the attempt that stored that fallback
+        # already settled the intent; reading the sidecar again here would let
+        # a retry claim tags after the row has been visible — and corrected —
+        # in the list.
+        intent = None if heal else self._auto_tag_intent()
+        tag_contract = (
+            await asyncio.to_thread(auto_tag.live_contract, intent.root)
+            if intent is not None
+            else None
+        )
         try:
             acceptance = await naming.generate_title_acceptance(
                 text,
@@ -4264,10 +4275,18 @@ class ServingSessionHandle(SessionHandle):
                 # classification layer has no attribute and the cascade hedges
                 # instead of asking. See ``naming.title_fit_check``.
                 fit_check=getattr(self._session, "title_fit_check", None),
+                tag_contract=tag_contract,
             )
         except Exception:  # noqa: BLE001 — naming is decoration; never fail a turn
             logger.debug("mobile conversation naming failed", exc_info=True)
             return
+        if intent is not None and acceptance.title:
+            # Only a title the cascade ACCEPTED may carry tags. ``settle`` is
+            # the one write and it also spends the sidecar, so the heal path
+            # and any later retry cannot re-apply; it never raises, and a
+            # revision conflict inside it is a human edit winning rather than
+            # a failure worth surfacing from a detached task.
+            await asyncio.to_thread(auto_tag.settle, intent, acceptance.tags)
         title = acceptance.title
         existing = getattr(self._session, "conversation_name", "")
         if not title or (existing and not heal):
@@ -4295,6 +4314,25 @@ class ServingSessionHandle(SessionHandle):
         self._session.set_conversation_name(title, user_set=False)
         self._refresh_state()
         self._notify()
+
+    def _auto_tag_intent(self) -> Any:
+        """The child's fork-time auto-tag intent, or ``None`` when not asked for.
+
+        Read from the session's OWN store, the same root the fork branch lands
+        a clone in (:func:`_fork_store`): the desktop route writes the sidecar
+        beside the child it created, so a runtime served out of another store
+        must look there rather than at this process's default root. The
+        sidecar is READ, not spent — :func:`auto_tag.settle` clears it only
+        after the naming attempt that accepted a title, which leaves a failed
+        call's intent for the next prompt's naming retry.
+        """
+        from local_operator.session import auto_tag
+
+        session_id = str(getattr(self._session, "session_id", "") or "")
+        if not session_id:
+            return None
+        root = self._config_dir or _fork_store(self._session)
+        return auto_tag.read(root, session_id)
 
     def _maybe_heal_name(self) -> None:
         """Spend the one-shot Tier 3 self-heal at a completed turn, if armed.
