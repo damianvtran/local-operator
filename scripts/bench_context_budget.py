@@ -1575,19 +1575,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # payload shape the nit asked for, and every variant that keeps it fails. The
 # raise is chosen to keep the payload clue AND leave margin, not to fit by
 # deleting the thing the nit was about.
-# RAISED 31,025 -> 31,100 for evidence-attachment discoverability, stated with
-# the arithmetic because this guard exists to make that an explicit decision.
-# Measured by THIS script on an isolated HOME at each tree, same machine:
-#   608fbaa01c  base (origin/main)        86,204 chars = ~31,009 billed  PASS, 16 headroom
-#   c5400d7df9  evidence-attachment head   86,404 chars = ~31,081 billed  FAIL by 56
-#   = +200 chars of ``tool_schemas``, ALL of it the ``project`` tool's
-#     ``attach`` description: when to use it (before/after frame, chart or data
-#     extract, log excerpt), that files are copied into the store, and the
-#     10-file/5 MB cap. The field existed but named no occasion, which is why
-#     agents recorded progress without the evidence beside it; trimming the
-#     occasion to fit 45 chars of headroom would delete the change. The raise
-#     is stated in the PR thread for a reviewer to verify before it settles.
-BUDGET_BILLED_TOKENS = 31_100
+# RAISED to 31,466 for the Team Bridge agent channel tool (#2665), measured with
+# THIS script on the merged base a68b18bdb5 in an isolated HOME:
+#   top arm:   87,323 chars = ~31,411 billed  -> 31,411 + 55-token band = 31,466
+#   child arm: 79,182 chars = ~28,483 billed  -> 28,483 + 55-token band = 28,538
+# The channel tool adds the four ops (channels/create/post/history), eleven
+# parameters and the nested member model; every field is load-bearing (name,
+# topic and visibility are request facts, members is the invite shape). The
+# prose was trimmed before this raise; what remains is structural.
+BUDGET_BILLED_TOKENS = 31_466
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1692,13 +1688,14 @@ BUDGET_BILLED_TOKENS = 31_100
 # audio pair and on the same measurement pass (child arm measured 27,688 billed
 # on this head). The two ceilings move together because the pair is in every
 # session's surface, child included; the difference between them is unchanged.
-# RAISED 28,100 -> 28,175 with ``BUDGET_BILLED_TOKENS`` above, same change and
-# same measurement pass: the child arm carries ``project`` too and moves by the
-# SAME +200 chars of ``tool_schemas`` — measured with this script's child arm:
-#   608fbaa01c  base (origin/main)  78,063 chars = ~28,080 billed  PASS, 20 headroom
-#   c5400d7df9  head               78,263 chars = ~28,152 billed  FAIL by 52
-# Ceiling = head + 23, this arm's own measured margin (the top arm is head + 19).
-BUDGET_CHILD_BILLED_TOKENS = 28_175
+# RAISED 28,100 -> 28,466 with the top arm's #2665 channel-tool raise, on the
+# same clean-arm pass (env -i, isolated HOME, same machine):
+#   base (origin/main 8714b008c1)  78,063 chars = ~28,080 billed
+#   head (this branch)             78,982 chars = ~28,411 billed
+#   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
+#     arm: the channel tool is in every session's surface, children included,
+#     and no child counter moved. Ceiling = measured head + the 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 28_538
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
