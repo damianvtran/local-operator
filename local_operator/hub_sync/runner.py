@@ -310,6 +310,13 @@ class HubSyncRunner:
                     continue
                 if policy is not None and not policy.subscribe:
                     continue
+                # A SUBSCRIBED-BUT-ABSENT SKILL IS CHECKED, NEVER INSTALLED
+                # unattended. Installing is an explicit pull: writing a copy the
+                # operator never asked for is the same class of surprise as
+                # clobbering local edits, and the absent state is the recorded
+                # fact that says there is nothing here to update yet.
+                if c.kind == "skill" and c.content_state == "absent":
+                    continue
                 # A prompt-too-long item keeps a cheap SCHEDULED retry but only
                 # re-sends when the input/config fingerprint moved; a plain
                 # due-time check would spend tokens re-learning "still too long"

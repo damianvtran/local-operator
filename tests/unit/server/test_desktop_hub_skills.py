@@ -1001,3 +1001,117 @@ async def test_a_crash_in_the_rename_window_keeps_the_grant_and_recovers(api, mo
     assert record is not None and record.lineage == "clean"
     kept = pol.stored_link_policy(read_config_values(root) or {}, identity.link_id)
     assert kept is not None and kept.auto_push is True
+
+
+# -- subscribe / unpull -------------------------------------------------------------
+
+
+def subscribe_body(**fields: Any) -> dict[str, Any]:
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "hub_id": HUB_ID,
+        "hub_source": BASE,
+        "visibility": "public",
+        "tenant_id": None,
+        "local_alias": ALIAS,
+    }
+    body.update(fields)
+    return body
+
+
+async def test_a_subscribe_links_without_installing_and_replays(api) -> None:
+    """The link exists with no bytes; the same request returns the same link."""
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    body = subscribe_body()
+
+    response = await client.post("/v1/desktop/hub/skills/subscribe", json=body)
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    assert row["kind"] == "skill" and row["name"] == ALIAS
+    assert row["content_state"] == "absent" and row["local_path"] is None
+    assert row["policy"]["subscribe"] is True and row["policy"]["auto_push"] is False
+    assert row["eligibility"]["can_auto_push"] is False
+    assert row["auto_will_apply"] is False
+    assert nothing_installed(root)
+
+    record = prov.read_baseline(root, "skill", row["local_id"])
+    assert record is not None and record.content_state == "absent"
+    assert record.local_alias == ALIAS and record.identity is not None
+    assert record.recorded_by == "subscribe"
+    assert record.fields == manifest()  # the remote text this link names
+    assert len(holder["anon"].calls) == 1
+
+    # The same request id replays the stored response: no second fetch, no
+    # second baseline (the receipts discipline every mutation shares).
+    replayed = await client.post("/v1/desktop/hub/skills/subscribe", json=body)
+    replayed_result = dict(replayed.json()["result"])
+    assert replayed_result.pop("replayed", None) is True
+    assert replayed_result == response.json()["result"]
+    assert len(holder["anon"].calls) == 1
+
+    # The capability-gated inventory carries the state a client renders.
+    listed = await client.get("/v1/desktop/hub/links", params={"kind": "skill"})
+    (link_row,) = listed.json()["result"]["links"]
+    assert link_row["link_id"] == row["link_id"]
+    assert link_row["content_state"] == "absent" and link_row["local_path"] is None
+
+    # Replay, not a duplicate: a fresh request id returns the SAME link.
+    again = await client.post(
+        "/v1/desktop/hub/skills/subscribe", json={**body, "request_id": str(uuid.uuid4())}
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["result"]["link"]["link_id"] == row["link_id"]
+    assert len([r for r in prov.iter_baselines(root) if r.kind == "skill"]) == 1
+
+
+async def test_the_unpull_route_removes_the_copy_and_keeps_the_link(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    pulled = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    link = pulled.json()["result"]["link"]
+    assert (root / "skills" / ALIAS).exists()
+
+    body = {"request_id": str(uuid.uuid4()), "link_id": link["link_id"]}
+    response = await client.post("/v1/desktop/hub/skills/unpull", json=body)
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    assert row["link_id"] == link["link_id"] and row["content_state"] == "absent"
+    assert row["local_path"] is None
+    assert not (root / "skills" / ALIAS).exists()
+    record = prov.read_baseline(root, "skill", link["local_id"])
+    assert record is not None and record.identity == linked_identity(link)
+    assert record.content_state == "absent"
+
+    # Unpull is a state transition, so repeating it succeeds with the same row.
+    again = await client.post(
+        "/v1/desktop/hub/skills/unpull", json={**body, "request_id": str(uuid.uuid4())}
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["result"]["link"]["content_state"] == "absent"
+
+
+async def test_a_public_subscribe_of_an_org_skill_is_one_plain_404(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, org_envelope(manifest()))
+
+    foreign = await client.post("/v1/desktop/hub/skills/subscribe", json=subscribe_body())
+    holder["anon"] = SkillClient(BASE, APIError("Not Found", status_code=404))
+    missing = await client.post("/v1/desktop/hub/skills/subscribe", json=subscribe_body())
+
+    # The PULL arm refuses the same row identically: one body for "missing" and
+    # "not yours", on both the install and the subscribe path.
+    holder["anon"] = SkillClient(BASE, org_envelope(manifest()))
+    pulled_foreign = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    holder["anon"] = SkillClient(BASE, APIError("Not Found", status_code=404))
+    pulled_missing = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+
+    assert foreign.status_code == 404 and missing.status_code == 404
+    assert foreign.json() == missing.json()
+    assert pulled_foreign.status_code == 404
+    assert pulled_foreign.json() == pulled_missing.json() == missing.json()
+    assert nothing_installed(root)
+    assert not [r for r in prov.iter_baselines(root) if r.kind == "skill"]

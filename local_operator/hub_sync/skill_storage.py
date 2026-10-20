@@ -10,10 +10,14 @@ and preserves unexpected edits instead of restoring a stale snapshot.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import re
 import shutil
+import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterator, Mapping
 
@@ -24,6 +28,7 @@ from local_operator.hub_sync.policies import materialize_policy, read_policy
 from local_operator.hub_sync.provenance import (
     BaselineRecord,
     alias_owner,
+    baseline_path,
     parse_baseline_record,
     read_baseline,
     write_baseline,
@@ -35,7 +40,13 @@ from local_operator.hub_sync.transactions import (
     TransactionJournal,
     _sync_ancestors,
     _sync_directory,
+    atomic_json,
 )
+
+logger = logging.getLogger(__name__)
+
+#: The exact tombstone suffix unpull mints: ``uuid.uuid4().hex``.
+_UNPULL_OPERATION = re.compile(r"^[a-f0-9]{32}$")
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,28 @@ class ManagedSkillStorage:
         self.config_dir = Path(config_dir).expanduser().resolve()
         self.root = self.config_dir / "skills"
         self.journal = TransactionJournal(self.config_dir)
+
+    # -- unpull (content removal that keeps the link) -------------------------------
+
+    def unpull_marker(self, local_id: str) -> Path:
+        """The intent record for one unpull, named from the validated baseline path.
+
+        ``baseline_path`` validates ``local_id`` as a single safe path segment; reusing
+        it means the marker cannot be aimed outside ``hub/unpull`` by a crafted id.
+        """
+        return (
+            self.config_dir
+            / "hub"
+            / "unpull"
+            / baseline_path(self.config_dir, "skill", local_id).name
+        )
+
+    def _tombstone(self, local_id: str, operation: str) -> Path:
+        return self.config_dir / "hub" / "backups" / f"skill-{local_id}-unpull-{operation}"
+
+    def _record_absent(self, record: BaselineRecord) -> None:
+        """The state write half of unpull, separated so recovery and tests can name it."""
+        write_baseline(self.config_dir, replace(record, content_state="absent"))
 
     def path(self, alias: str) -> Path:
         validate_name(alias)
@@ -75,9 +108,15 @@ class ManagedSkillStorage:
     def snapshot(self, local_id: str) -> SkillSnapshot:
         with config_write_lock(self.config_dir):
             self.recover(local_id=local_id)
+            # A crashed unpull is settled BEFORE the record is read, so a reader
+            # either sees the content (the rename never happened) or the explicit
+            # absent state (the rename did) -- never the gap between the two.
+            self._recover_unpull_locked(local_id=local_id)
             record = read_baseline(self.config_dir, "skill", local_id)
             if record is None or record.local_alias is None:
                 raise LinkError("baseline-unknown", "managed skill has no recorded local alias")
+            if record.content_state == "absent":
+                raise LinkError("local-concurrent-edit", "managed skill is absent locally")
             document = self._document(record.local_alias)
             if document is None:
                 raise LinkError("local-concurrent-edit", "managed skill is missing locally")
@@ -210,6 +249,12 @@ class ManagedSkillStorage:
         notify = checkpoint or (lambda _phase: None)
         with config_write_lock(self.config_dir):
             self.recover(local_id=identity.local_id)
+            # A completed-then-crashed unpull leaves an intent marker (and its
+            # tombstone) behind. Content is about to be written, so settle it
+            # FIRST: an old marker left lying would later let a genuine loss be
+            # read as a deliberate absence. Settling also aborts a marker whose
+            # rename never happened, which leaves the content this call expects.
+            self._recover_unpull_locked(local_id=identity.local_id)
             current_record = read_baseline(self.config_dir, "skill", identity.local_id)
             current = self._document(alias)
             # ALIAS OWNERSHIP IS DURABLE, NOT LIVE-DIRECTORY-LOCAL. A crash
@@ -343,6 +388,193 @@ class ManagedSkillStorage:
                 with self.journal.claim(transaction.operation_id) as claimed:
                     if claimed:
                         self._recover_one(transaction)
+
+    # -- unpull: remove the managed copy, keep the link ------------------------------
+
+    def unpull(self, local_id: str) -> BaselineRecord:
+        """Remove one skill's managed directory and record ``content_state: absent``.
+
+        The link is the membership: baseline, alias reservation and policy all stay,
+        so a later check/apply can reinstall from the same origin and no other origin
+        can claim the alias meanwhile. The removal is a SAME-FILESYSTEM rename into
+        the hub backup area (atomic, so a reader never sees a half-deleted directory),
+        then the state write, then the tombstone is dropped. The intent marker is what
+        makes the gap recoverable: a crash after the rename leaves the marker and the
+        tombstone, and :meth:`recover_unpull` finishes the state write from that
+        evidence instead of inferring absence from a missing directory.
+
+        Already-absent is a no-op success -- unpull is an idempotent state transition,
+        not a delete, so a retried request must not fail on its own earlier effect.
+        """
+        with config_write_lock(self.config_dir):
+            # Settle a crashed PULL first, exactly as a reader does: its journal
+            # may be mid-swap, and unpull must see the real destination (or none)
+            # instead of refusing a stale state.
+            self.recover(local_id=local_id)
+            self._recover_unpull_locked(local_id=local_id)
+            record = read_baseline(self.config_dir, "skill", local_id)
+            if record is None or record.identity is None or record.local_alias is None:
+                raise LinkError("baseline-unknown", "managed skill has no recorded local alias")
+            if record.content_state == "absent":
+                return record
+            alias = record.local_alias
+            destination = self.path(alias)
+            if not destination.exists():
+                # No marker and no directory: this is the genuine loss the check
+                # already reports, not a state this route may paper over.
+                raise LinkError("local-concurrent-edit", "managed skill is missing locally")
+            if not destination.is_dir():
+                raise LinkError(
+                    "origin-conflict", "managed alias is occupied by another local artifact"
+                )
+            operation = uuid.uuid4().hex
+            tombstone = self._tombstone(local_id, operation)
+            marker = self.unpull_marker(local_id)
+            for directory in (
+                self.config_dir / "hub",
+                marker.parent,
+                tombstone.parent,
+            ):
+                if directory.is_symlink():
+                    raise LinkError("skill-validation", "managed skill unpull path is unsafe")
+            marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tombstone.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _sync_ancestors(marker.parent, self.config_dir / "hub")
+            _sync_ancestors(tombstone.parent, self.config_dir / "hub")
+            atomic_json(
+                marker,
+                {
+                    "operation": operation,
+                    "local_id": local_id,
+                    "alias": alias,
+                    "tombstone": tombstone.name,
+                },
+            )
+            os.replace(destination, tombstone)
+            # A rename changes entries in BOTH directories: the removal in the
+            # skills root and the addition in the backups root. Syncing only one
+            # leaves a power-loss window where the tombstone is absent and the
+            # state write lands anyway -- the fourth case, a link that reports
+            # content it cannot show.
+            _sync_directory(self.root)
+            _sync_directory(tombstone.parent)
+            self._record_absent(record)
+            marker.unlink(missing_ok=True)
+            # Deleting the tombstone is allowed once the state is durable: the
+            # link no longer points at those bytes and no reader resolves them.
+            shutil.rmtree(tombstone, ignore_errors=True)
+            _sync_directory(tombstone.parent)
+            settled = read_baseline(self.config_dir, "skill", local_id)
+            return settled if settled is not None else replace(record, content_state="absent")
+
+    def recover_unpull(self, *, local_id: str | None = None) -> None:
+        """Public recovery entry for a caller that is not already holding the lock."""
+        with config_write_lock(self.config_dir):
+            self._recover_unpull_locked(local_id=local_id)
+
+    def _recover_unpull_locked(self, *, local_id: str | None = None) -> None:
+        """Settle crashed unpull attempts from their durable evidence.
+
+        Only the THIRD case may WRITE ``absent``:
+
+        * state already absent -> the state write landed; drop any leftover marker
+          and tombstone;
+        * destination still present -> the rename never happened; abort the intent
+          and leave the content exactly as it is;
+        * destination gone AND tombstone present -> our rename happened and the
+          state write did not; finish it, then drop the tombstone.
+
+        Destination gone with NO tombstone is the fourth case and is DELIBERATELY
+        not settled: nothing proves the copy was ours to remove, so the marker is
+        dropped and the genuine loss stays the error it is today.
+        """
+
+        if local_id is not None:
+            markers = [self.unpull_marker(local_id)]
+        else:
+            directory = self.config_dir / "hub" / "unpull"
+            try:
+                markers = sorted(directory.glob("skill-*.json"))
+            except OSError:
+                return
+        for marker in markers:
+            if not marker.exists():
+                continue
+            if marker.is_symlink():
+                logger.warning("ignoring symlinked unpull marker %s", marker)
+                continue
+            try:
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                logger.warning("ignoring unreadable unpull marker %s", marker)
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            attempted_id = payload.get("local_id")
+            marker_id = marker.name[len("skill-") : -len(".json")]
+            if not isinstance(attempted_id, str) or attempted_id != marker_id:
+                continue
+            # The id must be ONE safe path segment; ``baseline_path`` is the
+            # same validator every other hub path uses, and its basename is
+            # exactly this marker's expected name.
+            try:
+                expected_marker = baseline_path(self.config_dir, "skill", attempted_id)
+            except Exception:  # noqa: BLE001 - a tampered id names no marker of ours
+                logger.warning("ignoring malformed unpull marker %s", marker)
+                continue
+            if marker.name != expected_marker.name:
+                continue
+            if local_id is not None and attempted_id != local_id:
+                continue
+            operation = payload.get("operation")
+            alias = payload.get("alias")
+            tombstone_name = payload.get("tombstone")
+            expected_tombstone = f"skill-{attempted_id}-unpull-{operation}"
+            # THE TOMBSTONE MUST BE EXACTLY ONE NAME UNDER hub/backups. The
+            # operation is a uuid4 hex and the id is validated above, so the
+            # equality check alone confines it -- but the separator/traversal
+            # checks are stated explicitly because this is the ALLOW-LISTED
+            # ``rmtree``: on Windows a backslash is a separator too, and a
+            # crafted marker must never aim this call at another directory
+            # (``..\..\sessions\<id>``). No path is joined before this passes.
+            if (
+                not isinstance(operation, str)
+                or not _UNPULL_OPERATION.fullmatch(operation)
+                or not isinstance(alias, str)
+                or not isinstance(tombstone_name, str)
+                or tombstone_name != expected_tombstone
+                or any(separator in tombstone_name for separator in ("/", "\\"))
+                or ".." in tombstone_name
+            ):
+                logger.warning("ignoring malformed unpull marker %s", marker)
+                continue
+            record = read_baseline(self.config_dir, "skill", attempted_id)
+            if record is None:
+                marker.unlink(missing_ok=True)
+                continue
+            if record.local_alias != alias:
+                # The alias cannot change for one local id; a marker naming another
+                # one belongs to a superseded attempt and cannot describe this copy.
+                marker.unlink(missing_ok=True)
+                continue
+            tombstone = self.config_dir / "hub" / "backups" / tombstone_name
+            if record.content_state == "absent":
+                marker.unlink(missing_ok=True)
+                shutil.rmtree(tombstone, ignore_errors=True)
+                continue
+            try:
+                destination = self.path(alias)
+            except LinkError:
+                continue
+            if destination.exists():
+                marker.unlink(missing_ok=True)
+                continue
+            if not tombstone.exists():
+                marker.unlink(missing_ok=True)
+                continue
+            self._record_absent(record)
+            marker.unlink(missing_ok=True)
+            shutil.rmtree(tombstone, ignore_errors=True)
 
     def _recover_one(self, transaction: LocalTransaction) -> None:
         if transaction.phase == "blocked":

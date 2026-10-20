@@ -3055,6 +3055,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Removes ONLY this operation's own staged tree under <config_dir>/hub/staging/",
     ),
+    # UNPULL. Every path is built from validated pieces: the managed root
+    # <config_dir>/skills/<alias> (``validate_name`` authenticates a single
+    # kebab-case segment), the intent marker <config_dir>/hub/unpull/
+    # skill-<local_id>.json (``baseline_path`` validates the opaque id) and the
+    # tombstone <config_dir>/hub/backups/skill-<local_id>-unpull-<hex>. The
+    # replace MOVES the managed copy into that tombstone, the unlink removes
+    # this id's own marker, and the rmtree removes ONLY our tombstone -- no
+    # call accepts a session id, a sessions/ path or a caller-named directory.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "os.replace",
+        "Moves <config_dir>/skills/<validated alias> to its own hub/backups tombstone",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "<path>.unlink",
+        "Removes this skill id's own intent marker under <config_dir>/hub/unpull/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "shutil.rmtree",
+        "Removes ONLY the tombstone this unpull minted under <config_dir>/hub/backups/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
+        "<path>.unlink",
+        "Removes validated skill-unpull markers under <config_dir>/hub/unpull/ (six branches)",
+        6,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
+        "shutil.rmtree",
+        "After the state write, removes ONLY the marker's own hub/backups tombstone",
+        2,
+    ),
     # The local transaction journal's one JSON writer. Its ONLY caller passes
     # TransactionJournal._path(op-id): <config_dir>/hub/transactions/<validated id>.json
     # with a same-directory mkstemp temp -- never a session-derived path.
