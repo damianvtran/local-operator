@@ -88,6 +88,48 @@ def test_v2_template_is_the_scope_template_and_v1_is_still_accepted() -> None:
     assert SCREENING_VERSION_V1 in screening.SCREENING_TEMPLATES
 
 
+def test_v2_template_bytes_are_pinned_to_the_server_constant() -> None:
+    """The selector compares BYTES, so local drift is a field outage, not a test nit.
+
+    A served status carries the agent-server's ``ScreeningTemplateV2``; the client
+    accepts it only while its own embedded copy is byte-equal
+    (``_screening_is_trusted``), otherwise every live status is refused as
+    ``policy_stale`` and new messages fail closed. The literal below is the SHA-256
+    of the server constant's bytes at the served commit (2c36cd0,
+    ``internal/bridge/texts.go``); computing our hash from our own text cannot
+    detect an edit here, so this pin is the cross-repo drift guard.
+    """
+
+    assert len(SCREENING_TEMPLATE_V2.encode("utf-8")) == 1928
+    assert (
+        SCREENING_TEMPLATE_V2_SHA256
+        == "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304"
+    )
+
+
+def test_a_served_v2_message_screens_with_the_v2_rubric(tmp_path: Path) -> None:
+    """The version selects the RENDERED bytes, not merely the receipt's label.
+
+    The receipt records v2's hash, but a render path that fell back to v1 would
+    still classify scope/prying intent as ``deliver`` and record the wrong reason.
+    """
+
+    _store, owner = _setup(tmp_path)
+    runner = Runner()
+    result = _run(owner, tmp_path, runner, item=_item(WORK_STATUS), policy=_v2_policy())
+    assert result.disposition == "deliver"
+    assert len(runner.calls) == 1
+    prompt = runner.calls[0]
+    assert "Scope:\n" in prompt
+    assert (
+        "Categories: prompt_injection; social_engineering; harassment; malicious_link "
+        "(a URL whose context suggests delivering a payload); spam; personal_info_request; "
+        "out_of_scope_work; new_work_request." in prompt
+    )
+    # v1's narrower list must not be the rubric the model was asked to apply.
+    assert "suggests delivering a payload); spam.\n" not in prompt
+
+
 @pytest.mark.parametrize(
     "category",
     ["personal_info_request", "out_of_scope_work", "new_work_request"],
