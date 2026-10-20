@@ -76,11 +76,27 @@ Left in their tree, this is litter they cannot tell apart from output.
   is stopped before the child exists; the ordinary absolute/two-spelling forms
   and `cd "<pad>" && …` are resolved, and a rename wholly inside the pad or a
   `mkdir -p` of an existing directory still runs because it adds no bytes.
+  A `bash` command that starts UNDER the cap is also watched WHILE IT RUNS —
+  but only when the command NAMES the pad or runs with its working directory
+  inside it: the harness re-measures the pad about once a second, and a command
+  whose process group takes the pad over the configured cap is stopped during the
+  command with an actionable error instead of being reported after the bytes are
+  on disk. A pad that is ALREADY over cap is not watched during the command —
+  recovery commands (`rm`, a shrinking overwrite) run; a creating command that
+  names the pad is still refused before it runs; the after-the-fact line
+  reports. An unrelated long command (`pytest`, `git`) is not watched and pays
+  no walk.
   **KNOWN MISS: a destination assembled from an arbitrary shell variable
   (`D="$PAD/x"; mkdir "$D"`) is not resolved before the child exists** — the
   after-the-fact line still reports what it left behind, so treat this as the
-  backstop rather than complete shell coverage. Reads and shrinks (`ls`, `rm`)
-  always run. A command that names the pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its
+  backstop rather than complete shell coverage; the line remains for every
+  command that names the pad or runs with its working directory inside it,
+  including one that finishes under the cap or writes through a path the
+  watchdog cannot attribute to the pad. **KNOWN BLIND SPOT: a child that only
+  reads `LOCAL_OPERATOR_SCRATCHPAD` from its environment, without naming the pad
+  and with a cwd outside it, gets neither the live watch nor the after-the-fact
+  line.** Reads and shrinks (`ls`, `rm`) always run. A command that names the
+  pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its
   path, or a leading `~/`, `$HOME/` or `${HOME}/` spelling of it) also carries
   the `[scratch]` line when it ran and left the pad over its budget or entry
   cap, or put a refused name in it — whether it spelled the name or copied it

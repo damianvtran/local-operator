@@ -1,0 +1,19 @@
+{
+  "wire.memory.title": "Bộ nhớ",
+  "wire.memory.command": "Xem, tìm kiếm, sửa hoặc quên bộ nhớ theo phạm vi",
+  "wire.memory.description": "Truy hồi cục bộ có giới hạn và ghi lại khi nén trong khả năng cho phép; các dữ kiện truy xuất được không đáng tin.",
+  "wire.memory.enabled.label": "Bộ nhớ theo phạm vi",
+  "wire.memory.enabled.help": "Bật kho bộ nhớ SQLite có giới hạn. Tắt mục này không xóa các dữ kiện đã lưu.",
+  "wire.memory.capture.label": "Ghi lại khi nén",
+  "wire.memory.capture.help": "Ghi lại các quyết định, mục tiêu và tiến độ sau khi các lần nén đã hoàn tất; context-full cũng dùng lại bản tóm tắt sẵn có. Việc lưu tường minh vẫn là cách bảo đảm để ghi mục tiêu và quyết định.",
+  "wire.memory.capture.locators.label": "Ghi kèm ngữ cảnh tham chiếu",
+  "wire.memory.capture.locators.help": "Cũng giữ lại đường dẫn, URL và id, nhưng chỉ là ngữ cảnh gắn với một quyết định, mục tiêu hoặc ghi chú tiến độ đã được ghi lại trong cùng phần; không bao giờ là dữ kiện độc lập. Mặc định tắt. Tắt mục này không làm thay đổi các dữ kiện hiện có.",
+  "wire.memory.suggest.label": "Gợi ý truy hồi",
+  "wire.memory.suggest.help": "Gợi ý tối đa ba tiêu đề không đáng tin từ tin nhắn hiện tại của người dùng, với hạn mức riêng 180 token. Không có yêu cầu mạng hay embedding.",
+  "wire.memory.sync.label": "Đồng bộ bộ nhớ ngang hàng",
+  "wire.memory.sync.help": "Chia sẻ tăng dần các phạm vi đã chọn với những thiết bị ngang hàng hiện có đã ghép nối, có quyền receiver-admin và hỗ trợ memory-sync-v1. Việc này bao gồm bộ nhớ phiên mà không sao chép bản ghi.",
+  "wire.memory.scopes.label": "Phạm vi bộ nhớ cần đồng bộ",
+  "wire.memory.scopes.help": "Chỉ những không gian tên này được chia sẻ. Chủ sở hữu phiên, nhóm và tác nhân vẫn phải là ID chính xác trong sổ đăng ký hoặc ID phiên; cả bốn phạm vi đều được hỗ trợ.",
+  "wire.memory.exclude.label": "Thiết bị loại khỏi bộ nhớ",
+  "wire.memory.exclude.help": "Các ID thiết bị bị loại khỏi việc sao chép bộ nhớ. Việc này không thay đổi việc ghép nối, mức tin cậy hay quyền được cấp khi đăng ký."
+}
