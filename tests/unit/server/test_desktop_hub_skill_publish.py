@@ -511,7 +511,7 @@ def test_hub_skills_advertises_the_whole_adapter_and_every_promised_route_exists
     assert flags.get("hub_skills") == 1
 
     routes = {
-        (route.path, method)
+        (getattr(route, "path", ""), method)
         for route in desktop_hub.router.routes
         for method in getattr(route, "methods", set())
     }
