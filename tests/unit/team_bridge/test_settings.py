@@ -7,9 +7,12 @@ from local_operator.team_bridge import settings as tb
 
 def test_defaults_when_the_section_is_absent():
     values = tb.TeamBridgeSettings.from_values({})
-    assert values.enabled is False
+    # The opt-out default: an absent key means ON. Everything that actually
+    # gates a run (eligibility, consent, launch) is server-side.
+    assert values.enabled is True
     assert values.onboarding == ""
     assert values.session == ""
+    assert values.default_enrollment == ""
 
 
 def test_reads_from_a_nested_config_document():
@@ -19,22 +22,27 @@ def test_reads_from_a_nested_config_document():
                 "enabled": True,
                 "onboarding": "seen",
                 "session": "sess-123",
+                "default_enrollment": "done",
             }
         }
     )
     assert values.enabled is True
     assert values.onboarding == "seen"
     assert values.session == "sess-123"
+    assert values.default_enrollment == "done"
 
 
 def test_untrusted_values_normalise_fail_closed():
-    """A hand-edited value must read as the shipped default, never as "on".
+    """A hand-edited value must read as the shipped default, never crash.
 
-    ``enabled``: a non-bool reads as OFF. ``onboarding``: anything but
-    ``seen`` reads as "not dismissed", which allows the one-time notice to show
-    again rather than suppressing it. ``session``: a non-string (including a
-    list from the key's earlier draft shape) reads as "none designated" —
-    wrongly naming a wake destination is worse than naming none.
+    ``enabled``: a non-bool reads as the default, which is ON under the
+    opt-out policy — the key that actually turns it off is a real ``false``.
+    ``onboarding``: anything but ``seen`` reads as "not dismissed", which
+    allows the one-time notice to show again rather than suppressing it.
+    ``session``: a non-string (including a list from the key's earlier draft
+    shape) reads as "none designated" — wrongly naming a wake destination is
+    worse than naming none. ``default_enrollment``: only ``done`` counts, so a
+    typo cannot suppress the one default consent write.
     """
 
     values = tb.TeamBridgeSettings.from_values(
@@ -43,12 +51,17 @@ def test_untrusted_values_normalise_fail_closed():
                 "enabled": "true",
                 "onboarding": "yes",
                 "session": ["sess-1", "sess-2"],
+                "default_enrollment": "yes",
             }
         }
     )
-    assert values.enabled is False
+    assert values.enabled is True
     assert values.onboarding == ""
     assert values.session == ""
+    assert values.default_enrollment == ""
+
+    # A hand-edited STRING "false" is not an opt-out: only a real bool is.
+    assert tb.TeamBridgeSettings.from_values({"team_bridge": {"enabled": "false"}}).enabled is True
 
 
 def test_no_setting_can_disable_the_admission_gate():

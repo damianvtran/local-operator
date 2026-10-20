@@ -735,6 +735,27 @@ async def test_tenant_state_reads_the_frozen_route_with_the_pinned_bearer():
     assert seen == [("/v1/tenants/tnt_1/messaging/state", "Bearer token-1")]
 
 
+async def test_directory_sends_the_tenant_as_a_query_parameter():
+    """The directory is one org's answer: one GET, tenant in the QUERY, no body."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"members": [{"account_id": "acc_2"}]})
+
+    client = _make_client(handler)
+    result = await client.directory("tnt_1")
+
+    assert result == {"members": [{"account_id": "acc_2"}]}
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/v1/messaging/directory"
+    assert dict(seen[0].url.params) == {"tenant_id": "tnt_1"}
+    assert seen[0].content == b""
+    assert seen[0].headers["authorization"] == "Bearer token-1"
+
+
 # ---------------------------------------------------------------------------
 # the account-scope read surface (desktop multi-org forwarding)
 # ---------------------------------------------------------------------------
