@@ -567,6 +567,315 @@ def test_idempotent_install_reverifies_effective_restart_without_rewriting(tmp_p
     assert sum("Restart" in args for args in calls) == 2
 
 
+def test_parse_output_reads_the_clean_single_line_payload() -> None:
+    """The clean case must stay what the old fixed offset read."""
+
+    captured = (
+        'escalation=agentless>supplied\n{"installed": true, "unit": "action-server.service"}\n'
+    )
+    assert guest_supervisor.parse_output(
+        captured, guest_supervisor.is_install_payload
+    ) == json.loads(captured.split("\n", 1)[1])
+    assert guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_survives_the_sudo_prompt_before_the_payload() -> None:
+    """The captured form that broke the install: sudo's prompt is on stderr."""
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        "[sudo] password for user:\n"
+        '{"unit": "action-server.service", "installed": true}\n'
+    )
+    assert guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload) == {
+        "unit": "action-server.service",
+        "installed": True,
+    }
+
+
+def test_parse_output_reads_a_payload_spanning_several_lines() -> None:
+    captured = (
+        "escalation=none\n"
+        "{\n"
+        '  "unit": "action-server.service",\n'
+        '  "installed": true\n'
+        "}\n"
+    )
+    assert guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload) == {
+        "unit": "action-server.service",
+        "installed": True,
+    }
+
+
+def test_parse_output_ignores_noise_after_the_payload() -> None:
+    captured = (
+        "escalation=agentless\n"
+        '{"installed": true, "unit": "action-server.service"}\n'
+        "systemd: unit reloaded\n"
+    )
+    assert guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_reads_a_payload_with_no_metadata_line() -> None:
+    captured = '{"installed": true, "unit": "action-server.service"}\n'
+    assert guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_without_json_raises_a_named_failure_that_quotes_no_guest_text() -> None:
+    captured = (
+        "escalation=agentless>supplied\n"
+        "[sudo] password for user:\n"
+        "sudo: 1 incorrect password attempt\n"
+    )
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert type(failure.value).__name__ == "SupervisorOutputUnparseable"
+    assert str(failure.value) == "supervisor output contained no JSON object"
+    # The captured text can carry a credential prompt; it is never quoted.
+    assert "password" not in str(failure.value)
+    assert "incorrect password attempt" not in str(failure.value)
+    # A ValueError is what the json module raised here before, so every
+    # caller's handler keeps its meaning.
+    assert isinstance(failure.value, ValueError)
+
+
+def test_parse_output_skips_a_shadow_envelope_before_the_real_receipt() -> None:
+    """A preamble envelope must not displace the payload and report "no restart".
+
+    The shadow here is a FULLY VALID empty envelope, so a parser that keyed on
+    shape alone (or on the first decodable object) would accept it and read a
+    real restart as "no restart" -- the silent loss this module exists to
+    prevent.
+    """
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        + json.dumps(_envelope([]))
+        + "\n"
+        + json.dumps(_envelope([_restart_record()]))
+        + "\n"
+    )
+    records = guest_supervisor.receipt_records(captured)
+    assert [record["restart"] for record in records] == [42]
+
+
+def test_parse_output_skips_an_unexpected_object_before_the_real_payload() -> None:
+    captured = (
+        "escalation=agentless>supplied\n"
+        '{"note": "hi"}\n'
+        '{"installed": true, "unit": "action-server.service"}\n'
+    )
+    assert guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload) == {
+        "installed": True,
+        "unit": "action-server.service",
+    }
+
+
+def test_parse_output_refuses_a_truncated_payload_whose_inner_object_is_wrong_shape() -> None:
+    """A truncated payload whose innermost object is the WRONG shape must not win.
+
+    The inner object here (``{"n": 1}``) does not satisfy ``is_install_payload``,
+    so it is skipped and the parse fails closed. A completed, shape-MATCHING
+    nested object is refused by the document-boundary rule instead, which the
+    two ``installed_unit`` tests below pin -- shape alone could never tell it
+    apart from a real payload.
+    """
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        '{"unit": "action-server.service", "meta": {"n": 1}, "installed": true\n'
+    )
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert str(failure.value) == "supervisor output contained no JSON object"
+
+
+def test_installed_unit_accepts_the_real_same_line_sudo_capture() -> None:
+    """Real sudo writes its prompt WITHOUT a newline; the payload shares the line.
+
+    Every other sudo fixture in this file puts a newline after the prompt, a
+    shape real sudo never produces when its input is a pipe (it prints
+    ``[sudo] password for user:`` and the command's own output follows on the
+    same line). A left-boundary rule therefore rejected the genuine capture and
+    re-created the unsupervised-episode defect this module fixes.
+    """
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        '[sudo] password for user: {"unit": "action-server.service", "installed": true}\n'
+    )
+    assert guest_supervisor.installed_unit(captured) == "action-server.service"
+
+
+def test_the_real_same_line_sudo_capture_installs_the_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: the provider records an installed unit for the real capture."""
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        capture = (
+            "escalation=agentless>supplied\n"
+            '[sudo] password for user: {"unit": "action-server.service", "installed": true}\n'
+        )
+        calls = []
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            calls.append(argv)
+            return guest_disk.CommandResult(0, capture, "")
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        provider._install_guest_supervisor(_plan())
+        assert len(calls) == 1
+        assert provider._supervisor_unit == "action-server.service"
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report == {
+            "installed": True,
+            "unit": "action-server.service",
+            "status": "supervised",
+        }
+
+
+def test_installed_unit_refuses_an_array_wrapped_object() -> None:
+    """An array is not the install payload, even when it wraps one.
+
+    The pre-PR parser returned the LIST for this capture and ``installed_unit``
+    refused it. Decoding the inner object would install a unit the GUEST chose
+    for a service the action server does not own.
+    """
+
+    captured = 'escalation=x\n[{"installed": true, "unit": "evil.service"}]\n'
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.installed_unit(captured)
+    assert isinstance(failure.value, ValueError)
+
+
+def test_installed_unit_refuses_an_object_nested_inside_a_larger_object() -> None:
+    """A member of another object is not a top-level payload."""
+
+    captured = 'escalation=x\n{"outer": {"installed": true, "unit": "evil.service"}}\n'
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable):
+        guest_supervisor.installed_unit(captured)
+
+
+def test_installed_unit_refuses_a_multiline_member_of_another_object() -> None:
+    """A member of another object is never top level, however it is spelled.
+
+    The outer object decodes whole and consumes the member, so the member is
+    never a candidate; the end-boundary rule would refuse it too, because a
+    ``}`` closes its container right after it.
+    """
+
+    captured = (
+        "escalation=x\n"
+        "{\n"
+        '  "outer":\n'
+        '  {"installed": true, "unit": "evil.service"}\n'
+        "}\n"
+    )
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable):
+        guest_supervisor.installed_unit(captured)
+
+
+def test_parse_output_fails_closed_past_the_candidate_bound() -> None:
+    """Guest-controlled brace-led lines must not buy unbounded scan work."""
+
+    captured = "escalation=agentless\n" + "{\n" * (guest_supervisor._MAX_PAYLOAD_CANDIDATES + 1)
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert str(failure.value) == "supervisor output exceeded the parser candidate bound"
+
+
+def test_parse_output_fails_closed_past_the_size_bound() -> None:
+    captured = "escalation=agentless\n" + "x" * guest_supervisor._MAX_CAPTURE_CHARS
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert str(failure.value) == "supervisor output exceeded the parser size bound"
+
+
+def test_parse_output_wraps_decoder_recursion_in_the_named_failure() -> None:
+    """Deep nesting must not escape as a bare RecursionError.
+
+    The depth is past where the decoder provably recurses (measured: depth
+    8,000 decodes, 12,000 raises), and the fixture asserts that premise rather
+    than trusting it -- 4,000 decodes and would have passed for the wrong
+    reason.
+    """
+
+    nested = '{"a":' * 12000 + "1" + "}" * 12000
+    with pytest.raises(RecursionError):
+        json.JSONDecoder().raw_decode(nested, 0)
+    captured = "escalation=agentless\n" + nested + "\n"
+    with pytest.raises(guest_supervisor.SupervisorOutputUnparseable) as failure:
+        guest_supervisor.parse_output(captured, guest_supervisor.is_install_payload)
+    assert type(failure.value).__name__ == "SupervisorOutputUnparseable"
+
+
+def test_a_brace_heavy_journal_tail_still_parses() -> None:
+    """A legitimate receipt with thousands of brace pairs must not trip the bound.
+
+    Braces inside a decoded string value are not document candidates: the
+    decoded document is skipped whole. Counting them would spend the 32-candidate
+    budget on one 28 KB journal tail and refuse a perfectly good receipt.
+    """
+
+    record = dict(_restart_record())
+    record["stderr_tail"] = '{"frame": 1} ' * 2000
+    captured = (
+        "escalation=agentless\n[sudo] password for user: " + json.dumps(_envelope([record])) + "\n"
+    )
+    assert len(captured) > 20000, "fixture must be brace-heavy enough to matter"
+    records = guest_supervisor.receipt_records(captured)
+    assert [item["restart"] for item in records] == [42]
+
+
+def test_receipt_records_survive_the_sudo_prompt_before_the_payload() -> None:
+    """The report path shares the parser, so it shares the tolerance."""
+
+    captured = (
+        "escalation=agentless>supplied\n"
+        "[sudo] password for user:\n" + json.dumps(_envelope([_restart_record()])) + "\n"
+    )
+    records = guest_supervisor.receipt_records(captured)
+    assert [record["exit_status"] for record in records] == ["KILL"]
+
+
+def test_setup_evidence_names_the_unparseable_output_instead_of_a_json_decode_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup evidence must say WHAT failed, and never quote the guest."""
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+
+        def command(*args: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            return guest_disk.CommandResult(
+                0,
+                "escalation=agentless>supplied\n" "[sudo] password for user:\n" "not json at all\n",
+                "",
+            )
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["installed"] is False
+        assert report["status"] == "supervision unavailable"
+        assert report["cause"] == "SupervisorOutputUnparseable"
+        assert report["cause"] != "JSONDecodeError"
+        assert "password" not in json.dumps(report)
+
+
 def test_capture_preserves_exit_status_when_journal_times_out(tmp_path: Path) -> None:
     root = tmp_path / "var/lib/lop-action-supervisor"
     root.mkdir(parents=True)
@@ -645,11 +954,11 @@ async def test_receipt_read_failure_retries_once_and_never_posts_stale_input(
                 return guest_disk.CommandResult(0, "", "")
             if failure == "empty_list":
                 return guest_disk.CommandResult(0, "escalation=agentless\n[]", "")
-            # A real planted restart with a warning before JSON must NOT become
-            # "no restart" merely because parsing the receipt failed.
-            return guest_disk.CommandResult(
-                0, "sudo warning\n" + _receipt([_restart_record()]).stdout, ""
-            )
+            # A guest warning with NO receipt behind it: the read fails
+            # closed, so a restart that really happened can never be read
+            # as "no restart". A warning in FRONT of a real receipt is the
+            # tolerated case below, not a read failure.
+            return guest_disk.CommandResult(0, "sudo warning\nnot a receipt\n", "")
 
         monkeypatch.setattr(provider, "_run_guest_command", command)
         if failure == "scrub_exception":
@@ -666,6 +975,85 @@ async def test_receipt_read_failure_retries_once_and_never_posts_stale_input(
         assert evidence["receipt_unavailable"] is True
         assert evidence["read_failed"] is True
         assert evidence["read_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_behind_a_guest_warning_is_read_and_its_restart_is_not_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preamble before the payload must not hide a restart that really happened.
+
+    The old parser read a fixed offset after the metadata line, so a warning
+    line in front of the receipt JSON made the whole read fail. The receipt
+    then looked unreadable instead of reporting the restart it carried, which
+    is the same blindness the supervisor was merged to remove.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        calls = []
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            calls.append(argv)
+            assert "/var/lib/lop-action-supervisor" in str(argv), "stale input was posted"
+            return guest_disk.CommandResult(
+                0, "sudo warning\n" + _receipt([_restart_record()]).stdout, ""
+            )
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        with pytest.raises(GuestServerRecovered):
+            await provider.execute(["must_not_post()", "nor_this()"])
+        assert len(calls) == 1
+        # The planted restart was READ, never quietly reported as "no restart".
+        assert provider._supervisor_restart == 42
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["recovered"] is True
+        assert evidence["read_failed"] is False
+        assert evidence["receipt_unavailable"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_shadow_envelope_before_the_receipt_cannot_report_no_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid empty envelope ahead of the real receipt must not win.
+
+    Measured consequence before this guard: the shadow was accepted, the real
+    ``restart: 42`` was read as "no restart", the action was posted on the
+    possibly-restarted binding, and no recovery evidence was written.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        calls = []
+        shadow = json.dumps(_envelope([]))
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            calls.append(argv)
+            assert "/var/lib/lop-action-supervisor" in str(argv), "stale input was posted"
+            return guest_disk.CommandResult(
+                0,
+                "escalation=agentless>supplied\n"
+                + shadow
+                + "\n"
+                + _receipt([_restart_record()]).stdout,
+                "",
+            )
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        with pytest.raises(GuestServerRecovered):
+            await provider.execute(["must_not_post()", "nor_this()"])
+        assert len(calls) == 1
+        assert provider._supervisor_restart == 42
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["recovered"] is True
+        assert evidence["read_failed"] is False
 
 
 @pytest.mark.asyncio

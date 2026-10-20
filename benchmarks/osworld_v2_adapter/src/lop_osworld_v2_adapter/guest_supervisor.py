@@ -12,13 +12,26 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
-from typing import Any, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 from lop_osworld_v2_adapter import guest_disk
 
 
 class GenerationMismatch(ValueError):
     """systemd observed a restart that the guest capture history cannot prove."""
+
+
+class SupervisorOutputUnparseable(ValueError):
+    """The captured guest output carried no JSON payload to parse.
+
+    WHY A NAMED FAILURE. The setup evidence records only the exception's TYPE
+    name, never its text, because the text can carry a password prompt. A bare
+    ``JSONDecodeError`` said nothing about WHAT failed, so the episode read as
+    "supervision unavailable" with no way to tell a guest that printed noise
+    from a guest that printed nothing. This name is fixed vocabulary and never
+    contains guest text. It subclasses ``ValueError`` because that is what the
+    ``json`` module raised here before, so no caller changes meaning.
+    """
 
 
 @dataclass(frozen=True)
@@ -233,14 +246,146 @@ def report_command(unit: str, password: str) -> Sequence[str]:
     return _privileged(REPORT_SOURCE, [unit], password)
 
 
-def parse_output(output: str) -> object:
-    # The escalation ladder prints one metadata line before the command output.
-    return json.loads(output.split("\n", 1)[1])
+#: Bounds on guest-controlled text. Every recovery attempt scans the capture,
+#: so an adversarial guest must not be able to buy unbounded work: before these
+#: existed, a brace-dense 1 MB capture measured ~11 s against a sub-millisecond
+#: old parser. Real captures are ~20 KB (four 4 KB journal tails plus the
+#: envelope), so both bounds leave years of headroom and fail closed past them.
+#: The candidate count is TOP-LEVEL decode attempts, not raw ``{`` characters:
+#: a decoded document is skipped whole, so braces inside its string values (a
+#: journal tail is the common case) never spend the budget.
+_MAX_CAPTURE_CHARS = 256 * 1024
+_MAX_PAYLOAD_CANDIDATES = 32
+
+
+def _ends_a_document(output: str, end: int) -> bool:
+    """True when the decoded value is not a MEMBER of an enclosing container.
+
+    A member is followed by its container's own delimiter (``,``, ``]`` or
+    ``}``), so an array-wrapped ``[{"installed": true, ...}]`` and an object
+    nested in a larger object are not top-level documents and must not be read
+    as one. A real payload is followed by a line break, the end of the capture,
+    or ordinary trailing noise, so it passes here.
+
+    This is deliberately a RIGHT boundary only. Real ``sudo -S`` writes its
+    prompt WITHOUT a trailing newline when input is a pipe, so the genuine
+    capture is ``[sudo] password for user: {"unit": ..., "installed": true}``
+    on ONE line; requiring a line start would refuse the very payload this
+    module exists to read.
+    """
+
+    cursor = end
+    while cursor < len(output) and output[cursor] in " \t\r\n":
+        cursor += 1
+    return cursor >= len(output) or output[cursor] not in ",]}"
+
+
+def parse_output(output: str, accept: Callable[[object], bool]) -> object:
+    """Extract the guest's expected JSON payload from a captured escalation output.
+
+    WHY A SCAN, NOT A FIXED OFFSET. The escalation ladder captures the
+    command's combined stdout+stderr and prefixes one metadata line
+    (``escalation=agentless>supplied``), but the captured text is more than
+    the payload: ``sudo -S`` writes its ``[sudo] password for user:`` prompt
+    to stderr, and a guest MOTD, locale notice or warning lands the same way.
+    Reading a fixed offset after the first newline therefore handed
+    ``json.loads`` a prompt line plus the payload and raised
+    ``JSONDecodeError``, so the supervisor never installed and the episode ran
+    unsupervised. Scanning for the positions that decode as a JSON object is
+    identical for the clean case and tolerates a preamble, a prompt line, a
+    payload spanning several lines and trailing noise.
+
+    WHY THE CALLER PASSES THE SHAPE, AND WHY THE LAST MATCH WINS. A bare
+    "first object that decodes" accepts ANY object the preamble happens to
+    carry, so a shadow that looks like a receipt would be read instead of the
+    real envelope and report a restart as "no restart" -- the silent loss
+    this module exists to prevent. The caller therefore states what its own
+    command prints (``is_install_payload`` / ``is_receipt_payload``), and only
+    objects of that shape count. Among those, the LAST wins: the ladder prints
+    the command's own output last (``guest_disk.escalation_script`` carries the
+    invariant next to that print), so its payload is the final document while
+    sudo's prompt and guest warnings land before it.
+
+    WHY ONLY TOP-LEVEL DOCUMENTS, AND WHY THE BOUNDARY IS ON THE RIGHT. Decoding
+    an inner object and accepting it would let a guest-chosen fragment inside an
+    array or a larger object stand in for the payload -- e.g.
+    ``[{"installed": true, "unit": "x.service"}]`` would install a unit the
+    action server does not own, where the old parser returned the list and the
+    caller refused it. What distinguishes a payload is that nothing encloses it,
+    and that shows up AFTER it: a member is followed by its container's
+    delimiter. So a document is a candidate when it ends a document, which also
+    accepts the genuine same-line ``sudo`` capture. A left rule would reject
+    that capture, because real sudo writes its prompt without a newline.
+
+    Only ``SupervisorOutputUnparseable`` (a ``ValueError``) escapes for an
+    extraction failure: no expected top-level document, a capture past
+    ``_MAX_CAPTURE_CHARS``, more than ``_MAX_PAYLOAD_CANDIDATES`` candidates,
+    or nesting deep enough to raise ``RecursionError`` in the decoder. Guest
+    text is never quoted into the message, because it can carry a password
+    prompt.
+    """
+
+    if len(output) > _MAX_CAPTURE_CHARS:
+        raise SupervisorOutputUnparseable("supervisor output exceeded the parser size bound")
+    decoder = json.JSONDecoder()
+    found = False
+    match: object = None
+    candidates = 0
+    index = output.find("{")
+    while index != -1:
+        candidates += 1
+        if candidates > _MAX_PAYLOAD_CANDIDATES:
+            # Fail closed rather than keep buying work for a guest that keeps
+            # printing brace-led text.
+            raise SupervisorOutputUnparseable(
+                "supervisor output exceeded the parser candidate bound"
+            )
+        try:
+            value, end = decoder.raw_decode(output, index)
+        except (ValueError, RecursionError):
+            # Not a JSON object here, or nested past the interpreter's limit:
+            # neither is a payload, and both must stay inside the named error.
+            index = output.find("{", index + 1)
+            continue
+        if _ends_a_document(output, end) and accept(value):
+            found, match = True, value
+        # Skip the whole decoded document: a nested member is never a top-level
+        # document, and braces inside its strings must not spend the budget.
+        index = output.find("{", end)
+    if not found:
+        raise SupervisorOutputUnparseable("supervisor output contained no JSON object")
+    return match
+
+
+def is_install_payload(value: object) -> bool:
+    """The install command prints either the installed unit or a refusal reason.
+
+    Deliberately shape-only: the caller's own validation still decides whether
+    an ``installed`` answer is a usable unit, so a near-miss payload reaches it
+    instead of being skipped in favour of an unrelated object.
+    """
+
+    return isinstance(value, dict) and isinstance(value.get("installed"), bool)
+
+
+def is_receipt_payload(value: object) -> bool:
+    """The report command prints the capture envelope, whose schema is versioned.
+
+    This mirrors the first checks in ``receipt_records``; the generation and
+    record validation stay there, so an envelope-shaped object is still
+    checked before any input is authorized.
+    """
+
+    return (
+        isinstance(value, dict)
+        and value.get("schema_version") == 1
+        and isinstance(value.get("records"), list)
+    )
 
 
 def receipt_records(output: str) -> list[dict[str, Any]]:
     """An empty initialized envelope proves absence; empty/malformed output does not."""
-    value = parse_output(output)
+    value = parse_output(output, is_receipt_payload)
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise ValueError("invalid supervisor receipt")
     records = value.get("records")
@@ -278,7 +423,7 @@ def receipt_records(output: str) -> list[dict[str, Any]]:
 
 
 def installed_unit(output: str) -> str:
-    value = parse_output(output)
+    value = parse_output(output, is_install_payload)
     if not isinstance(value, dict) or value.get("installed") is not True:
         raise ValueError("invalid supervisor installation")
     unit = value.get("unit")
