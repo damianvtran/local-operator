@@ -57,11 +57,11 @@ GZIP_CAP = 4608
 #: width-aware tick density, and dark-fallback ink. CSS 2,056 -> 1,878 B (the `h1` rule,
 #: the reduced-motion block, `.dim` and the redundant light color-scheme rule were dead
 #: weight under the no-chrome/no-motion contract and paid for the change); JS 8,077 ->
-#: 8,114 B. Pair 9,992 B raw / 4,602 B gzip, 6 B under the unchanged cap.
+#: 8,124 B. Pair 10,002 B raw / 4,606 B gzip, 2 B under the unchanged cap.
 PINNED_CSS_BYTES = 1878
-PINNED_JS_BYTES = 8114
-PINNED_GZIP_BYTES = 4602
-PINNED_DIGEST = "15f90c388de1faef1afa05c9f7bde5fe3280acfdb5b710da362c7eaaf2275a64"
+PINNED_JS_BYTES = 8124
+PINNED_GZIP_BYTES = 4606
+PINNED_DIGEST = "61db1322689565a9b1046494cbb6aa46edf07da3967919ed372e39def993fddc"
 PINNED_VERSION = 6
 
 

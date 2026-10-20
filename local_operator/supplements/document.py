@@ -74,7 +74,7 @@ from typing import Any, Final, Mapping
 #: the left gutter is the measured widest category label (clamped, then ellipsised), tick
 #: density follows the plot width, and the dark FALLBACK declares its own ink so a frame
 #: that never receives a host push is readable on #121212. Paid for by dead CSS (no drawn
-#: headings, no motion) and the unused `.dim` rule: 9,992 B raw / 4,602 B gzip.
+#: headings, no motion) and the unused `.dim` rule: 10,002 B raw / 4,606 B gzip.
 PRELUDE_VERSION: Final = 6
 
 #: The document CSP (memo §4.1), verbatim.
