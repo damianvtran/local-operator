@@ -63,12 +63,12 @@ GZIP_CAP = 4608
 #: cannot magnify a bounded height past the 480 px clamp; the dark fallback's hairline is
 #: #333; the light color-scheme reset returns; `.row` is removed as the measured trim. The
 #: reduced-motion enforcement moved to the validator. CSS 1,866 B, JS 8,145 B, pair
-#: 10,019 B raw / 4,601 B gzip, 7 B under the unchanged cap.
-PINNED_CSS_BYTES = 1849
-PINNED_JS_BYTES = 8170
-PINNED_GZIP_BYTES = 4601
-PINNED_DIGEST = "7866e13fbfe2222315242d545c014df2dc35b09a6f667deeab349cf17d4c9261"
-PINNED_VERSION = 8
+#: 10,021 B raw / 4,602 B gzip, 6 B under the unchanged cap.
+PINNED_CSS_BYTES = 1860
+PINNED_JS_BYTES = 8161
+PINNED_GZIP_BYTES = 4602
+PINNED_DIGEST = "6b6e857fd60e733785900dca068f5a47ac40804dcf9cdfa0a82bddf324216875"
+PINNED_VERSION = 9
 
 
 @pytest.fixture
@@ -409,7 +409,9 @@ def test_the_known_top_tick_overprint_at_220_px_is_recorded_not_hidden(tmp_path:
         for b in texts[i + 1 :]
         if all(v > 0.5 for v in _overlap(a, b))
     )
-    assert colliding == [("1,000 USD/day", "910")]
+    # v9: the chart width is the viewport minus the body's 4 px padding (216 at a 220 frame),
+    # matching the browser; the narrower plot adds the `0`/`Search` pair to the recorded fixture.
+    assert colliding == [("0", "Search"), ("1,000 USD/day", "910")]
 
 
 @needs_node
@@ -726,9 +728,13 @@ def test_a_vertical_chart_reports_the_body_height_including_its_padding(
     resizes = [p for p in out["posts"] if p.get("t") == "resize"]
     assert resizes, out["posts"]
     assert resizes[-1]["h"] == out["svgH"] + 16, (width, resizes[-1], out["svgH"])
-    assert out["svgH"] == (365 if width == 810 else 279 if width == 620 else 396), (
+    assert out["svgH"] == (363 if width == 810 else 277 if width == 620 else 396), (
         width,
         out["svgH"],
+    )
+    assert out["svgW"] == (806 if width == 810 else 616 if width == 620 else 880), (
+        width,
+        out["svgW"],
     )
 
 
@@ -809,3 +815,14 @@ def test_a_light_mode_push_resets_native_chrome() -> None:
     css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
     assert ":root[data-mode=light]{color-scheme:light}" in css
     assert "html{visibility:hidden;overflow:hidden}" in css
+
+
+def test_oversized_content_keeps_a_body_scroller() -> None:
+    """QA round 3 Q-1: a 30-row table exceeds the 480 clamp; `html{overflow:hidden}` alone
+    clipped it with no affordance. The body is the scroller (overflow-y auto at 100vh) and
+    the resize report is its natural scrollHeight, so normal content never scrolls while a
+    tall table can be reached. The browser frames are the reachability proof."""
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    js = (PRELUDE_DIR / "prelude.js").read_text(encoding="utf-8")
+    assert "overflow:hidden auto;max-height:100vh" in css
+    assert ".body.scrollHeight" in js

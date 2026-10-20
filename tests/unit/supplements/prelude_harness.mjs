@@ -57,20 +57,23 @@ target.clientWidth = scenario.width ?? 620;
 // the drawn SVG height plus the stylesheet's 8 px top/bottom padding; the browser frames
 // measure the real layout (including the 810x373 feedback lock this guards).
 const body = new Node("body");
-Object.defineProperty(body, "offsetHeight", {
-  get() {
-    let h = 0;
-    const find = (n) => {
-      if (n.tag === "svg") {
-        const b = (n.attrs.viewBox || "0 0 0 0").split(" ");
-        h = +b[3];
-      }
-      for (const c of n.children) if (typeof c === "object") find(c);
-    };
-    find(target);
-    return h + 16;
-  },
-});
+body.offsetWidth = 0;
+body.clientWidth = 0;
+const bodyHeight = () => {
+  let h = 0;
+  const find = (n) => {
+    if (n.tag === "svg") {
+      const b = (n.attrs.viewBox || "0 0 0 0").split(" ");
+      h = +b[3];
+    }
+    for (const c of n.children) if (typeof c === "object") find(c);
+  };
+  find(target);
+  return h + 16;
+};
+for (const key of ["offsetHeight", "scrollHeight"]) {
+  Object.defineProperty(body, key, { get: bodyHeight });
+}
 
 const document = {
   documentElement: root,
