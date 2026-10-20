@@ -143,8 +143,8 @@
       "label": "Manager",
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
       "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
-      "version": "1.6.5",
-      "instructions_sha256": "9f875b68c8073b1e7e7c91fa64f5abc972e82dbe722f081b36054f76c3e323a8",
+      "version": "1.6.6",
+      "instructions_sha256": "786df475d68069eb65d2f2b0959653b5d69024437b4fd9e68545555b61bd19c5",
       "instructions_chars": 3290,
       "tools": [
         "read",
