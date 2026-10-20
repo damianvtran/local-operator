@@ -967,6 +967,87 @@ async def test_stalled_notice_once_then_restored_notice(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_blind_outcome_keeps_the_baseline_and_notifies_once(tmp_path: Any) -> None:
+    """A check whose full result cannot be compared must never look like a quiet tick.
+
+    The live failure: a spilled Slack thread was compared as its display
+    projection, the projection's only visible change was the spill footer, the
+    gate suppressed it and the baseline advanced — seven replies became
+    unrecoverable. A blind outcome keeps the old baseline, charges no strike,
+    and tells the operator once per episode.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)  # baseline
+        before = harness.counters()
+
+        reason = "its full result is no longer in the spill store"
+        harness.results.append({"error": reason, "kind": "blind"})
+        await rill(harness, 60_000)
+
+        counters = harness.counters()
+        assert counters["blind"] is True
+        assert counters["blind_reason"] == reason
+        assert counters["content_hash"] == before["content_hash"]
+        assert counters["consecutive_failures"] == 0
+        assert counters["checks"] == before["checks"] + 1
+        assert counters["disabled"] is False
+        assert counters["next_due_at"] is not None
+        assert harness.deliveries == []
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+        assert harness.notices[0].detail == reason
+        # The row every listing surface reads carries the state and the reason.
+        row = harness.scheduler.index_rows()[0]
+        assert row["blind"] is True and row["blind_reason"] == reason
+        assert row["suppressed"] == counters["suppressed"]
+
+        # A second blind tick is not a second notice.
+        harness.results.append({"error": reason, "kind": "blind"})
+        await rill(harness, 60_000)
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+
+        # Seeing again: the comparison resumes from the LAST GOOD baseline, so
+        # the change since then arrives as one delta, plus the matching clear.
+        harness.results.append({"text": "B", "error": None})
+        await rill(harness, 60_000)
+
+        resumed = harness.counters()
+        assert resumed["blind"] is False and resumed["blind_reason"] == ""
+        assert resumed["blind_notified"] is False
+        assert [notice.kind for notice in harness.notices] == ["blind", "seeing"]
+        assert [delivery.monitor_id for delivery in harness.deliveries] == ["m1"]
+        delta = harness.deliveries[0].delta_text
+        assert "- A" in delta and "+ B" in delta, delta
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_blind_tick_that_was_never_announced_resumes_silently(tmp_path: Any) -> None:
+    """No matching notice for an episode nobody was told about."""
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+        # Clear the latch to model a notice that never reached a session: the
+        # state was blind, but no clear was earned.
+        entry = harness.scheduler._entries["m1"]
+        entry.counters["blind_notified"] = False
+        harness.results.append({"text": "B", "error": None})
+        await rill(harness, 60_000)
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+        assert harness.counters()["blind"] is False
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unavailable_past_24h_disables(tmp_path: Any) -> None:
     """ "Genuinely gone" is settled by time, not by a strike count: a server
     that reconnects comes back; one that was uninstalled does not.

@@ -1272,3 +1272,39 @@ class TestMonitorBandHealth:
 
         assert "checks, 0 deliveries" not in out
         assert "unavailable" not in out
+
+
+class TestBlindMonitorState:
+    """A watch whose result cannot be compared must not paint as a healthy one.
+
+    Measured live: a monitor that compared the display projection of a spilled
+    Slack thread rendered as an ordinary armed row with a due clock while seven
+    replies went unreported. The band's job is to make the state visible even
+    when the health sentence is cut.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_blind_monitor_leads_with_its_state_word(self) -> None:
+        spec, counters = _monitor("m1", "watch the slack thread")
+        counters["blind"] = True
+        counters["blind_reason"] = "its full result is no longer in the spill store"
+
+        _, out = await _paint([], [(spec, counters)])
+
+        row = out.splitlines()[1]
+        assert "blind" in row
+        assert "BLIND: cannot compare its result" in row
+        assert "watch the slack thread" in row
+
+    @pytest.mark.asyncio
+    async def test_a_blind_row_outranks_a_quiet_one_for_the_two_row_cap(self) -> None:
+        healthy_spec, healthy = _monitor("m1", "watch the deploy queue", due_in_ms=30_000)
+        healthy["deliveries"] = 2
+        blind_spec, blind = _monitor("m2", "watch the slack thread")
+        blind["blind"] = True
+        blind["blind_reason"] = "its result was stored incompletely"
+
+        _, out = await _paint([], [(healthy_spec, healthy), (blind_spec, blind)])
+
+        assert "m2" in out.splitlines()[1]
+        assert "blind" in out.splitlines()[1]

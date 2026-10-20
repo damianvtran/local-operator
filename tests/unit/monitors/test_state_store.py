@@ -374,6 +374,67 @@ def test_zero_deliveries_after_several_checks_gets_a_neutral_hint() -> None:
     assert monitor_store.health_hint(_row(checks=2, deliveries=0), 1_756_000_060_000) is None
 
 
+def test_a_blind_row_says_it_cannot_compare_and_outranks_other_hints() -> None:
+    """The 2026-10-20 failure rendered as a healthy row; it must not."""
+    reason = "its full result is no longer in the spill store"
+    hint = monitor_store.health_hint(_row(blind=True, blind_reason=reason), 1_756_000_060_000)
+    assert hint == f"BLIND: cannot compare its result — {reason}; changes are not being reported"
+    # Blind wins over the unavailable line: an armed watch that runs but cannot
+    # compare reports nothing, which is the stronger fact.
+    blind_and_stalled = _row(
+        blind=True,
+        blind_reason=reason,
+        unavailable_since=1_756_000_000_000,
+        checks=5,
+        deliveries=0,
+    )
+    blind_hint = monitor_store.health_hint(blind_and_stalled, 1_756_000_060_000)
+    assert blind_hint is not None and blind_hint.startswith("BLIND: ")
+    # A disabled row keeps its own wording: it is not running at all.
+    assert (
+        monitor_store.health_hint(
+            _row(blind=True, blind_reason=reason, disabled=True), 1_756_000_060_000
+        )
+        is None
+    )
+    # A blind row with no stored reason still says what it cannot do.
+    fallback = monitor_store.health_hint(_row(blind=True), 1_756_000_060_000)
+    assert fallback == (
+        "BLIND: cannot compare its result — its full result is not available; "
+        "changes are not being reported"
+    )
+
+
+def test_suppressions_are_named_instead_of_nothing_has_changed() -> None:
+    """A row that suppressed changes did not "see nothing" — it was told not to tell."""
+    hint = monitor_store.health_hint(
+        _row(
+            checks=5,
+            deliveries=0,
+            suppressed={"non_material_metadata": 93, "ignorable": 0, "rate_cap": 0},
+        ),
+        1_756_000_060_000,
+    )
+    assert hint == (
+        "5 checks, 0 deliveries — 93 changes suppressed as non-material — "
+        "the call may have changed without telling you"
+    )
+    # Singular reads as one change, not one changes.
+    one = monitor_store.health_hint(
+        _row(checks=3, deliveries=0, suppressed={"ignorable": 1}),
+        1_756_000_060_000,
+    )
+    assert one is not None and "1 change suppressed" in one, one
+    # Two checks is still below the floor, suppressions or not.
+    assert (
+        monitor_store.health_hint(
+            _row(checks=2, deliveries=0, suppressed={"non_material_metadata": 9}),
+            1_756_000_060_000,
+        )
+        is None
+    )
+
+
 def test_idle_is_overdue_beyond_two_intervals_and_not_held() -> None:
     now = 1_756_000_060_000
     stale = _row(next_due_at=now - 3_600_000)

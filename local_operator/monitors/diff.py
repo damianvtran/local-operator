@@ -26,11 +26,19 @@ from __future__ import annotations
 import difflib
 import hashlib
 import re
+from dataclasses import dataclass
 
 #: Where one preview line is clipped. A code constant, not a setting: the
 #: total message budget (``deltaMaxChars``) is the contract's bound, and this
 #: only stops one monstrous line from eating it whole.
 DELTA_PREVIEW_CHARS = 200
+
+#: How much text a differing-line window keeps BEFORE the first difference.
+#: A replace hunk whose lines are longer than a preview used to render two
+#: identical prefix clips (the live Slack-thread failure: a 13.7 KB single-line
+#: JSON whose only visible difference was the spill footer's char count), so a
+#: long pair is now shown around the character where the two lines diverge.
+DELTA_WINDOW_LEAD_CHARS = 40
 
 #: The marker word for a scrubbed timestamp.
 _TS_MARKER = "<ts>"
@@ -169,14 +177,32 @@ def is_pure_addition(old: str, new: str) -> bool:
     return carries_content
 
 
+@dataclass(frozen=True)
+class DeltaRender:
+    """One rendered delta plus what its previews cannot show (§7.3, §8.4).
+
+    ``hidden`` is the gate's fail-open signal: True when a changed line's
+    RENDERED preview equals its counterpart's while the raw lines differ — the
+    preview hides the difference, so the materiality gate must not be asked to
+    judge evidence it cannot see. :func:`render_delta` structures every long
+    replace pair as a character window precisely so this stays False; the flag
+    is the guard that keeps a future renderer change from silently restoring
+    the 2026-10-20 blind suppression.
+    """
+
+    text: str
+    changed_lines: int
+    hidden: bool = False
+
+
 def render_delta(
     old: str,
     new: str,
     *,
     max_delta_lines: int,
     delta_max_chars: int,
-) -> tuple[str, int]:
-    """``(delta_text, changed_lines)`` — counts + bounded previews (§7.3).
+) -> DeltaRender:
+    """Counts + bounded previews, and whether a preview hides its change (§7.3).
 
     The input is bounded by the snapshot cap (~1k lines worst case), which
     keeps the quadratic matcher cheap — the unit suite pins that bound.
@@ -185,6 +211,9 @@ def render_delta(
     opcodes = matcher.get_opcodes()
     added = removed = 0
     previews: list[str] = []
+    hidden = False
+    old_split = old.split("\n")
+    new_split = new.split("\n")
     for tag, i1, i2, j1, j2 in opcodes:
         if tag in ("replace", "delete"):
             removed += i2 - i1
@@ -192,12 +221,31 @@ def render_delta(
             added += j2 - j1
         if tag == "equal":
             continue
-        old_lines = old.split("\n")[i1:i2]
-        new_lines = new.split("\n")[j1:j2]
-        for line in old_lines:
-            previews.append("- " + _clip(line))
-        for line in new_lines:
-            previews.append("+ " + _clip(line))
+        old_lines = old_split[i1:i2]
+        new_lines = new_split[j1:j2]
+        if tag == "replace":
+            # Pair the two sides positionally: a replaced line's information is
+            # the CHARACTERS that differ, and a prefix clip of a long JSON line
+            # shows only the shared header, so both sides read identically (the
+            # live Slack monitor suppressed seven new replies this way). One
+            # window anchored at the first differing character keeps the change
+            # inside the preview and its context around it.
+            paired = min(len(old_lines), len(new_lines))
+            for index in range(paired):
+                old_preview, new_preview = _pair_previews(old_lines[index], new_lines[index])
+                previews.append("- " + old_preview)
+                previews.append("+ " + new_preview)
+                if old_preview == new_preview:
+                    hidden = True
+            for line in old_lines[paired:]:
+                previews.append("- " + _clip(line))
+            for line in new_lines[paired:]:
+                previews.append("+ " + _clip(line))
+        else:
+            for line in old_lines:
+                previews.append("- " + _clip(line))
+            for line in new_lines:
+                previews.append("+ " + _clip(line))
 
     changed = added + removed
     header = f"+{added}/-{removed} changed lines"
@@ -210,7 +258,7 @@ def render_delta(
             body_lines.append(marker)
         text = "\n".join(body_lines)
         if len(text) <= delta_max_chars or not shown:
-            return text, changed
+            return DeltaRender(text=text, changed_lines=changed, hidden=hidden)
         shown.pop()
         dropped += 1
 
@@ -227,3 +275,38 @@ def _clip(line: str) -> str:
     if len(line) <= DELTA_PREVIEW_CHARS:
         return line
     return line[:DELTA_PREVIEW_CHARS] + "…"
+
+
+def _common_prefix_length(left: str, right: str) -> int:
+    """Characters the two lines share before the first difference."""
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _window_preview(line: str, start: int) -> str:
+    """One preview line from ``start``, marked where it was cut."""
+    head = "…" if start > 0 else ""
+    # One char of headroom for the trailing marker, so a window never renders
+    # longer than the plain clip it replaces.
+    budget = DELTA_PREVIEW_CHARS - len(head) - 1
+    body = line[start : start + budget]
+    tail = "…" if start + len(body) < len(line) else ""
+    return head + body + tail
+
+
+def _pair_previews(old_line: str, new_line: str) -> tuple[str, str]:
+    """Two previews of one replaced pair, windowed on their first difference.
+
+    Both windows start at the same character — ``DELTA_WINDOW_LEAD_CHARS``
+    before the divergence — so the reader sees the text that changed, not two
+    copies of a shared 200-char header. Short lines are clipped exactly as
+    before; only a pair with a line past :data:`DELTA_PREVIEW_CHARS` is
+    windowed, which keeps every existing delta byte-identical.
+    """
+    if len(old_line) <= DELTA_PREVIEW_CHARS and len(new_line) <= DELTA_PREVIEW_CHARS:
+        return _clip(old_line), _clip(new_line)
+    start = max(0, _common_prefix_length(old_line, new_line) - DELTA_WINDOW_LEAD_CHARS)
+    return _window_preview(old_line, start), _window_preview(new_line, start)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from local_operator.monitors import diff
@@ -54,27 +56,89 @@ def test_content_hash_is_prefix_tagged_and_exact() -> None:
 def test_render_delta_counts_and_previews() -> None:
     old = "a\nb\nc"
     new = "a\nB\nc\nd"
-    text, changed = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=1200)
-    assert changed == 3  # -b +B +d
-    assert "+2/-1 changed lines" in text
-    assert "- b" in text and "+ B" in text and "+ d" in text
+    rendered = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=1200)
+    assert rendered.changed_lines == 3  # -b +B +d
+    assert "+2/-1 changed lines" in rendered.text
+    assert "- b" in rendered.text and "+ B" in rendered.text and "+ d" in rendered.text
+    assert rendered.hidden is False
 
 
 def test_render_delta_truncates_previews_and_names_the_remainder() -> None:
     old = "\n".join(f"line {i}" for i in range(40))
     new = "\n".join(f"line {i}!" for i in range(40))
-    text, changed = diff.render_delta(old, new, max_delta_lines=2, delta_max_chars=10_000)
-    assert changed == 80
-    assert "… and 78 more changed lines" in text
+    rendered = diff.render_delta(old, new, max_delta_lines=2, delta_max_chars=10_000)
+    assert rendered.changed_lines == 80
+    assert "… and 78 more changed lines" in rendered.text
 
 
 def test_render_delta_respects_the_char_budget_ever_tightened() -> None:
     old = "a"
     new = "\n".join(["x" * 200] * 12)
-    text, changed = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=300)
-    assert len(text) <= 300
-    assert changed == 13  # one removed + twelve added
-    assert "more changed lines" in text
+    rendered = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=300)
+    assert len(rendered.text) <= 300
+    assert rendered.changed_lines == 13  # one removed + twelve added
+    assert "more changed lines" in rendered.text
+
+
+def _thread_result(replies: int) -> str:
+    """One ``slack_read_thread``-shaped result: the whole thread, one line.
+
+    The live shape that reproduced the blind suppression: MCP wraps the thread
+    as ``{"messages": [...], "pagination_info": ...}`` and serializes it
+    compactly, so a 13.7 KB thread is ONE line whose only line-level change is
+    a new message object near the end.
+    """
+    messages = [
+        {
+            "type": "message",
+            "user": f"U{index:04d}",
+            "text": f"reply {index}: " + "status update " * 90,
+            "ts": f"17560000{index:02d}.000100",
+        }
+        for index in range(replies)
+    ]
+    return json.dumps(
+        {"messages": messages, "pagination_info": {"has_more": False, "next_cursor": ""}},
+        separators=(",", ":"),
+    )
+
+
+def test_a_single_line_json_change_is_visible_in_the_delta() -> None:
+    """The 2026-10-20 failure, reproduced at the diff layer.
+
+    Two prefix clips of a 13.7 KB single-line result are byte-identical (both
+    are the thread header), so the only visible difference was the spill
+    footer. The delta must instead show the characters that changed — the new
+    reply — for the reader AND for the materiality gate.
+    """
+    old = _thread_result(10)
+    new = _thread_result(11)
+    assert "\n" not in old
+    assert len(old) > 13_000, len(old)
+
+    rendered = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=2000)
+    assert rendered.changed_lines == 2  # one line replaced by one line
+    assert rendered.hidden is False
+    previews = [line for line in rendered.text.split("\n") if line[:2] in ("+ ", "- ")]
+    assert len(previews) == 2, rendered.text
+    old_preview, new_preview = previews
+    assert old_preview != new_preview, "the two previews must not be the same prefix clip"
+    # A window, not a prefix: each side is marked where it was cut.
+    assert old_preview.startswith("- …") and new_preview.startswith("+ …")
+    assert "reply 10:" in new_preview, new_preview
+
+
+def test_a_hidden_preview_is_reported_as_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fail-open signal is derived from what the previews actually show.
+
+    No current renderer path can hide a long pair's difference (the window is
+    anchored on it), so this pins the detector itself against a renderer that
+    regresses to identical clips: the gate must be told the evidence is not
+    there rather than judging it.
+    """
+    monkeypatch.setattr(diff, "_clip", lambda line: "…")
+    rendered = diff.render_delta("a", "b", max_delta_lines=12, delta_max_chars=1200)
+    assert rendered.hidden is True
 
 
 def test_beyond_window_text_names_the_checksum() -> None:

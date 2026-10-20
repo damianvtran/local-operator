@@ -506,3 +506,70 @@ def test_a_disabled_row_does_not_say_its_failure_count_twice(
     out = capsys.readouterr().out
     assert out.count("5 failed") == 0
     assert "5 consecutive failed checks" in out
+
+
+def test_a_blind_monitor_says_so_in_the_state_column(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A watch that cannot compare must not read as an armed one.
+
+    The 2026-10-20 failure listed as a healthy row: the due clock survived and
+    nothing said the result was not being compared. The state word and the
+    shared hint both have to carry it.
+    """
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m3",
+                next_due_at=now + 150_000,
+                checks=4,
+                deliveries=0,
+                blind=True,
+                blind_reason="its full result is no longer in the spill store",
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "blind" in out
+    assert "BLIND: cannot compare its result" in out
+    assert "in 2m" not in out, "the due clock must not stand in for the state"
+
+
+def test_a_monitor_that_suppressed_changes_does_not_read_as_unchanged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The index row carries the suppression counts to this surface."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m4",
+                next_due_at=now + 150_000,
+                checks=5,
+                deliveries=0,
+                suppressed={"non_material_metadata": 7, "ignorable": 0, "rate_cap": 0},
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "7 changes suppressed as non-material" in out
+    assert "nothing has changed" not in out

@@ -425,3 +425,32 @@ async def test_a_healthy_row_carries_no_hint(desktop) -> None:
     assert response.status_code == 200
     row = response.json()["result"]["entries"][0]["monitors"][0]
     assert row["health"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_blind_watch_is_not_reported_as_armed(desktop) -> None:
+    """Armed-and-ticking is not the same as armed-and-reporting.
+
+    The blind state rides the index row; the wire word must name it rather than
+    letting the row read as a working watch with a due clock.
+    """
+    client, root = desktop
+    _session(root, "aaaaaaaaaaaa")
+    _entry(
+        root,
+        "aaaaaaaaaaaa",
+        rows=[
+            _row(
+                "m5",
+                blind=True,
+                blind_reason="its full result is no longer in the spill store",
+            )
+        ],
+    )
+
+    listing = await _list(client)
+
+    row = listing["entries"][0]["monitors"][0]
+    assert row["state"] == "blind"
+    assert row["blind"] is True
+    assert "BLIND: cannot compare its result" in row["health"]
