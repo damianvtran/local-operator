@@ -55,14 +55,11 @@ from textual.widgets import Static
 
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
-from local_operator.sigils import SlashContext, at_token, is_boundary, split_token
+from local_operator.sigils import SlashContext, is_boundary, split_token
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import (
-    ArgumentChoice,
-    SlashCommand,
-    match_choices,
-    match_commands,
-)
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.autocomplete import file_completion_token as at_token
+from local_operator.tui.autocomplete import match_choices, match_commands
 
 # The project has exactly ONE cell-accurate truncator and it lives in
 # tool_card. Importing it across widget modules is deliberate: a local copy is
@@ -944,8 +941,9 @@ def _file_span_replacement(text: str, token: SlashContext, row_name: str) -> tup
     directory = token.query[: token.query.rfind("/") + 1]
     path = f"{directory}{row_name}"
     quoted = f'"{path}"' if " " in path else path
-    completed = f"{text[: token.start]}@{quoted}{text[token.end :]}"
-    return completed, token.start + len(quoted) + 1
+    sigil = "@" if text[token.start : token.start + 1] == "@" else ""
+    completed = f"{text[: token.start]}{sigil}{quoted}{text[token.end :]}"
+    return completed, token.start + len(quoted) + len(sigil)
 
 
 def _skill_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:

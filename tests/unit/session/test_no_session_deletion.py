@@ -2295,6 +2295,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_file_viewer",
+        "<path>.remove",
+        "Textual FileViewer.remove unmounts the page; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_agent_form",
         "<path>.remove",
         "Textual AgentFormPage.remove unmounts the page; no filesystem path",

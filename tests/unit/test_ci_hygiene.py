@@ -31,6 +31,7 @@ against the defect it claims to catch.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import re
 import shlex
@@ -671,6 +672,91 @@ def test_a_measured_zero_never_becomes_a_free_file_or_a_free_fallback() -> None:
     assert isinstance(fallback, float) and fallback > 0, manifest
     assert isinstance(durations, dict), manifest
     assert durations["tests/unit/test_all_skipped.py"] > 0, manifest
+
+
+def _junit_report(tmp_path: Path, *testcases: str) -> Path:
+    """A minimal JUnit report holding `testcases` verbatim.
+
+    Built as text rather than through ElementTree because the point of the
+    tests below is a `classname` pytest really emits, including the empty one
+    an XML writer would be within its rights to drop.
+    """
+    report = tmp_path / "junit.xml"
+    report.write_text(
+        '<?xml version="1.0"?>\n<testsuites><testsuite name="p">'
+        + "".join(testcases)
+        + "</testsuite></testsuites>\n"
+    )
+    return report
+
+
+def test_a_module_level_skip_resolves_through_its_name(tmp_path: Path) -> None:
+    """`classname=""` must not stop the documented CI regeneration route.
+
+    pytest reports a MODULE-level skip (`pytest.skip(...,
+    allow_module_level=True)`) with an EMPTY `classname` and the module's
+    dotted path in `name` -- pytest 8, observed on CI 2026-10-19 with
+    `tests/unit/tui/test_hub_links_capture.py`. That empty string used to reach
+    `Path("").with_suffix(".py")` and raise `ValueError: PosixPath('.') has an
+    empty name`, which took down the whole run BEFORE anything was written: the
+    manifest did not refresh and went 630 files stale instead, with no CI job
+    failing to say so. Driven through `main`, because the property is that the
+    route completes and writes, not that one helper returns a string.
+    """
+    from scripts import gen_test_durations
+
+    report = _junit_report(
+        tmp_path, '<testcase classname="" name="tests.unit.test_ci_hygiene" time="2.5"/>'
+    )
+    out = tmp_path / "durations.json"
+
+    assert gen_test_durations.main(["--junit", str(report), "--out", str(out)]) == 0
+    written = json.loads(out.read_text())
+    assert written["durations"] == {"tests/unit/test_ci_hygiene.py": 2.5}, written
+
+
+@pytest.mark.parametrize("classname", ["", ".", "..", "tests."])
+def test_a_classname_of_only_separators_is_dropped_not_raised(
+    classname: str, tmp_path: Path
+) -> None:
+    """The guard covers the empty-component CLASS, not just the empty string.
+
+    `"."` splits to two empty components and reaches the SAME `ValueError` as
+    `""`, so `if not classname` closes the spelling pytest emits today and
+    leaves the other one open. Nothing emits `.` yet; the cost of the wider
+    guard is nothing, and the cost of the narrow one is a manifest that
+    silently stops being regenerated. `tests.` is here because a trailing
+    separator trims to `tests.py`, which names no test file and must be a drop,
+    not a crash.
+    """
+    from scripts import gen_test_durations
+
+    report = _junit_report(tmp_path, f'<testcase classname="{classname}" time="1.0"/>')
+
+    assert gen_test_durations.aggregate([report]) == {}
+
+
+def test_the_unresolved_warning_names_the_string_that_was_tried(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dropped mapping must be actionable: name the string actually tried.
+
+    On the empty-classname path the string tried is `name`, and the warning
+    recorded the raw `classname` instead -- so the message printed `['']`,
+    which names no testcase the reader could go and look at. A silently
+    dropped mapping understates a file's cost, which is the failure the
+    warning exists to make loud.
+    """
+    from scripts import gen_test_durations
+
+    report = _junit_report(
+        tmp_path, '<testcase classname="" name="tests.unit.test_never_written" time="1.0"/>'
+    )
+
+    assert gen_test_durations.aggregate([report]) == {}
+    err = capsys.readouterr().err
+    assert "tests.unit.test_never_written" in err, err
+    assert "['']" not in err, err
 
 
 def test_every_shard_matrix_job_uses_a_known_tree() -> None:

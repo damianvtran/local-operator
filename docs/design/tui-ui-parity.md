@@ -41,7 +41,8 @@ evidence for both.
 |---|---|---|---|---|
 | 2.1 | Multiline composer, slash autocomplete, `@path` references | ✅ | ✅ | UI `shared/components/composer/message-input.tsx`, `at-mention-overlay.tsx`; TUI `widgets/editor.py`, `autocomplete.py` |
 | 2.2 | Image attachment staging (paste, drop, picker) | ✅ | ✅ | UI `file-attachment.tsx`, `image-attachment.tsx`, attach button; TUI `widgets/editor.py` attachment staging |
-| 2.3 | Rich attachment / artifact preview in the app | ✅ | ◐ | UI canvas viewers for text, code, markdown, HTML, PDF, spreadsheet, image, audio, video; TUI renders images inline (`widgets/image_block.py`) and opens other files externally (`attachments.py`, `supplement_block.py`) |
+| 2.3a | Read-only text, code and markdown attachment preview | ✅ | ✅ | TUI `/view <path>` and supported file callouts open `widgets/file_viewer.py`: bounded UTF-8 text, highlighted source/JSON/YAML/TOML, rendered markdown, CSV as text and HTML as source; images retain their inline renderer |
+| 2.3b | Rich documents and media preview (rendered HTML, PDF, spreadsheet, audio, video) | ✅ | ◐ | UI canvas viewers; TUI retains OS/Finder handling for supported callouts, not inline rich rendering — P7 |
 | 2.4 | Voice dictation in the composer | ✅ | ✗ | UI `features/chat/components/audio-recording-indicator.tsx`, mic in `message-input.tsx`; no TUI capture surface |
 | 2.5 | Model, reasoning effort and fast-mode switching | ✅ | ✅ | UI header cluster/pickers; TUI `/model`, `/effort`, `/fast`, shift+tab |
 | 2.6 | Tool approval mode and per-call approval cards | ✅ | ✅ | UI approval cards; TUI `widgets/approval.py`, `/approvals` |
@@ -101,7 +102,8 @@ evidence for both.
 | # | Capability | UI | TUI | Evidence |
 |---|---|---|---|---|
 | 6.1 | File callouts from an answer, open in the OS | ✅ | ✅ | UI file rows; TUI `widgets/supplement_block.py`, `attachments.py` |
-| 6.2 | Inline document viewer (text, code, markdown, HTML, PDF, spreadsheet, image, audio, video) | ✅ | ◐ | UI `features/chat/components/canvas/*`; TUI renders images inline (`image_block.py`) and the agent's `read` can print text, but there is no viewer |
+| 6.2a | Read-only inline text, code and markdown viewer | ✅ | ✅ | TUI `/view <path>` / file callout click: 1 MiB / 20,000-line bounded read-only page; code line numbers and horizontal scroll, markdown rendered, text wrapped, reload/wrap/copy-path/external-open; HTML source only (`file_viewer.py`, `widgets/file_viewer.py`) |
+| 6.2b | Rich documents/media viewer (rendered HTML, PDF, spreadsheet, image, audio, video) | ✅ | ◐ | Images retain inline `image_block.py`; other rich documents/media stay external, with no new parsers or rendered HTML — P7 |
 | 6.3 | Create/edit files with an inline AI editor | ✅ | ◐ | UI `canvas/inline-edit.tsx`, `create-file-dialog.tsx`, WYSIWYG markdown; TUI has no editor surface — the agent's `edit`/`write` tools are the only path |
 | 6.4 | Drag-and-drop arbitrary files into the composer | ✅ | ◐ | UI attach-file button/drop; TUI stages images, other terminal drops arrive as paths/text |
 
@@ -196,7 +198,7 @@ design is accepted.
 | P1 | `/schedule` — wake list/create/edit/cancel | 2.14, 8.3 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround | Medium: mutation, form validation, date/duration parsing |
 | P2 | Project parity completion: edit project, add/remove milestone | 10.3, 10.5 | Closes the last project gaps; store APIs already exist; TUI already has the page and form patterns | Low–medium |
 | P3 | Agent and team authoring forms | 4.2, 4.4 | Removes the agent-mediated workaround; desktop has the full field set to mirror; TUI already has `/agent` and `/team` surfaces | Medium: forms and validation |
-| P4 | Attachment/file preview | 2.3, 6.2 | TUI currently punts everything but images to the OS; text/code/markdown preview is terminal-shaped and useful | Medium: file-type routing, bounded rendering |
+| P4a | Read-only text/code/markdown file preview — delivered | 2.3a, 6.2a | `/view` and supported callouts share a bounded local read-only viewer; richer rendering and editing are not included | Medium: file-type routing, bounded rendering |
 | P5 | Command palette providers | 1.4 | One keyboard surface over destinations, settings rows, conversations and agents; the inherited Textual palette already opens, but has nothing app-specific to show | Medium: new interaction, not a new subsystem |
 
 ### Proposals (do not build without acceptance)
@@ -204,9 +206,10 @@ design is accepted.
 - **P6 — Agent hub browser/install/publish** (4.5–4.9). High value but requires
   Radient auth, the public catalogue API, download/publish paths and a terminal
   information architecture for a marketplace. Propose as its own design.
-- **P7 — Canvas** (6.2–6.3, 2.3). A document viewer/editor is a subsystem:
-  file-type routing, freshness, editing, AI inline edit. Propose a read-only
-  first phase if wanted.
+- **P7 — Rich canvas** (6.2b–6.3, 2.3b). Rich document/media rendering,
+  editing and AI inline edit remain a separate subsystem. P4a delivers only
+  the read-only text/code/markdown subset; PDF/spreadsheet/rendered HTML/audio/
+  video still use the OS, and images keep their existing inline behavior.
 - **P8 — Built-in browser pane** (7.1–7.3). A browser in a terminal needs a
   different answer from an Electron webview; the consent/approval half is the
   part that matters for agent safety. Propose.

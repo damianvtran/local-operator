@@ -3724,6 +3724,26 @@ async def test_clicking_the_exit_hint_leaves_the_page() -> None:
         assert session.aborts == [], "leaving is not stopping the parent's turn"
 
 
+async def _wait_for_scroll_animation(pilot: Any, body: Any, *, timeout: float = 5.0) -> None:
+    """Observe completed motion, not an arbitrary animation frame after idle.
+
+    Pilot.pause can return while scroll_y is still moving or the next scroll
+    is queued. Waiting for scheduled animations also drains the screen callbacks
+    that dispatch the click; it does not disable the real arrow animation.
+    """
+    try:
+        await asyncio.wait_for(pilot.wait_for_scheduled_animations(), timeout=timeout)
+    except TimeoutError as exc:
+        raise AssertionError(
+            "scroll animation never completed: "
+            f"current={body.scroll_y}, rendered={body.scroll_offset.y}, "
+            f"target={body.scroll_target_y}, max={body.max_scroll_y}, "
+            f"virtual_height={body.virtual_size.height}"
+        ) from exc
+    assert not body.app.animator.is_being_animated(body, "scroll_y")
+    assert body.scroll_y == pytest.approx(body.scroll_target_y)
+
+
 @pytest.mark.asyncio
 async def test_clicking_the_arrows_scrolls_the_transcript_both_ways() -> None:
     """Two targets, not one: a single `↑↓` hint would have to guess which way a
@@ -3739,18 +3759,18 @@ async def test_clicking_the_arrows_scrolls_the_transcript_both_ways() -> None:
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         view = await _open(pilot, app, job)
-        await pilot.pause()
+        await _wait_for_scroll_animation(pilot, view._body)
         tail = view._body.scroll_offset.y
         assert tail > 0, "premise: the page opens scrolled to the tail"
 
         assert view._up_hint.has_class("actionable"), "there IS somewhere to scroll back to"
         await pilot.click(view._up_hint)
-        await pilot.pause()
+        await _wait_for_scroll_animation(pilot, view._body)
         lifted = view._body.scroll_offset.y
         assert lifted < tail, "the up arrow moves the reader back up the run"
 
         await pilot.click(view._down_hint)
-        await pilot.pause()
+        await _wait_for_scroll_animation(pilot, view._body)
         assert view._body.scroll_offset.y > lifted, "and the down arrow moves them forward"
 
 

@@ -2000,7 +2000,12 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         return []
 
     hints: list[Skill] = []
-    agents_dir = Path(agent_registry.config_dir) / "agents"
+    # The registry, not ``config_dir / "agents"``: a session-scoped registry is
+    # rooted at ``<session>/roles``, and deriving the path here would point the
+    # hint row at the global tree for a row that does not live there. Older
+    # callers and tests pass a duck-typed registry without the seam; keep the
+    # historical global path for those rather than failing hint enrichment.
+    agent_dir_method: Callable[[str], Path] | None = getattr(agent_registry, "agent_dir", None)
     for agent in agents:
         semantic_parts = [
             sanitize_prompt_line(str(agent.description or "")),
@@ -2010,14 +2015,18 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         semantic = " ".join(part for part in semantic_parts if part).strip()
         if not semantic:
             continue
-        agent_dir = agents_dir / str(agent.id)
+        agent_dir: Path
+        if agent_dir_method is not None:
+            agent_dir = agent_dir_method(agent.id)
+        else:
+            agent_dir = Path(agent_registry.config_dir) / "agents" / agent.id
         hints.append(
             Skill(
                 name=f"registered-agent-{agent.id}",
                 description=f"{sanitize_prompt_line(str(agent.name))}: {semantic}"[:512],
                 file_path=agent_dir / "agent.yml",
                 base_dir=agent_dir,
-                source=str(agents_dir),
+                source=str(agent_dir.parent),
                 resource_type="agent_hint",
             )
         )
@@ -4565,6 +4574,19 @@ async def _prepare(
         cache_lineage_id=fork_parent(transcript_dir) or None,
     )
 
+    # --- session-scoped roles (LOH-9) ---------------------------------------
+    # A role authored FOR this conversation lives in <session>/roles, not in
+    # the global store, so it appears in this session's pickers and nowhere
+    # else. The composite is built ONCE here and inherited by subagents (their
+    # ``create_session`` receives this registry and the helper returns it
+    # unchanged), which is what keeps a child's creations in the parent's
+    # conversation scope. Writes still delegate to the global store in S1.
+    # Teams are scoped beside their creation below, because that registry is
+    # built later and may legitimately be None.
+    from local_operator.profile_scope import scope_agent_registry
+
+    agent_registry = scope_agent_registry(agent_registry, transcript_dir)
+
     # --- tools + lazy knowledge (streams A and C) --------------------------
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
@@ -4641,6 +4663,12 @@ async def _prepare(
             f"\033[1;33mWarning: teams are unavailable this session: {exc}\033[0m",
             file=sys.stderr,
         )
+    else:
+        # LOH-9: teams are conversation-scoped too. A None registry keeps the
+        # existing degrade-one-feature behaviour (the tool is not advertised).
+        from local_operator.profile_scope import scope_team_registry
+
+        team_registry = scope_team_registry(team_registry, transcript_dir)
     # The projects registry gets the same degrade-one-feature handling, for the
     # same reason: a store the user may never have touched must not take down
     # the whole boot. `ProjectRegistry` construction is read-only (it creates

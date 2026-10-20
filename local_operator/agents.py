@@ -751,20 +751,35 @@ class AgentRegistry:
     _refresh_interval: float
     _incomplete_agent_dirs: List[Path]
 
-    def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        refresh_interval: float = 5.0,
+        *,
+        initialize: bool = True,
+        migrate: bool = True,
+    ) -> None:
         """
         Initialize the AgentRegistry, loading metadata from agent.yml files.
 
         Args:
             config_dir (Path): Directory containing the agents directory
             refresh_interval (float): Time in seconds between refreshes of agent data from disk
+            initialize (bool): Create ``config_dir``/``agents`` when absent. A
+                SESSION-SCOPED registry passes ``False``: reading a scope must
+                not litter a conversation directory, and ``save_agent`` makes
+                the tree on the first real write.
+            migrate (bool): Run the legacy-store migrations. Those belong to
+                the machine-wide store only; a session scope has no legacy
+                layout to migrate.
         """
         self.config_dir = config_dir
-        if not self.config_dir.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
+        if initialize:
+            if not self.config_dir.exists():
+                self.config_dir.mkdir(parents=True, exist_ok=True)
 
         self.agents_dir = self.config_dir / "agents"
-        if not self.agents_dir.exists():
+        if initialize and not self.agents_dir.exists():
             self.agents_dir.mkdir(parents=True, exist_ok=True)
 
         # For backward compatibility
@@ -786,8 +801,9 @@ class AgentRegistry:
         self._refresh_interval = refresh_interval
 
         # Migrate old agents if needed
-        self.migrate_agents_dir()
-        self.migrate_legacy_agents()
+        if migrate:
+            self.migrate_agents_dir()
+            self.migrate_legacy_agents()
 
         # Load agent metadata
         self._load_agents_metadata()
@@ -1525,6 +1541,17 @@ class AgentRegistry:
             "delegate": profile.may_delegate,
             "action_class": _normalize(profile.action_class),
         }
+
+    def agent_dir(self, agent_id: str) -> Path:
+        """The directory holding ``agent_id`` in THIS store.
+
+        A seam for readers that need a row's definition path (the semantic
+        agent-hint index). It must come from the registry rather than
+        ``config_dir / "agents"`` because a session-scoped registry is rooted
+        at ``<session>/roles``; callers that derive the path themselves would
+        point at the global tree.
+        """
+        return self.agents_dir / str(agent_id)
 
     def get_agent(self, agent_id: str) -> AgentData:
         """

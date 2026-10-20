@@ -620,7 +620,7 @@ never re-derived per surface.
 | Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
 | Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
-| Conversation tags | — | chat sidebar tag chips + `/v1/desktop/tags` | partial — the relay serves the catalogue, the per-row fields and desired-state assignment (S0); phone create/rename is deliberately absent and the chip render is next (S2) |
+| Conversation tags | — | chat sidebar tag chips + `/v1/desktop/tags` | partial — S2a ships the row labels on both lists and the assignment sheet (checkboxes, primary radio, two-step clear); create/rename remains desktop/agent-only. Grouping by tag is S2b and is not shipped |
 | Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
 | Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
