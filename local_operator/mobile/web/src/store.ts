@@ -74,6 +74,14 @@ export interface ProjectionSlot {
 
 let sessions: SessionSummary[] = [];
 let sessionsConnected = false;
+/* Monotonic count of ACCEPTED list frames. Consumers that need "has a newer
+   authoritative frame arrived?" read this, never the `sessions` array's
+   identity: identity is only a change signal for `useSyncExternalStore`
+   itself, and a caller may legally hand back a fresh array every render (the
+   screen tests do exactly that). Counting HERE — in the one handler that
+   accepts a frame — is what keeps the counter tied to frames rather than to
+   renders. */
+let sessionsRevision = 0;
 /* Server capabilities off the SAME list frames that carry the sessions (see
    the daemon's ``_list_frame``): one answer, two transports. ``null`` means an
    older daemon omitted the key — read it as "no capabilities", never as
@@ -180,10 +188,15 @@ function subscribe(l: () => void): () => void {
 export function useSessions(): {
 	sessions: SessionSummary[];
 	connected: boolean;
+	/** Every accepted list frame increments this once; it never moves on a
+	    component render. A write that compares it before and after can tell
+	    whether a newer authoritative frame landed meanwhile. */
+	revision: number;
 } {
 	const list = useSyncExternalStore(subscribe, () => sessions);
 	const connected = useSyncExternalStore(subscribe, () => sessionsConnected);
-	return { sessions: list, connected };
+	const revision = useSyncExternalStore(subscribe, () => sessionsRevision);
+	return { sessions: list, connected, revision };
 }
 
 /** The pins the user has asked for and the daemon has not confirmed yet, keyed
@@ -386,6 +399,7 @@ export function retainSessionListStream(): () => void {
 						capabilities?: Capabilities;
 					};
 					sessions = payload.sessions;
+					sessionsRevision++;
 					capabilities = payload.capabilities ?? null;
 					wireCatalogueLoader.invalidateCapabilities();
 					sessionsConnected = true;

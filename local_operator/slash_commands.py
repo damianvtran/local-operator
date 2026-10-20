@@ -17,6 +17,7 @@ from local_operator.i18n.keys import (
     tui_import,
     tui_review,
     tui_schedule,
+    tui_viewer,
     wire_memory,
     wire_slash,
     wire_slash_library,
@@ -1205,6 +1206,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # smell §1.7 names — give it its own command instead. The description below
     # stays the path form's: it is the one every install has, and the mesh form
     # is taught where the mesh is (`/network`, the design's §1.6 strings).
+    SlashCommand(
+        "view",
+        _tr(tui_viewer.description()),
+        arguments=ArgumentMode.REQUIRED,
+        argument_shape=ArgumentShape.ANY,
+    ),
     SlashCommand(
         "move",
         # Names the two ways to answer it, because the argument form is the

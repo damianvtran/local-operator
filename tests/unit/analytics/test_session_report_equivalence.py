@@ -294,7 +294,9 @@ def _compare(store: AnalyticsStore, path, session_id: str, *, recent_limit: int 
     fresh = store.session_report(session_id, recent_limit=recent_limit)
     with sqlite3.connect(path) as conn:
         legacy = legacy_session_report(store, conn, session_id, recent_limit=recent_limit)
-    assert asdict(fresh) == asdict(legacy)
+    # The frozen oracle predates payment-basis breakdowns. Compare every
+    # legacy field unchanged; dedicated tests exercise the new split itself.
+    assert asdict(replace(fresh, by_model_basis={}, descendants_by_basis={})) == asdict(legacy)
 
 
 @pytest.mark.parametrize("session_id", [CHILD, ROOT, GRANDCHILD, TWO_PARENTS, SELF_PARENT, "nope"])
@@ -321,7 +323,9 @@ def test_a_session_with_children_matches_including_the_subtree(tmp_path):
     assert fresh.descendant_ids, "the fixture must give the root a subtree to walk"
     with sqlite3.connect(tmp_path / "analytics.db") as conn:
         legacy = legacy_session_report(store, conn, ROOT)
-    assert asdict(fresh) == asdict(legacy)
+    # The frozen oracle predates payment-basis breakdowns. Compare every
+    # legacy field unchanged; dedicated tests exercise the new split itself.
+    assert asdict(replace(fresh, by_model_basis={}, descendants_by_basis={})) == asdict(legacy)
 
 
 def test_an_older_ledger_without_the_optional_columns_matches(tmp_path):
@@ -357,7 +361,9 @@ def test_an_older_ledger_without_the_optional_columns_matches(tmp_path):
     fresh = store.session_report(CHILD)
     with sqlite3.connect(path) as conn:
         legacy = legacy_session_report(store, conn, CHILD)
-    assert asdict(fresh) == asdict(legacy)
+    # The frozen oracle predates payment-basis breakdowns. Compare every
+    # legacy field unchanged; dedicated tests exercise the new split itself.
+    assert asdict(replace(fresh, by_model_basis={}, descendants_by_basis={})) == asdict(legacy)
     assert fresh.available is True
     # The old behaviour, stated where a reader will see it: an absent column is
     # UNKNOWN, never a confident zero.

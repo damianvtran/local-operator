@@ -133,9 +133,27 @@ UPDATES_MAX = 500
 ATTACHMENTS_MAX = 10
 ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 
-#: Extensions copied in as ``image`` attachments; everything else is ``data``
-#: (the kinds renderers branch on, so the classification is stated once).
+#: Extensions classified at copy time; everything else is ``data`` (the kinds
+#: renderers branch on, so the classification is stated once here). Audio and
+#: video are distinct from ``data`` so a renderer can pick a player instead of
+#: guessing from the suffix; rows written before these kinds existed keep
+#: ``data`` and stay valid.
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
+_AUDIO_SUFFIXES = frozenset({".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus"})
+_VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"})
+_ATTACHMENT_KINDS = frozenset({"image", "audio", "video"})
+
+
+def _attachment_kind(suffix: str) -> Literal["image", "audio", "video", "data"]:
+    """The stored ``kind`` for a copied file, derived only from its suffix."""
+    if suffix in _IMAGE_SUFFIXES:
+        return "image"
+    if suffix in _AUDIO_SUFFIXES:
+        return "audio"
+    if suffix in _VIDEO_SUFFIXES:
+        return "video"
+    return "data"
+
 
 #: How long a progress snippet stays "fresh" when the operator has not said
 #: otherwise. The live threshold is the settings key ``projects.stale_after_hours``
@@ -485,8 +503,9 @@ class ProjectAttachment(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = Field(default="", description="Original file name, for display.")
-    kind: Literal["image", "data"] = Field(
-        default="data", description="``image`` by extension; ``data`` otherwise."
+    kind: Literal["image", "audio", "video", "data"] = Field(
+        default="data",
+        description="``image``, ``audio`` or ``video`` by extension; ``data`` otherwise.",
     )
     path: str = Field(default="", description="Where the COPY lives, resolvable.")
     bytes: int = Field(default=0, description="Size at copy time.")
@@ -526,7 +545,7 @@ def _coerce_attachment(raw: dict[str, Any]) -> ProjectAttachment:
         size = 0
     return ProjectAttachment(
         name=str(raw.get("name") or "").strip(),
-        kind="image" if kind == "image" else "data",
+        kind=kind if kind in _ATTACHMENT_KINDS else "data",  # type: ignore[arg-type]
         path=str(raw.get("path") or "").strip(),
         bytes=size,
         added_at=str(raw.get("added_at") or "").strip(),
@@ -1982,7 +2001,7 @@ class ProjectRegistry:
                 stored.append(
                     ProjectAttachment(
                         name=source.name,
-                        kind="image" if suffix in _IMAGE_SUFFIXES else "data",
+                        kind=_attachment_kind(suffix),
                         path=str(destination),
                         bytes=destination.stat().st_size,
                         added_at=stamp,

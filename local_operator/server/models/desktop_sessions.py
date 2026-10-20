@@ -168,6 +168,9 @@ class SessionRow(BaseModel):
     #: unusable value becomes ``null`` — which every client already handles —
     #: instead of a 500 the list cannot survive. The same rule runs in
     #: ``info.collect`` and in the sidebar's ``resume._counted``.
+    #: Additive wait presence; nullable job counts distinguish no report from zero.
+    waiting_on: int = 0
+    jobs_running: int | None = None
     subagents_running: int | None = None
     subagents_queued: int | None = None
 
@@ -202,7 +205,7 @@ class SessionRow(BaseModel):
     #: which is also what it does before the first user message exists.
     last_user_at: float | None = None
 
-    @field_validator("subagents_running", "subagents_queued", mode="before")
+    @field_validator("jobs_running", "subagents_running", "subagents_queued", mode="before")
     @classmethod
     def _a_reported_count(cls, value: Any) -> int | None:
         """Refuse an unusable count the way every other reader does."""

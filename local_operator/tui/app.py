@@ -6199,6 +6199,8 @@ class OperatorApp(App[None]):
         # for the same reason — the Esc chain and every approval/ask/clear
         # yield close it the same way, and ``_sync_boot_layout_class`` counts
         # it against the boot layout.
+        self._file_viewer: Any | None = None
+        self._file_viewer_focus_restore: Any | None = None
         self._projects_view: Any | None = None
         self._team_form: Any | None = None
         self._team_form_focus_restore: Any | None = None
@@ -12353,8 +12355,20 @@ class OperatorApp(App[None]):
         # user's chosen level would repaint the band with a level they did not
         # choose and are no longer running.
         spec = _model_spec(session)
+        follower = callable(getattr(session, "route_shared_slash", None))
+        # A RESTORED choice already belongs to the session; the app's own
+        # preference starts empty after a restart. Seed it BEFORE the restore
+        # guard below, or a resumed session with nothing else to restore never
+        # runs the restore at all and the first `/model` would apply the
+        # target's seed — the reported defect one step later (review round 5).
+        # Never on a FOLLOWER: its remembered local effort must not rewrite the
+        # shared owner's model, and the owner projection is authoritative.
+        if not follower and self._effort_choice is None:
+            restored_choice = getattr(session, "chosen_effort", None)
+            if restored_choice:
+                self._effort_choice = restored_choice
         if (
-            not callable(getattr(session, "route_shared_slash", None))
+            not follower
             and spec is not None
             and (self._effort_choice is not None or self._fast_choice)
             and hasattr(session, "set_model")
@@ -17960,7 +17974,17 @@ class OperatorApp(App[None]):
     #: the handler never runs, while the marks it lists are on disk in front of
     #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/sidebar", "/help", "/settings", "/hub", "/resume", "/notifications"}
+        {
+            "/copy",
+            "/links",
+            "/view",
+            "/sidebar",
+            "/help",
+            "/settings",
+            "/hub",
+            "/resume",
+            "/notifications",
+        }
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -25284,6 +25308,7 @@ class OperatorApp(App[None]):
                 # read-only composer already claims the keyboard: the claim
                 # must not depend on that side effect, or a future focusable
                 # mode rebuilds the hole (agent review round 1, finding 11).
+                or self._file_viewer is not None
                 or self._projects_view is not None
                 or self._agent_form is not None
                 or self._team_form is not None
@@ -26118,6 +26143,8 @@ class OperatorApp(App[None]):
             return
         if self._agent_form is not None:
             self._agent_form.action_cancel_request()
+            return
+        if self._close_file_viewer():
             return
         if self._projects_view is not None and self._projects_view.escape_surface():
             return
@@ -30213,6 +30240,7 @@ class OperatorApp(App[None]):
             and self._settings_view is None
             and self._subagent_view is None
             and self._org_chart_view is None
+            and self._file_viewer is None
             and self._projects_view is None
             and self._agent_form is None
             and self._team_form is None
@@ -36220,6 +36248,7 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         comms = getattr(self._session, "_subagent_comms", None)
@@ -36419,6 +36448,7 @@ class OperatorApp(App[None]):
         # Conversation boot needs the dismissal message, not the optional
         # renderer. Import before registry/focus/layout work so a first-use
         # import failure remains observable without leaving a half-entered mode.
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         from local_operator.tui.widgets.org_chart_view import OrgChartView
@@ -36548,6 +36578,7 @@ class OperatorApp(App[None]):
         Its data loading is async in the widget's own worker, so the first
         frame is the loading state rather than a blocked app.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._import_view is not None:
@@ -36623,6 +36654,7 @@ class OperatorApp(App[None]):
         loading is async in the widget's own worker, so the first frame is the
         loading state rather than a blocked app.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._review_view is not None:
@@ -36702,6 +36734,7 @@ class OperatorApp(App[None]):
         page reads the live scheduler synchronously, so its first frame is the
         populated (or empty) list rather than a loading state.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._schedule_view is not None:
@@ -36798,6 +36831,7 @@ class OperatorApp(App[None]):
         ``on_mount`` so the first painted frame already says "reading the
         library" instead of flashing an empty list for one tick.
         """
+        self._close_file_viewer()
         if self._library_view is not None:
             return
         from local_operator.paths import config_dir
@@ -37014,6 +37048,7 @@ class OperatorApp(App[None]):
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._settings_view is not None:
@@ -37585,6 +37620,7 @@ class OperatorApp(App[None]):
         view switch, zoom and cursor movement without ever re-reading, so a
         repaint costs no registry or filesystem I/O.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._projects_view is not None:
@@ -37653,6 +37689,9 @@ class OperatorApp(App[None]):
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
         """
+        # Every mode/session transition already closes the projects sibling;
+        # keep the local-file worker on that same lifecycle boundary.
+        self._close_file_viewer()
         view = self._projects_view
         if view is None:
             return False
@@ -40893,7 +40932,7 @@ class OperatorApp(App[None]):
             )
         }
         remote_capability = remote_capabilities.get(command)
-        if command in {"/loop", "/sidebar"}:
+        if command in {"/loop", "/sidebar", "/view"}:
             # The invoking TUI owns scheduling/interaction, even when a legacy
             # owner advertises the older authoritative classification. Each
             # loop iteration still uses the source's real owner prompt route.
@@ -41168,6 +41207,8 @@ class OperatorApp(App[None]):
                 notice("Use /sidebar or /sidebar focus", "error")
             else:
                 self.action_toggle_sidebar()
+        elif command == "/view":
+            self._cmd_view(arg)
         elif command == "/settings":
             self._cmd_settings(notice)
         elif command == "/import":
@@ -43466,7 +43507,16 @@ class OperatorApp(App[None]):
         if session is None or spec is None or not hasattr(session, "set_model"):
             return False
         self._effort_choice = level if remember else None
-        session.set_model(spec.model_copy(update={"reasoning_effort": level}))
+        # The session owns the DURABLE half of the same decision: an explicit
+        # level is a choice, and `remember=False` (`/effort auto`) is a
+        # WITHDRAWAL. Passed explicitly rather than left for the session to
+        # infer from the spec, because a withdrawal can leave the spec level
+        # untouched and a failover clamp can move it without a decision (review
+        # round 1, M1/M3).
+        session.set_model(
+            spec.model_copy(update={"reasoning_effort": level}),
+            effort_choice=(level if remember else None),
+        )
         # READ BACK rather than trusting the write. A host is free to accept a
         # spec and keep its own, and the whole value of this return is that a
         # receipt is never printed for a level the session is not carrying —
@@ -43657,7 +43707,7 @@ class OperatorApp(App[None]):
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
         )
-        return f"reasoning effort: {rendered} — shift+tab cycles, this session only"
+        return f"reasoning effort: {rendered} — shift+tab cycles, this conversation"
 
     def _cmd_effort(self, arg: str, notice: NoticeFn) -> None:
         """``/effort`` — list this model's levels; ``/effort <level>`` — set one.
@@ -43671,20 +43721,23 @@ class OperatorApp(App[None]):
         in one keystroke, so the listing names that key instead of competing
         with it.
 
-        The level is SESSION-scoped: ``/effort`` has no durable form of its own,
-        which is where this parts company with ``PERSIST_HINT``. The model is a
-        standing preference — you want the same one next launch — while effort is
-        a per-task dial: raised for a hard refactor, dropped for chat. Freezing
-        one task's dial into every future session is the failure mode, so there
-        is still no ``/effort default``. What changed with the ``model_effort``
-        key is that a level CAN be made the BIRTH default for new conversations
-        — by saving the model with ``/model default`` while it is in force —
-        which is a separate, deliberate action about the DEFAULT rather than a
-        side effect of turning a dial. So the SET receipt points at that
-        command (D10). The ``/effort auto`` receipt points at ``/settings``
-        instead: auto WITHDRAWS the preference, so ``/model default`` is not the
-        route that keeps it (a stored level survives a bare ``/model default`` by
-        design, D6) — the settings row is (U2).
+        The level is CONVERSATION-scoped: ``/effort`` has no durable form of its
+        own as a machine setting, which is where this parts company with
+        ``PERSIST_HINT``. The model is a standing preference — you want the same
+        one next launch — while effort is a per-task dial: raised for a hard
+        refactor, dropped for chat. Freezing one task's dial into every future
+        session is the failure mode, so there is still no ``/effort default``.
+        The level IS written to this conversation's own journal, so a restart of
+        THIS conversation keeps it — the reported "set Max, restart, back to
+        High" defect. And what changed with the ``model_effort`` key is that a
+        level CAN be made the BIRTH default for new conversations — by saving
+        the model with ``/model default`` while it is in force — which is a
+        separate, deliberate action about the DEFAULT rather than a side effect
+        of turning a dial. So the SET receipt points at that command (D10). The
+        ``/effort auto`` receipt points at ``/settings`` instead: auto WITHDRAWS
+        the preference, so ``/model default`` is not the route that keeps it (a
+        stored level survives a bare ``/model default`` by design, D6) — the
+        settings row is (U2).
         """
         session = self._session
         spec = _model_spec(session)
@@ -43755,19 +43808,24 @@ class OperatorApp(App[None]):
             destination = restored or "auto"
             scope = "(the model's own default)" if restored else "(nothing sent)"
             if restored == current:
+                # THE LEVEL DID NOT MOVE, BUT THE CHOICE MAY HAVE — and the
+                # `_apply_effort(..., remember=False)` above already carried the
+                # WITHDRAWAL to the session even when the spec did not move
+                # (review round 1, M3). Only the receipt differs here.
                 notice(f"reasoning effort: already {destination} {scope}")
                 return
-            # U2: the withdrawal is SESSION-scoped and the user is told the one
-            # route that makes it stick, because the key they set earlier still
-            # holds the level and the next `/new` boots on it. The origin clause
-            # (`(the model's own default)` / `(nothing sent)`) gives way to it:
-            # at 80 columns a notice row holds 70 cells (design review D2) and
-            # origin + `(this session)` + the pointer do not fit together, so the
-            # actionable half stays. What it dropped is on the band and in the
-            # `/settings` expansion beside the level this row names.
+            # U2: the withdrawal is CONVERSATION-scoped and the user is told the one
+            # route that makes it stick for NEW conversations, because the key
+            # they set earlier still holds the level and the next `/new` boots
+            # on it. The origin clause (`(the model's own default)` /
+            # `(nothing sent)`) gives way to it: at 80 columns a notice row holds
+            # 70 cells (design review D2) and origin + `(saved)` + the pointer do
+            # not fit together, so the actionable half stays. What it dropped is
+            # on the band and in the `/settings` expansion beside the level this
+            # row names.
             notice(
                 f"reasoning effort: {current or 'auto'} → {destination} "
-                f"(this session) — /settings sets auto"
+                f"(saved) — /settings sets auto"
             )
             return
         if wanted not in levels:
@@ -43792,6 +43850,16 @@ class OperatorApp(App[None]):
             # out in full, so the shorter form still points at the state it means.
             # Kept word for word in `_effort_slash_result`, or a phone and a
             # terminal answer one command two ways.
+            # Typing the level the band already shows is a NO-OP unless a
+            # DIFFERENT level is held: a narrow route can clamp a real choice
+            # (say `max`) onto the level on the band, and the user typing that
+            # level is how they replace it. With nothing held, arming the
+            # switch-following preference here would leak it across an
+            # unrelated later `/model` — exactly the B2 leak this branch's
+            # neighbour pins (see `_pending_effort_override`).
+            held = getattr(session, "chosen_effort", None)
+            if held and held != wanted:
+                self._apply_effort(wanted)
             self._system_notice(
                 f"reasoning effort: already {wanted} — /effort auto restores the default"
             )
@@ -43806,7 +43874,7 @@ class OperatorApp(App[None]):
         # receipt for an action rather than an answer about the app's settings.
         # The pointer is the one place the app tells the user a level can be made
         # the standing default (D10); it is on this receipt and not on the bare
-        # listing, whose budget is tight and whose "this session only" clause is
+        # listing, whose budget is tight and whose "this conversation" clause is
         # still exactly true of the command it describes.
         #
         # `{current or 'auto'}` is the BAND's word for "a ladder, no level set"
@@ -48924,7 +48992,7 @@ class OperatorApp(App[None]):
 
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         projects: list[ArgumentChoice] = []
-        if not message.directory:
+        if not message.directory and not self._editor().text.startswith("/view "):
             projects = self._project_picker_choices(await project_picker_rows())
         prepended = len(projects)
         choices = [*projects, *choices]
@@ -54150,7 +54218,7 @@ class OperatorApp(App[None]):
                     text=f"reasoning effort: already {destination} {scope}",
                     style="info",
                 )
-            # Word for word the sibling site above, including the session scope and
+            # Word for word the sibling site above, including the saved scope and
             # the route to making the withdrawal stick (U2): the two surfaces exist
             # so a phone and a terminal get the SAME answer from one set of rules,
             # and an answer that omitted the durability clause here would be the one
@@ -54159,7 +54227,7 @@ class OperatorApp(App[None]):
                 kind="notice",
                 text=(
                     f"reasoning effort: {current or 'auto'} → {destination} "
-                    f"(this session) — /settings sets auto"
+                    f"(saved) — /settings sets auto"
                 ),
                 style="info",
             )
@@ -54175,6 +54243,12 @@ class OperatorApp(App[None]):
         if wanted == current:
             # Word for word the sibling site above, including its cell budget: the
             # two surfaces exist so one command gets one answer whatever renders it.
+            # Same conditional as the sibling: only a DIFFERENT held choice is
+            # replaced; with nothing held this is a true no-op and must not arm
+            # a switch-following preference (review round 1, M3 / B2).
+            held = getattr(session, "chosen_effort", None)
+            if held and held != wanted:
+                self._apply_effort(wanted)
             return SlashResult(
                 kind="notice",
                 text=f"reasoning effort: already {wanted} — /effort auto restores the default",
@@ -59431,8 +59505,69 @@ class OperatorApp(App[None]):
         self._supplement_read_inflight.clear()
         self._supplement_live.clear()
 
-    def open_transcript_file(self, url: str, *, source_path: str = "") -> None:
-        """Reveal a file callout in Finder — the open half of the affordance.
+    def _cmd_view(self, arg: str) -> None:
+        from local_operator.i18n.keys import tui_viewer as viewer_msg
+        from local_operator.i18n.text import tr
+
+        if not arg.strip():
+            self._notice(tr("tui.viewer")(viewer_msg.usage()), "warning")
+            return
+        raw = arg.strip()
+        if len(raw) > 1 and raw[0] == raw[-1] == '"':
+            raw = raw[1:-1]
+        self._open_file_viewer(raw)
+
+    def _open_file_viewer(self, raw: str, *, expected: Any = None) -> None:
+        from pathlib import Path
+
+        from local_operator.tui.widgets.file_viewer import FileViewer
+
+        self._close_projects_view()
+        self._close_settings_view()
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_org_chart_view()
+        self._close_subagent_view()
+        self._file_viewer_focus_restore = self.focused
+        page = FileViewer(raw, cwd=Path(self.session_cwd()), expected=expected)
+        self._file_viewer = page
+        self._transcript_view().display = False
+        self.screen.mount(page, before=self.query_one("#input-dock"))
+        self.screen.add_class(PROJECTS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_file_viewer(self) -> bool:
+        page = self._file_viewer
+        if page is None:
+            return False
+        self._file_viewer = None
+        page.cancel_read()
+        page.remove()
+        self.screen.remove_class(PROJECTS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._file_viewer_focus_restore
+        self._file_viewer_focus_restore = None
+        target = (
+            restore
+            if restore is not None and restore.is_attached and restore.display
+            else self._editor()
+        )
+        target.focus()
+        return True
+
+    def on_file_viewer_dismissed(self, message: Any) -> None:
+        message.stop()
+        self._close_file_viewer()
+
+    def open_transcript_file(
+        self, url: str, *, source_path: str = "", expected: Any = None
+    ) -> None:
+        """Preview supported text locally; retain Finder reveal for other files.
 
         ``open -R``, never ``webbrowser``: the callout hands the user the FILE,
         and revealing it is the least authority that answers "where is it".
@@ -59458,9 +59593,27 @@ class OperatorApp(App[None]):
             # moved root): refuse rather than reveal what was never vouched for.
             notice("that file changed since it was listed", "warning")
             return
-        from urllib.parse import unquote, urlparse
+        from local_operator.tui.link_targets import file_uri_to_path
 
-        path = unquote(urlparse(checked).path)
+        path = file_uri_to_path(checked)
+        from pathlib import Path
+
+        from local_operator.tui.file_viewer import file_identity, viewer_kind
+
+        if expected is not None:
+            try:
+                changed = file_identity(Path(path)) != expected
+            except OSError:
+                changed = True
+            if changed:
+                from local_operator.i18n.keys import tui_viewer as viewer_msg
+                from local_operator.i18n.text import tr
+
+                notice(tr("tui.viewer")(viewer_msg.changed()), "warning")
+                return
+        if viewer_kind(Path(path)) is not None:
+            self._open_file_viewer(source_path, expected=expected)
+            return
         self.run_worker(self._reveal_file(path, notice), group="reveal-file")
 
     async def _reveal_file(self, path: str, notice: NoticeFn) -> None:
@@ -59987,10 +60140,14 @@ def mode_word(auto: bool) -> str:
 #: of rungs the shared vocabulary can form has to fit one 70-cell notice row at
 #: 80 columns (design review round 2, D9 / review NEW-2 / QA Q1) — and the test
 #: that proves that has to measure the SHIPPED string rather than a copy of it
-#: kept in the test file. `(session)`, one word shorter than the sibling
-#: receipts' `(this session)`, is the 5 cells that buy the invariant: 18 + 3 +
-#: rungs + 30 ≤ 70 holds for the longest two words in the vocabulary.
-EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (session); /model default keeps it"
+#: kept in the test file. `(saved)` is the 7 cells that buy the invariant (18 +
+#: 3 + rungs + 33 ≤ 70 holds for the longest two words in the vocabulary) and
+#: it is also the HONEST word now: the level is written into the conversation's
+#: own journal and survives a restart (see
+#: ``Session._journal_effort_if_selection_in_force``), while `/new` still starts
+#: on the configured default — which is exactly what `/model default = new
+#: chats` says.
+EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (saved); /model default = new chats"
 
 
 def _effort_unavailable(label: str) -> str:

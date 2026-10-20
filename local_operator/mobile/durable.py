@@ -655,8 +655,8 @@ def _compaction_prefix(
     compaction: TranscriptEntry,
     injection_ids: Container[str] | None = None,
 ) -> list[AgentMessage]:
-    """The marker summary plus preserved user turns, exactly as
-    ``build_llm_history`` injects them (see its docstring for why the turns
+    """The marker summary, preserved user turns and the carried tier, exactly
+    as ``build_llm_history`` injects them (see its docstring for why the turns
     ride the payload verbatim).
 
     ``injection_ids`` carries the same journal-resolved provenance the
@@ -694,6 +694,23 @@ def _compaction_prefix(
                 message.id = turn_id
             message.provider_payload = preserved_turn_payload(turn)
             prefix.append(message)
+    # The carried tier comes from the SAME renderer the live commit and the
+    # transcript replay use; a third hand-kept copy is where a later fix lands
+    # in two places out of three. It sits after the verbatim turns and before
+    # the kept window, on every path.
+    from local_operator.compaction.carry import (
+        CARRIED_ASKS_KEY,
+        CARRIED_DECISIONS_KEY,
+        render_carried_tier,
+    )
+
+    if compaction.payload.get(CARRIED_ASKS_KEY) or compaction.payload.get(CARRIED_DECISIONS_KEY):
+        carried = render_carried_tier(
+            compaction.payload.get(CARRIED_ASKS_KEY),
+            compaction.payload.get(CARRIED_DECISIONS_KEY),
+        )
+        if carried is not None:
+            prefix.append(carried)
     return prefix
 
 

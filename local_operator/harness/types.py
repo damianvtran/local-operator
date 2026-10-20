@@ -759,7 +759,7 @@ class Message(BaseModel):
 
 
 def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
-    """Drop ``at_ms`` from a serialized usage while it was never set.
+    """Drop unset optional provenance stamps without inflating attach frames.
 
     Every ``Usage`` subclass's own ``@model_serializer`` must route its result
     through here (see ``session/frontend_state``'s frozen wrappers), because a
@@ -772,8 +772,9 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    if data.get("at_ms") is None:
-        data.pop("at_ms", None)
+    for field in ("at_ms", "billing_basis"):
+        if data.get(field) is None:
+            data.pop(field, None)
     return data
 
 
@@ -799,7 +800,14 @@ _DECODE_WINDOW_ATTR = "_decode_window"
 
 
 class Usage(BaseModel):
-    """Token accounting reported by a provider (or estimated locally)."""
+    """Token accounting reported by a provider (or estimated locally).
+
+    ``billing_basis`` is durable per-call provenance stamped at dispatch from
+    the credential actually used. The same provider can serve subscription
+    and API-key calls in one turn; replay and child aggregation cannot recover
+    their payment relationship from its id or from today's logged-in account.
+    An unset stamp means legacy/unknown and is omitted from serialized usage.
+    """
 
     #: ``(decode_us, decode_tokens)`` for this call, or unset. See
     #: :data:`_DECODE_WINDOW_ATTR` — private so it costs the wire nothing, and read
@@ -812,6 +820,10 @@ class Usage(BaseModel):
     ) -> dict[str, Any]:
         """Serialize normally, then drop a stamp that was never set."""
         return _omit_unset_usage_stamp(handler(self))
+
+    # Durable per-call credential provenance: a provider can serve both plan and
+    # API-key traffic, so consumers cannot reconstruct this from its id later.
+    billing_basis: str | None = None
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -1456,6 +1468,9 @@ class ToolContext(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    # Host-owned presence only: never serialize a callback onto the tool wire.
+    note_waiting: Callable[[int], None] | None = Field(default=None, exclude=True, repr=False)
 
     cwd: str = "."
     #: Explicit host-owned attention-turn identity. No value means the host has
@@ -3227,6 +3242,24 @@ class LoopConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Provider wire contract
 # ---------------------------------------------------------------------------
+
+
+#: Sentinel for the optional ``effort_choice`` argument on ``set_model``.
+#:
+#: THREE STATES, and the middle one is the reason this exists:
+#: * a level string — the caller DECIDED on that reasoning level;
+#: * ``None`` — the caller DECIDED to WITHDRAW it (``/effort auto``);
+#: * this sentinel — the call made no reasoning-level decision at all (a model
+#:   switch, a rehome, an adoption, a sampling override), so the conversation's
+#:   held choice must be left exactly as it was.
+#:
+#: Inferring the choice from the spec's level instead cannot separate a chosen
+#: level from one a failover CLAMP produced, nor see a withdrawal that did not
+#: move the level at all — both were real defects in review round 1 (M1/M3).
+#: Lives here, beside :class:`ModelSpec`, because every ``set_model``
+#: implementation and its Protocol need the same object and this module is the
+#: leaf they already share.
+EFFORT_CHOICE_UNSET = object()
 
 
 class ModelSpec(BaseModel):

@@ -73,7 +73,7 @@ from local_operator.harness.types import (
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import (
     carry_floor,
-    cost_summary,
+    cost_summary_by_basis,
     job_subtree_cost,
     turn_cost,
 )
@@ -716,8 +716,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, str], Any] = {}
-    order: list[tuple[str, str, str]] = []
+    folded: dict[tuple[str, str, str, str | None], Any] = {}
+    order: list[tuple[str, str, str, str | None]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -768,7 +768,9 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
             if accepted is not None
             else "estimated" if estimated is not None else "unknown"
         )
-        key = (provider, model_id, mode)
+        # A retained job row must not relabel API-key cash as plan money (or
+        # vice versa) merely because both calls used the same serving model.
+        key = (provider, model_id, mode, getattr(component, "billing_basis", None))
         existing = folded.get(key)
         if existing is None:
             folded[key] = component.model_copy(deep=True)
@@ -976,6 +978,9 @@ _FRONTEND_LOCAL_SLASHES = {
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
+    # Preview reads the invoking machine's filesystem and paints this TUI.
+    # It must not bind or route to an authoritative runtime on another host.
+    "view",
     # The same three facts as `/copy` above, one step further out: the transcript
     # it reads is painted by this frontend, the picker is painted by this
     # frontend, and the BROWSER is on the machine the user is sitting at. Routed
@@ -1282,12 +1287,15 @@ class FrontendSpendChildren(BaseModel):
     #: say must not grow every frame by a key, the same shape ``asks_truncated``
     #: uses on the state model above.
     reason: str | None = None
+    by_basis: dict[str, int] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_reason(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         payload = handler(self)
         if self.reason is None:
             payload.pop("reason", None)
+        if self.by_basis is None:
+            payload.pop("by_basis", None)
         return payload
 
 
@@ -3315,6 +3323,101 @@ def effective_identity_for(
     return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
 
 
+def effort_displacement(selected: Any, effective: Any, chosen: str | None = None) -> dict[str, str]:
+    """The chosen reasoning level that is NOT in force on the serving model.
+
+    A fallback may serve at a level other than the one the conversation chose,
+    for two different reasons that read identically on a status band and must
+    not be silent either way: the chain entry pins a level of its own (the
+    operator's config says the rescue route runs at ``high``), or the target's
+    ladder cannot express the choice and ``spec_for_target`` clamps it. In both
+    cases the band's effort segment correctly names the level IN FORCE — that
+    is its job — so the divergence has to be stated somewhere else or the user
+    watches ``max`` become ``high`` with no explanation.
+
+    ``chosen`` is the CONVERSATION's choice (``Session.chosen_effort``), passed
+    separately because the selected spec may be a route that cannot express it
+    and then carries ``None``/a clamp itself. ``None`` means "read it off the
+    selected spec", which is the honest answer for an ownerless frame (a cold
+    catalogue row) that has no session to ask.
+
+    Returns ``{}`` when there is nothing to report: no level was chosen (a
+    model's seed is not a choice), or the serving spec is on exactly the chosen
+    level. Otherwise a five-key statement, all short strings:
+
+    * ``chosen`` — the level the conversation owns;
+    * ``effective`` — the level in force on the serving spec, ``""`` when that
+      spec exposes no level (the provider's own default, or no effort knob);
+    * ``selected`` / ``serving`` — ``provider/model_id`` labels for the two;
+    * ``note`` — the sentence a surface renders, composed HERE so the TUI, the
+      desktop strip and any other client cannot word one fact three ways.
+
+    The sentence names the level in force first and then the level that comes
+    back, which is the pair a user needs to decide whether to wait or re-pick:
+    ``Effort: high on anthropic/claude-sonnet-5-5; max resumes on
+    deepseek/deepseek-flash.`` Design review round 1 (D1) preferred this to the
+    first wording's ``returns with``, whose missing subject left the reader to
+    infer that the MODEL returns rather than the effort. A same-model route
+    (the quota walk can pin one model at a lower level) reads ``Effort: medium
+    on openai/gpt-6.1-sol; you chose high.``
+    """
+
+    def _level(spec: Any) -> str:
+        return str(getattr(spec, "reasoning_effort", "") or "").strip().lower()
+
+    def _label(spec: Any) -> str:
+        provider = str(getattr(spec, "provider", "") or "")
+        model_id = str(getattr(spec, "model_id", "") or "")
+        return f"{provider}/{model_id}" if provider and model_id else model_id
+
+    # ``in_force`` is the LEVEL; the ``effective`` SPEC stays the parameter —
+    # shadowing it with its own level was a real bug here (the first draft
+    # reassigned it before ``_label`` read the spec and composed an empty
+    # serving label, so every displacement answered "nothing to report").
+    in_force = _level(effective)
+    if chosen is None:
+        chosen_level = _level(selected)
+        # A SEED IS NOT A CHOICE. ``build_model_spec`` sets both fields to the
+        # same value and they diverge only when a level is picked (the
+        # documented contract ``_carried_effort`` reads as "a choice"). Without
+        # this guard a fallback would report the boot model's own seed as a
+        # preference the user never expressed — inventing a level and then
+        # mourning it.
+        chosen_default = (
+            str(getattr(selected, "reasoning_default_effort", "") or "").strip().lower()
+        )
+        if not chosen_level or chosen_level == chosen_default:
+            return {}
+    else:
+        # Callers that hold the session's own choice (the journal-backed
+        # ``Session.chosen_effort``) have already done that discrimination; an
+        # explicit empty value is "nothing chosen", never "read the spec".
+        chosen_level = str(chosen).strip().lower()
+        if not chosen_level:
+            return {}
+    if chosen_level == in_force:
+        return {}
+    selected_label = _label(selected)
+    serving_label = _label(effective)
+    if not serving_label:
+        return {}
+    level_in_force = in_force or "the model's own default"
+    if serving_label != selected_label:
+        note = (
+            f"Effort: {level_in_force} on {serving_label}; "
+            f"{chosen_level} resumes on {selected_label}."
+        )
+    else:
+        note = f"Effort: {level_in_force} on {serving_label}; you chose {chosen_level}."
+    return {
+        "chosen": chosen_level,
+        "effective": in_force,
+        "selected": selected_label,
+        "serving": serving_label,
+        "note": note,
+    }
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -3388,6 +3491,19 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: The chosen reasoning level a fallback is NOT honouring, or ``{}``.
+    #:
+    #: ADDITIVE, and the sibling of ``selected_model``/``effective_model``
+    #: rather than a fourth way to read them: the two specs already carry the
+    #: two levels, and this field exists because the DIFFERENCE is the fact a
+    #: user needs and no client could state it honestly without re-deriving
+    #: which of the two is a choice (see :func:`effort_displacement`). The
+    #: sentence is composed server-side so every surface says one thing.
+    #:
+    #: Bounded by its shape: five short strings, replaced (never appended) on
+    #: every refresh — the same classification ``effective_identity`` carries.
+    #: ``{}`` is the ordinary value and also what an older backend omits.
+    effort_displacement: dict[str, str] = Field(default_factory=dict)
     #: "Can the model this session is on actually run here" — see
     #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
     #: publish it, or one whose store could not be read); old clients ignore
@@ -3404,6 +3520,8 @@ class FrontendSessionState(BaseModel):
     # Whole manager ledger, not a sum of visible rows: live descendants, folded
     # attempts and retained-away jobs all belong here exactly once. Optional
     # knowledge distinguishes legacy checkpoints from an explicitly empty ledger.
+    # Same ledger walk as subagent_cost; retain across parent-only refreshes.
+    subagent_basis_micro: dict[str, int] | None = None
     subagent_cost: float | None = None
     subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
@@ -3565,6 +3683,8 @@ class FrontendSessionState(BaseModel):
     def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         mutable = self.model_copy(update={"jobs": list(self.jobs)})
         payload = handler(mutable)
+        if mutable.subagent_basis_micro is None:
+            payload.pop("subagent_basis_micro", None)
         # N2: the ask fields are present on the frame ONLY while the feature is
         # live in this process. Popped here rather than left to the writer,
         # because every consumer of this state — the install snapshot, every
@@ -7114,6 +7234,7 @@ class FrontendStateStore:
         ledger = {
             "subagent_cost": state.subagent_cost,
             "subagent_cost_knowledge": state.subagent_cost_knowledge,
+            "subagent_basis_micro": state.subagent_basis_micro,
         }
         payload = _spend_channels_payload(
             session, ledger, state.child_costs, getattr(session, "spend", None)
@@ -7386,6 +7507,16 @@ class FrontendStateStore:
             ),
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
+            ),
+            # The DIFFERENCE between those two, stated once and in words.
+            # Both specs are already on the state, so this is not a second
+            # source of truth: it is the answer to "is the level the user
+            # chose the level now serving", which a client could only derive
+            # by knowing that ``reasoning_effort != reasoning_default_effort``
+            # is this codebase's test for a CHOICE (see ``_carried_effort``).
+            # That knowledge belongs here, not in three renderers.
+            effort_displacement=effort_displacement(
+                selected, effective, getattr(session, "chosen_effort", None)
             ),
             # A fallback delta must not carry the former primary's accusation.
             # The owner access publisher will replace it with the serving claim.
@@ -7751,6 +7882,7 @@ class FrontendStateStore:
             ledger = {
                 "subagent_cost": state.subagent_cost,
                 "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                "subagent_basis_micro": state.subagent_basis_micro,
             }
         if child_costs is None:
             child_costs = state.child_costs
@@ -7780,6 +7912,7 @@ class FrontendStateStore:
                 else {
                     "subagent_cost": state.subagent_cost,
                     "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                    "subagent_basis_micro": state.subagent_basis_micro,
                 }
             ),
             state.child_costs,
@@ -8971,9 +9104,10 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
     if not callable(accounting):
         return {}
     components = accounting()
-    cost, unknown = cost_summary(components)
+    cost, unknown, bases = cost_summary_by_basis(components)
     return {
         "subagent_cost": cost,
+        "subagent_basis_micro": bases,
         # An empty ledger has no missing bills; an unknown-only nonempty ledger
         # does. PARTIAL keeps that distinction when parent spend is known.
         "subagent_cost_knowledge": (CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT),
@@ -9009,6 +9143,7 @@ def _children_snapshot(
         snapshot = ChildrenSnapshot(
             total_micro=_usd_to_micro(cost),
             knowledge=str(knowledge),
+            by_basis=ledger.get("subagent_basis_micro"),
         )
     elif child_costs:
         snapshot = ChildrenSnapshot(
@@ -9020,6 +9155,7 @@ def _children_snapshot(
     if predates_process and snapshot.knowledge in ("exact", "unknown"):
         return ChildrenSnapshot(
             total_micro=snapshot.total_micro,
+            by_basis=snapshot.by_basis,
             knowledge="partial",
             reason="subagent spend from earlier processes is not re-readable here",
         )
@@ -9052,8 +9188,12 @@ def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
     recorded basis.
     """
     try:
+        from local_operator.session.channel_spend import BASIS_VALUES
         from local_operator.session.spend import inference_billing_labels
 
+        basis = getattr(usage, "billing_basis", None)
+        if basis in BASIS_VALUES:
+            return basis
         provider = str(getattr(usage, "provider", "") or "")
         if not provider:
             provider = str(getattr(effective_model, "provider", "") or "")
@@ -9444,6 +9584,12 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
         reasoning_tokens=sum(u.reasoning_tokens for u in usages),
         context_tokens=last_context,
         cost_components=components,
+        billing_basis=(
+            components[0].billing_basis
+            if components
+            and all(c.billing_basis == components[0].billing_basis for c in components)
+            else None
+        ),
     )
 
 
