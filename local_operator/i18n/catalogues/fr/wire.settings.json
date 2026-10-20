@@ -496,7 +496,7 @@
   "wire.settings.remote_compute.title": "Calcul distant",
   "wire.settings.remote_compute_enabled.choice.false.description": "local uniquement",
   "wire.settings.remote_compute_enabled.choice.true.description": "exécutions distantes autorisées",
-  "wire.settings.remote_compute_enabled.help": "Aperçu  : envoyer votre travail au calcul de Radient dans votre maillage.",
+  "wire.settings.remote_compute_enabled.help": "Aperçu  : envoyer votre travail au calcul Radient, lié à un maillage.",
   "wire.settings.remote_compute_enabled.label": "Calcul distant",
   "wire.settings.retired.description": "Clés lues mais qui n’ont plus d’effet.",
   "wire.settings.retired.title": "Retirées",

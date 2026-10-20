@@ -626,7 +626,7 @@
  "wire.settings.remote_compute_enabled.choice.false.label": "off",
  "wire.settings.remote_compute_enabled.choice.true.description": "remote runs allowed",
  "wire.settings.remote_compute_enabled.choice.true.label": "on",
- "wire.settings.remote_compute_enabled.help": "Preview: sends work to Radient-hosted compute in your mesh network.",
+ "wire.settings.remote_compute_enabled.help": "Preview: sends work to Radient compute, bound to one mesh network.",
  "wire.settings.remote_compute_enabled.label": "Remote compute",
  "wire.settings.retired.description": "Keys that are read but no longer do anything.",
  "wire.settings.retired.title": "Retired",
