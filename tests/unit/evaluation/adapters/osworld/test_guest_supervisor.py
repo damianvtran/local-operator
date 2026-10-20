@@ -13,11 +13,13 @@ import contextlib
 import errno
 import io
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from lop_osworld_v2_adapter import guest_disk, guest_supervisor
@@ -239,7 +241,7 @@ async def test_setup_unavailable_is_loud_once_and_fail_open(
                 0,
                 "escalation=agentless\n"
                 + json.dumps(
-                    {"installed": False, "reason": "action server has no private service"}
+                    {"installed": False, "reason": "existing server stderr is not journalled"}
                 ),
                 "",
             )
@@ -253,7 +255,7 @@ async def test_setup_unavailable_is_loud_once_and_fail_open(
         assert report == {
             "installed": False,
             "status": "supervision unavailable",
-            "cause": "action server has no private service",
+            "cause": "existing server stderr is not journalled",
         }
         monkeypatch.setattr(provider, "_run_guest_command", real_command)
         await provider.execute(["unchanged_episode_input()"])
@@ -289,6 +291,8 @@ async def test_allocation_installs_once_before_task_setup(
         report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
         assert report["installed"] is True
         assert report["status"] == "supervised"
+        # The installed path is not a refusal: it carries no diagnostic layout.
+        assert "layout" not in report
 
 
 @pytest.mark.asyncio
@@ -1275,3 +1279,376 @@ def test_restart_history_must_agree_with_independent_systemd_view(changes: dict[
     history.update(changes)
     with pytest.raises(guest_supervisor.GenerationMismatch):
         guest_supervisor.receipt_records("escalation=agentless\n" + json.dumps(history))
+
+
+# ---------------------------------------------------------------------------
+# Layout diagnostic on a unit-discovery refusal
+# ---------------------------------------------------------------------------
+
+
+def _layout_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "port": 5000,
+        "pid_source": "socket",
+        "socket_pids": [9000],
+        "server": {
+            "pid": 9000,
+            "ppid": 8000,
+            "comm": "python3",
+            "cgroup": "/system.slice/action-server.service",
+        },
+        "ancestry": [
+            {"pid": 9000, "ppid": 8000, "comm": "python3"},
+            {"pid": 8000, "ppid": 1, "comm": "systemd"},
+        ],
+        "units": [
+            {
+                "unit": "action-server.service",
+                "main_pid": 8001,
+                "exec_start": "/usr/bin/python3 /home/user/server/main.py",
+                "type": "simple",
+                "control_group": "/system.slice/action-server.service",
+                "sub_state": "running",
+                "load_state": "loaded",
+            }
+        ],
+        "socket_pid_differs_from_main_pid": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _install_refusal(reason: str) -> guest_disk.CommandResult:
+    return guest_disk.CommandResult(
+        0, "escalation=agentless\n" + json.dumps({"installed": False, "reason": reason}), ""
+    )
+
+
+def _scripted_commands(
+    provider: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    install: guest_disk.CommandResult,
+    layout: guest_disk.CommandResult | Callable[[], guest_disk.CommandResult],
+) -> list[float]:
+    """Answer install and layout commands from one fake transport."""
+    timeouts: list[float] = []
+
+    def command(argv: Any, timeout: float) -> guest_disk.CommandResult:
+        timeouts.append(timeout)
+        if "socket_pids" in " ".join(argv):
+            return layout if isinstance(layout, guest_disk.CommandResult) else layout()
+        return install
+
+    monkeypatch.setattr(provider, "_run_guest_command", command)
+    return timeouts
+
+
+def test_exclusive_ownership_refusal_records_the_guest_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        timeouts = _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("service does not exclusively own action server"),
+            guest_disk.CommandResult(
+                0, "escalation=agentless\n" + json.dumps(_layout_payload()), ""
+            ),
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["installed"] is False
+        assert report["status"] == "supervision unavailable"
+        assert report["cause"] == "service does not exclusively own action server"
+        layout = report["layout"]
+        assert set(layout) == {
+            "schema_version",
+            "status",
+            "port",
+            "pid_source",
+            "socket_pids",
+            "server",
+            "ancestry",
+            "units",
+            "socket_pid_differs_from_main_pid",
+        }
+        assert layout["status"] == "ok"
+        assert layout["units"] == _layout_payload()["units"]
+        assert layout["server"] == _layout_payload()["server"]
+        assert layout["ancestry"] == _layout_payload()["ancestry"]
+        assert layout["socket_pids"] == [9000]
+        assert layout["socket_pid_differs_from_main_pid"] is True
+        # Install first, then exactly one bounded layout probe.
+        assert timeouts == [15.0, guest_supervisor.LAYOUT_BUDGET_S]
+
+
+def test_no_listening_socket_falls_back_to_the_ancestry_and_records_no_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        payload = _layout_payload(
+            pid_source="ancestry",
+            socket_pids=[],
+            server={"pid": 8000, "ppid": 1, "comm": "python3", "cgroup": "/system.slice"},
+            ancestry=[{"pid": 8000, "ppid": 1, "comm": "python3"}],
+            units=[],
+            socket_pid_differs_from_main_pid=None,
+        )
+        _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("action server has no private service"),
+            guest_disk.CommandResult(0, "escalation=agentless\n" + json.dumps(payload), ""),
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["cause"] == "action server has no private service"
+        assert report["layout"]["pid_source"] == "ancestry"
+        assert report["layout"]["units"] == []
+        assert report["layout"]["server"]["pid"] == 8000
+        assert report["layout"]["socket_pid_differs_from_main_pid"] is None
+
+
+def test_a_socket_owner_outside_any_unit_is_still_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        payload = _layout_payload(
+            server={"pid": 9000, "ppid": 8000, "comm": "python3", "cgroup": "/system.slice"},
+            units=[],
+            socket_pid_differs_from_main_pid=None,
+        )
+        _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("service does not exclusively own action server"),
+            guest_disk.CommandResult(0, "escalation=agentless\n" + json.dumps(payload), ""),
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["layout"]["server"]["cgroup"] == "/system.slice"
+        assert report["layout"]["units"] == []
+        assert report["layout"]["socket_pids"] == [9000]
+
+
+def test_a_hung_layout_capture_is_bounded_and_leaves_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        monkeypatch.setattr(guest_supervisor, "LAYOUT_BUDGET_S", 0.05)
+
+        def layout() -> guest_disk.CommandResult:
+            time.sleep(0.5)
+            return guest_disk.CommandResult(0, json.dumps(_layout_payload()), "")
+
+        _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("service does not exclusively own action server"),
+            layout,
+        )
+        started = time.monotonic()
+        provider._install_guest_supervisor(_plan())
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.75
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["installed"] is False
+        assert report["cause"] == "service does not exclusively own action server"
+        assert report["layout"] == {"schema_version": 1, "status": "timeout"}
+
+
+def test_a_raising_layout_capture_never_changes_the_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+
+        def layout() -> guest_disk.CommandResult:
+            raise RuntimeError("transport exploded")
+
+        _scripted_commands(
+            provider, monkeypatch, _install_refusal("action server has no private service"), layout
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["status"] == "supervision unavailable"
+        assert report["cause"] == "action server has no private service"
+        assert report["layout"] == {"schema_version": 1, "status": "error"}
+
+
+def test_a_malformed_layout_capture_is_unparseable_not_an_outcome_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("service does not exclusively own action server"),
+            guest_disk.CommandResult(0, "not a json document at all", ""),
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["cause"] == "service does not exclusively own action server"
+        assert report["layout"] == {"schema_version": 1, "status": "unparseable"}
+
+
+def test_a_planted_secret_never_reaches_the_layout_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "canary" + "-value-" + "42"
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._known_secret_values = (*provider._known_secret_values, secret)
+        payload = _layout_payload(
+            server={
+                "pid": 9000,
+                "ppid": 8000,
+                "comm": secret,
+                "cgroup": "/system.slice/" + secret + ".service",
+            },
+            units=[
+                {
+                    **_layout_payload()["units"][0],
+                    "exec_start": "/usr/bin/python3 /home/user/server/main.py --password=" + secret,
+                }
+            ],
+        )
+        _scripted_commands(
+            provider,
+            monkeypatch,
+            _install_refusal("service does not exclusively own action server"),
+            guest_disk.CommandResult(0, "escalation=agentless\n" + json.dumps(payload), ""),
+        )
+        provider._install_guest_supervisor(_plan())
+        raw = (provider._cache_root / "guest-supervisor-setup.json").read_text()
+        assert secret not in raw
+        assert "[redacted]" in raw
+        assert json.loads(raw)["layout"]["status"] == "ok"
+
+
+def test_layout_record_drops_unknown_keys_and_neutralizes_malformed_fields() -> None:
+    payload = {
+        "schema_version": 1,
+        "status": "pretending-to-be-ok",
+        "argv": ["--secret"],
+        "units": [
+            {
+                "unit": "action-server.service",
+                "main_pid": "8000",
+                "exec_start": "python3\nmain.py",
+                "type": "invented",
+                "control_group": "/system.slice/action-server.service",
+                "sub_state": "Not A State",
+                "load_state": "loaded",
+                "environment": {"PASSWORD": "x"},
+            }
+        ],
+        "ancestry": [{"pid": 9000, "ppid": True, "comm": "python3\rmain"}],
+        "unknown": "dropped",
+    }
+    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
+    assert "unknown" not in record and "argv" not in record
+    unit = record["units"][0]
+    assert "environment" not in unit
+    assert unit["main_pid"] is None
+    assert unit["exec_start"] == "python3main.py"
+    assert unit["type"] == "other"
+    assert unit["sub_state"] == "other"
+    # True is not PID 1.
+    assert record["ancestry"][0]["ppid"] is None
+    assert record["ancestry"][0]["comm"] == "python3main"
+
+
+def _execute_layout_script(tmp_path: Path, *, listening: bool) -> dict[str, Any]:
+    """Run the shipped LAYOUT_SOURCE against a redirected /proc and fake systemd."""
+    for pid, (name, ppid) in {
+        9000: ("python3", 8000),
+        8000: ("python3", 1),
+        1: ("systemd", 0),
+    }.items():
+        directory = tmp_path / "proc" / str(pid)
+        directory.mkdir(parents=True)
+        (directory / "status").write_text(f"Name:\t{name}\nPPid:\t{ppid}\n")
+        (directory / "cgroup").write_text("0::/system.slice/action-server.service\n")
+        (directory / "cmdline").write_bytes(b"python3\0/home/user/server/main.py\0--do-not-emit\0")
+    if listening:
+        (tmp_path / "proc" / "9000" / "fd").mkdir()
+        (tmp_path / "proc" / "9000" / "fd" / "3").symlink_to("socket:[4242]")
+    net = tmp_path / "proc" / "net"
+    net.mkdir()
+    (net / "tcp").write_text(
+        "  sl  local_address rem_address   st\n"
+        "   0: 00000000:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 4242\n"
+        if listening
+        else "  sl  local_address rem_address   st\n"
+    )
+    (net / "tcp6").write_text("  sl\n")
+
+    def check_output(args: Any, **kwargs: Any) -> str:
+        return "\n".join(
+            (
+                "MainPID=8001",
+                "ExecStart=/usr/bin/python3 /home/user/server/main.py",
+                "Type=simple",
+                "ControlGroup=/system.slice/action-server.service",
+                "SubState=running",
+                "LoadState=loaded",
+            )
+        )
+
+    modules = {
+        "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
+        "os": SimpleNamespace(getppid=lambda: 8000, readlink=os.readlink),
+        "subprocess": SimpleNamespace(check_output=check_output),
+        "sys": SimpleNamespace(argv=["-c", "5000"]),
+        "time": SimpleNamespace(monotonic=time.monotonic),
+    }
+    real_import = builtins.__import__
+
+    def importer(name: str, *args: Any, **kwargs: Any) -> Any:
+        return modules[name] if name in modules else real_import(name, *args, **kwargs)
+
+    output: io.StringIO = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(
+            guest_supervisor.LAYOUT_SOURCE,
+            {"__builtins__": {**vars(builtins), "__import__": importer}},
+        )
+    return json.loads(output.getvalue())
+
+
+def test_layout_script_reports_the_socket_owner_and_never_argv(tmp_path: Path) -> None:
+    payload = _execute_layout_script(tmp_path, listening=True)
+    assert payload["pid_source"] == "socket"
+    assert payload["socket_pids"] == [9000]
+    assert payload["server"]["pid"] == 9000
+    assert [member["pid"] for member in payload["ancestry"]] == [9000, 8000, 1]
+    assert payload["units"][0]["main_pid"] == 8001
+    assert payload["socket_pid_differs_from_main_pid"] is True
+    # The one encoded path in the fake cmdline is never emitted: no argv field.
+    assert "--do-not-emit" not in json.dumps(payload)
+    assert (
+        guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))["status"]
+        == "ok"
+    )
+
+
+def test_layout_script_falls_back_to_ancestry_when_nothing_listens(tmp_path: Path) -> None:
+    payload = _execute_layout_script(tmp_path, listening=False)
+    assert payload["pid_source"] == "ancestry"
+    assert payload["socket_pids"] == []
+    assert payload["server"]["pid"] == 8000
+    assert payload["socket_pid_differs_from_main_pid"] is None
