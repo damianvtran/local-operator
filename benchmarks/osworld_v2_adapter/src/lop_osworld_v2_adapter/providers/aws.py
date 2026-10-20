@@ -911,7 +911,10 @@ class AwsProvider:
             outcome = guest_loss._run_bounded(
                 {
                     "layout": lambda: self._run_guest_command(
-                        guest_supervisor.layout_command(password), timeout=socket_timeout
+                        guest_supervisor.layout_command(
+                            password, port=guest_supervisor.ACTION_SERVER_PORT
+                        ),
+                        timeout=socket_timeout,
                     )
                 },
                 budget,
@@ -924,7 +927,9 @@ class AwsProvider:
         if state != "ok" or getattr(value, "returncode", None) != 0:
             return guest_supervisor.empty_layout("error")
         try:
-            layout = guest_supervisor.layout_record(value.stdout)
+            layout = guest_supervisor.layout_record(
+                value.stdout, port=guest_supervisor.ACTION_SERVER_PORT
+            )
         except Exception:
             # Includes SupervisorOutputUnparseable: guest text never explains
             # itself into the record, only this fixed status does.

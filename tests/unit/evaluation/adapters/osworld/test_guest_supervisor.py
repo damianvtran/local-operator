@@ -1374,7 +1374,7 @@ def test_exclusive_ownership_refusal_records_the_guest_layout(
             "server",
             "ancestry",
             "units",
-            "socket_pid_differs_from_main_pid",
+            "socket_owned_by_unit",
         }
         assert layout["status"] == "ok"
         assert layout["units"] == _layout_payload()["units"]
@@ -1384,7 +1384,7 @@ def test_exclusive_ownership_refusal_records_the_guest_layout(
         # Derived host-side, never accepted from the guest.
         assert layout["port"] == guest_supervisor.ACTION_SERVER_PORT
         assert layout["pid_source"] == "socket"
-        assert layout["socket_pid_differs_from_main_pid"] is True
+        assert layout["socket_owned_by_unit"] is False
         # Install first; the capture uses a socket deadline DERIVED from the
         # guest's intended deadline, not the 4 s host budget (which would ask
         # the guest to finish in 1 s), and one bounded probe.
@@ -1450,7 +1450,7 @@ def test_no_listening_socket_falls_back_to_the_ancestry_and_records_no_unit(
         assert report["layout"]["pid_source"] == "ancestry"
         assert report["layout"]["units"] == []
         assert report["layout"]["server"]["pid"] == 8000
-        assert report["layout"]["socket_pid_differs_from_main_pid"] is None
+        assert report["layout"]["socket_owned_by_unit"] is None
 
 
 def test_a_socket_owner_outside_any_unit_is_still_recorded(
@@ -1475,7 +1475,7 @@ def test_a_socket_owner_outside_any_unit_is_still_recorded(
         assert report["layout"]["units"] == []
         assert report["layout"]["socket_pids"] == [9000]
         assert report["layout"]["pid_source"] == "socket"
-        assert report["layout"]["socket_pid_differs_from_main_pid"] is None
+        assert report["layout"]["socket_owned_by_unit"] is None
 
 
 def test_a_hung_layout_capture_is_bounded_and_leaves_the_refusal(
@@ -1584,19 +1584,19 @@ def test_layout_record_recomputes_guest_derived_claims() -> None:
     payload = _layout_payload(
         port=22,
         pid_source="ancestry",
-        socket_pid_differs_from_main_pid=True,
+        socket_owned_by_unit=False,
     )
     record = guest_supervisor.layout_record(json.dumps(payload))
     assert record["port"] == guest_supervisor.ACTION_SERVER_PORT
     assert record["pid_source"] == "socket"
-    # unit MainPID 8001 is known and differs from socket owner 9000.
-    assert record["socket_pid_differs_from_main_pid"] is True
+    # unit MainPID 8001 is known and does not own socket 9000.
+    assert record["socket_owned_by_unit"] is False
 
     # The guest still claims a difference, but the only unit's MainPID is the
     # socket owner: the host must report agreement it can prove.
     payload["units"][0]["main_pid"] = 9000
     record = guest_supervisor.layout_record(json.dumps(payload))
-    assert record["socket_pid_differs_from_main_pid"] is False
+    assert record["socket_owned_by_unit"] is True
 
     # A server proc that is not the socket owner is not "socket"-sourced.
     payload["server"]["pid"] = 7000
@@ -1604,28 +1604,28 @@ def test_layout_record_recomputes_guest_derived_claims() -> None:
     assert record["pid_source"] is None
 
 
-def test_unknown_main_pid_is_undetermined_not_a_difference() -> None:
-    """M2: missing MainPID data must never be reported as ``true``."""
+def test_unknown_main_pid_is_undetermined_not_ownership() -> None:
+    """A missing MainPID can never be read as ``false`` (not owned)."""
     payload = _layout_payload()
     payload["units"][0]["main_pid"] = None
     record = guest_supervisor.layout_record(json.dumps(payload))
-    assert record["socket_pid_differs_from_main_pid"] is None
+    assert record["socket_owned_by_unit"] is None
 
     # One unknown unit beside a known non-matching one: still undetermined.
     second = {**payload["units"][0], "unit": "other.service", "main_pid": 8001}
     payload["units"].append(second)
     record = guest_supervisor.layout_record(json.dumps(payload))
-    assert record["socket_pid_differs_from_main_pid"] is None
+    assert record["socket_owned_by_unit"] is None
 
     # A known match settles it regardless of the other unit's missing value.
     second["main_pid"] = 9000
     record = guest_supervisor.layout_record(json.dumps(payload))
-    assert record["socket_pid_differs_from_main_pid"] is False
+    assert record["socket_owned_by_unit"] is True
 
     # No socket owner at all is also undetermined.
     payload["socket_pids"] = []
     record = guest_supervisor.layout_record(json.dumps(payload))
-    assert record["socket_pid_differs_from_main_pid"] is None
+    assert record["socket_owned_by_unit"] is None
 
 
 def test_layout_record_drops_unknown_keys_and_neutralizes_malformed_fields() -> None:
@@ -1666,7 +1666,7 @@ def test_layout_record_drops_unknown_keys_and_neutralizes_malformed_fields() -> 
     assert record["ancestry"][0]["ppid"] is None
     assert record["ancestry"][0]["comm"] == "python3main"
     assert "argv" not in record
-    assert record["socket_pid_differs_from_main_pid"] is None
+    assert record["socket_owned_by_unit"] is None
 
 
 def test_layout_record_caps_every_list() -> None:
@@ -1754,7 +1754,7 @@ def test_layout_script_reports_the_socket_owner_and_never_argv(tmp_path: Path) -
     assert record["status"] == "ok"
     assert record["pid_source"] == "socket"
     assert record["port"] == guest_supervisor.ACTION_SERVER_PORT
-    assert record["socket_pid_differs_from_main_pid"] is True
+    assert record["socket_owned_by_unit"] is False
 
 
 def test_layout_script_falls_back_to_ancestry_when_nothing_listens(tmp_path: Path) -> None:
@@ -1763,4 +1763,140 @@ def test_layout_script_falls_back_to_ancestry_when_nothing_listens(tmp_path: Pat
     assert payload["server"]["pid"] == 8000
     record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
     assert record["pid_source"] == "ancestry"
-    assert record["socket_pid_differs_from_main_pid"] is None
+    assert record["socket_owned_by_unit"] is None
+
+
+def test_ownership_matches_any_listening_socket() -> None:
+    """R2-2: a MainPID owning ANY observed listener is ownership."""
+    payload = _layout_payload(
+        socket_pids=[9000, 9001],
+        server={"pid": 9000, "ppid": 8000, "comm": "python3", "cgroup": "/system.slice/x"},
+        units=[{**_layout_payload()["units"][0], "main_pid": 9001}],
+    )
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_owned_by_unit"] is True
+    assert record["pid_source"] == "socket"
+
+
+def test_ownership_is_derived_from_the_capped_unit_list() -> None:
+    """R2-3: the claim must be reproducible from the units the record carries."""
+    unit = _layout_payload()["units"][0]
+    units = [{**unit, "unit": f"u{index}.service", "main_pid": 8001} for index in range(8)]
+    units.append({**unit, "unit": "ninth.service", "main_pid": 9000})
+    record = guest_supervisor.layout_record(json.dumps(_layout_payload(units=units)))
+    assert len(record["units"]) == 8
+    assert all(item["unit"] != "ninth.service" for item in record["units"])
+    assert record["socket_owned_by_unit"] is False
+
+
+def test_pid_source_ancestry_needs_ancestry_evidence() -> None:
+    """R2-4: a lone server record is not an observed ancestry."""
+    server = {"pid": 7000, "ppid": 1, "comm": "python3", "cgroup": "/system.slice"}
+    record = guest_supervisor.layout_record(
+        json.dumps(_layout_payload(socket_pids=[], server=server, ancestry=[]))
+    )
+    assert record["pid_source"] is None
+
+    # An ancestry whose head is a different process proves nothing either.
+    record = guest_supervisor.layout_record(
+        json.dumps(
+            _layout_payload(
+                socket_pids=[],
+                server=server,
+                ancestry=[{"pid": 8000, "ppid": 1, "comm": "python3"}],
+            )
+        )
+    )
+    assert record["pid_source"] is None
+
+    # The truthful shape: ancestry starts at the recorded server proc.
+    record = guest_supervisor.layout_record(
+        json.dumps(
+            _layout_payload(
+                socket_pids=[],
+                server=server,
+                ancestry=[{"pid": 7000, "ppid": 1, "comm": "python3"}],
+            )
+        )
+    )
+    assert record["pid_source"] == "ancestry"
+
+
+def _execute_slow_layout_script(
+    tmp_path: Path, *, unit_count: int, delay: float
+) -> tuple[dict[str, Any], float]:
+    """Run LAYOUT_SOURCE with a slow systemctl and a distinct unit per ancestry hop."""
+    pids = [9000 - index for index in range(unit_count)]
+    for index, pid in enumerate(pids):
+        directory = tmp_path / "proc" / str(pid)
+        directory.mkdir(parents=True)
+        ppid = pids[index + 1] if index + 1 < len(pids) else 1
+        (directory / "status").write_text(f"Name:\tpython3\nPPid:\t{ppid}\n")
+        (directory / "cgroup").write_text(f"0::/system.slice/u{index}.service\n")
+        (directory / "cmdline").write_bytes(b"python3\0/home/user/server/main.py\0")
+    root = tmp_path / "proc" / "1"
+    root.mkdir()
+    (root / "status").write_text("Name:\tsystemd\nPPid:\t0\n")
+    (root / "cgroup").write_text("0::/init.scope\n")
+    (tmp_path / "proc" / "9000" / "fd").mkdir()
+    (tmp_path / "proc" / "9000" / "fd" / "3").symlink_to("socket:[4242]")
+    net = tmp_path / "proc" / "net"
+    net.mkdir()
+    (net / "tcp").write_text(
+        "  sl  local_address rem_address   st\n"
+        "   0: 00000000:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 4242\n"
+    )
+    (net / "tcp6").write_text("  sl\n")
+
+    def check_output(args: Any, **kwargs: Any) -> str:
+        # Honour the script's own per-call timeout: an in-flight call can only
+        # consume the time left before DEADLINE.
+        time.sleep(min(delay, kwargs.get("timeout", delay)))
+        return "\n".join(
+            (
+                "MainPID=8001",
+                "ExecStart=/usr/bin/python3 /home/user/server/main.py",
+                "Type=simple",
+                "ControlGroup=/system.slice/u0.service",
+                "SubState=running",
+                "LoadState=loaded",
+            )
+        )
+
+    modules = {
+        "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
+        "os": SimpleNamespace(getppid=lambda: pids[0], readlink=os.readlink),
+        "subprocess": SimpleNamespace(check_output=check_output),
+        "sys": SimpleNamespace(argv=["-c", "5000"]),
+        "time": SimpleNamespace(monotonic=time.monotonic),
+    }
+    real_import = builtins.__import__
+
+    def importer(name: str, *args: Any, **kwargs: Any) -> Any:
+        return modules[name] if name in modules else real_import(name, *args, **kwargs)
+
+    started = time.monotonic()
+    output: io.StringIO = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(
+            guest_supervisor.LAYOUT_SOURCE,
+            {"__builtins__": {**vars(builtins), "__import__": importer}},
+        )
+    return json.loads(output.getvalue()), time.monotonic() - started
+
+
+def test_a_slow_systemctl_still_prints_a_complete_payload(tmp_path: Path) -> None:
+    """R2-1: the unit loop must stop at the deadline and still print JSON.
+
+    With eight 0.8 s units the ungated loop runs ~6.4 s and is killed by the
+    3.5 s body timeout with NO output. Gated, it prints what it gathered just
+    after 3 s. This test asserts the payload, not just a fast return.
+    """
+    payload, elapsed = _execute_slow_layout_script(tmp_path, unit_count=8, delay=0.8)
+    assert payload["schema_version"] == 1
+    assert 1 <= len(payload["units"]) <= 8
+    assert elapsed < guest_supervisor.LAYOUT_GUEST_DEADLINE_S
+    # A real layout record can be built from the printed payload.
+    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "ok"
+    assert record["units"] == payload["units"]

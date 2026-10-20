@@ -419,7 +419,13 @@ if pid and chain:
                   'cgroup': cgroup_of(pid)}
     except OSError:
         pass
-units = [unit_record(name) for name in names[:8]]
+units = []
+for name in names[:8]:
+    # A call already in flight is capped by min(1.5, left()); starting one
+    # at the deadline could still run past the body timeout, so gate here.
+    if time.monotonic() > DEADLINE:
+        break
+    units.append(unit_record(name))
 # Only raw observations leave the guest. Derived claims (which pid owns the
 # socket, whether every MainPID agrees) are recomputed host-side from these,
 # so a guest cannot assert a contradiction into the evidence file.
@@ -642,7 +648,7 @@ _LAYOUT_KEYS = frozenset(
         "server",
         "ancestry",
         "units",
-        "socket_pid_differs_from_main_pid",
+        "socket_owned_by_unit",
     }
 )
 
@@ -677,10 +683,11 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
     stripped of control characters, and enum-shaped fields fall back to a
     neutral word. Derived claims (``pid_source``, the socket-owner comparison,
     the probed port) are recomputed from RAW fields and the host's own request,
-    never taken from the guest: a capture that says ``differs=false`` beside a
-    unit MainPID that is missing must not be able to assert agreement it never
-    observed. Raises ``SupervisorOutputUnparseable`` when no layout document is
-    present; callers turn that into ``empty_layout('unparseable')``.
+    never taken from the guest: a capture that says ``socket_owned_by_unit``
+    is false beside a unit MainPID that is missing must not be able to assert a
+    negative it never observed. Raises ``SupervisorOutputUnparseable`` when no
+    layout document is present; callers turn that into
+    ``empty_layout('unparseable')``.
     """
 
     value = parse_output(output, is_layout_payload)
@@ -746,28 +753,36 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
                 "comm": _layout_text(server.get("comm"), 64),
                 "cgroup": _layout_text(server.get("cgroup"), 512),
             }
+    # Cap BEFORE deriving: a claim must be reproducible from the units the
+    # record actually carries, not from a list it truncated afterwards.
+    units = units[:8]
     sockets = [pid for pid in (value.get("socket_pids") or [])[:8] if _layout_pid(pid) is not None]
-    socket_pid = sockets[0] if sockets else None
-    # ``pid_source`` is a statement about this capture, not a guest opinion:
-    # "socket" means the recorded server proc is the socket owner, "ancestry"
-    # means no socket owner was found but an ancestor was, and anything the
-    # guest claims on top of a contradiction is undetermined.
-    if socket_pid is not None and server_record is not None and server_record["pid"] == socket_pid:
+    # ``pid_source`` is a statement about this capture, not a guest opinion.
+    # "socket" needs the recorded server proc to be one of the observed socket
+    # owners; "ancestry" needs no socket owner AND an ancestry whose head is
+    # that proc -- a lone server record is not ancestry evidence.
+    if server_record is not None and sockets and server_record["pid"] in sockets:
         pid_source: str | None = "socket"
-    elif server_record is not None and not sockets:
+    elif (
+        server_record is not None
+        and not sockets
+        and ancestry
+        and ancestry[0]["pid"] == server_record["pid"]
+    ):
         pid_source = "ancestry"
     else:
         pid_source = None
-    # Three-state, and TRUE only when every unit's MainPID was observed and
-    # none matches: a missing MainPID could be the socket owner, so claiming a
-    # difference from missing data would mislead the next supervision design.
-    differs: bool | None = None
-    if socket_pid is not None and units:
+    # Three-state ``socket_owned_by_unit``: true when ANY observed socket owner
+    # is a unit's MainPID (a listener owned by one unit is what supervision
+    # needs), false only when every MainPID was observed and none owns a
+    # socket, and null while an unobserved MainPID could still be an owner.
+    owned: bool | None = None
+    if sockets and units:
         known = [unit["main_pid"] for unit in units if unit["main_pid"] is not None]
-        if socket_pid in known:
-            differs = False
+        if any(socket in known for socket in sockets):
+            owned = True
         elif len(known) == len(units):
-            differs = True
+            owned = False
     record: dict[str, Any] = {
         "schema_version": 1,
         "status": "ok",
@@ -776,8 +791,8 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
         "socket_pids": sockets,
         "server": server_record,
         "ancestry": ancestry,
-        "units": units[:8],
-        "socket_pid_differs_from_main_pid": differs,
+        "units": units,
+        "socket_owned_by_unit": owned,
     }
     # The frozen key set is the contract the provider writes; keeping it here
     # means a future guest field cannot appear in the evidence unannounced.
