@@ -89,6 +89,14 @@ _NOTICE_LATCH: dict[str, str] = {
 
 #: The delivery rate window (§9.4).
 DELIVERY_WINDOW_MS = 3_600_000
+#: The diff inputs are compared with ``difflib``'s quadratic matcher, which the
+#: stored snapshot used to bound at ``snapshotMaxChars``. The full-body baseline
+#: removes that implicit bound, so the matcher gets an explicit one: past either
+#: limit the change is delivered as ``beyond_window_text`` (with ``hidden``
+#: set) rather than diffed. Fail open, and never a multi-second stall inside a
+#: check.
+MAX_DIFF_CHARS = 1_048_576
+MAX_DIFF_LINES = 8_000
 #: How long a monitor's tool may stay out of reach before the operator is told
 #: (§D3). One notice per episode, not one per tick: the point is that a stalled
 #: watch stops being silent, not that it becomes noisy.
@@ -116,6 +124,26 @@ def _skipped_checks_since(last_check_at: int, every_ms: int, now_ms: int) -> int
     return max(0, intervals - 1)
 
 
+def _read_spill_body(handle: str) -> str | None:
+    """The full text an earlier check spilled, or ``None`` when unusable.
+
+    A missing/evicted entry and an entry stored ``complete=False`` are both
+    unusable: neither reproduces the whole result, and a partial body could
+    hide the very change the diff exists to show.
+    """
+    from local_operator.tools.spill import get_store
+
+    store = get_store()
+    meta = store.stat(handle)
+    if meta is None or not meta.complete:
+        return None
+    loaded = store.read_lines(handle, 1, None)
+    if loaded is None:
+        return None
+    lines, _total = loaded
+    return "\n".join(lines)
+
+
 class CheckOutcome(TypedDict, total=False):
     """What one check produced: model-visible text, or a failure reason.
 
@@ -139,6 +167,11 @@ class CheckOutcome(TypedDict, total=False):
     text: str | None
     error: str | None
     kind: str | None
+    #: The ``spill://`` handle whose full body became ``text``, when the result
+    #: overflowed the tool-output limit. The scheduler keeps it as the next
+    #: diff's baseline: a snapshot above ``snapshotMaxChars`` is a clipped
+    #: prefix, and diffing against that prefix hides a change past the cut.
+    handle: str | None
 
 
 @dataclass
@@ -672,7 +705,12 @@ class MonitorScheduler:
                         if notice is not None:
                             notices.append(notice)
                     else:
-                        change = self._apply_success(entry, outcome.get("text") or "", now)
+                        change = self._apply_success(
+                            entry,
+                            outcome.get("text") or "",
+                            now,
+                            handle=outcome.get("handle") or None,
+                        )
                         seeing = self._clear_blind(entry, now)
                         if seeing is not None:
                             notices.append(seeing)
@@ -776,7 +814,39 @@ class MonitorScheduler:
 
     # -- the tick's decision core ------------------------------------------
 
-    def _apply_success(self, entry: _Entry, text: str, now: int) -> _Change | None:
+    def _previous_result(
+        self, spec: MonitorSpec, counters: dict[str, Any], old_hash: str
+    ) -> str | None:
+        """The FULL previous result (normalized), or ``None`` when unusable.
+
+        Same normalization the commit used, then the committed hash is
+        re-derived from the body: a handle that does not reproduce ``old_hash``
+        is not this monitor's baseline (a torn counters file, or an ignore/
+        sort_lines edit since), and the caller falls back to the snapshot.
+        """
+        handle = str(counters.get("last_handle") or "")
+        if not handle:
+            return None
+        body = _read_spill_body(handle)
+        if body is None:
+            return None
+        previous = normalize(
+            body,
+            sort_lines=spec.sort_lines,
+            ignore=spec.ignore,
+            normalize_timestamps=self._settings.normalize_timestamps,
+        )
+        if content_hash(previous) != old_hash:
+            logger.info(
+                "monitor %s previous spill does not reproduce its baseline; using the snapshot",
+                spec.id,
+            )
+            return None
+        return previous
+
+    def _apply_success(
+        self, entry: _Entry, text: str, now: int, *, handle: str | None = None
+    ) -> _Change | None:
         """One successful check: the diff state machine of §7.2 in full.
 
         Returns the detected change awaiting the §8 gate, or ``None`` for
@@ -812,7 +882,11 @@ class MonitorScheduler:
 
         if new_hash == old_hash:
             # Quiet tick. One ≲1 KiB write is the whole cost; the blob is only
-            # probed so a blob-only loss heals for free (§7.2).
+            # probed so a blob-only loss heals for free (§7.2). A spilled result
+            # is recorded as the next diff's full baseline even here: the
+            # content is identical, so the handle addresses the same text.
+            if handle:
+                counters["last_handle"] = handle
             if old_hash and not monitor_state.snapshot_exists(
                 self._config_dir, self._session_id, spec.id
             ):
@@ -821,56 +895,82 @@ class MonitorScheduler:
             return None
 
         blob = monitor_state.read_snapshot(self._config_dir, self._session_id, spec.id)
-        if blob is None:
-            if not old_hash:
-                # No baseline at all (first check, or both files lost): the
-                # baseline is established SILENTLY — never a full-dump
-                # delivery.
+        blob_text = ""
+        truncated = False
+        if blob is not None:
+            blob_text = str(blob.get("snapshot") or "")
+            truncated = bool(blob.get("snapshot_truncated"))
+
+        diff_base: str | None
+        if not old_hash:
+            if blob is None or truncated:
+                # No baseline at all (first check, or both files lost), or a
+                # clipped prefix with no hash to rebuild it from: the baseline
+                # is established SILENTLY — never a full-dump delivery.
                 if self._write_snapshot(spec, normalized):
                     counters["content_hash"] = new_hash
+                    counters["last_handle"] = handle or ""
                     counters["last_note"] = (
-                        "baseline re-established" if old_last_check else "baseline captured"
+                        "baseline re-established"
+                        if old_last_check or truncated
+                        else "baseline captured"
                     )
                 else:
                     counters["last_note"] = "baseline write failed"
                 counters["next_due_at"] = self._advance(spec, now)
                 return None
-            delta_text, changes = beyond_window_text(new_hash)
+            # A full stored snapshot with a lost hash is still complete
+            # content: diff against it, exactly as before.
+            diff_base = blob_text
         else:
-            blob_text = str(blob.get("snapshot") or "")
-            truncated = bool(blob.get("snapshot_truncated"))
-            if not old_hash and truncated:
-                # Counters lost AND the blob is truncated: the hash cannot be
-                # rebuilt (§7.2 "a truncated blob cannot yield the hash") and a
-                # clipped prefix cannot diff honestly, so the baseline is
-                # re-established silently rather than diffed against a window
-                # that may hide the change.
-                if self._write_snapshot(spec, normalized):
-                    counters["content_hash"] = new_hash
-                    counters["last_note"] = "baseline re-established"
-                else:
-                    counters["last_note"] = "baseline write failed"
+            # The diff's old side is the FULL previous result. The stored
+            # snapshot is clipped at ``snapshotMaxChars``; diffing against that
+            # prefix renders the boundary continuation for any change past the
+            # cut, which reads as real changed lines to the gate (review round
+            # 1, F1). The spill handle recorded on the last commit addresses the
+            # whole body, so it is preferred; the snapshot is the fallback only
+            # when there is no usable handle.
+            diff_base = self._previous_result(spec, counters, old_hash)
+            if diff_base is None and blob is not None and not truncated:
+                diff_base = blob_text
+            if diff_base is not None and (
+                len(diff_base) > MAX_DIFF_CHARS
+                or len(normalized) > MAX_DIFF_CHARS
+                or diff_base.count("\n") > MAX_DIFF_LINES
+                or normalized.count("\n") > MAX_DIFF_LINES
+            ):
+                logger.info(
+                    "monitor %s result is too large to diff; delivering a checksum delta",
+                    spec.id,
+                )
+                diff_base = None
+
+        if diff_base is None:
+            # No usable diff baseline (handle evicted/incomplete, a truncated
+            # snapshot, or a result past the matcher's bound): a checksum/
+            # boundary delta is not evidence, so it is delivered without
+            # asking the gate.
+            delta_text, changes = beyond_window_text(new_hash)
+            delta_hidden = True
+        else:
+            if not has_line_difference(diff_base, normalized):
+                # The hash disagreed while the content did not: the stored
+                # hash was TORN (a crash between the two writes), or a handle
+                # reproduced the same text under a different stored hash.
+                # Re-adopt and stay quiet.
+                counters["content_hash"] = new_hash
+                counters["last_handle"] = handle or str(counters.get("last_handle") or "")
                 counters["next_due_at"] = self._advance(spec, now)
                 return None
-            if not has_line_difference(blob_text, normalized):
-                if not truncated:
-                    # The hash disagreed while the content did not: the stored
-                    # hash was TORN (a crash between the two writes). Re-adopt
-                    # the blob ((recompute) and stay quiet.
-                    counters["content_hash"] = new_hash
-                    counters["next_due_at"] = self._advance(spec, now)
-                    return None
-                delta_text, changes = beyond_window_text(new_hash)
-            else:
-                pure_addition = not truncated and is_pure_addition(blob_text, normalized)
-                rendered = render_delta(
-                    blob_text,
-                    normalized,
-                    max_delta_lines=self._settings.max_delta_lines,
-                    delta_max_chars=self._settings.delta_max_chars,
-                )
-                delta_text, changes = rendered.text, rendered.changed_lines
-                delta_hidden = rendered.hidden
+            pure_addition = is_pure_addition(diff_base, normalized)
+            rendered = render_delta(
+                diff_base,
+                normalized,
+                max_delta_lines=self._settings.max_delta_lines,
+                delta_max_chars=self._settings.delta_max_chars,
+            )
+            delta_text, changes = rendered.text, rendered.changed_lines
+            delta_hidden = rendered.hidden
 
         # Order matters (§7.2): blob first, counters second — the counters
         # write is the commit point, so the baseline advances only when its
@@ -880,6 +980,9 @@ class MonitorScheduler:
             counters["next_due_at"] = self._advance(spec, now)
             return None
         counters["content_hash"] = new_hash
+        # Only a COMMITTED comparable check records its handle as the next
+        # baseline; a failed snapshot write above leaves the old one in place.
+        counters["last_handle"] = handle or ""
         counters["last_change_at"] = now
         counters["next_due_at"] = self._advance(spec, now)
         return _Change(
@@ -984,6 +1087,10 @@ class MonitorScheduler:
             )
             counters["rate_cap_held"] = int(counters.get("rate_cap_held") or 0) + 1
             self._write_counters(entry)
+            # Same reason as the gate branch: the index row carries the
+            # suppression counts, and a rate-capped change would otherwise be
+            # invisible to every cold reader (review round 1, F3).
+            self._notify_change()
             return None
         counters["rate_window_count"] = int(counters.get("rate_window_count") or 0) + 1
         counters["deliveries"] = int(counters.get("deliveries") or 0) + 1
@@ -1183,19 +1290,26 @@ class MonitorScheduler:
         """
         counters = entry.counters
         was_blind = bool(counters.get("blind"))
+        previous_reason = str(counters.get("blind_reason") or "")
         counters["checks"] = int(counters.get("checks") or 0) + 1
         counters["last_check_at"] = now
         counters["consecutive_failures"] = 0
         counters["last_error"] = ""
+        if not was_blind:
+            # Recorded BEFORE anything can establish a baseline: it is what
+            # lets the blind/seeing notices say whether the gap has anything to
+            # diff against (review round 1, F4).
+            counters["blind_no_baseline"] = not bool(counters.get("content_hash"))
         counters["blind"] = True
         counters["blind_reason"] = str(reason)[:500]
         counters["last_note"] = "result not comparable — blind"
         counters["next_due_at"] = self._advance(entry.spec, now)
-        if not was_blind:
+        if not was_blind or counters["blind_reason"] != previous_reason:
             # The INDEX is what every cold reader renders its hint from, and it
             # is only rewritten on a change event (§10.2). Without this the
             # in-session row would say BLIND while `lop monitor status` kept
-            # saying "nothing has changed".
+            # saying "nothing has changed"; a reason that changes mid-episode
+            # is stale on the wire without the second half.
             self._notify_change()
         logger.info("monitor %s is blind: %s", entry.spec.id, counters["blind_reason"])
         if counters.get("blind_notified"):
@@ -1212,6 +1326,7 @@ class MonitorScheduler:
             checks=int(counters.get("checks") or 0),
             deliveries=int(counters.get("deliveries") or 0),
             detail=counters["blind_reason"],
+            no_baseline=bool(counters.get("blind_no_baseline")),
         )
 
     def _clear_blind(self, entry: _Entry, now: int) -> MonitorNotice | None:
@@ -1225,6 +1340,7 @@ class MonitorScheduler:
         if not counters.get("blind"):
             return None
         notified = bool(counters.get("blind_notified"))
+        no_baseline = bool(counters.pop("blind_no_baseline", False))
         counters["blind"] = False
         counters["blind_reason"] = ""
         counters["blind_notified"] = False
@@ -1241,6 +1357,7 @@ class MonitorScheduler:
             at_ms=now,
             checks=int(counters.get("checks") or 0),
             deliveries=int(counters.get("deliveries") or 0),
+            no_baseline=no_baseline,
         )
 
     def _rate_allows(self, counters: dict[str, Any], now: int) -> bool:

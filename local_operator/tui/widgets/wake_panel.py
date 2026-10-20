@@ -340,9 +340,16 @@ class WakePanel(Container):
             "tool": getattr(spec, "tool", ""),
             "created_at": getattr(spec, "created_at", 0) or 0,
             "every_ms": getattr(spec, "every_ms", None),
+            "until_at": getattr(spec, "until_at", None),
         }
         disabled = bool(counters.get("disabled"))
-        blind = bool(counters.get("blind"))
+        until = counters.get("until_at", getattr(spec, "until_at", None))
+        expired = isinstance(until, int) and not isinstance(until, bool) and until <= now_ms
+        # EXPIRED outranks blind (review round 1, F5): a watch past ``until_at``
+        # will not tick again, so the blind state describes a failure that can
+        # no longer cost a missed change. Same rule as the CLI state word,
+        # ``store.health_hint`` and the desktop/mobile rows.
+        blind = bool(counters.get("blind")) and not expired
         since = counters.get("unavailable_since")
         unavailable = isinstance(since, int) and not isinstance(since, bool) and since > 0
         failures = counters.get("consecutive_failures")
@@ -415,13 +422,21 @@ class WakePanel(Container):
         elif failing:
             health = f"{fail_count} failed"
             ink, rank = "warning", 6
+        elif hint and "suppressed as non-material" in hint:
+            # A SUPPRESSED change is not a quiet watch (design review round 1,
+            # D1): the gate filed real deltas as bookkeeping, so the row is
+            # warning ink and counts toward "needs attention" — the fact now
+            # leads the shared sentence, so the band's first-clause extraction
+            # keeps it.
+            health = _band_health_clause(hint)
+            ink, rank = "warning", 5
         elif hint:
             # NEUTRAL by design — a quiet watch may be watching something quiet
             # — but painted in MUTED rather than DIM: the dim token measures
             # 4.18:1 on the band panel, below the AA floor, which made the new
             # hint the least legible text in the frame (D8).
             health = _band_health_clause(hint)
-            ink, rank = "muted", 5
+            ink, rank = "muted", 7
 
         every_ms = getattr(spec, "every_ms", None)
         every = f"every {format_duration(every_ms)}" if every_ms else "once"

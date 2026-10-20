@@ -131,6 +131,12 @@ class MonitorNotice:
     #: defaults it on, because a disabled watch is the one notice that needs
     #: the operator's attention.
     notify: bool = False
+    #: For ``blind``/``seeing``: whether a comparable baseline existed when the
+    #: episode began. False means the first check was already blind, so the
+    #: recovery adopts its first full result as the baseline silently and the
+    #: notice must not promise a "everything it missed as one delta" delivery
+    #: (review round 1, F4/QA Q1 — the live m2 notice made that false promise).
+    no_baseline: bool = False
 
 
 def format_monitor_notice_text(notice: MonitorNotice) -> str:
@@ -231,20 +237,40 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
         ]
         if notice.detail:
             lines.append(f"Reason: {_clip(notice.detail)}")
-        lines.append(
-            "It keeps its last comparable baseline, so the next comparable check reports "
-            "everything it missed as one delta."
-        )
+        if notice.no_baseline:
+            # The first check was already blind: there is no baseline to keep,
+            # so the recovery captures one silently instead of delivering the
+            # gap (QA round 1, Q1: the live m2 notice promised a delta that
+            # could not arrive).
+            lines.append(
+                "No comparable baseline existed, so this episode has nothing to diff against: "
+                "the first full result after it becomes the baseline silently (no delta for "
+                "that one)."
+            )
+        else:
+            lines.append(
+                "It keeps its last comparable baseline, so the next comparable check reports "
+                "everything it missed as one delta."
+            )
         lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
         lines.append("Monitors tick only while this session is open.")
         return _bounded("\n".join(lines))
 
     # seeing: the clear for a blind episode the operator was told about.
+    if notice.no_baseline:
+        consequence = (
+            "The blind episode began before any comparable baseline existed, so the first "
+            "full result was adopted as the baseline — no delta covers the gap."
+        )
+    else:
+        consequence = (
+            "The next check diffs against the last comparable baseline, so changes during "
+            "the gap arrive as one delta."
+        )
     return _bounded(
         f"(monitor) {who} is seeing its full result again as of {clock}{source_note} — "
         "the earlier blind episode has ended.\n"
-        "The next check diffs against the last comparable baseline, so changes during the "
-        f'gap arrive as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) '
+        f'{consequence} Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) '
         "once its goal is met."
     )
 

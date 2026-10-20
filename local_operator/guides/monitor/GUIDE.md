@@ -122,9 +122,11 @@ default keep "difference" honest:
   gated**: a delta that only adds lines (a log tail, a new row) is delivered
   as-is. Suppressions are counted (`suppressed.*` in the monitor's state file)
   and logged at INFO, and the listing says so: a row with checks, no deliveries
-  and suppressions reads `N changes suppressed as non-material — the call may
-  have changed without telling you`, not `nothing has changed`. That distinction
-  is the point — a gate filing real news as bookkeeping is invisible otherwise.
+  and suppressions reads `N changes suppressed as non-material (M checks, 0
+  deliveries) — the call may have changed without telling you`, not `nothing
+  has changed`. That distinction is the point — a gate filing real news as
+  bookkeeping is invisible otherwise. The fact leads the sentence because the
+  TUI band renders the first clause and used to drop it.
 - **A delta whose preview hides its change is never gated.** Long single-line
   results (a compact JSON thread, `gh pr view --json`, `jq -c`) used to render
   as two identical 200-character prefix clips, so the gate's only visible
@@ -182,7 +184,14 @@ it reports nothing, and it says so: one notice when it goes blind
 with the state word `blind`, and a matching "seeing its full result again"
 arrives when a comparable check succeeds. The check after that recovery diffs
 against the last good baseline, so everything missed during the episode arrives
-as one delta.
+as one delta — unless the episode began before any baseline existed (a first
+check that was already blind), in which case the first full result is adopted
+silently and both notices say there is no gap to report.
+
+An **expired** monitor (`until_at` has passed) outranks blind everywhere: it
+will not tick again, so a blind state describes a failure that can no longer
+cost a missed change. That is one rule for the shared health line, the CLI
+state word, the TUI band and the desktop/mobile rows.
 
 The list surfaces say what a row's counters alone cannot: `idle` (overdue
 because no session is hosting it), `never checked`, `N checks, 0 deliveries —
@@ -191,7 +200,9 @@ suppressed), `BLIND: cannot compare its result — <reason>; changes are not
 being reported`, and `tool unavailable since HH:MM — retrying`. The status band
 is a two-row glance surface, so it carries the STATE in the due slot
 (`disabled` / `stalled` / `blind` / `idle`) and the state clause of a hint; the
-`lop monitor status` table and the expanded receipt carry each hint whole.
+`lop monitor status` table prints each row, then its health hint on an indented
+wrapped line beneath it (a narrow terminal wraps the fact rather than clipping
+it), and `--json` carries it inline.
 
 ## No action needed is a first-class outcome
 

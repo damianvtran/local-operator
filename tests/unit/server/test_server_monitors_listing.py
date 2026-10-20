@@ -245,13 +245,26 @@ async def test_the_state_word_follows_the_cli_precedence(desktop) -> None:
             _row("m2", disabled=True, disabled_reason="5 failed"),
             _row("m3", until_at=PAST),
             _row("m4", due=PAST),
+            # Review round 1, F5: expired outranks blind on every surface.
+            _row(
+                "m5",
+                until_at=PAST,
+                blind=True,
+                blind_reason="its full result is no longer in the spill store",
+            ),
         ],
     )
 
     listing = await _list(client)
 
     states = {row["id"]: row["state"] for row in listing["entries"][0]["monitors"]}
-    assert states == {"m1": "armed", "m2": "disabled", "m3": "expired", "m4": "armed"}
+    assert states == {
+        "m1": "armed",
+        "m2": "disabled",
+        "m3": "expired",
+        "m4": "armed",
+        "m5": "expired",
+    }
     # A late watch is still armed: the due time moves only on change events
     # (§10.2), so lateness between events is ordinary, not a state.
     rows = {row["id"]: row for row in listing["entries"][0]["monitors"]}
