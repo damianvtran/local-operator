@@ -2824,17 +2824,13 @@
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "session": "4250a0ac5db6",
-        "label": "wm-audit-ru-delta",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-19",
         "result": "passed",
-        "findings": 0,
-        "independent_from_translator_session": true,
-        "actual_model_source": "subagent session runtime model deepseek/deepseek-flash per the session context; no fallback observed"
+        "findings": 0
       },
       "status": "passed",
-      "note": "Label-budget delta (20261019a): «Синхронизация памяти с пирами» 29c, «Области для синхронизации» 25c, «Исключённые пиры» 16c; other 14 byte-identical; check 0; passed; 1 MINOR (trusted dropped; help gates), 1 NIT. Record: i18n/audits/evidence/ru/wire.memory/ru19b/record.json"
+      "note": "Label-budget delta (20261019a): «Синхронизация памяти с пирами» 29c, «Области для синхронизации» 25c, «Исключённые пиры» 16c; other 14 byte-identical; check 0; passed; 1 MINOR (trusted dropped; help gates), 1 NIT. Record:."
     },
     {
       "locale": "hi",
@@ -2910,7 +2906,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "2nd indep pass fr19b: 1st 6 MAJOR fixed; 8/8 verified, 9 unchanged; no tu; validé=DB commit (not user confirm); token cap separate; sync.label 27c; check 0. MINOR: doubled space before ';' in 3 strings. i18n/audits/evidence/fr/wire.memory/fr19b/record.json"
+      "note": "2nd indep pass fr19b: 1st 6 MAJOR fixed; 8/8 verified, 9 unchanged; no tu; validé=DB commit (not user confirm); token cap separate; sync.label 27c; check 0. MINOR: doubled space before ';' in 3 strings."
     }
   ]
 }

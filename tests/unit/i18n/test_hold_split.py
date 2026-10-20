@@ -22,9 +22,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # TWENTY-THREE: the union plus independently audited P3a/P3b namespaces,
-    # the scratchpad-hygiene slice's hi wire.settings row, and P4a's audited
-    # tui.viewer row (including its keyboard-hint audit refresh).
+    # TWENTY-FOUR: the union plus independently audited P3a/P3b namespaces,
+    # the scratchpad-hygiene slice's hi wire.settings row, P4a's audited
+    # tui.viewer row (including its keyboard-hint audit refresh), and the
+    # i18n lane's audited `wire.memory` row for the namespace translated in
+    # five active locales.
     # Base is twelve (the Wave-3 ten retain their audited source pins). Main
     # added a wire.settings row for the hub-setting deletion and the LOH-19
     # review slice added a tui.review row; the earlier branch added a
