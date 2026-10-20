@@ -18,6 +18,8 @@ from typing import Any
 import pytest
 
 from local_operator.monitors import classify as classify_module
+from local_operator.monitors import diff
+from local_operator.monitors import scheduler as scheduler_module
 from local_operator.monitors import state as monitor_state
 from local_operator.monitors.classify import (
     IGNORABLE,
@@ -80,6 +82,10 @@ class Harness:
         self.delay_s = 0.0
         self.active = 0
         self.peak = 0
+        #: The scheduler's change hook: the session's index rewrite rides it, so
+        #: a test can pin that a suppression/blind transition reaches the
+        #: derived index rather than only the counters file.
+        self.changes = 0
         # ``True`` = the scripted callback below; ``False`` = no gate at all
         # (the classify=None path); anything else is used as the callback
         # directly (the real adapter in the end-to-end test).
@@ -94,7 +100,7 @@ class Harness:
             run_check=self._run_check,
             deliver=self._deliver,
             persist=self._persist,
-            on_change=None,
+            on_change=self._on_change,
             classify=gate,
             uniform=lambda low, high: low,
         )
@@ -124,6 +130,9 @@ class Harness:
 
     async def _persist(self, monitors: list[MonitorSpec]) -> None:
         pass
+
+    def _on_change(self) -> None:
+        self.changes += 1
 
     async def ripe(self, *, advance: int = 10**9) -> None:
         self.now_ms += advance
@@ -199,6 +208,23 @@ async def test_ignorable_suppresses_and_counts(harness: Harness) -> None:
     assert counters["deliveries"] == 0
 
 
+@pytest.mark.asyncio
+async def test_a_suppression_refreshes_the_index_row(harness: Harness) -> None:
+    """The suppression counts must reach the derived index, not only counters.
+
+    Every cold reading surface (the CLI, the desktop route, the TUI band)
+    renders its health hint from the index row; a suppression that only wrote
+    the counters file left those rows saying "nothing has changed".
+    """
+    harness.script.append(NON_MATERIAL_METADATA)
+    await one_change(harness)
+
+    row = harness.scheduler.index_rows()[0]
+    assert row["suppressed"]["non_material_metadata"] == 1
+    # The session's on_change hook is what rewrites the index file.
+    assert harness.changes == 1
+
+
 # ---------------------------------------------------------------------------
 # Fail-open (§8.4's last row)
 # ---------------------------------------------------------------------------
@@ -247,6 +273,31 @@ async def test_a_quiet_tick_makes_zero_classifier_calls(harness: Harness) -> Non
     await harness.ripe()
     assert harness.states == []
     assert harness.deliveries == []
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_delta_is_delivered_without_asking_the_gate(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-open on evidence the gate cannot see (§8.4's spirit).
+
+    The 2026-10-20 Slack monitor's delta showed two identical 200-char prefix
+    clips, so the gate's only visible difference was a spill footer's char
+    count and it answered ``non-material-metadata``. When the renderer reports
+    that a preview hides its change, the gate is not called at all: the change
+    is delivered.
+    """
+    hidden = diff.DeltaRender(text="+1/-1 changed lines\n- …\n+ …", changed_lines=1, hidden=True)
+    monkeypatch.setattr(scheduler_module, "render_delta", lambda *a, **kw: hidden)
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress if it were asked
+
+    await one_change(harness)
+
+    assert harness.states == [], "the gate must not judge a delta that hides its change"
+    assert [d.monitor_id for d in harness.deliveries] == ["m1"]
+    counters = harness.counters()
+    assert counters["suppressed"]["non_material_metadata"] == 0
+    assert counters["deliveries"] == 1
 
 
 # ---------------------------------------------------------------------------

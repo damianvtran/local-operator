@@ -8722,6 +8722,16 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     # route and the TUI band read.
                     "unavailable_since": raw.get("unavailable_since") or 0,
                     "last_error": raw.get("last_error") or "",
+                    # The blind state and the suppression counts: ``health_hint``
+                    # renders from the INDEX row, so a listing that dropped
+                    # them could only ever say "nothing has changed" for a
+                    # watch that was suppressing changes or comparing a
+                    # truncated result.
+                    "suppressed": (
+                        raw.get("suppressed") if isinstance(raw.get("suppressed"), dict) else {}
+                    ),
+                    "blind": bool(raw.get("blind")),
+                    "blind_reason": raw.get("blind_reason") or "",
                     "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
@@ -8756,6 +8766,11 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "dormant"
     if row["disabled"]:
         return "disabled"
+    if row.get("blind"):
+        # A blind watch is armed and ticking but reports nothing; like disabled
+        # it outranks the clock, because the due time is the one thing that
+        # still looks healthy.
+        return "blind"
     if row["due_in_s"] is None:
         return "waiting"
     from local_operator.monitors import store as monitor_store
@@ -8886,6 +8901,14 @@ def monitor_command(args: argparse.Namespace) -> int:
         # One clause, because the row above already says "session not open"
         # (D7): the legend's job is to say what to DO, not to restate the row.
         legend.append(("idle", "no session is hosting it — reopen it to resume"))
+    if any(row.get("blind") for row in rows):
+        legend.append(
+            (
+                "blind",
+                "it cannot compare its full result, so changes are not reported; "
+                "the row's detail line names the reason",
+            )
+        )
     if legend:
         import textwrap
 

@@ -84,6 +84,7 @@ RETRY_CAP_MS = 900_000
 _NOTICE_LATCH: dict[str, str] = {
     "disabled": "disable_notified",
     "stalled": "unavailable_notified",
+    "blind": "blind_notified",
 }
 
 #: The delivery rate window (§9.4).
@@ -126,6 +127,11 @@ class CheckOutcome(TypedDict, total=False):
     - ``unavailable``: the call never ran. No strike is charged (a reconnect
       window must not disable a monitor), it is retried on the same backoff
       ladder, and a stall notice goes out after ``UNAVAILABLE_STALL_MS``;
+    - ``blind``: the call RAN but its result could not be compared honestly —
+      the spill that held the full body is gone, or it was stored incompletely.
+      No strike is charged and the baseline is NOT advanced (advancing it would
+      make the missed change unrecoverable); ``error`` carries the sentence the
+      operator is shown, and the blind notice goes out once per episode;
     - ``fatal``: the failure is deterministic and cannot self-heal (the tool's
       own schema rejected the arguments). Disabled on the first occurrence.
     """
@@ -166,6 +172,12 @@ class _Change:
     #: change is delivered without asking the gate — see
     #: :func:`~local_operator.monitors.diff.is_pure_addition` for why.
     pure_addition: bool = False
+    #: The rendered previews do not show what changed (see
+    #: :attr:`~local_operator.monitors.diff.DeltaRender.hidden`). The gate is
+    #: skipped: a model cannot judge a change the delta does not show, and the
+    #: live failure was the gate calling the only visible difference (a spill
+    #: footer's char count) non-material metadata.
+    hidden: bool = False
 
 
 @dataclass
@@ -210,6 +222,12 @@ def fresh_counters(monitor_id: str, next_due_at: int | None) -> dict[str, Any]:
         "unavailable_since": 0,
         "unavailable_ticks": 0,
         "unavailable_notified": False,
+        # The blind-episode fields: the call runs, but its full result is not
+        # comparable (a spill gone or stored incompletely). While set, the
+        # baseline does not advance and the row must never render as healthy.
+        "blind": False,
+        "blind_reason": "",
+        "blind_notified": False,
         # The disable notice's exactly-once latch (§D4), set only after the
         # notice is handed to the session — so a crash between the disable and
         # the announce still tells the operator on the next open.
@@ -354,6 +372,18 @@ class MonitorScheduler:
                     # set for an external arm — the two must not drift.
                     "unavailable_since": counters.get("unavailable_since", 0),
                     "last_error": counters.get("last_error", ""),
+                    # The suppression counts and the blind state ride the row
+                    # because ``store.health_hint`` is rendered from the INDEX
+                    # by readers with no counters file (the CLI, the desktop
+                    # route, the TUI band); a row that dropped them could only
+                    # ever say "nothing has changed".
+                    "suppressed": (
+                        dict(counters["suppressed"])
+                        if isinstance(counters.get("suppressed"), Mapping)
+                        else {}
+                    ),
+                    "blind": bool(counters.get("blind")),
+                    "blind_reason": str(counters.get("blind_reason") or ""),
                 }
             )
         return rows
@@ -624,12 +654,28 @@ class MonitorScheduler:
                         return
                     now = self._now()
                     error = outcome.get("error")
-                    if error:
-                        notice = self._apply_failure(entry, error, now, kind=outcome.get("kind"))
+                    kind = outcome.get("kind")
+                    if kind == "blind":
+                        # The call RAN; only the comparison is impossible. It is
+                        # neither a success (nothing may be adopted as the new
+                        # baseline) nor a failure (the call did not fail), so it
+                        # gets its own branch: no strike, no baseline advance,
+                        # one notice per episode.
+                        notice = self._apply_blind(entry, str(error or ""), now)
+                        if notice is not None:
+                            notices.append(notice)
+                        restored = self._restored_notice(entry, now)
+                        if restored is not None:
+                            notices.append(restored)
+                    elif error:
+                        notice = self._apply_failure(entry, error, now, kind=kind)
                         if notice is not None:
                             notices.append(notice)
                     else:
                         change = self._apply_success(entry, outcome.get("text") or "", now)
+                        seeing = self._clear_blind(entry, now)
+                        if seeing is not None:
+                            notices.append(seeing)
                         restored = self._restored_notice(entry, now)
                         if restored is not None:
                             notices.append(restored)
@@ -754,6 +800,10 @@ class MonitorScheduler:
         new_hash = content_hash(normalized)
         old_hash = str(counters.get("content_hash") or "")
         pure_addition = False
+        # Set only by the rendered-diff branch below; every other path (loss
+        # semantics, re-adopt) has no previews at all and never had a hiding
+        # preview to report.
+        delta_hidden = False
 
         counters["checks"] = int(counters.get("checks") or 0) + 1
         counters["last_check_at"] = now
@@ -813,12 +863,14 @@ class MonitorScheduler:
                 delta_text, changes = beyond_window_text(new_hash)
             else:
                 pure_addition = not truncated and is_pure_addition(blob_text, normalized)
-                delta_text, changes = render_delta(
+                rendered = render_delta(
                     blob_text,
                     normalized,
                     max_delta_lines=self._settings.max_delta_lines,
                     delta_max_chars=self._settings.delta_max_chars,
                 )
+                delta_text, changes = rendered.text, rendered.changed_lines
+                delta_hidden = rendered.hidden
 
         # Order matters (§7.2): blob first, counters second — the counters
         # write is the commit point, so the baseline advances only when its
@@ -841,6 +893,7 @@ class MonitorScheduler:
             checks=int(counters["checks"]),
             at_ms=now,
             pure_addition=pure_addition,
+            hidden=delta_hidden,
         )
 
     async def _classify_change(self, change: _Change) -> str | None:
@@ -859,6 +912,17 @@ class MonitorScheduler:
         second policy for one call (the classification layer's own rule).
         """
         if self._classify is None:
+            return None
+        if change.hidden:
+            # Fail OPEN: a model asked to judge a delta whose previews hide the
+            # difference can only answer from the counts and the spill footer,
+            # and the live gate answered "non-material-metadata" for a Slack
+            # thread whose seven new replies were behind a 200-char prefix. The
+            # evidence is not shown, so it is delivered rather than judged.
+            logger.info(
+                "monitor %s delta preview hides its change; delivering without the gate",
+                change.spec.id,
+            )
             return None
         if change.pure_addition:
             # Appended content is new information, never "bookkeeping that
@@ -895,11 +959,13 @@ class MonitorScheduler:
         contract's (§5.2 step 5: the gate, "then either deliver (§9) or
         suppress + count") — a suppressed change was never a delivery
         candidate, and letting noise consume the hourly window would spend the
-        budget the operator's material messages are owed. A suppression does
-        not ``_notify_change``: the counters file is the durable record, the
-        index row (what the front ends read today) carries no suppression
-        figures, and §10.2 names delivery/arm/cancel/disable as the triggers —
-        slice 4's surfaces are where a counter repaint gets its reader.
+        budget the operator's material messages are owed. A suppression still
+        calls ``_notify_change``: the index row is what every cold reader (the
+        CLI, the desktop route, the TUI band) derives its health hint from, and
+        a row that keeps saying "nothing has changed" while the gate suppresses
+        every change is the blind spot this counters key now closes. The rewrite
+        is cheap and suppressions are rare — a monitor that suppresses often is
+        exactly the row an operator needs to see.
         """
         counters = entry.counters
         if suppressed is not None:
@@ -910,6 +976,7 @@ class MonitorScheduler:
             # and at debug level the 2026-10-09 gate regression left no trace
             # outside the counters file.
             logger.info("monitor %s change suppressed (%s)", change.spec.id, suppressed)
+            self._notify_change()
             return None
         if not self._rate_allows(counters, change.at_ms):
             counters["suppressed"]["rate_cap"] = (
@@ -1094,6 +1161,83 @@ class MonitorScheduler:
             name=entry.spec.name,
             tool=entry.spec.tool,
             kind="restored",
+            at_ms=now,
+            checks=int(counters.get("checks") or 0),
+            deliveries=int(counters.get("deliveries") or 0),
+        )
+
+    def _apply_blind(self, entry: _Entry, reason: str, now: int) -> MonitorNotice | None:
+        """Apply one uncomparable check: mark blind, advance nothing comparable.
+
+        The check itself ran, so ``checks``/``last_check_at``/``next_due_at``
+        move (a blind monitor must not hot-loop on a due instant it never
+        advances), but the two pieces of state that decide what the operator is
+        told stay put: ``content_hash`` and the snapshot are NOT rewritten, so
+        the next comparable check diffs against the last good baseline and
+        reports everything missed as one delta. That is exactly what the live
+        failure lost — the truncated display projection was adopted as the
+        baseline, and the seven new replies became unrecoverable.
+
+        No strike is charged: ``consecutive_failures`` resets, because the call
+        succeeded and the failure ladder exists for calls that did not.
+        """
+        counters = entry.counters
+        was_blind = bool(counters.get("blind"))
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_check_at"] = now
+        counters["consecutive_failures"] = 0
+        counters["last_error"] = ""
+        counters["blind"] = True
+        counters["blind_reason"] = str(reason)[:500]
+        counters["last_note"] = "result not comparable — blind"
+        counters["next_due_at"] = self._advance(entry.spec, now)
+        if not was_blind:
+            # The INDEX is what every cold reader renders its hint from, and it
+            # is only rewritten on a change event (§10.2). Without this the
+            # in-session row would say BLIND while `lop monitor status` kept
+            # saying "nothing has changed".
+            self._notify_change()
+        logger.info("monitor %s is blind: %s", entry.spec.id, counters["blind_reason"])
+        if counters.get("blind_notified"):
+            return None
+        # The latch is settled by ``_send_notice`` after the sink returned, so
+        # a notice that never reached a session is re-announced on the next
+        # blind tick rather than leaving a silent episode.
+        return MonitorNotice(
+            monitor_id=entry.spec.id,
+            name=entry.spec.name,
+            tool=entry.spec.tool,
+            kind="blind",
+            at_ms=now,
+            checks=int(counters.get("checks") or 0),
+            deliveries=int(counters.get("deliveries") or 0),
+            detail=counters["blind_reason"],
+        )
+
+    def _clear_blind(self, entry: _Entry, now: int) -> MonitorNotice | None:
+        """End a blind episode on the first comparable check; announce if told.
+
+        Same rule as ``_restored_notice``: an episode nobody was told about
+        resumes silently, and one the operator SAW gets the matching "seeing
+        again" so the blind notice is never the last word.
+        """
+        counters = entry.counters
+        if not counters.get("blind"):
+            return None
+        notified = bool(counters.get("blind_notified"))
+        counters["blind"] = False
+        counters["blind_reason"] = ""
+        counters["blind_notified"] = False
+        # Same reason as the enter side: the derived index must stop saying
+        # BLIND the moment the watch can see again.
+        self._notify_change()
+        if not notified:
+            return None
+        return MonitorNotice(
+            monitor_id=entry.spec.id,
+            name=entry.spec.name,
+            tool=entry.spec.tool,
+            kind="seeing",
             at_ms=now,
             checks=int(counters.get("checks") or 0),
             deliveries=int(counters.get("deliveries") or 0),

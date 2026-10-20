@@ -91,13 +91,16 @@ def format_monitor_delivery_text(delivery: MonitorDelivery) -> str:
 
 
 #: The lifecycle kinds a notice carries. ``delta`` is the ordinary delivery and
-#: is NOT one of these: it rides ``MonitorDelivery``.
-NOTICE_KINDS = ("disabled", "stalled", "restored")
+#: is NOT one of these: it rides ``MonitorDelivery``. ``blind`` names a check
+#: whose result cannot be compared (the watch is armed but reports nothing);
+#: ``seeing`` is its matching clear, sent only when the blind notice was told.
+NOTICE_KINDS = ("disabled", "stalled", "restored", "blind", "seeing")
 
 
 @dataclass(frozen=True)
 class MonitorNotice:
-    """One lifecycle notice about a monitor: disabled, stalled, restored.
+    """One lifecycle notice about a monitor: disabled, stalled, restored, blind
+    or seeing again.
 
     Deliberately NOT a :class:`MonitorDelivery`: a notice carries no delta and
     no ``changes``, it never counts as a delivery (§9.4's rate window is for
@@ -212,12 +215,37 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
         return _bounded("\n".join(lines))
 
     # restored
+    if notice.kind == "restored":
+        return _bounded(
+            f"(monitor) {who} is running again as of {clock}{source_note} — the earlier "
+            "interruption has ended.\n"
+            "The next check diffs against the old baseline, so changes during the gap arrive "
+            f'as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once '
+            "its goal is met."
+        )
+
+    if notice.kind == "blind":
+        lines = [
+            f"(monitor) {who} cannot compare its result at {clock}{source_note} — it is "
+            "BLIND, so changes are not being reported."
+        ]
+        if notice.detail:
+            lines.append(f"Reason: {_clip(notice.detail)}")
+        lines.append(
+            "It keeps its last comparable baseline, so the next comparable check reports "
+            "everything it missed as one delta."
+        )
+        lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
+        lines.append("Monitors tick only while this session is open.")
+        return _bounded("\n".join(lines))
+
+    # seeing: the clear for a blind episode the operator was told about.
     return _bounded(
-        f"(monitor) {who} is running again as of {clock}{source_note} — the earlier "
-        "interruption has ended.\n"
-        "The next check diffs against the old baseline, so changes during the gap arrive "
-        f'as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once '
-        "its goal is met."
+        f"(monitor) {who} is seeing its full result again as of {clock}{source_note} — "
+        "the earlier blind episode has ended.\n"
+        "The next check diffs against the last comparable baseline, so changes during the "
+        f'gap arrive as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) '
+        "once its goal is met."
     )
 
 
