@@ -1093,7 +1093,16 @@ async def test_a_public_subscribe_of_an_org_skill_is_one_plain_404(api) -> None:
     holder["anon"] = SkillClient(BASE, APIError("Not Found", status_code=404))
     missing = await client.post("/v1/desktop/hub/skills/subscribe", json=subscribe_body())
 
+    # The PULL arm refuses the same row identically: one body for "missing" and
+    # "not yours", on both the install and the subscribe path.
+    holder["anon"] = SkillClient(BASE, org_envelope(manifest()))
+    pulled_foreign = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    holder["anon"] = SkillClient(BASE, APIError("Not Found", status_code=404))
+    pulled_missing = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+
     assert foreign.status_code == 404 and missing.status_code == 404
     assert foreign.json() == missing.json()
+    assert pulled_foreign.status_code == 404
+    assert pulled_foreign.json() == pulled_missing.json() == missing.json()
     assert nothing_installed(root)
     assert not [r for r in prov.iter_baselines(root) if r.kind == "skill"]
