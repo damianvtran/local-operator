@@ -25,7 +25,9 @@ invisible in review.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from local_operator.remote_compute.request import RunCreateRequest
 from local_operator.remote_compute.resolve import (
@@ -90,7 +92,37 @@ def is_enabled(config_dir: Path | None = None) -> bool:
     return section.get(SETTING_PATH[1], DEFAULT_REMOTE_COMPUTE_ENABLED) is True
 
 
+#: The attestation surface, resolved on first access instead of imported here.
+#:
+#: ``attestation`` imports the mesh refusal family
+#: (``local_operator.network.types``) at module scope, and this package is
+#: imported by ``server.features.feature_flags()`` on every capability
+#: negotiation — the same reason :func:`is_enabled` reads the config lazily. Only
+#: a caller that actually verifies a statement pays for that import.
+_ATTESTATION_NAMES = frozenset(
+    {"AttestationRefusal", "VerifiedAttestation", "parse_attestation_keys", "verify_attestation"}
+)
+
+
+def __getattr__(name: str) -> object:
+    """Resolve the attestation names on first access; see ``_ATTESTATION_NAMES``."""
+    if name in _ATTESTATION_NAMES:
+        module = importlib.import_module("local_operator.remote_compute.attestation")
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+if TYPE_CHECKING:  # the names __getattr__ serves, typed where the analyzer can see them
+    from local_operator.remote_compute.attestation import (
+        AttestationRefusal,
+        VerifiedAttestation,
+        parse_attestation_keys,
+        verify_attestation,
+    )
+
+
 __all__ = [
+    "AttestationRefusal",
     "CODE_AMBIGUOUS_NETWORK",
     "CODE_DUPLICATE_NETWORK_ID",
     "CODE_INVALID_NETWORK_ID",
@@ -102,6 +134,9 @@ __all__ = [
     "NetworkBinding",
     "RunCreateRequest",
     "SETTING_PATH",
+    "VerifiedAttestation",
     "is_enabled",
+    "parse_attestation_keys",
     "resolve_network",
+    "verify_attestation",
 ]
