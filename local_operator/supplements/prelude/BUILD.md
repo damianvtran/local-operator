@@ -29,10 +29,11 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,124 | 10,002 | 4,606 |
 | v7 review round 1: viewBox pin (no upscale), dark hairline, light chrome reset, max-ending ticks, dense-label thinning, `.row`/`.muted` trims | 1,833 | 8,186 | 10,019 | 4,605 |
 | v8 scroll-lock: `html{overflow:hidden}` + body natural-height report | 1,849 | 8,170 | 10,019 | 4,601 |
+| v9 tall content: body is the 100vh scroller; report `body.scrollHeight`; viewport-width chart | 1,860 | 8,161 | 10,021 | 4,602 |
 
 Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
-1,245 B raw / **7 B gzip**. Relative to v3: −84 B raw / +28 B gzip; relative to the
-reviewed v5: −114 B raw / −6 B gzip. `PRELUDE_VERSION` **8** is what a served document
+1,243 B raw / **6 B gzip**. Relative to v3: −82 B raw / +29 B gzip; relative to the
+reviewed v5: −112 B raw / −5 B gzip. `PRELUDE_VERSION` **9** is what a served document
 re-derives under. The theme-flip ground and its wait for `[data-ready]` are documented in
 `prelude.src.css`; they are unchanged by this repair.
 
@@ -67,6 +68,18 @@ keeps 12 px axis type at 12 px instead of 16.3 px at a 1200 column. Dense charts
 the `data-mode=light` `color-scheme` reset returns for horizontally scrolling tables on a
 dark-OS host. The universal reduced-motion rule's enforcement moved to the validator (see
 above); removing it from the prelude is no longer a behaviour loss.
+
+The v9 correction keeps the v8 lock fix and restores reachability for genuinely oversized
+content. `html{overflow:hidden}` alone clipped a 30-row table (876 px document) at the UI's
+480 px clamp with no scrollbar and no way to reach row 30. The body is now the scroller
+(`overflow:hidden auto;max-height:100vh`) and `size()` reports `body.scrollHeight`: 379 px for
+the four-bar chart at 810 (no body scroll after the host grows), 876 px for the table (the host
+clamps at 480 and the body scrolls to row 30). Chart width is `R.clientWidth - 4` (viewport
+minus the body's 2 px side padding), not the body content width, so a body scrollbar cannot
+narrow the chart and recreate the 379/373 feedback lock. `svg` no longer has `max-width:100%`
+or `height:auto`: the width attribute is the viewport width, and the body's `overflow-x:hidden`
+clips only the transient 15 px during the one-step grow. The pair is 4,602 B gzip; the
+removed `max-width`/`height` rules paid for the body overflow.
 
 The v8 scroll-lock fix came from the desktop UI's reproduction of the operator's "weird bar
 on the right" on a VERTICAL four-bar chart at an 810 px column. The host seeded the iframe at
@@ -110,14 +123,14 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 7 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 6 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in the 7 B gzip headroom this pair
+`e.source!==parent` check drops it today). None of that fits in the 6 B gzip headroom this pair
 has left. Lane N either injects a native-only shim at assembly time without touching this shared
 pair, or revisits the cap in its own PR with measured numbers.
 

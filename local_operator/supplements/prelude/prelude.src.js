@@ -55,14 +55,14 @@ LO._put(t,LO.el("div",{class:"wrap"},tb),[],{});return tb},
 // unit, so it is usually the widest): the left margin reserves it plus a gap. When that
 // reservation would eat too much of a narrow frame, `ins` tells the caller to put the top tick
 // inside the plot instead — a clipped label is never an option (D2-1).
-_frame(t,o,need){const W=_max(200,_min(880,t.clientWidth||600)),Hh=o.height||Math.round(W*.45),m={t:12,r:o.right??64,b:28,l:o.left??48},ins=need!=null&&need+10>W*.4;if(need!=null&&!ins)m.l=_max(m.l,_ceil(need+10));return{W,H:Hh,m,iw:W-m.l-m.r,ih:Hh-m.t-m.b,ins}},
+_frame(t,o,need){const W=_max(200,_min(880,R.clientWidth-4||600)),Hh=o.height||Math.round(W*.45),m={t:12,r:o.right??64,b:28,l:o.left??48},ins=need!=null&&need+10>W*.4;if(need!=null&&!ins)m.l=_max(m.l,_ceil(need+10));return{W,H:Hh,m,iw:W-m.l-m.r,ih:Hh-m.t-m.b,ins}},
 _scale(a,b,lo,hi){return v=>lo+(hi-lo)*((v-a)/((b-a)||1))},
 _ticks(a,b,n=4){const st=10**Math.floor(Math.log10((b-a)/n||1)),e=[1,2,5,10].map(k=>k*st).find(s=>(b-a)/s<=n)||st*10,o=[];for(let v=_ceil(a/e)*e;v<=b+1e-9;v+=e)o.push(+v.toFixed(10));if(n<3)o[o.length-1]=b;return o},
 // The width/height attributes pin the SVG to its viewBox: CSS `max-width:100%` then only
 // shrinks it on a narrow frame. Without them the element stretches to the column, so a
 // height bounded in viewBox units (<=360 for many bars) became >480 rendered at 1200 and
 // put the host scrollbar back.
-_svg(f,lab){return LO.el("svg",{svg:1,width:f.W,height:f.H,viewBox:`0 0 ${f.W} ${f.H}`,role:"img","aria-label":lab})},
+_svg(f,lab){return LO.el("svg",{svg:1,width:f.W,viewBox:`0 0 ${f.W} ${f.H}`,role:"img","aria-label":lab})},
 _g(f,sv){const g=LO.el("g",{svg:1,transform:`translate(${f.m.l},${f.m.t})`});sv.append(g);return g},
 // Only finite numeric cells enter a scale: unknown strings are labelled gaps, not
 // NaN geometry that erases every other measurement. Null still paints nothing. Labels
@@ -86,7 +86,7 @@ _put(t,sv,keys,o){const fig=LO.el("figure",{});if(keys.length>1)fig.append(LO.el
 // 6 px taller locked a scrollbar in place at 810x373 (the chart re-rendered 7 px shorter
 // and reported the box, not the content). `overflow:hidden` on html makes the body the
 // only scroller-free measure; its 8 px top/bottom padding is inside offsetHeight.
-size(){cancelAnimationFrame(LO._r);LO._r=requestAnimationFrame(()=>P({t:"resize",h:D.body.offsetHeight}))},
+size(){cancelAnimationFrame(LO._r);LO._r=requestAnimationFrame(()=>P({t:"resize",h:D.body.scrollHeight}))},
 _rd(){cancelAnimationFrame(LO._x);LO._x=requestAnimationFrame(()=>{const c=V.slice();V.length=0;for(const v of c)if(v.t.isConnected){v.t.replaceChildren();try{LO[v.k](v.t,v.id,{...v.o,_k:1})}catch(e){E(e)}V.push(v)}for(const f of B)try{f()}catch(e){}LO.size()})}};
 addEventListener("message",({source:o,data:d})=>{if(o!==parent||!d||d.lo!=="supplement-host")return;if(d.t==="ping"){P({t:"pong"});return}if(d.t!=="theme")return;const th=d,k=d.nonce;if(N==null){N=typeof k=="string"&&k.length<65?k:"";Q&&P(Q)}R.dataset.mode=th.mode==="dark"?"dark":"light";for(const k in th.vars||{}){const v=String(th.vars[k]).slice(0,120);if(/^--(lo|font)-[a-z0-9-]+$/.test(k)&&CSS.supports(k,v))R.style.setProperty(k,v)}LO.theme=th;R.setAttribute("data-ready","");H.forEach(f=>{try{f(th)}catch(x){E(x)}});LO.size()});
 addEventListener("error",e=>E(e.message));

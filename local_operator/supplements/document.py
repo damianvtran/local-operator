@@ -85,7 +85,11 @@ from typing import Any, Final, Mapping
 #: is the BODY's natural height, not the root's current box, so a first layout 6 px taller
 #: than the host seed cannot lock a scrollbar by shrinking the chart and re-reporting the
 #: box. 10,019 B raw / 4,601 B gzip; the `offsetHeight` report paid for the CSS clip.
-PRELUDE_VERSION: Final = 8
+#: 9 — tall content stays reachable: `body` clamps at `100vh` and scrolls itself, while the
+#: report is `body.scrollHeight` (natural height, padding included). The chart width is the
+#: viewport minus the 4 px body padding, so a body scrollbar cannot narrow the chart and
+#: re-trigger the 379/373 lock. 10,021 B raw / 4,602 B gzip.
+PRELUDE_VERSION: Final = 9
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (
