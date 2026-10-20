@@ -701,6 +701,26 @@ def test_the_wide_horizontal_plot_fits_the_480_px_frame_the_ui_clamps(tmp_path: 
     assert out["svgAttrW"] == out["svgW"], "the SVG must not upscale past its viewBox"
 
 
+@pytest.mark.parametrize("bars", [3, 9, 10, 40])
+@pytest.mark.parametrize("width", [360, 620, 900, 1200, 1440])
+def test_the_rendered_height_is_bounded_across_the_matrix(
+    bars: int, width: int, tmp_path: Path
+) -> None:
+    """QA Q-1's matrix: 3, 9, 10 and 40 bars at every supported column. The model uses the
+    element's own width attribute, so an SVG that still stretched would compute the v6
+    height (9 bars @1440 = 581) and fail; the browser frames confirm the client box."""
+    data = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [[f"row {i}", round(i / bars, 3)] for i in range(1, bars + 1)],
+        }
+    }
+    out = _run(_bar_scenario(data, width), tmp_path)
+    assert out["svgAttrW"] == out["svgW"], (bars, width, out["svgAttrW"], out["svgW"])
+    rendered = out["svgH"] * min(width, out["svgAttrW"]) / out["svgW"] + 16
+    assert rendered <= 480, (bars, width, rendered, out["svgH"], out["svgW"])
+
+
 @pytest.mark.parametrize("bars", [9, 40])
 @pytest.mark.parametrize("width", [1200, 1440])
 def test_a_many_bar_chart_renders_under_the_480_px_frame(
