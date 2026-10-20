@@ -28,10 +28,11 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | v5 remediation: silent nulls, centred series gaps, labelled line gaps + shared-code trims | 2,056 | 8,077 | 10,133 | 4,607 |
 | v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,124 | 10,002 | 4,606 |
 | v7 review round 1: viewBox pin (no upscale), dark hairline, light chrome reset, max-ending ticks, dense-label thinning, `.row`/`.muted` trims | 1,833 | 8,186 | 10,019 | 4,605 |
+| v8 scroll-lock: `html{overflow:hidden}` + body natural-height report | 1,849 | 8,170 | 10,019 | 4,601 |
 
 Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
-1,245 B raw / **3 B gzip**. Relative to v3: −84 B raw / +32 B gzip; relative to the
-reviewed v5: −114 B raw / −2 B gzip. `PRELUDE_VERSION` **7** is what a served document
+1,245 B raw / **7 B gzip**. Relative to v3: −84 B raw / +28 B gzip; relative to the
+reviewed v5: −114 B raw / −6 B gzip. `PRELUDE_VERSION` **8** is what a served document
 re-derives under. The theme-flip ground and its wait for `[data-ready]` are documented in
 `prelude.src.css`; they are unchanged by this repair.
 
@@ -67,6 +68,18 @@ the `data-mode=light` `color-scheme` reset returns for horizontally scrolling ta
 dark-OS host. The universal reduced-motion rule's enforcement moved to the validator (see
 above); removing it from the prelude is no longer a behaviour loss.
 
+The v8 scroll-lock fix came from the desktop UI's reproduction of the operator's "weird bar
+on the right" on a VERTICAL four-bar chart at an 810 px column. The host seeded the iframe at
+373 px; the document's first layout was 379 px (chart 363 + 16 px body padding); Chromium
+added a 15 px scrollbar; the narrower chart re-rendered 7 px shorter and reported 373 px, so
+the host kept the scrollbar as a settled feedback lock (`scrollHeight == clientHeight` once
+locked). `html{overflow:hidden}` removes the child scrollbar entirely, and `size()` now
+reports `body.offsetHeight` (the body's natural height, padding included) instead of the
+root's current box. The report is 379 px at 810/373, 293 px at 620/320 and 412 px at
+1200/320; the frames show no strip and `innerWidth - documentElement.clientWidth == 0`.
+The shorter `offsetHeight` expression paid for the CSS clip: the pair is 4 B gzip smaller
+than v7.
+
 `_e = LO.el` was also tried as a size trim and measured **worse** under gzip (a repeated
 `LO.el(` compresses better than a two-letter alias plus its definition); it is not in the
 build. The gutter minimum dropped from an arbitrary 56 px to the measured label width, and
@@ -97,14 +110,14 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 3 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 7 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in the 3 B gzip headroom this pair
+`e.source!==parent` check drops it today). None of that fits in the 7 B gzip headroom this pair
 has left. Lane N either injects a native-only shim at assembly time without touching this shared
 pair, or revisits the cap in its own PR with measured numbers.
 

@@ -80,8 +80,12 @@ from typing import Any, Final, Mapping
 #: push resets `color-scheme` for table scrollbars. The reduced-motion enforcement moved to
 #: the validator (0 prelude bytes), and dense bars drop value labels rather than overprint.
 #: The last tick ends on the scale maximum at two-tick widths. Paid for by the unused `.row`
-#: and `.muted` rules: 10,019 B raw / 4,605 B gzip.
-PRELUDE_VERSION: Final = 7
+#: and `.muted` rules.
+#: 8 — the operator's "weird bar on the right": `html` clips overflow and the resize report
+#: is the BODY's natural height, not the root's current box, so a first layout 6 px taller
+#: than the host seed cannot lock a scrollbar by shrinking the chart and re-reporting the
+#: box. 10,019 B raw / 4,601 B gzip; the `offsetHeight` report paid for the CSS clip.
+PRELUDE_VERSION: Final = 8
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (

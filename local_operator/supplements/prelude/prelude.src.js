@@ -81,7 +81,12 @@ x.forEach((v,i)=>{if(i%step===0||i===x.length-1){const c=xs(v),w=_min(dx,2*(c-lp
 ys.forEach((c,j)=>{const yv=LO.col(id,c),pts=x.map((v,i)=>_nf(yv[i])?[xs(v),sc(yv[i])]:(typeof yv[i]==="string"&&g.append(LO.el("text",{svg:1,class:"lbl",text:yv[i],x:xs(v),y:f.ih-4-j*14,"text-anchor":"middle"})),null)).filter(Boolean);g.append(LO.el("polyline",{svg:1,points:pts.map(p=>p.join(",")).join(" "),fill:"none",stroke:LO.color(j),"stroke-width":2,"stroke-dasharray":["","6 3","2 3","8 3 2 3"][j%4]}));pts.forEach((p,i)=>g.append(LO.el("circle",{svg:1,cx:p[0],cy:p[1],r:2.5,fill:LO.color(j)},LO.el("title",{svg:1,text:`${x[i]} · ${c}: ${LO.fmt(yv[i],{unit:o.unit})}`}))));const last=pts[pts.length-1];if(last&&ys.length>1)g.append(LO.el("text",{svg:1,class:"lbl",text:c,x:last[0]+6,y:last[1]+4}))});
 LO._put(t,sv,ys.length>1?[]:ys,o);return sv},
 _put(t,sv,keys,o){const fig=LO.el("figure",{});if(keys.length>1)fig.append(LO.el("div",{},keys.map((k,j)=>LO.el("span",{class:"k"},LO.el("i",{style:`background:${LO.color(j)}`}),k))));fig.append(sv);if(o.caption)fig.append(LO.el("figcaption",{text:o.caption}));t.append(fig);LO.size()},
-size(){cancelAnimationFrame(LO._r);LO._r=requestAnimationFrame(()=>P({t:"resize",h:_ceil(R.getBoundingClientRect().height)}))},
+// The host sizes the frame from this report. Report the BODY's natural height, not the
+// root's rendered box: the root is the host's current height, so a first layout that was
+// 6 px taller locked a scrollbar in place at 810x373 (the chart re-rendered 7 px shorter
+// and reported the box, not the content). `overflow:hidden` on html makes the body the
+// only scroller-free measure; its 8 px top/bottom padding is inside offsetHeight.
+size(){cancelAnimationFrame(LO._r);LO._r=requestAnimationFrame(()=>P({t:"resize",h:D.body.offsetHeight}))},
 _rd(){cancelAnimationFrame(LO._x);LO._x=requestAnimationFrame(()=>{const c=V.slice();V.length=0;for(const v of c)if(v.t.isConnected){v.t.replaceChildren();try{LO[v.k](v.t,v.id,{...v.o,_k:1})}catch(e){E(e)}V.push(v)}for(const f of B)try{f()}catch(e){}LO.size()})}};
 addEventListener("message",({source:o,data:d})=>{if(o!==parent||!d||d.lo!=="supplement-host")return;if(d.t==="ping"){P({t:"pong"});return}if(d.t!=="theme")return;const th=d,k=d.nonce;if(N==null){N=typeof k=="string"&&k.length<65?k:"";Q&&P(Q)}R.dataset.mode=th.mode==="dark"?"dark":"light";for(const k in th.vars||{}){const v=String(th.vars[k]).slice(0,120);if(/^--(lo|font)-[a-z0-9-]+$/.test(k)&&CSS.supports(k,v))R.style.setProperty(k,v)}LO.theme=th;R.setAttribute("data-ready","");H.forEach(f=>{try{f(th)}catch(x){E(x)}});LO.size()});
 addEventListener("error",e=>E(e.message));

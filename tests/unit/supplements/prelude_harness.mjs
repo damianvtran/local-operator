@@ -53,9 +53,28 @@ const dataEl = new Node("script");
 dataEl._text = JSON.stringify(scenario.data ?? {});
 const target = new Node("div");
 target.clientWidth = scenario.width ?? 620;
+// The resize report is the body's natural height, not the root's current box. Model it as
+// the drawn SVG height plus the stylesheet's 8 px top/bottom padding; the browser frames
+// measure the real layout (including the 810x373 feedback lock this guards).
+const body = new Node("body");
+Object.defineProperty(body, "offsetHeight", {
+  get() {
+    let h = 0;
+    const find = (n) => {
+      if (n.tag === "svg") {
+        const b = (n.attrs.viewBox || "0 0 0 0").split(" ");
+        h = +b[3];
+      }
+      for (const c of n.children) if (typeof c === "object") find(c);
+    };
+    find(target);
+    return h + 16;
+  },
+});
 
 const document = {
   documentElement: root,
+  body,
   getElementById: (id) => (id === "lo-data" ? dataEl : id === "c" ? target : null),
   createElement: (tag) =>
     tag === "canvas"
