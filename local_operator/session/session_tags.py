@@ -21,6 +21,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 from threading import RLock
 from typing import Any, TypedDict
@@ -59,6 +60,41 @@ class TagRevisionConflict(Exception):
     def __init__(self, current: dict[str, Any]) -> None:
         super().__init__("Tag assignment changed; refresh before retrying")
         self.current = current
+
+
+class TagCreateApplyError(Exception):
+    """Creation succeeded but the assignment write did not.
+
+    Registry creation and assignment are two files, so the store cannot offer a
+    transaction across them (see the module docstring). A caller must still be
+    able to say WHICH half landed rather than report a flat failure that invites
+    a blind retry: retrying the create would duplicate a category name, while
+    retrying the apply is exactly the right next step. ``created`` is that fact.
+    """
+
+    def __init__(self, message: str, *, created: bool) -> None:
+        super().__init__(message)
+        self.created = created
+
+
+class TagToggle(TypedDict):
+    """The assignment after a toggle, plus what the toggle did.
+
+    ``created`` and ``applied`` are separate facts on purpose: creating a tag
+    and assigning it are distinct durable writes, and a caller that collapses
+    them into one "changed" flag cannot describe the partial-create failure
+    above or tell a create-and-apply from an apply of an existing name.
+    """
+
+    tags: list[str]
+    primary: str | None
+    revision: int
+    created: bool
+    applied: bool
+    #: The registry's canonical spelling, which may differ in case from the
+    #: name the caller typed. Receipts quote THIS, so the sentence names the
+    #: row the list paints rather than the user's casing.
+    name: str
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -139,6 +175,24 @@ def _bump_revision(root: Path) -> None:
         return
 
 
+def _breaks_single_row(name: str) -> bool:
+    """True when ``name`` carries characters that cannot stay on one row.
+
+    A tag name is painted as ONE row in two surfaces (the `/tag` picker row and
+    the grouped sidebar heading), and both measure width with ``cell_len``,
+    which counts U+000A as zero columns: an embedded newline therefore turns
+    one row into two without a capacity row, and an escape sequence can move
+    the cursor. Refusing here, in the store, is what makes every client inherit
+    the rule instead of each renderer sanitising its own output.
+
+    Printable-only would be too strict — it rejects the emoji ZWJ sequences and
+    combining marks a human may reasonably type inside a 24-character label —
+    so this refuses the control and line/paragraph-separator classes (Cc, Cs,
+    Zl, Zp) and nothing else.
+    """
+    return any(unicodedata.category(char) in {"Cc", "Cs", "Zl", "Zp"} for char in name)
+
+
 def read_tags_revision(root: Path) -> str | None:
     """The store's current change token, or None for a store without one.
 
@@ -195,6 +249,8 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
     for key, raw_name in desired:
         name = raw_name.strip()
         folded = name.casefold()
+        if _breaks_single_row(name):
+            raise ValueError("Category names must not contain control characters")
         if (
             not 1 <= len(name) <= MAX_NAME_CHARS
             or folded == RESERVED_NAME.casefold()
@@ -346,6 +402,112 @@ def _set_entity_tags(
     if _write(path, {"version": 1, **state}):
         _bump_revision(root)
     return state
+
+
+def effective_primary(
+    tags: list[str],
+    primary: str | None,
+    categories: list[dict[str, str]],
+) -> str | None:
+    """The primary tag that may group this entity, or None for Untagged.
+
+    THE GROUPING PREDICATE, in the store rather than in a renderer: a bucket is
+    a primary only when it is non-null, still in the registry, AND still in this
+    entity's assignment. A dangling id or a registry edit that removed a
+    category must fall to Untagged rather than create an invisible group or
+    resurrect a stale heading. Grouping by "has any tags" is a different
+    question and deliberately not answered here; secondary tags never choose a
+    bucket.
+    """
+    if primary is None:
+        return None
+    known = {item["id"] for item in categories}
+    return primary if primary in known and primary in tags else None
+
+
+def toggle_entity_tag(
+    root: Path,
+    entity_type: str,
+    entity_id: str,
+    name: str,
+    *,
+    expected_revision: str | int | None = None,
+) -> TagToggle:
+    """Toggle a tag by NAME, creating and applying it when the name is new.
+
+    ONE semantic for every client (TUI now, desktop next): a user activating a
+    tag row means "this conversation is in this category, flip that", not "edit
+    a registry and then, separately, an assignment". Existing names always win
+    over creation (case-insensitive, matching the registry's own uniqueness
+    rule), so a retry after a dropped response cannot mint a duplicate.
+
+    PRIMARY RULES, stated here because they are the grouping contract: the first
+    assignment becomes primary; adding another tag never moves it; removing a
+    non-primary leaves it; removing the primary promotes the oldest surviving
+    assignment. Empty assignments have no primary. ``set_entity_tags`` owns the
+    append-order mechanics; this function only chooses the primary it wants.
+
+    CAPS ARE CHECKED BEFORE CREATION, so a full assignment list cannot leave a
+    newly created category behind with nothing using it.
+
+    Raises :class:`TagCreateApplyError` when the name was created but the
+    assignment write failed. Any other write failure propagates unchanged.
+    """
+    cleaned = name.strip()
+    if _breaks_single_row(cleaned):
+        raise ValueError("Tag names must not contain control characters")
+    if not 1 <= len(cleaned) <= 24:
+        raise ValueError("Tag names must be 1..24 characters")
+    if cleaned.casefold() == "untagged":
+        raise ValueError("Untagged is reserved")
+    with _assignment_lock:
+        categories = read_categories(root)
+        current = read_entity_tags(root, entity_type, entity_id, categories=categories)
+        match = next(
+            (item for item in categories if item["name"].casefold() == cleaned.casefold()),
+            None,
+        )
+        created = False
+        if match is None:
+            if len(current["tags"]) >= 8:
+                raise ValueError("At most 8 distinct tags are allowed")
+            try:
+                desired: list[tuple[str | None, str]] = [
+                    (item["id"], item["name"]) for item in categories
+                ]
+                desired.append((None, cleaned))
+                categories = write_categories(root, desired)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            match = next(
+                (item for item in categories if item["name"].casefold() == cleaned.casefold()),
+                None,
+            )
+            if match is None:  # pragma: no cover - the writer just stored it
+                raise ValueError("Tag creation did not publish the category")
+            created = True
+        tag_id = match["id"]
+        if tag_id in current["tags"]:
+            tags = [key for key in current["tags"] if key != tag_id]
+            primary = current["primary"] if current["primary"] in tags else None
+            applied = False
+        else:
+            if len(current["tags"]) >= 8:
+                raise ValueError("At most 8 distinct tags are allowed")
+            tags = [*current["tags"], tag_id]
+            primary = (
+                current["primary"]
+                if current["primary"] in current["tags"]
+                else current["tags"][0] if current["tags"] else tag_id
+            )
+            applied = True
+        try:
+            state = _set_entity_tags(root, entity_type, entity_id, tags, primary, expected_revision)
+        except Exception as exc:
+            if created:
+                raise TagCreateApplyError(str(exc), created=True) from exc
+            raise
+        return {**state, "created": created, "applied": applied, "name": match["name"]}
 
 
 def usage_counts(root: Path, entity_type: str = "session") -> dict[str, int]:

@@ -269,6 +269,11 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 # TUI-only: the optional Librarian package's local state and
                 # its pinned conversation. Same wrong-machine argument.
                 "librarian",
+                # TUI-only: the tag surface edits THIS config root's store and
+                # the grouping preference paints THIS terminal's sidebar. No
+                # desktop destination ships in this slice.
+                "tag",
+                "tags",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
