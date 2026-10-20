@@ -846,7 +846,10 @@ def _inactive_locales_at_ref(ref: str) -> set[str] | None:
             return None
         if code == "en":
             continue
-        listing = _git("ls-tree", "-r", "--name-only", ref, "--", f"local_operator/i18n/catalogues/{code}")
+        listing = _git(
+            "ls-tree", "-r", "--name-only", ref, "--",
+            f"local_operator/i18n/catalogues/{code}",
+        )
         if listing.returncode != 0:
             return None
         if not listing.stdout.strip():
