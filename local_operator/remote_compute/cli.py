@@ -86,8 +86,10 @@ from local_operator.remote_compute.errors import (
     InvalidIdempotencyKey,
     InvalidRequest,
     NetworkMismatch,
+    RunIdentityMismatch,
     RunNotFound,
     Unreachable,
+    UnreadableEnvelope,
 )
 from local_operator.remote_compute.request import (
     RunCreateRequest,
@@ -211,6 +213,12 @@ def _report(failure: BaseException) -> int:
         return _key_refusal(failure)
     if isinstance(failure, NetworkMismatch):
         return _refuse(_t(_wr.network_mismatch()))
+    if isinstance(failure, RunIdentityMismatch):
+        return _refuse(
+            _t(_wr.run_identity_mismatch(asked_for=failure.asked_for, answered=failure.answered))
+        )
+    if isinstance(failure, UnreadableEnvelope):
+        return _refuse(_t(_wr.unreadable_envelope()))
     if isinstance(failure, Unreachable):
         return _refuse(_t(_wr.unreachable()))
     if isinstance(failure, InsufficientCredit):
@@ -363,16 +371,18 @@ def _network_verdict(payload: dict[str, Any], *, network: str | None) -> str:
 
 
 def _remote_status(identifier: str | None, *, network: str | None = None) -> int:
-    """``--remote-status``: the run as JSON, then whether its network is ours.
+    """``--remote-status``: the run as JSON on STDOUT, the verdict on STDERR.
 
     Does NOT require the preview switch: reading a run this account already
     owns is not sending work, and a switch turned off after submission must not
     hide the state of work that is still running.
 
-    THE NETWORK LINE IS SEPARATE FROM THE JSON so the JSON stays a faithful
-    print of the run: a caller parsing stdout gets the server's document, and a
-    person gets the one thing the document cannot say — whether this device can
-    vouch for it. The two secret fields are dropped from the print.
+    STDOUT CARRIES THE RUN AND NOTHING ELSE, so ``json.loads(stdout)`` parses the
+    whole stream: a caller piping this into ``jq`` gets the server's document
+    alone. The one thing the document cannot say — whether this device can vouch
+    for the run's network — is a comment about the run, not part of it, and it
+    goes to stderr where a person still reads it and a parser never does. The
+    two secret fields are dropped from the print.
     """
     if not identifier:
         return _refuse(_t(_wr.alone()))
@@ -383,7 +393,7 @@ def _remote_status(identifier: str | None, *, network: str | None = None) -> int
     except (ValueError, OSError) as failure:
         return _report(failure)
     print(json.dumps(_without_secrets(payload), ensure_ascii=False))
-    print(_network_verdict(payload, network=network))
+    print(_network_verdict(payload, network=network), file=sys.stderr)
     return 0
 
 
@@ -488,6 +498,15 @@ def _submit(args: argparse.Namespace) -> int:
         return 130
     except (ValueError, OSError) as failure:
         return _report(failure)
+    # A REPLAY IS ANNOUNCED, NOT SILENT. A retry whose ``--idempotency-key``
+    # matches an earlier submission gets 200 and THAT run: no work was queued
+    # this time. Without a word the operator cannot tell a fresh submission from
+    # a retry that did nothing, and the difference is the whole point of passing
+    # a key. It goes to stderr beside the receipt so stdout stays the run id
+    # alone, and the run id is named so the line is about a run rather than a
+    # status. Everything after this point is the ordinary path.
+    if created.replayed:
+        print(_t(_wr.replayed(run_id=identifier)), file=sys.stderr)
     if getattr(args, "detach", False):
         # The run id ALONE on stdout, so `id=$(lop exec --remote --detach ...)`
         # captures exactly the id. The receipt — key included — goes to stderr.

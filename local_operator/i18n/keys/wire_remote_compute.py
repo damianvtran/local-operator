@@ -121,8 +121,19 @@ def only_with(*, flag: str) -> Msg:
     return Msg("wire.remote_compute.only_with", {"flag": flag})
 
 
+def replayed(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.replayed", {"run_id": run_id})
+
+
 def retrying() -> Msg:
     return Msg("wire.remote_compute.retrying", {})
+
+
+def run_identity_mismatch(*, answered: str, asked_for: str) -> Msg:
+    return Msg(
+        "wire.remote_compute.run_identity_mismatch",
+        {"answered": answered, "asked_for": asked_for},
+    )
 
 
 def status_line(*, status: str) -> Msg:
@@ -159,3 +170,7 @@ def unknown_run() -> Msg:
 
 def unreachable() -> Msg:
     return Msg("wire.remote_compute.unreachable", {})
+
+
+def unreadable_envelope() -> Msg:
+    return Msg("wire.remote_compute.unreadable_envelope", {})

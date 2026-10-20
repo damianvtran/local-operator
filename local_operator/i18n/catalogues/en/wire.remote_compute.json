@@ -26,7 +26,9 @@
   "wire.remote_compute.no_capacity": "Radient has no remote-compute capacity right now; try again later.",
   "wire.remote_compute.no_credit": "Radient has no compute credit for this account, so the run was not admitted.",
   "wire.remote_compute.only_with": "{flag} only applies with --remote.",
+  "wire.remote_compute.replayed": "The idempotency key matched an earlier submission, so this is remote run {run_id} and no new run was created.",
   "wire.remote_compute.retrying": "Radient reported an error for this run and retries it, so this watch continues.",
+  "wire.remote_compute.run_identity_mismatch": "Radient answered for remote run {answered}, not the run {asked_for} that was asked for, so this response cannot be reported as that run's state.",
   "wire.remote_compute.status_line": "status: {status}",
   "wire.remote_compute.status_network_matched": "network checked: this run is in {network_id}, this device's network.",
   "wire.remote_compute.status_network_mismatch": "network checked: this run is in {network_id}, which is not this device's network.",
@@ -35,5 +37,6 @@
   "wire.remote_compute.still_running": "Run {run_id} is still running past the {max_hours}-hour limit Radient reported for it, so this command stopped watching. Check it with: lop exec --remote-status {run_id}",
   "wire.remote_compute.submitted": "Remote run {run_id} submitted.\nnetwork (confirmed by Radient): {network_id}",
   "wire.remote_compute.unknown_run": "Radient has no such remote run for the selected login.",
-  "wire.remote_compute.unreachable": "Radient could not be reached; check the network and try again."
+  "wire.remote_compute.unreachable": "Radient could not be reached; check the network and try again.",
+  "wire.remote_compute.unreadable_envelope": "Radient's response format has changed, and this lop build cannot read it. Update lop with `lop-update` and try again."
 }

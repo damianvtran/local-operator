@@ -361,7 +361,9 @@ export type MessageParams = {
   "wire.remote_compute.no_capacity": undefined;
   "wire.remote_compute.no_credit": undefined;
   "wire.remote_compute.only_with": { "flag": string };
+  "wire.remote_compute.replayed": { "run_id": string };
   "wire.remote_compute.retrying": undefined;
+  "wire.remote_compute.run_identity_mismatch": { "answered": string; "asked_for": string };
   "wire.remote_compute.status_line": { "status": string };
   "wire.remote_compute.status_network_matched": { "network_id": string };
   "wire.remote_compute.status_network_mismatch": { "network_id": string };
@@ -371,6 +373,7 @@ export type MessageParams = {
   "wire.remote_compute.submitted": { "run_id": string; "network_id": string };
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
+  "wire.remote_compute.unreadable_envelope": undefined;
   "wire.settings.agents.description": undefined;
   "wire.settings.agents.title": undefined;
   "wire.settings.agents_auto_update_seeds.choice.false.description": undefined;

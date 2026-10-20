@@ -56,6 +56,7 @@ from local_operator.remote_compute.errors import (
     RunIdentityMismatch,
     RunNotFound,
     Unreachable,
+    UnreadableEnvelope,
 )
 from local_operator.remote_compute.request import is_commit_sha, is_repo_url
 from local_operator.tunnels.config import DEFAULT_API_URL
@@ -366,6 +367,39 @@ async def test_a_reused_key_with_a_different_body_is_a_conflict(
     async with http:
         with pytest.raises(IdempotencyConflict):
             await client.create_run(request_for(), idempotency_key="same")
+
+
+@pytest.mark.asyncio
+async def test_an_envelope_with_keys_outside_the_set_is_its_own_failure(
+    credential: int,
+) -> None:
+    """E2-5 — the strict key set stays; a body that fails it is a typed refusal.
+
+    It is neither an envelope nor the payload itself, so it is not guessed at:
+    the format moved on without this build, and that is its own error rather
+    than a run truncated to one field.
+    """
+    origin = _Origin(
+        httpx.Response(
+            200,
+            json={"msg": "Run", "result": {"id": "run_1", "status": "running"}, "trace": "t"},
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(UnreadableEnvelope):
+            await client.get_run("run_1")
+
+
+@pytest.mark.asyncio
+async def test_an_identity_mismatch_carries_both_run_ids(credential: int) -> None:
+    """E2-4 — the surface builds its keyed sentence from fields, not from prose."""
+    origin = _Origin(httpx.Response(200, json=_read(_run("run_other", "running"))))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RunIdentityMismatch) as caught:
+            await client.get_run("run_1")
+    assert (caught.value.asked_for, caught.value.answered) == ("run_1", "run_other")
 
 
 @pytest.mark.asyncio

@@ -5923,7 +5923,9 @@
         "wire.remote_compute.no_capacity",
         "wire.remote_compute.no_credit",
         "wire.remote_compute.only_with",
+        "wire.remote_compute.replayed",
         "wire.remote_compute.retrying",
+        "wire.remote_compute.run_identity_mismatch",
         "wire.remote_compute.status_line",
         "wire.remote_compute.status_network_matched",
         "wire.remote_compute.status_network_mismatch",
@@ -5932,7 +5934,8 @@
         "wire.remote_compute.still_running",
         "wire.remote_compute.submitted",
         "wire.remote_compute.unknown_run",
-        "wire.remote_compute.unreachable"
+        "wire.remote_compute.unreachable",
+        "wire.remote_compute.unreadable_envelope"
       ]
     },
     {
@@ -13500,7 +13503,9 @@
         "wire.remote_compute.no_capacity",
         "wire.remote_compute.no_credit",
         "wire.remote_compute.only_with",
+        "wire.remote_compute.replayed",
         "wire.remote_compute.retrying",
+        "wire.remote_compute.run_identity_mismatch",
         "wire.remote_compute.status_line",
         "wire.remote_compute.status_network_matched",
         "wire.remote_compute.status_network_mismatch",
@@ -13509,7 +13514,8 @@
         "wire.remote_compute.still_running",
         "wire.remote_compute.submitted",
         "wire.remote_compute.unknown_run",
-        "wire.remote_compute.unreachable"
+        "wire.remote_compute.unreachable",
+        "wire.remote_compute.unreadable_envelope"
       ]
     },
     {
