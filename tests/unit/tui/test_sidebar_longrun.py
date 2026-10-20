@@ -236,9 +236,9 @@ async def poll_until(
             while not ready():
                 await one_poll(app, pilot)
     except TimeoutError as exc:
-        live = {entry.id: entry.row.live_state for entry in app._session_sidebar.visible_entries}
+        live = {entry.id: entry.row.live_state for entry in app._session_sidebar.entries}
         raise AssertionError(
-            f"sidebar never ready: {description}; visible live states={live!r}; "
+            f"sidebar never ready: {description}; catalog live states={live!r}; "
             f"parked={list(app._sidebar_presentations)!r}; "
             f"refresh pending={app._sidebar_refresh_pending}; "
             f"prefetch active={app._sidebar_prefetch is not None}"
@@ -364,13 +364,13 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
             app._sidebar_timer.pause()  # the test drives polls so cycles are countable
             # Catalog liveness arrives asynchronously: a completed refresh is
             # not proof that every owner is eligible for speculative admission.
+            # Check the catalog, not its geometry-dependent visible page: a
+            # narrow or not-yet-laid-out sidebar need not display every live row.
             await poll_until(
                 app,
                 pilot,
                 lambda: set(ids).issubset(
-                    entry.id
-                    for entry in app._session_sidebar.visible_entries
-                    if entry.row.live_state
+                    entry.id for entry in app._session_sidebar.entries if entry.row.live_state
                 ),
                 f"catalog reporting all expected live rows {ids!r}",
             )
@@ -402,12 +402,9 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
             target = next(sid for sid in ids[1:] if sid not in parked)
             app._sidebar_navigation.intend(target)
             try:
-                await poll_until(
-                    app,
-                    pilot,
-                    lambda: target in app._sidebar_presentations,
-                    f"prewarm parking intended row {target!r} at capacity",
-                )
+                # This is a one-poll workload assertion, not a readiness wait:
+                # the intent exemption must apply on the very next refresh.
+                await one_poll(app, pilot)
             finally:
                 app._sidebar_navigation.intent_id = ""
             assert (
