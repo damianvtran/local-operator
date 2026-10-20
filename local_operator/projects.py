@@ -504,7 +504,8 @@ class ProjectAttachment(BaseModel):
 
     name: str = Field(default="", description="Original file name, for display.")
     kind: Literal["image", "audio", "video", "data"] = Field(
-        default="data", description="``image`` by extension; ``data`` otherwise."
+        default="data",
+        description="``image``, ``audio`` or ``video`` by extension; ``data`` otherwise.",
     )
     path: str = Field(default="", description="Where the COPY lives, resolvable.")
     bytes: int = Field(default=0, description="Size at copy time.")

@@ -14,11 +14,12 @@ import datetime
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 from local_operator.projects import (
+    _ATTACHMENT_KINDS,
     ATTACHMENTS_MAX,
     MILESTONES_MAX,
     PROJECT_PROGRESS_STALE_S,
@@ -26,6 +27,7 @@ from local_operator.projects import (
     UPDATES_MAX,
     MilestoneEdit,
     Project,
+    ProjectAttachment,
     ProjectEdit,
     ProjectMilestone,
     ProjectNameConflictError,
@@ -848,6 +850,12 @@ def test_attachments_are_copied_into_the_store_and_described(store, tmp_path: Pa
     assert copied.name != "frame.png" and copied.suffix == ".png"
     shot.unlink()
     assert copied.read_bytes().startswith(b"\x89PNG")
+
+
+def test_the_preserved_kinds_match_the_attachment_literal() -> None:
+    """A kind added to the Literal but not the passthrough set degrades to data."""
+    declared = set(get_args(ProjectAttachment.model_fields["kind"].annotation))
+    assert declared == _ATTACHMENT_KINDS | {"data"}
 
 
 def test_attachment_kinds_are_classified_by_suffix_and_survive_a_reload(
