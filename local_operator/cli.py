@@ -1205,6 +1205,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_sh.cleanup_scratchpads_only().envelope(locale=help_locale)["text"],
     )
+    # HELP IS SUPPRESSED, NOT MISSING: these two are rendered in the command
+    # docstring and the configuration guide. New visible help copy needs a
+    # translation wave into every active locale (the coverage allowance is
+    # shrink-only and refuses new English there), and a coder must not
+    # translate/audit their own contribution (i18n guide step 5). Hiding the
+    # prose keeps the flags working and every i18n gate honest; the follow-up
+    # is one help-tranche key per flag.
+    cleanup_parser.add_argument(
+        "--report-non-git-copies",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    cleanup_parser.add_argument(
+        "--reference-repo",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=argparse.SUPPRESS,
+    )
     cleanup_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
@@ -4643,6 +4662,13 @@ def _cleanup_row(candidate: Any, verb: str) -> str:
 #: them all, and the real run's record is ``.cleanup-log.jsonl``.
 _CLEANUP_TEXT_ROWS = 200
 
+#: Text rows the non-git COPY report prints. Smaller than the cleanup listing on
+#: purpose: the report is a decision surface (what is provable, what is waiting,
+#: what is refused), not an inventory — the measured store had 294 rows, of which
+#: two were actioned, and a refused parent repeats its child's bytes at every
+#: depth. ``--json`` carries every row.
+_COPY_REPORT_TEXT_ROWS = 40
+
 
 def _delegated_hours(text: str) -> int:
     """Argparse type for ``--delegated-max-age-hours``: the registry's own range."""
@@ -4780,6 +4806,7 @@ def _print_content(delegated: Any, verb: str, policy: Any | None = None) -> None
             # sessions-cleanup section; remove when extracted (docs/I18N.md)
             f"  scratchpad content: off ({switch}; --force runs it once)"
         )
+        _print_copy_arm_line(delegated)
         return
     if skipped == "disabled during the pass":
         print("  scratchpad content: switch turned off during the pass (batched stop)")
@@ -4803,6 +4830,51 @@ def _print_content(delegated: Any, verb: str, policy: Any | None = None) -> None
             f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
             "(--json lists every row)"
         )
+    _print_copy_arm_line(delegated)
+
+
+def _print_copy_arm_line(delegated: Any) -> None:
+    """One line for the non-git COPY arm, always under the content rows.
+
+    The pass's OWN counters, never a second scan: a preview and the run it
+    explains must agree. ``--report-non-git-copies`` is the separate, whole-store
+    class report (it includes sessions no pass would reach), so this line only
+    says what THIS pass did and why it did nothing.
+    """
+    from local_operator.session.delegated_retention import CONTENT_CLASS_COPY
+
+    skipped = getattr(delegated, "copy_skipped", None)
+    if skipped == "disabled":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  non-git copies: off (session.cleanup.delegated.non_git_copies.enabled "
+            "is off; --report-non-git-copies --dry-run previews the class; hold "
+            "sessions with session.cleanup.delegated.non_git_copies.hold_sessions)"
+        )
+        return
+    pads = sum(
+        1
+        for row in getattr(delegated, "content", [])
+        if CONTENT_CLASS_COPY in getattr(row, "classes", ())
+    )
+    line = (  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"  non-git copies: {getattr(delegated, 'copy_candidates', 0)} candidate(s), "
+        f"~{_format_bytes(getattr(delegated, 'copy_candidate_bytes', 0))}; reclaimable "
+        f"{pads} pad(s) ~{_format_bytes(getattr(delegated, 'copy_reclaimed_bytes', 0))}"
+    )
+    if getattr(delegated, "copy_budget_exhausted", False):
+        line += "; hash budget spent (the rest defers to the next pass)"
+    if skipped == "no reference repository":
+        line += (
+            " (no reference repository: name one with --reference-repo or "
+            "session.cleanup.delegated.non_git_copies.reference_repos)"
+        )
+    elif skipped == "holds unreadable":
+        line += (
+            " (holds unreadable: fix "
+            "session.cleanup.delegated.non_git_copies.hold_sessions; the arm did "
+            "not run)"
+        )
+    print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
 
 
 def _scratchpad_shape_summary(pad: Any, limit: int = 4) -> str:
@@ -4925,6 +4997,168 @@ def _print_scratchpads(audit: Any) -> None:
         )
 
 
+def _print_non_git_copy_report(root: Path, policy: Any, *, json_mode: bool) -> int:
+    """``--report-non-git-copies``: the READ-ONLY whole-store copy class report.
+
+    It reports the class, not a plan: every depth-1 non-git directory over the
+    minimum size in every pad, its bytes, how many its reference trees prove,
+    and why the rest would be kept. A scan that produced an impossible result
+    exits 3 with the message on stderr — never a silent 0-candidate report (the
+    measured incident was exactly that being read as success).
+    """
+    import json as _json
+
+    from local_operator.session.delegated_retention import (
+        NonGitCopyScanError,
+        scan_non_git_copies,
+    )
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    try:
+        report = scan_non_git_copies(
+            root / SESSIONS_DIRNAME,
+            references=policy.delegated_non_git_copy_references,
+            holds=(
+                None
+                if policy.delegated_non_git_copy_holds_unreadable
+                else policy.delegated_non_git_copy_holds
+            ),
+            now=time.time(),
+            window_hours=policy.delegated_max_age_hours,
+        )
+    except NonGitCopyScanError as exc:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"non-git copy report failed: {exc}", file=sys.stderr
+        )
+        if json_mode:
+            print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+                _json.dumps({"outcome": "error", "error": str(exc)})
+            )
+        return 3
+    if report.errors:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"non-git copy report: {report.errors} candidate(s) could not be scanned",
+            file=sys.stderr,
+        )
+    if json_mode:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            _json.dumps({"outcome": "report", "non_git_copies": report.as_dict()}, indent=2)
+        )
+        return 3 if report.errors else 0
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        "== Non-git copies (read-only) =="
+    )
+    # THE SUMMARY RECONCILES BY NOUN (design C1): candidates are top-level
+    # directories, the states are SESSIONS (one session can hold several
+    # provable subtrees), and the kept figure is candidates again — so the
+    # parts are each labelled and never silently mix units.
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"  non-git copies: {report.count} candidate(s) (top-level directories), "
+        f"~{_format_bytes(report.candidate_bytes)}"
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"    would reclaim now: {report.reclaimable_sessions} session(s) "
+        f"({sum(1 for row in report.candidates if row.would_reclaim)} candidate(s)), "
+        f"~{_format_bytes(report.reclaimable_bytes)}"
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"    waiting for the {report.window_hours:g}h window: "
+        f"{report.within_window_sessions} session(s) "
+        f"({sum(1 for row in report.candidates if row.waiting)} candidate(s)), "
+        f"~{_format_bytes(report.within_window_bytes)}"
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"    kept: {report.kept_candidates} candidate(s), "
+        f"~{_format_bytes(report.kept_bytes)}"
+        + (f"; {report.held_sessions} held session(s)" if report.held_sessions else "")
+        + (f"; {report.errors} error(s)" if report.errors else "")
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        "  proof: a file is recoverable when its path and content exist in a "
+        "merged reference tree; nothing unproven is removed"
+    )
+    holds = tuple(getattr(policy, "delegated_non_git_copy_holds", ()) or ())
+    if getattr(policy, "delegated_non_git_copy_holds_unreadable", False):
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  operator holds: unreadable; fix "
+            "session.cleanup.delegated.non_git_copies.hold_sessions before "
+            "trusting this report"
+        )
+    elif holds:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"  operator holds: {len(holds)} session(s) ({', '.join(holds)})"
+        )
+    else:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  operator holds: none configured (add session ids to "
+            "session.cleanup.delegated.non_git_copies.hold_sessions before enabling)"
+        )
+    if report.skipped == "no store":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  no session store yet: nothing to reclaim"
+        )
+    elif report.skipped == "no reference repository":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  no reference repository: name one with --reference-repo or "
+            "session.cleanup.delegated.non_git_copies.reference_repos"
+        )
+    # The rows an operator acts on come first: the provable ones (reclaimable
+    # now, waiting for the window, or held), the scan errors, then the largest
+    # TOP-LEVEL refusals. Nested rows are in --json only: a refused parent and
+    # its refused child print the SAME bytes three levels deep (measured: one
+    # node-gyp chain filled 40 lines), which buries the two rows that matter.
+    actionable = [
+        row
+        for row in report.candidates
+        if row.would_reclaim or row.proof_ok or row.held or row.error
+    ]
+    actionable.sort(key=lambda row: -row.bytes)
+    refused = [row for row in report.candidates if row.top_level and not row.proof_ok]
+    refused = [row for row in refused if row not in actionable]
+    refused.sort(key=lambda row: -row.bytes)
+    shown = actionable + refused
+    # A NESTED ROW PRINTS ITS PARENT PATH (design C5): ``base-repo`` alone is
+    # ambiguous when its parent ``qa-1232`` is the refused row above it. The
+    # width follows the longest name actually shown, bounded 8..28.
+    displays = [row.path.split("/scratchpad/", 1)[-1] for row in shown]
+    name_width = min(28, max(8, max((len(name) for name in displays), default=8)))
+    for row, display in zip(shown[:_COPY_REPORT_TEXT_ROWS], displays):
+        name = display if len(display) <= name_width else "…" + display[-(name_width - 1) :]
+        if row.error:
+            verb = "error"
+        elif row.held:
+            verb = "hold"
+        elif row.would_reclaim:
+            verb = "would reclaim"
+        elif row.waiting:
+            # Provable, but the session is inside the retention window: the row
+            # is WAITING, not refused — the distinction is the whole point of
+            # the report (the measured class is 12-30 h old against 48 h).
+            verb = "waiting"
+        else:
+            verb = "keep"
+        if row.reason:
+            tail = row.reason
+        else:
+            proved = ", ".join(path.rsplit("/", 1)[-1] for path in row.proved_by[:3])
+            tail = f"{_format_bytes(row.matched_bytes)} proven"
+            if proved:
+                tail += f" against {proved}"
+            if row.unmatched_files:
+                tail += f"; {row.unmatched_files} unmatched file(s) kept"
+        size = "?" if not row.bytes else _format_bytes(row.bytes)
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"  {verb:<14} {row.session:<12} {name:<{name_width}} {size:>8} ({tail})"
+        )
+    if len(shown) > _COPY_REPORT_TEXT_ROWS:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"  {_COPY_REPORT_TEXT_ROWS} of {len(shown)} rows shown " "(--json lists every row)"
+        )
+    return 3 if report.errors else 0
+
+
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
@@ -4967,6 +5201,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     ``--force`` still overrides the delegated switches for that one run; the
     confirmation says "reclaim scratchpad content" and nothing else.
 
+    ``--report-non-git-copies`` is the READ-ONLY whole-store class report for
+    the fourth content arm (plain non-git directory copies): every candidate in
+    every pad, its size, whether a merged reference tree proves its bytes, and
+    the keep reason. It needs ``--dry-run`` and removes nothing; without it the
+    command refuses with exit 2, because the pass has its own config switch.
+    ``--reference-repo`` adds a merged reference repository for one invocation
+    (repeatable), on top of ``non_git_copies.reference_repos``.
+
     Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
     delegated cleanup off); 2 refused (parent switch off without ``--force`` and
     nothing else to run, or confirmation declined); 3 ran with errors. ``--json``
@@ -4983,6 +5225,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         CLEANUP_LOG_NAME,
         CleanupResult,
         apply_cleanup,
+        clamp_delegated_hours,
         policy_from_config,
         run_cleanup,
     )
@@ -4995,6 +5238,25 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
 
     root = config_dir()
     policy = policy_from_config(ConfigManager(root))
+    reference_overrides = tuple(
+        os.path.abspath(os.path.expanduser(path))
+        for path in (getattr(args, "reference_repo", None) or ())
+    )
+    if reference_overrides:
+        # ONE invocation's extra references, APPENDED to the configured set —
+        # the proof only ever gains sources, and a dry run must prove the same
+        # bytes the configured pass would.
+        policy = dataclasses.replace(
+            policy,
+            delegated_non_git_copy_references=(
+                policy.delegated_non_git_copy_references + reference_overrides
+            ),
+        )
+    # ONE invocation's policy overrides — applied BEFORE the report branch so
+    # ``--delegated-max-age-hours`` shapes the report's window too. The delta
+    # it exists for: previewing what the class looks like at a 2 h window a day
+    # before it ages out. The value is CLAMPED here, exactly as the config read
+    # clamps it (a hand-typed 0 must not silently mean "window 0").
     overrides = {
         name: value
         for name, value in (
@@ -5006,7 +5268,23 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         )
         if value is not None
     }
+    if "delegated_max_age_hours" in overrides:
+        overrides["delegated_max_age_hours"] = clamp_delegated_hours(
+            overrides["delegated_max_age_hours"]
+        )
     policy = dataclasses.replace(policy, **overrides)
+
+    if getattr(args, "report_non_git_copies", False):
+        if not args.dry_run:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "--report-non-git-copies only reports; run the pass with "
+                "session.cleanup.delegated.non_git_copies.enabled",
+                file=sys.stderr,
+            )
+            return 2
+        return _print_non_git_copy_report(root, policy, json_mode=bool(args.json))
     record_path = root / "sessions" / CLEANUP_LOG_NAME
     switch_hint = (
         "session.cleanup.enabled is off: turn it on in /settings > Session cleanup, "
@@ -5093,6 +5371,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     "bytes": sum(row.bytes for row in getattr(delegated, "content", [])),
                     "remaining": getattr(delegated, "content_remaining", 0),
                     "skipped": getattr(delegated, "content_skipped", None),
+                },
+                non_git_copies={
+                    "enabled": getattr(delegated, "copy_skipped", None) != "disabled",
+                    "candidates": getattr(delegated, "copy_candidates", 0),
+                    "candidate_bytes": getattr(delegated, "copy_candidate_bytes", 0),
+                    "reclaimed_bytes": getattr(delegated, "copy_reclaimed_bytes", 0),
+                    "budget_exhausted": getattr(delegated, "copy_budget_exhausted", False),
+                    "skipped": getattr(delegated, "copy_skipped", None),
                 },
             )
             payload["delegated"] = detail
@@ -6347,7 +6633,7 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     )
     if result.get("ok"):
         for line in lines:
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         return 0
     for line in lines:
         print(line, file=sys.stderr)
@@ -6808,7 +7094,7 @@ def sessions_command(args: argparse.Namespace) -> int:
             # ``STOP_RUNG_LABELS`` states for the stop rungs).
             said_held = HELD_CELL if held.get(row["session_id"]) else ""
             line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
-        print(line)
+        print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
     return 0
 
 
@@ -11792,7 +12078,7 @@ def _ask_for_consent(
         )
         print()
         for line in _wrap_text(_ORG_INTERNAL_OPS_V1_CONSENT, _term_width() - 4, indent="  "):
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         answer = _prompt_line('\nType "yes" to confirm: ')
         if answer is None or answer.strip().lower() != "yes":
             print("\n\033[1;33mConsent not given; nothing was published.\033[0m")
@@ -11927,7 +12213,7 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
             # The reminder is only claimable when something WAS removed (ux N1).
             summary += " Removed sections stay removed."
         for line in _wrap_text(summary, width):
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         for unit in removed[:10]:
             _print_resolution_unit(unit, sign="-", width=width)
         if len(removed) > 10:
@@ -11948,7 +12234,7 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
             "this is published:"
         )
         for line in _wrap_text(heading, width):
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         print()
         rows: "list[tuple[str, str, str, str, str]]" = []
         for change in changes:
