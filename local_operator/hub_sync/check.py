@@ -631,9 +631,9 @@ def check_hub_skills(
                             "unavailable",
                             reason="local-concurrent-edit",
                             detail=f"could not read the local skill: {error}",
-                            link_id=record.identity.link_id
-                            if record.identity is not None
-                            else None,
+                            link_id=(
+                                record.identity.link_id if record.identity is not None else None
+                            ),
                         )
                     )
                     continue

@@ -374,9 +374,7 @@ def test_an_org_skill_is_refused_by_the_public_scope_with_one_plain_404(
 ) -> None:
     """A public request must not be able to tell an org row from a missing one."""
 
-    ctx, _manager, _remote, base, _document = _rig(
-        tmp_path, visibility="org", tenant_id="org-1"
-    )
+    ctx, _manager, _remote, base, _document = _rig(tmp_path, visibility="org", tenant_id="org-1")
 
     with pytest.raises(LinkError) as public:
         _subscribe(ctx, base)
