@@ -292,6 +292,24 @@ def cgroup_of(pid):
     return paths[-1] if paths else ''
 
 
+def owner_record(pid):
+    # One entry per observed socket owner -- INCLUDING one /proc cannot be read.
+    # Dropping an unreadable owner would leave the host deriving "every other
+    # owner shares the unit cgroup" from a list it never saw the gap in.
+    record = {'pid': pid, 'ppid': None, 'comm': '', 'cgroup': None}
+    if time.monotonic() > DEADLINE:
+        return record
+    try:
+        record['comm'], record['ppid'] = status(pid)
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        record['cgroup'] = cgroup_of(pid)
+    except OSError:
+        pass
+    return record
+
+
 def units_in(cgroup):
     found = []
     for name in re.findall(r'/([^/\n]+\.(?:service|scope))(?:/|$)', cgroup):
@@ -400,6 +418,10 @@ def unit_record(unit):
 
 
 socket_pids = inode_pids(listening_inodes(PORT))
+# Same cap as the printed pid list: the detail cannot outgrow the evidence it
+# annotates. A pid whose reads hit the shared deadline still gets its entry
+# with an unknown cgroup, so the host can say "undetermined", never "shares".
+socket_owners = [owner_record(pid) for pid in socket_pids[:8]]
 fallback = server_ancestor()
 pid = socket_pids[0] if socket_pids else fallback
 chain = ancestry(pid) if pid else []
@@ -430,7 +452,7 @@ for name in names[:8]:
 # socket, whether every MainPID agrees) are recomputed host-side from these,
 # so a guest cannot assert a contradiction into the evidence file.
 print(json.dumps({'schema_version': 1, 'socket_pids': socket_pids[:8], 'server': server,
-                  'ancestry': chain, 'units': units}))
+                  'ancestry': chain, 'units': units, 'socket_owners': socket_owners}))
 """
 
 REPORT_SOURCE = r"""
@@ -645,10 +667,12 @@ _LAYOUT_KEYS = frozenset(
         "port",
         "pid_source",
         "socket_pids",
+        "socket_owners",
         "server",
         "ancestry",
         "units",
         "socket_owned_by_unit",
+        "other_socket_owners_share_unit_cgroup",
     }
 )
 
@@ -675,14 +699,80 @@ def _layout_pid(value: object) -> int | None:
     return value if type(value) is int and value > 0 else None
 
 
+def _server_unit(
+    server: dict[str, Any] | None, units: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The unit that owns the action server, or ``None`` when it is ambiguous.
+
+    MainPID is the anchor the install path uses, so it wins. A stale MainPID
+    (a unit whose MainPID is not the observed server) falls back to the one
+    unit whose ControlGroup IS the server's cgroup; two such units cannot
+    both own it, so the answer stays undetermined. Equality, not prefix
+    matching: a nested sub-cgroup is not what the install path compares.
+    """
+
+    if server is None:
+        return None
+    by_pid = [unit for unit in units if unit["main_pid"] == server["pid"]]
+    if by_pid:
+        if len({unit["control_group"] for unit in by_pid}) > 1:
+            return None
+        return by_pid[0]
+    if server["cgroup"]:
+        by_cgroup = [unit for unit in units if unit["control_group"] == server["cgroup"]]
+        if len(by_cgroup) == 1:
+            return by_cgroup[0]
+    return None
+
+
+def _owners_share_unit_cgroup(
+    server: dict[str, Any] | None,
+    sockets: list[int],
+    owners: list[dict[str, Any]],
+    units: list[dict[str, Any]],
+) -> bool | None:
+    """Three-state answer: do all NON-server socket owners share the unit cgroup?
+
+    ``true`` when every other owner's cgroup is readable and equals the owning
+    unit's ControlGroup -- including when there is no other owner, which is
+    vacuously true and exactly what supervision needs: a restart leaves no
+    sibling holding the port. ``false`` when any readable other owner differs
+    (a restart would leave it alive). ``null`` when the question cannot be
+    answered: no observed socket, no server record, no single owning unit, an
+    empty unit ControlGroup, an owner missing from ``socket_owners``, or an
+    unreadable owner cgroup. ``true`` is never derived from missing data; a
+    known difference still answers ``false`` when another owner is unreadable,
+    because the universal claim is already refuted.
+    """
+
+    if not sockets or server is None:
+        return None
+    unit = _server_unit(server, units)
+    if unit is None or not unit["control_group"]:
+        return None
+    by_pid = {owner["pid"]: owner for owner in owners}
+    verdict: bool | None = True
+    for pid in sockets:
+        if pid == server["pid"]:
+            continue
+        owner = by_pid.get(pid)
+        if owner is None or not owner["cgroup"]:
+            verdict = None
+            continue
+        if owner["cgroup"] != unit["control_group"]:
+            return False
+    return verdict
+
+
 def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]:
     """Parse and whitelist one layout capture.
 
     Every field is re-validated on this side, because the guest could print any
     document it likes. Unknown keys are dropped, strings are bounded and
     stripped of control characters, and enum-shaped fields fall back to a
-    neutral word. Derived claims (``pid_source``, the socket-owner comparison,
-    the probed port) are recomputed from RAW fields and the host's own request,
+    neutral word. Derived claims (``pid_source``, both socket-owner
+    comparisons, the probed port) are recomputed from RAW fields and the
+    host's own request,
     never taken from the guest: a capture that says ``socket_owned_by_unit``
     is false beside a unit MainPID that is missing must not be able to assert a
     negative it never observed. Raises ``SupervisorOutputUnparseable`` when no
@@ -753,6 +843,29 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
                 "comm": _layout_text(server.get("comm"), 64),
                 "cgroup": _layout_text(server.get("cgroup"), 512),
             }
+    # ``socket_owners`` is raw per-owner evidence, not a derived claim: each
+    # entry is kept even when its cgroup could not be read (``null``), so the
+    # host can tell "shares" from "could not determine".
+    owners: list[dict[str, Any]] = []
+    for item in (value.get("socket_owners") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        pid = _layout_pid(item.get("pid"))
+        if pid is None:
+            continue
+        owners.append(
+            {
+                "pid": pid,
+                "ppid": (
+                    item.get("ppid")
+                    if type(item.get("ppid")) is int and item["ppid"] >= 0
+                    else None
+                ),
+                "comm": _layout_text(item.get("comm"), 64),
+                # An empty or non-string cgroup is unreadable, never "equal".
+                "cgroup": _layout_text(item.get("cgroup"), 512) or None,
+            }
+        )
     # Cap BEFORE deriving: a claim must be reproducible from the units the
     # record actually carries, not from a list it truncated afterwards.
     units = units[:8]
@@ -783,16 +896,20 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
             owned = True
         elif len(known) == len(units):
             owned = False
+    owners = owners[:8]
+    share = _owners_share_unit_cgroup(server_record, sockets, owners, units)
     record: dict[str, Any] = {
         "schema_version": 1,
         "status": "ok",
         "port": port if type(port) is int and 0 < port < 65536 else ACTION_SERVER_PORT,
         "pid_source": pid_source,
         "socket_pids": sockets,
+        "socket_owners": owners,
         "server": server_record,
         "ancestry": ancestry,
         "units": units,
         "socket_owned_by_unit": owned,
+        "other_socket_owners_share_unit_cgroup": share,
     }
     # The frozen key set is the contract the provider writes; keeping it here
     # means a future guest field cannot appear in the evidence unannounced.
