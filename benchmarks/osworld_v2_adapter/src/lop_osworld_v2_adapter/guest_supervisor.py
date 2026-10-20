@@ -52,6 +52,17 @@ LAYOUT_REFUSALS = frozenset(
     }
 )
 
+#: The ``KillMode`` the supervisor drop-in sets (``INSTALL_SOURCE`` writes
+#: exactly ``KillMode=process`` and re-asserts it on re-entry). This is the
+#: mode the drop-in WOULD install, not the unit's current effective mode -- the
+#: drop-in is absent on the refusal path that triggers the layout capture.
+#: Recorded beside the cgroup comparison because membership is NOT survival
+#: under this mode: systemd signals only the MainPID, so every other process
+#: survives a restart whether or not it shares the unit's cgroup. The
+#: membership fact still decides whether an explicit cgroup-wide kill can
+#: reach such a holder.
+SUPERVISOR_KILL_MODE = "process"
+
 
 class GenerationMismatch(ValueError):
     """systemd observed a restart that the guest capture history cannot prove."""
@@ -292,6 +303,24 @@ def cgroup_of(pid):
     return paths[-1] if paths else ''
 
 
+def owner_record(pid):
+    # One entry per observed socket owner -- INCLUDING one /proc cannot be read.
+    # Dropping an unreadable owner would leave the host deriving "every other
+    # owner shares the unit cgroup" from a list it never saw the gap in.
+    record = {'pid': pid, 'ppid': None, 'comm': '', 'cgroup': None}
+    if time.monotonic() > DEADLINE:
+        return record
+    try:
+        record['comm'], record['ppid'] = status(pid)
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        record['cgroup'] = cgroup_of(pid)
+    except OSError:
+        pass
+    return record
+
+
 def units_in(cgroup):
     found = []
     for name in re.findall(r'/([^/\n]+\.(?:service|scope))(?:/|$)', cgroup):
@@ -323,10 +352,12 @@ def listening_inodes(port):
 def inode_pids(inodes):
     pids = set()
     if not inodes:
-        return []
+        return [], True
     wanted = {'socket:[' + inode + ']' for inode in inodes}
+    complete = True
     for entry in pathlib.Path('/proc').iterdir():
         if time.monotonic() > DEADLINE:
+            complete = False
             break
         if not entry.name.isdigit():
             continue
@@ -340,7 +371,7 @@ def inode_pids(inodes):
                     continue
         except OSError:
             continue
-    return sorted(pids)
+    return sorted(pids), complete
 
 
 def ancestry(pid):
@@ -399,7 +430,15 @@ def unit_record(unit):
     return record
 
 
-socket_pids = inode_pids(listening_inodes(PORT))
+socket_pids, socket_scan_complete = inode_pids(listening_inodes(PORT))
+# The PRE-cap count and the scan flag are what let the host refuse a universal
+# claim over a list this capture shortened: a ninth holder in another cgroup
+# must produce "undetermined", never "every other owner shares".
+socket_owner_count = len(socket_pids)
+# Same cap as the printed pid list: the detail cannot outgrow the evidence it
+# annotates. A pid whose reads hit the shared deadline still gets its entry
+# with an unknown cgroup, so the host can say "undetermined", never "shares".
+socket_owners = [owner_record(pid) for pid in socket_pids[:8]]
 fallback = server_ancestor()
 pid = socket_pids[0] if socket_pids else fallback
 chain = ancestry(pid) if pid else []
@@ -430,7 +469,9 @@ for name in names[:8]:
 # socket, whether every MainPID agrees) are recomputed host-side from these,
 # so a guest cannot assert a contradiction into the evidence file.
 print(json.dumps({'schema_version': 1, 'socket_pids': socket_pids[:8], 'server': server,
-                  'ancestry': chain, 'units': units}))
+                  'ancestry': chain, 'units': units, 'socket_owners': socket_owners,
+                  'socket_owner_count': socket_owner_count,
+                  'socket_scan_complete': socket_scan_complete}))
 """
 
 REPORT_SOURCE = r"""
@@ -645,10 +686,15 @@ _LAYOUT_KEYS = frozenset(
         "port",
         "pid_source",
         "socket_pids",
+        "socket_owners",
+        "socket_owner_count",
+        "socket_scan_complete",
         "server",
         "ancestry",
         "units",
         "socket_owned_by_unit",
+        "other_socket_owners_share_unit_cgroup",
+        "supervisor_dropin_kill_mode",
     }
 )
 
@@ -675,14 +721,106 @@ def _layout_pid(value: object) -> int | None:
     return value if type(value) is int and value > 0 else None
 
 
+def _server_unit(
+    server: dict[str, Any] | None, units: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The unit that owns the action server, or ``None`` when it is ambiguous.
+
+    MainPID is the anchor the install path uses, so it wins. A stale MainPID
+    (a unit whose MainPID is not the observed server) falls back to the one
+    unit whose ControlGroup IS the server's cgroup; two such units cannot
+    both own it, so the answer stays undetermined. Equality, not prefix
+    matching: a nested sub-cgroup is not what the install path compares.
+    """
+
+    if server is None:
+        return None
+    by_pid = [unit for unit in units if unit["main_pid"] == server["pid"]]
+    if by_pid:
+        if len({unit["control_group"] for unit in by_pid}) > 1:
+            return None
+        return by_pid[0]
+    if server["cgroup"]:
+        by_cgroup = [unit for unit in units if unit["control_group"] == server["cgroup"]]
+        if len(by_cgroup) == 1:
+            return by_cgroup[0]
+    return None
+
+
+def _owners_share_unit_cgroup(
+    server: dict[str, Any] | None,
+    sockets: list[int],
+    owners: list[dict[str, Any]],
+    units: list[dict[str, Any]],
+    owner_count: int | None,
+    scan_complete: bool | None,
+) -> bool | None:
+    """Three-state answer: do all NON-server socket owners share the unit cgroup?
+
+    This is CGROUP MEMBERSHIP ONLY, and it does not imply survival. The
+    supervisor's drop-in sets ``KillMode=process`` (``SUPERVISOR_KILL_MODE``),
+    so a restart signals only the MainPID and every other process survives it
+    whether or not it shares the unit's cgroup. What the fact decides is
+    whether an explicit cgroup-wide kill (``systemctl kill --kill-whom=all``)
+    can reach the holder: same cgroup yes, different cgroup no. A same-cgroup
+    survivor therefore needs that explicit kill, or a post-restart check that
+    the listener owner is the new MainPID, before supervision may claim
+    recovery.
+
+    ``true`` when every other owner's cgroup is readable and equals the owning
+    unit's ControlGroup -- including when there is no other owner, which is
+    vacuously true (there is no sibling to survive). ``false`` when any
+    readable other owner differs. ``null`` when the question cannot be
+    answered: no observed socket, no server record, no single owning unit, an
+    empty unit ControlGroup, an owner missing from ``socket_owners``, an
+    unreadable owner cgroup, a scan that stopped early, a pre-cap owner count
+    larger than the recorded list, a missing completeness signal, or one pid
+    recorded twice with differing cgroups. ``true`` is never derived from
+    missing or truncated data; a known difference still answers ``false`` when
+    another owner is unreadable, because the universal claim is already
+    refuted.
+    """
+
+    if not sockets or server is None:
+        return None
+    # A universal claim over a list this capture shortened is not evidence.
+    # The guest reports the count BEFORE its eight-pid cap and whether the
+    # /proc scan reached its end, so a hidden ninth holder cannot be invisible.
+    if scan_complete is not True or owner_count is None or owner_count != len(sockets):
+        return None
+    unit = _server_unit(server, units)
+    if unit is None or not unit["control_group"]:
+        return None
+    by_pid: dict[int, dict[str, Any]] = {}
+    for owner in owners:
+        seen = by_pid.get(owner["pid"])
+        if seen is not None and seen["cgroup"] != owner["cgroup"]:
+            # Two entries for one pid that disagree make the evidence
+            # self-contradictory; order must not decide the answer.
+            return None
+        by_pid.setdefault(owner["pid"], owner)
+    verdict: bool | None = True
+    for pid in sockets:
+        if pid == server["pid"]:
+            continue
+        owner = by_pid.get(pid)
+        if owner is None or not owner["cgroup"]:
+            verdict = None
+            continue
+        if owner["cgroup"] != unit["control_group"]:
+            return False
+    return verdict
+
+
 def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]:
     """Parse and whitelist one layout capture.
 
     Every field is re-validated on this side, because the guest could print any
     document it likes. Unknown keys are dropped, strings are bounded and
     stripped of control characters, and enum-shaped fields fall back to a
-    neutral word. Derived claims (``pid_source``, the socket-owner comparison,
-    the probed port) are recomputed from RAW fields and the host's own request,
+    neutral word. Derived claims (``pid_source``, both socket-owner
+    comparisons, the probed port) are recomputed from RAW fields and the
+    host's own request,
     never taken from the guest: a capture that says ``socket_owned_by_unit``
     is false beside a unit MainPID that is missing must not be able to assert a
     negative it never observed. Raises ``SupervisorOutputUnparseable`` when no
@@ -753,6 +891,29 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
                 "comm": _layout_text(server.get("comm"), 64),
                 "cgroup": _layout_text(server.get("cgroup"), 512),
             }
+    # ``socket_owners`` is raw per-owner evidence, not a derived claim: each
+    # entry is kept even when its cgroup could not be read (``null``), so the
+    # host can tell "shares" from "could not determine".
+    owners: list[dict[str, Any]] = []
+    for item in (value.get("socket_owners") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        pid = _layout_pid(item.get("pid"))
+        if pid is None:
+            continue
+        owners.append(
+            {
+                "pid": pid,
+                "ppid": (
+                    item.get("ppid")
+                    if type(item.get("ppid")) is int and item["ppid"] >= 0
+                    else None
+                ),
+                "comm": _layout_text(item.get("comm"), 64),
+                # An empty or non-string cgroup is unreadable, never "equal".
+                "cgroup": _layout_text(item.get("cgroup"), 512) or None,
+            }
+        )
     # Cap BEFORE deriving: a claim must be reproducible from the units the
     # record actually carries, not from a list it truncated afterwards.
     units = units[:8]
@@ -783,16 +944,37 @@ def layout_record(output: str, port: int = ACTION_SERVER_PORT) -> dict[str, Any]
             owned = True
         elif len(known) == len(units):
             owned = False
+    owners = owners[:8]
+    # Raw completeness signals, validated like every other guest field:
+    # ``False`` means the /proc scan stopped early; ``None`` means this capture
+    # did not say. Either makes a universal owner claim undetermined.
+    count_value = value.get("socket_owner_count")
+    owner_count = count_value if type(count_value) is int and count_value >= 0 else None
+    scan_value = value.get("socket_scan_complete")
+    scan_complete = True if scan_value is True else (False if scan_value is False else None)
+    share = _owners_share_unit_cgroup(
+        server_record, sockets, owners, units, owner_count, scan_complete
+    )
     record: dict[str, Any] = {
         "schema_version": 1,
         "status": "ok",
         "port": port if type(port) is int and 0 < port < 65536 else ACTION_SERVER_PORT,
         "pid_source": pid_source,
         "socket_pids": sockets,
+        "socket_owners": owners,
+        "socket_owner_count": owner_count,
+        "socket_scan_complete": scan_complete,
         "server": server_record,
         "ancestry": ancestry,
         "units": units,
         "socket_owned_by_unit": owned,
+        "other_socket_owners_share_unit_cgroup": share,
+        # Host-side, never guest input: the KillMode the supervisor drop-in
+        # would install -- NOT the unit's current effective mode, which on this
+        # refusal path has no drop-in at all. It sits beside the membership
+        # answer so a reader cannot mistake "same cgroup" for "a restart reaps
+        # it".
+        "supervisor_dropin_kill_mode": SUPERVISOR_KILL_MODE,
     }
     # The frozen key set is the contract the provider writes; keeping it here
     # means a future guest field cannot appear in the evidence unannounced.
