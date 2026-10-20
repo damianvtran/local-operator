@@ -266,6 +266,58 @@ def test_a_crash_between_the_rename_and_the_state_write_is_recovered(
 # -- check / apply -------------------------------------------------------------------
 
 
+def test_an_explicit_pull_resumes_a_subscribed_link(tmp_path: Path) -> None:
+    """Pull is the install a subscription waits for: it resumes, never duplicates."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    first = _subscribe(ctx, base)["link"]
+
+    result = svc.install_skill(
+        ctx,
+        hub_source=base,
+        hub_id=HUB_ID,
+        visibility="public",
+        tenant_id=None,
+        alias=ALIAS,
+    )
+
+    (report,) = result["reports"]
+    assert report["outcome"] == "merged" and report["applied"] is True
+    assert result["link"]["link_id"] == first["link_id"]
+    assert result["link"]["content_state"] == "present"
+    assert (ctx.config_dir / "skills" / ALIAS / "SKILL.md").exists()
+    records = [r for r in prov.iter_baselines(ctx.config_dir) if r.kind == "skill"]
+    assert len(records) == 1 and records[0].content_state == "present"
+    assert records[0].recorded_by == "pull" and records[0].lineage == "clean"
+
+
+def test_recovery_aborts_an_unpull_that_never_renamed(tmp_path: Path) -> None:
+    """Marker written, crash before the rename: the copy stays, no state is invented."""
+
+    import json
+
+    storage, _hub, ctx, identity, document = _present_link(tmp_path)
+    marker = storage.unpull_marker(identity.local_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "operation": "a" * 32,
+                "local_id": identity.local_id,
+                "alias": document.name,
+                "tombstone": f"skill-{identity.local_id}-unpull-{'a' * 32}",
+            }
+        )
+    )
+
+    storage.recover_unpull(local_id=identity.local_id)
+
+    assert not marker.exists()
+    assert (storage.config_dir / "skills" / document.name / "SKILL.md").exists()
+    record = prov.read_baseline(storage.config_dir, "skill", identity.local_id)
+    assert record is not None and record.content_state == "present"
+
+
 def test_a_check_on_an_absent_link_fetches_and_reports_available(tmp_path: Path) -> None:
     ctx, _manager, remote, base, _document = _rig(tmp_path)
     _subscribe(ctx, base)
