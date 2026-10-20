@@ -59,7 +59,13 @@ Only `planning`/`active`/`qa`/`validation` can read **stale** — those are the 
 - **Refresh ≠ update.** When you checked and the line still describes reality, record the check: `op='refresh'` (or re-sending the identical line) writes a dated assertion and nothing else — the line stays, its clock stays, so a stale badge stays stale until a NEW line lands; on a fresh record it is a no-op, and there is no reason to send one every turn. Everything else is an **update**: a reworded or near-identical re-send is a NEW line — it appends and moves the clock — so never re-send an annotated copy of the same line.
 - Emptying `progress` (`progress=''`) records "no progress recorded" and clears the freshness pair with it.
 - Every NEW line is also appended to the project's **history** (`updates`, newest last): an append-only, timestamped log bounded at 500 entries (oldest drop first). The latest line is what surfaces as the summary. Re-sending an identical line or clearing appends nothing — only a new line writes history.
-- Attach files to a new line (`attach=['frame.png', 'out.log']`): **screenshots for visual progress, evidence for everything else** (test output, measured numbers, data tables) — so readers can see how things are actually going. Files are copied into the project store (≤ 10 per update, ≤ 5 MB each; never referenced from their original location, so the evidence survives a reaped scratch dir), and `show` lists each with its stored path. Stored files are reclaimed with what carries them: deleting a project removes its attachment folder, and an entry evicted by the five-hundred cap takes its files with it.
+- Attach evidence to a new line (`attach=['frame.png', 'out.log']`) — the occasion picks the file, see below.
+
+### Attaching evidence
+
+The occasion picks what to attach, and it is the evidence the line already cites: a user-visible change gets the before/after frame or screenshot, a measured result the chart, table or data extract, a failure or debug the log excerpt, audio/video work the clip. Attach what you already captured — never write a second artifact just to fill the field, and never attach unrelated files.
+
+Files are copied into the project store (≤ 10 per update, ≤ 5 MB each; never referenced from their original location, so the evidence survives a reaped scratch dir), and `show` lists each with its stored path. Stored files are reclaimed with what carries them: deleting a project removes its attachment folder, and an entry evicted by the five-hundred cap takes its files with it.
 
 ## The `@project:<name>` reference
 

@@ -850,6 +850,41 @@ def test_attachments_are_copied_into_the_store_and_described(store, tmp_path: Pa
     assert copied.read_bytes().startswith(b"\x89PNG")
 
 
+def test_attachment_kinds_are_classified_by_suffix_and_survive_a_reload(
+    store, tmp_path: Path
+) -> None:
+    project = create(store)
+    names = ("clip.mp3", "clip.m4a", "take.mp4", "take.mov", "sheet.csv", "frame.PNG")
+    attachments = []
+    for name in names:
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        attachments.append(path)
+
+    outcome = store.update_project(
+        project.id,
+        ProjectEdit(progress="kinds"),
+        reporter=SESSION_A,
+        attachments=attachments,
+    )
+    (entry,) = outcome.project.updates
+    kinds = {attachment.name: attachment.kind for attachment in entry.attachments}
+    assert kinds == {
+        "clip.mp3": "audio",
+        "clip.m4a": "audio",
+        "take.mp4": "video",
+        "take.mov": "video",
+        "sheet.csv": "data",
+        "frame.PNG": "image",
+    }
+    # The kinds reach a reload unchanged: renderers branch on `kind`, so a
+    # reader that degraded audio/video back to `data` would undo the copy-time
+    # classification (rows written before these kinds existed stay `data`).
+    reloaded = ProjectRegistry(store.config_dir).get_project(project.id)
+    assert reloaded is not None
+    assert {a.name: a.kind for a in reloaded.updates[0].attachments} == kinds
+
+
 def test_attachment_refusals_name_the_remedy(store, tmp_path: Path) -> None:
     project = create(store)
     store.update_project(project.id, ProjectEdit(progress="baseline"), reporter=SESSION_A)

@@ -355,7 +355,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # entry that moved: every other count above is byte-identical.
     "no_reply": 109,
     "patience": 330,
-    "project": 1098,
+    # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
+    # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
+    # names its occasion (frame/chart/log) and the copy-and-limit contract;
+    # re-measured through this test's own printed table, not pasted.
+    "project": 1143,
     "project_delete": 91,
     "read": 345,
     "read_variable": 67,
