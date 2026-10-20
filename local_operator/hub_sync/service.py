@@ -1388,6 +1388,20 @@ def apply_one(
             error_class=c.reason,
             message=c.detail,
         )
+    if c.kind == "skill" and c.content_state == "absent" and auto:
+        # UNATTENDED NEVER INSTALLS. ``auto`` is the runner tick and the retry
+        # composition; installing a subscribed-only skill is an explicit pull
+        # (or a per-item apply), never a side effect of those paths. Writing a
+        # copy the operator never asked for is the same class of surprise as
+        # clobbering local edits.
+        return ItemMergeReport(
+            c.kind,
+            c.local_id,
+            c.name,
+            c.hub_id,
+            "skipped",
+            skipped_reason="install-requires-pull",
+        )
     # An EXPLICIT replace acts on a copy that differs from the hub even when the hub
     # has not moved (classification ``local-only``, which a plain pull reads as
     # up-to-date): "discard my edits, take the hub's" is the main reason anyone
