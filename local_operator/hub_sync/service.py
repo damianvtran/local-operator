@@ -2998,6 +2998,16 @@ def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
 #     bookkeeping did not finish. The remote outcome is persisted before any
 #     local write, so a retry resumes the SAME link instead of republishing.
 #
+# RETENTION: a draft receipt is confirmable for PUBLICATION_PREVIEW_TTL_S and
+# expires with the review. Once the hub ACCEPTS, the receipt is the only record
+# of the remote row (no baseline and no link exist yet), so it is retained
+# indefinitely while reconciliation is pending -- through restarts and past the
+# draft TTL. That is why it keeps the reviewed proposal bytes as well as the raw
+# accepted result: re-materializing the link after a restart must not depend on
+# the authored folder, which may have been edited, moved or removed. When the
+# local link completes the receipt is deleted; a failed deletion leaves a
+# `completed` marker that the next expired-receipt sweep prunes.
+#
 # A REFUSED publication leaves every piece of skill state untouched: the hub call
 # happens before the managed transaction, and the only bytes this path writes on
 # a dry run are the preview receipt itself.
@@ -3063,7 +3073,9 @@ def _prune_publication_previews(directory: Path, *, keep: Path) -> None:
     A receipt that carries an ACCEPTED remote outcome but has not completed local
     reconciliation is never pruned: its hub id exists nowhere else (no baseline,
     no link), so deleting it would orphan the publication. The 15-minute bound is
-    the reviewed DRAFT's lifetime, not the accepted row's.
+    the reviewed DRAFT's lifetime, not the accepted row's. A COMPLETED receipt is
+    prunable like any other: its link is durable, so the record is only a leftover
+    of a failed unlink.
     """
 
     cutoff = datetime.now(timezone.utc)
@@ -3098,6 +3110,21 @@ def _receipt_awaits_reconciliation(record: Mapping[str, Any]) -> bool:
         record.get("remote_result"), Mapping
     )
     return accepted and not record.get("completed")
+
+
+def _delete_publication_preview(config_dir: Path, token: str) -> None:
+    """Remove a reconciled receipt; best-effort, because the link is durable."""
+
+    try:
+        path = _publication_preview_path(config_dir, token)
+    except LinkError:
+        return
+    if path.is_symlink() or path.parent.is_symlink():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -3914,7 +3941,13 @@ def publish_skill(
             ),
         )
     record["completed"] = True
-    _write_publication_preview(ctx.config_dir, record)
+    try:
+        # The marker is only load-bearing if the unlink below fails: a completed
+        # record is prunable, whereas an accepted-unreconciled one is not.
+        _write_publication_preview(ctx.config_dir, record)
+    except Exception:  # noqa: BLE001 - the local link already landed
+        logger.warning("could not mark the publication receipt complete", exc_info=True)
+    _delete_publication_preview(ctx.config_dir, preview_receipt)
     return {
         "preview": None,
         "link": row,

@@ -3124,6 +3124,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes EXPIRED *.json receipts in <config_dir>/hub/publication-previews/ only",
     ),
+    (
+        "local_operator/hub_sync/service.py::_delete_publication_preview",
+        "<path>.unlink",
+        "Removes ONE reconciled receipt in <config_dir>/hub/publication-previews/",
+    ),
     # -- speech-to-text temp scratch (mobile STT) ---------------------------
     # The Radient leg writes the uploaded clip into a directory THIS call
     # minted one line above via ``tempfile.mkdtemp(prefix="lop-stt-")`` — a
