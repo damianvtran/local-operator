@@ -458,6 +458,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``MODULE_NAME`` (``local_operator.librarian``): a dotted MODULE name the "
         "control plane imports lazily, not a path or a session entry",
     ),
+    # The tag store is CONFIG-ROOT presentation state: ``<config>/tags/`` holds
+    # the registry and per-session assignments, and ``sidebar-tags.json`` sits
+    # beside ``config.yml`` as the grouping toggle. It is the TUI's own view
+    # data, never an entry a session directory holds, and a session moved to
+    # another device carries none of it.
+    "local_operator/tui/sidebar_tags.py": (
+        1,
+        "``TAG_GROUPS_FILE`` ('sidebar-tags.json'): the grouping toggle at the "
+        "CONFIG root beside config.yml, never an entry of a session directory",
+    ),
     # The Library's derived catalog and authoritative metadata live under the
     # CONFIG root too: the index is a discardable cache under
     # ``<config>/cache/library/`` and the metadata database is

@@ -11130,11 +11130,18 @@ class OperatorApp(App[None]):
         if apply_subagents:
             self._session_sidebar.show_subagents = settings.show_subagents
         if apply_tag_groups:
-            self._session_sidebar.set_tag_groups(tag_groups)
-            # The flat list's rows are already in hand, so a mode flip can
-            # repaint without waiting for the 2 s poll. The refresh also picks
-            # up the primary-tag bucket map for the new mode.
-            self._refresh_sidebar()
+            # THE MODE IS ADOPTED WITH ITS MAP, by the refresh, never here: a
+            # bare `set_tag_groups(True)` paints one frame with an empty
+            # registry — every row under Untagged — until the map lands (agent
+            # review round 3, MINOR-5). The map costs one assignment read per
+            # row, the work the poll exists to move off this thread, so this
+            # takes the same adoption path as `/tags on`. A poll already in
+            # flight collected under the OLD mode; `again` makes it re-collect
+            # instead of waiting for the 2 s tick.
+            if self._sidebar_refresh_pending:
+                self._sidebar_refresh_again = True
+            else:
+                self._refresh_sidebar()
         if apply_visibility:
             self._set_sidebar_open(settings.visible)
         else:
@@ -11231,12 +11238,10 @@ class OperatorApp(App[None]):
         would be a second, silently diverging notion of "next".
         """
 
-        def collect() -> (
-            tuple[
-                list[CatalogEntry],
-                tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
-            ]
-        ):
+        def collect() -> tuple[
+            list[CatalogEntry],
+            tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
+        ]:
             from local_operator.paths import config_dir
             from local_operator.tui.session_catalog import load_catalog
             from local_operator.tui.sidebar_pins import read_pins
@@ -11254,14 +11259,18 @@ class OperatorApp(App[None]):
             # `/tags on` is persisted, so a shortcut pressed while the drawer
             # is shut must still traverse the grouped order the next open will
             # paint — the same "one notion of next" rule as the ranking above.
-            # The mode is carried WITH the map for the reason `_refresh_sidebar`
-            # states: adoption must never pair one mode's snapshot with a later
-            # flip of `self._tag_groups`.
-            if self._tag_groups:
+            # The mode is read ONCE and carried WITH the map for the reason
+            # `_refresh_sidebar` states: adoption must never pair one mode's
+            # snapshot with a later flip of `self._tag_groups`. Reading the flag
+            # again for the tuple was that same TOCTOU one level down — a flip
+            # between the branch and the tuple stamped `(True, (), {})` and
+            # painted every row under Untagged (QA round 2, Q-1).
+            enabled = self._tag_groups
+            if enabled:
                 categories, primaries = self._tag_group_snapshot(root, entries)
             else:
                 categories, primaries = (), {}
-            tag_groups = (self._tag_groups, categories, primaries)
+            tag_groups = (enabled, categories, primaries)
             return entries, tag_groups
 
         try:
@@ -11633,16 +11642,19 @@ class OperatorApp(App[None]):
             # The bucket map is read only in grouping mode, and from the same
             # worker hop as the catalogue: a per-row assignment read on the UI
             # thread would be the one new cost this poll adds to the frame.
-            # The MODE travels with the map. Adoption must not re-read
-            # `self._tag_groups`: a flip while this poll is in flight would pair
-            # one mode's snapshot with the other mode's flag, and an old-off
-            # snapshot adopted as on paints every row under Untagged until the
-            # deferred refresh lands (agent review round 2, MINOR-1).
-            if self._tag_groups:
+            # The MODE travels with the map, read ONCE. Adoption must not
+            # re-read `self._tag_groups`: a flip while this poll is in flight
+            # would pair one mode's snapshot with the other mode's flag, and an
+            # old-off snapshot adopted as on paints every row under Untagged
+            # until the deferred refresh lands (agent review round 2, MINOR-1).
+            # A second read for the tuple reproduced that window one level down
+            # (QA round 2, Q-1).
+            enabled = self._tag_groups
+            if enabled:
                 categories, primaries = self._tag_group_snapshot(root, entries)
             else:
                 categories, primaries = (), {}
-            tag_groups = (self._tag_groups, categories, primaries)
+            tag_groups = (enabled, categories, primaries)
             return entries, pins, total, peer_rows, unanswered, ask_marks, tag_groups
 
         async def refresh() -> None:

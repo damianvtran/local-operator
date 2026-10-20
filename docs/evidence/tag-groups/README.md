@@ -19,7 +19,8 @@ cmp /tmp/frame.png docs/evidence/tag-groups/<frame>.png
 
 ## How these were captured
 
-Both rigs are scratch scripts, not repo scripts. They call the repo's own
+The sidebar rig is a scratch script; the `/tag` rig is committed as
+`scripts/tag_surface_shot.py`. Both call the repo's own
 `scripts.visual_capture.isolate_capture` (isolated HOME/config root, no real
 store) and `scripts.visual_capture.save_capture`, so the real app and CSS are
 what produced the frames.

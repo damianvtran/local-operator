@@ -3241,6 +3241,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.move",
         "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
     ),
+    # -- the TUI's sidebar grouping toggle: config-root view state ------------
+    # `write_tag_groups` writes `<config>/sidebar-tags.json`, a FIXED path
+    # built from the config root: `os.replace` moves only the sibling mkstemp
+    # file onto it, and the `unlink` removes only that leftover temp sibling
+    # when the replace failed. Neither argument is derived from a session id,
+    # a session directory or caller input, so neither can reach `sessions/`.
+    (
+        "local_operator/tui/sidebar_tags.py::write_tag_groups",
+        "os.replace",
+        "Atomic config-root sidebar-tags.json only; fixed path, never a session entry",
+    ),
+    (
+        "local_operator/tui/sidebar_tags.py::write_tag_groups",
+        "<path>.unlink",
+        "Only the sibling .sidebar-tags-*.tmp leftover; never a session path",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}

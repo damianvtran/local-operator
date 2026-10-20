@@ -320,9 +320,7 @@ async def test_remote_viewer_refuses_the_write_and_grouping_agrees() -> None:
         set_entity_tags(config_dir(), "session", "111111111111", [review["id"]], review["id"])
         entries = [
             CatalogEntry(
-                SessionRow(
-                    "abcdef123456", 20, "Remote work", live_state="busy", locality="remote"
-                )
+                SessionRow("abcdef123456", 20, "Remote work", live_state="busy", locality="remote")
             ),
             CatalogEntry(SessionRow("111111111111", 10, "Local work", live_state="busy")),
         ]
@@ -441,9 +439,7 @@ async def test_tags_on_during_an_in_flight_poll_never_paints_all_untagged(
 
         assert state["flipped"], "the race never ran"
         ungrouped = [entry for entry in adopted if entry[0] and not entry[1]]
-        assert ungrouped == [], (
-            "an on-adoption carried no registry: every row would paint Untagged"
-        )
+        assert ungrouped == [], "an on-adoption carried no registry: every row would paint Untagged"
         assert app._session_sidebar._tag_grouping is True
         assert app._session_sidebar._tag_categories == ((review["id"], "Review"),)
         # The deferred pass is the one that lands the registry; the point is

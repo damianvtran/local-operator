@@ -75,8 +75,7 @@ def _frame_text(app: OperatorApp) -> str:
     """
     svg = app.export_screenshot()
     return " ".join(
-        re.sub(r"<[^>]+>", "", body)
-        for body in re.findall(r"<text[^>]*>(.*?)</text>", svg, re.S)
+        re.sub(r"<[^>]+>", "", body) for body in re.findall(r"<text[^>]*>(.*?)</text>", svg, re.S)
     )
 
 
