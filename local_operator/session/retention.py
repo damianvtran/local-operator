@@ -131,6 +131,12 @@ _SIDECAR_NAMES = frozenset(
         # is the guard for that, and it asks about the asks rather than about the
         # file, so a session whose asks are all settled can still be swept.
         "asks.jsonl",
+        # A desktop fork's pending auto-tag intent (``session/auto_tag.py``). It is
+        # written at the fork and spent before or at the first accepted title;
+        # it says nothing the transcript does not already date (a fork is a user
+        # action), and it is not user content, so it moves neither clock nor
+        # size budget.
+        "auto-tag.json",
     }
 )
 

@@ -473,6 +473,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "writes fail, so readers fall back to the stats fingerprint; the path is never "
         "a session directory or transcript.",
     ),
+    # The fork auto-tag sidecar is one REGULAR FILE inside the child's own
+    # session directory. Both paths are that fixed basename joined onto the
+    # directory: the temp is a sibling mkstemp file and the replace target is
+    # `auto-tag.json`, so neither call can rename or remove the directory
+    # itself. `clear` unlinks that same file. See `session/auto_tag.py`.
+    (
+        "local_operator/session/auto_tag.py::record_fork",
+        "os.replace",
+        "Atomic replacement of the fixed-basename auto-tag.json sidecar inside the "
+        "child's session directory; the source is its own sibling mkstemp FILE, "
+        "never a session directory.",
+    ),
+    (
+        "local_operator/session/auto_tag.py::record_fork",
+        "<path>.unlink",
+        "Removes only its own named mkstemp FILE after a failed replacement; never a "
+        "session directory or transcript.",
+    ),
+    (
+        "local_operator/session/auto_tag.py::clear",
+        "<path>.unlink",
+        "Removes only the fixed-basename auto-tag.json sidecar FILE after the naming "
+        "attempt; never a session directory or transcript.",
+    ),
     # -- the archive index: the pins store's row, for the pins store's reasons --
     # One file at the config root with a FIXED basename (`archived-sessions.json`
     # plus a pid-named sibling while it is written). No session id, no caller
@@ -3375,6 +3399,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
         # tmp -> tags/<type>/<id>.json under config_dir()/tags, never sessions/
         "local_operator/session/session_tags.py::_write",
+        # tmp -> auto-tag.json, a FILE inside the child's own session directory
+        "local_operator/session/auto_tag.py::record_fork",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
         "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)

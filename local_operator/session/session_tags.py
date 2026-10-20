@@ -26,6 +26,12 @@ from threading import RLock
 from typing import Any, TypedDict
 from uuid import uuid4
 
+#: The per-entity assignment cap the route, the agent tool and the naming call
+#: all quote. One definition so a model-facing cap can never drift from the
+#: store's refusal; ``naming.MAX_ASSIGNED_TAGS`` mirrors it because the naming
+#: module deliberately imports no store.
+MAX_TAGS = 8
+
 
 class EntityTags(TypedDict):
     tags: list[str]
@@ -258,7 +264,7 @@ def read_entity_tags(
         for key in tags:
             if isinstance(key, str) and key in known and key not in surviving:
                 surviving.append(key)
-    surviving = surviving[:8]
+    surviving = surviving[:MAX_TAGS]
     primary = raw.get("primary")
     if primary not in surviving:
         primary = surviving[0] if surviving else None
@@ -302,8 +308,8 @@ def _set_entity_tags(
             }
         )
     known = {item["id"] for item in categories}
-    if len(tag_ids) > 8 or len(set(tag_ids)) != len(tag_ids):
-        raise ValueError("At most 8 distinct tags are allowed")
+    if len(tag_ids) > MAX_TAGS or len(set(tag_ids)) != len(tag_ids):
+        raise ValueError(f"At most {MAX_TAGS} distinct tags are allowed")
     if any(key not in known for key in tag_ids):
         raise ValueError("Unknown category id")
     if primary is not None and primary not in tag_ids:
