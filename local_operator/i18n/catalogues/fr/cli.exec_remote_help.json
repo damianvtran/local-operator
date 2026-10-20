@@ -1,0 +1,13 @@
+{
+  "cli.exec_remote_help.budget_usd": "Plafond de dépense pour cette exécution, en dollars US (défaut : valeur d’admission du serveur)",
+  "cli.exec_remote_help.cancel": "Annuler une exécution distante et quitter",
+  "cli.exec_remote_help.detach": "Afficher l’ID de l’exécution et la clé d’idempotence, puis quitter sans suivre l’exécution",
+  "cli.exec_remote_help.idempotency_key": "Clé d’idempotence à réutiliser au lieu d’en créer une, pour qu’un nouvel essai d’une exécution soumise ne la lance pas deux fois",
+  "cli.exec_remote_help.max_hours": "Durée maximale en heures de l’exécution distante avant que le serveur ne l’arrête (défaut : 2 ; le serveur plafonne)",
+  "cli.exec_remote_help.network": "Réseau par lequel soumettre l’exécution, par nom ou par ID. Obligatoire si cet appareil est dans plusieurs réseaux",
+  "cli.exec_remote_help.remote": "Exécuter cette tâche sur le calcul distant Radient (niveau 1 : exécutions courtes) au lieu de cette machine",
+  "cli.exec_remote_help.repo": "URL Git récupérée par l’exécution distante. Obligatoire avec --remote : les fichiers locaux ne sont jamais téléversés",
+  "cli.exec_remote_help.sha": "Commit à récupérer dans --repo. Obligatoire avec --remote",
+  "cli.exec_remote_help.size": "Taille de calcul pour l’exécution distante : s, m ou l (défaut : m)",
+  "cli.exec_remote_help.status": "Afficher une exécution distante en JSON et quitter"
+}

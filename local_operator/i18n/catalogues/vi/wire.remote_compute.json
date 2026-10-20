@@ -1,0 +1,20 @@
+{
+  "wire.remote_compute.alone": "--remote-status và --remote-cancel là các lệnh riêng: chạy một lệnh duy nhất, không kèm --remote hay tùy chọn chạy nào khác.",
+  "wire.remote_compute.cancelled": "Lần chạy từ xa {run_id} đã bị hủy.",
+  "wire.remote_compute.conflict": "Khóa idempotency đó đã được dùng với một nội dung yêu cầu khác. Hãy truyền khóa mới bằng --idempotency-key.",
+  "wire.remote_compute.detached": "Đã gửi lần chạy từ xa {run_id} tới mạng {network_id}.\nKhóa idempotency: {idempotency_key}\nTheo dõi: lop exec --remote-status {run_id}\nHủy: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.disabled": "Tính toán từ xa đang tắt. Bật bằng `lop config edit remote_compute.enabled true`, rồi chạy lại lệnh này.",
+  "wire.remote_compute.failed": "tính toán từ xa thất bại: {error}",
+  "wire.remote_compute.finished": "Lần chạy từ xa {run_id} đã kết thúc: {status}.",
+  "wire.remote_compute.interrupted": "Đã dừng theo dõi lần chạy {run_id}; lần chạy vẫn đang chạy từ xa. Hủy bằng: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.invalid_request": "Radient từ chối yêu cầu vì không hợp lệ. Đây là lỗi ở phía client này, không phải việc phải gõ lại.",
+  "wire.remote_compute.local_only": "{flag} chỉ có nghĩa với lần chạy cục bộ, nên không thể kết hợp với --remote.",
+  "wire.remote_compute.needs_prompt": "--remote cần một prompt: truyền công việc làm đối số vị trí duy nhất.",
+  "wire.remote_compute.needs_repo": "--remote cần --repo <url> và --sha <commit>: lần chạy này không bao giờ tải tệp cục bộ lên, nên hãy cho biết kho và commit cần checkout.",
+  "wire.remote_compute.no_capacity": "Radient hiện không còn công suất tính toán từ xa; hãy thử lại sau.",
+  "wire.remote_compute.no_credit": "Radient không có tín dụng tính toán cho tài khoản này, nên lần chạy không được chấp nhận.",
+  "wire.remote_compute.only_with": "{flag} chỉ áp dụng khi có --remote.",
+  "wire.remote_compute.status_line": "trạng thái: {status}",
+  "wire.remote_compute.unknown_run": "Radient không có lần chạy từ xa như vậy cho lần đăng nhập đã chọn.",
+  "wire.remote_compute.unreachable": "Không thể kết nối tới Radient; hãy kiểm tra mạng và thử lại."
+}

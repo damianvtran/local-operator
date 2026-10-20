@@ -3672,6 +3672,26 @@
     },
     {
       "locale": "zh-CN",
+      "namespace": "cli.exec_remote_help",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.exec_remote_help.budget_usd",
+        "cli.exec_remote_help.cancel",
+        "cli.exec_remote_help.detach",
+        "cli.exec_remote_help.idempotency_key",
+        "cli.exec_remote_help.max_hours",
+        "cli.exec_remote_help.network",
+        "cli.exec_remote_help.remote",
+        "cli.exec_remote_help.repo",
+        "cli.exec_remote_help.sha",
+        "cli.exec_remote_help.size",
+        "cli.exec_remote_help.status"
+      ]
+    },
+    {
+      "locale": "zh-CN",
       "namespace": "cli.exec_runtime",
       "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
       "owner": "i18n-translator lane",
@@ -5867,6 +5887,33 @@
         "wire.memory.sync.help",
         "wire.memory.sync.label",
         "wire.memory.title"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.remote_compute",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "wire.remote_compute.alone",
+        "wire.remote_compute.cancelled",
+        "wire.remote_compute.conflict",
+        "wire.remote_compute.detached",
+        "wire.remote_compute.disabled",
+        "wire.remote_compute.failed",
+        "wire.remote_compute.finished",
+        "wire.remote_compute.interrupted",
+        "wire.remote_compute.invalid_request",
+        "wire.remote_compute.local_only",
+        "wire.remote_compute.needs_prompt",
+        "wire.remote_compute.needs_repo",
+        "wire.remote_compute.no_capacity",
+        "wire.remote_compute.no_credit",
+        "wire.remote_compute.only_with",
+        "wire.remote_compute.status_line",
+        "wire.remote_compute.unknown_run",
+        "wire.remote_compute.unreachable"
       ]
     },
     {
@@ -11183,6 +11230,26 @@
     },
     {
       "locale": "ur",
+      "namespace": "cli.exec_remote_help",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-03-31",
+      "missing": [
+        "cli.exec_remote_help.budget_usd",
+        "cli.exec_remote_help.cancel",
+        "cli.exec_remote_help.detach",
+        "cli.exec_remote_help.idempotency_key",
+        "cli.exec_remote_help.max_hours",
+        "cli.exec_remote_help.network",
+        "cli.exec_remote_help.remote",
+        "cli.exec_remote_help.repo",
+        "cli.exec_remote_help.sha",
+        "cli.exec_remote_help.size",
+        "cli.exec_remote_help.status"
+      ]
+    },
+    {
+      "locale": "ur",
       "namespace": "cli.exec_runtime",
       "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
       "owner": "i18n-translator lane",
@@ -13378,6 +13445,33 @@
         "wire.memory.sync.help",
         "wire.memory.sync.label",
         "wire.memory.title"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.remote_compute",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-03-31",
+      "missing": [
+        "wire.remote_compute.alone",
+        "wire.remote_compute.cancelled",
+        "wire.remote_compute.conflict",
+        "wire.remote_compute.detached",
+        "wire.remote_compute.disabled",
+        "wire.remote_compute.failed",
+        "wire.remote_compute.finished",
+        "wire.remote_compute.interrupted",
+        "wire.remote_compute.invalid_request",
+        "wire.remote_compute.local_only",
+        "wire.remote_compute.needs_prompt",
+        "wire.remote_compute.needs_repo",
+        "wire.remote_compute.no_capacity",
+        "wire.remote_compute.no_credit",
+        "wire.remote_compute.only_with",
+        "wire.remote_compute.status_line",
+        "wire.remote_compute.unknown_run",
+        "wire.remote_compute.unreachable"
       ]
     },
     {

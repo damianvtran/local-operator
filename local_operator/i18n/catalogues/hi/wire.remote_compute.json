@@ -1,0 +1,20 @@
+{
+  "wire.remote_compute.alone": "--remote-status और --remote-cancel अपने आप में पूरे कमांड हैं: इनमें से एक को अकेले चलाएँ, --remote या रन के दूसरे विकल्पों के बिना।",
+  "wire.remote_compute.cancelled": "रिमोट रन {run_id} रद्द कर दिया गया है।",
+  "wire.remote_compute.conflict": "यह आइडेम्पोटेंसी कुंजी पहले ही किसी दूसरे अनुरोध बॉडी के साथ इस्तेमाल हो चुकी है। --idempotency-key से नई कुंजी दें।",
+  "wire.remote_compute.detached": "रिमोट रन {run_id} नेटवर्क {network_id} पर सबमिट किया गया।\nआइडेम्पोटेंसी कुंजी: {idempotency_key}\nइसे फ़ॉलो करें: lop exec --remote-status {run_id}\nइसे रद्द करें: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.disabled": "रिमोट कंप्यूट बंद है। इसे `lop config edit remote_compute.enabled true` से चालू करें, फिर यह दोबारा चलाएँ।",
+  "wire.remote_compute.failed": "रिमोट कंप्यूट विफल: {error}",
+  "wire.remote_compute.finished": "रिमोट रन {run_id} पूरा हुआ: {status}।",
+  "wire.remote_compute.interrupted": "रन {run_id} की निगरानी रोक दी गई; यह अभी भी रिमोट पर चल रहा है। इसे रद्द करने के लिए: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.invalid_request": "Radient ने अनुरोध को अमान्य बताकर अस्वीकार किया। यह इस क्लाइंट में बग है, इसे दोबारा टाइप करने की बात नहीं।",
+  "wire.remote_compute.local_only": "{flag} का अर्थ केवल स्थानीय रन में है, इसलिए इसे --remote के साथ नहीं जोड़ा जा सकता।",
+  "wire.remote_compute.needs_prompt": "--remote के लिए प्रॉम्प्ट चाहिए: कार्य को एकमात्र पोज़िशनल आर्ग्युमेंट के रूप में दें।",
+  "wire.remote_compute.needs_repo": "--remote के लिए --repo <url> और --sha <commit> चाहिए: यह रन स्थानीय फ़ाइलें कभी अपलोड नहीं करता, इसलिए बताएँ कि कौन-सी रिपॉज़िटरी और कौन-सा commit चेकआउट करना है।",
+  "wire.remote_compute.no_capacity": "Radient के पास अभी रिमोट कंप्यूट की क्षमता नहीं है; बाद में फिर कोशिश करें।",
+  "wire.remote_compute.no_credit": "Radient के पास इस खाते के लिए कंप्यूट क्रेडिट नहीं है, इसलिए रन स्वीकार नहीं किया गया।",
+  "wire.remote_compute.only_with": "{flag} केवल --remote के साथ लागू होता है।",
+  "wire.remote_compute.status_line": "स्थिति: {status}",
+  "wire.remote_compute.unknown_run": "चुने गए लॉगिन के लिए Radient के पास ऐसा कोई रिमोट रन नहीं है।",
+  "wire.remote_compute.unreachable": "Radient तक पहुँचा नहीं जा सका; नेटवर्क जाँचें और फिर कोशिश करें।"
+}
