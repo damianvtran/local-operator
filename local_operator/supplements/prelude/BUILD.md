@@ -27,10 +27,11 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | numeric cells: finite-only bar/line scales and labelled bar gaps | 2,056 | 8,170 | 10,226 | 4,602 |
 | v5 remediation: silent nulls, centred series gaps, labelled line gaps + shared-code trims | 2,056 | 8,077 | 10,133 | 4,607 |
 | v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,124 | 10,002 | 4,606 |
+| v7 review round 1: viewBox pin (no upscale), dark hairline, light chrome reset, max-ending ticks, dense-label thinning, `.row`/`.muted` trims | 1,833 | 8,186 | 10,019 | 4,605 |
 
 Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
-1,262 B raw / **2 B gzip**. Relative to v3: −101 B raw / +33 B gzip; relative to the
-reviewed v5: −131 B raw / −1 B gzip. `PRELUDE_VERSION` **6** is what a served document
+1,245 B raw / **3 B gzip**. Relative to v3: −84 B raw / +32 B gzip; relative to the
+reviewed v5: −114 B raw / −2 B gzip. `PRELUDE_VERSION` **7** is what a served document
 re-derives under. The theme-flip ground and its wait for `[data-ready]` are documented in
 `prelude.src.css`; they are unchanged by this repair.
 
@@ -43,13 +44,28 @@ the measured gutter and +18 B for width-aware tick density; the dark FALLBACK in
 * `h1,h2,h3` — §2.8/operator directive 2026-10-10 says a component is body-only and its
   title is never drawn; no helper or fixture emits a heading. -15 B gzip measured.
 * `@media (prefers-reduced-motion:reduce)` — the generation contract says "no animation,
-  transitions"; the prelude's own CSS declares neither, so the rule can never match a
-  moving element. -42 B gzip measured.
+  transitions". The CSS rule is gone, but the rule it enforced is now a validator deny
+  (`_MOTION_RE` in `validate.py`), which covers component-authored `<style>`/`<script>` and
+  costs 0 prelude bytes. -42 B gzip measured.
 * `.dim` — no helper emits it and the prompt teaches `var(--lo-ink-dim)` instead. The
   `--lo-ink-dim` token stays in the root palette. -8 B gzip measured.
-* `:root[data-mode=light]{color-scheme:light}` — the root already declares
-  `light dark`; the only UA chrome in the frame is a scrollbar, and v6's content-sized
-  height removes the chart's overflow. -9 B gzip measured.
+* `.row` — the side-by-side layout helper is not emitted by any prelude helper, fixture,
+  test or the generator prompt. -33 B gzip measured.
+* `.muted` — likewise undocumented and emitted by no helper; the prompt teaches
+  `var(--lo-ink-muted)` for the same effect. -7 B gzip measured. Together these pay for
+  v7's width pin, dark hairline and max-ending ticks.
+
+The v7 remediation was driven by review round 1. The SVG now carries `width`/`height` equal
+to its viewBox, so `svg{max-width:100%}` only shrinks it on a narrow frame and cannot
+magnify a bounded height at 1200/1440 (9 bars and 40 bars now render 346/360 px + 16 px of
+body padding, under the 480 clamp; the old stretch gave 486/505 and 581/604). That also
+keeps 12 px axis type at 12 px instead of 16.3 px at a 1200 column. Dense charts (band
+<= 14 px) drop their value labels and the last category label instead of stacking them on
+5 px bars; the axis, the earlier labels and the per-bar tooltip remain. The dark fallback adds
+`--lo-hairline:#333` so reference lines recede behind the bars (light path unchanged), and
+the `data-mode=light` `color-scheme` reset returns for horizontally scrolling tables on a
+dark-OS host. The universal reduced-motion rule's enforcement moved to the validator (see
+above); removing it from the prelude is no longer a behaviour loss.
 
 `_e = LO.el` was also tried as a size trim and measured **worse** under gzip (a repeated
 `LO.el(` compresses better than a two-letter alias plus its definition); it is not in the
@@ -81,14 +97,14 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 2 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 3 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in the 2 B gzip headroom this pair
+`e.source!==parent` check drops it today). None of that fits in the 3 B gzip headroom this pair
 has left. Lane N either injects a native-only shim at assembly time without touching this shared
 pair, or revisits the cap in its own PR with measured numbers.
 

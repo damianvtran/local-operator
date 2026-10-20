@@ -57,12 +57,18 @@ GZIP_CAP = 4608
 #: width-aware tick density, and dark-fallback ink. CSS 2,056 -> 1,878 B (the `h1` rule,
 #: the reduced-motion block, `.dim` and the redundant light color-scheme rule were dead
 #: weight under the no-chrome/no-motion contract and paid for the change); JS 8,077 ->
-#: 8,124 B. Pair 10,002 B raw / 4,606 B gzip, 2 B under the unchanged cap.
-PINNED_CSS_BYTES = 1878
-PINNED_JS_BYTES = 8124
-PINNED_GZIP_BYTES = 4606
-PINNED_DIGEST = "61db1322689565a9b1046494cbb6aa46edf07da3967919ed372e39def993fddc"
-PINNED_VERSION = 6
+#: 8,124 B. Pair 10,002 B raw / 4,606 B gzip.
+#:
+#: PRELUDE_VERSION 7 (review round 1): the SVG carries its viewBox width/height so CSS
+#: cannot magnify a bounded height past the 480 px clamp; the dark fallback's hairline is
+#: #333; the light color-scheme reset returns; `.row` is removed as the measured trim. The
+#: reduced-motion enforcement moved to the validator. CSS 1,866 B, JS 8,145 B, pair
+#: 10,019 B raw / 4,605 B gzip, 3 B under the unchanged cap.
+PINNED_CSS_BYTES = 1833
+PINNED_JS_BYTES = 8186
+PINNED_GZIP_BYTES = 4605
+PINNED_DIGEST = "bcf976f0373b53e3f44737ff5c9c914d3d15d7556880bbef019ba78702f7ade9"
+PINNED_VERSION = 7
 
 
 @pytest.fixture
@@ -670,15 +676,64 @@ def test_value_labels_stay_off_the_fill_for_a_full_bar_and_a_tiny_one(tmp_path: 
 
 
 @needs_node
+@pytest.mark.parametrize("width", [360, 620])
+def test_the_narrow_axis_ends_on_the_bar_maximum(width: int, tmp_path: Path) -> None:
+    """Design QA D4: at 360/620 the two-tick reduction left the last tick at 0.5 while the
+    scale and the longest bar reached 0.6, so the bar looked past the axis. A two-tick axis
+    now ends on the scale maximum; wider plots keep their round-step ticks."""
+    out = _run(_bar_scenario(_BAR_DATA, width), tmp_path)
+    labels = [n["text"] for n in out["nodes"] if n["tag"] == "text"]
+    assert "0.6" in labels, labels
+    assert "0.5" not in labels, labels
+
+
+@needs_node
 def test_the_wide_horizontal_plot_fits_the_480_px_frame_the_ui_clamps(tmp_path: Path) -> None:
     """The UI clamps a graphic's frame at 480 px. The document is the SVG scaled to the column
     (``svgH x column / svgW``) plus body padding; at a 1200 px column the old width-derived
     height overflowed, which is the scrollbar the operator reported."""
     width = 1200
     out = _run(_bar_scenario(_BAR_DATA, width), tmp_path)
-    rendered = out["svgH"] * width / out["svgW"] + 16
-    assert rendered <= 480, (rendered, out["svgH"], out["svgW"])
+    rendered_width = min(width, out["svgAttrW"] or width)
+    rendered = out["svgH"] * rendered_width / out["svgW"] + 16
+    assert rendered <= 480, (rendered, out["svgH"], out["svgW"], out["svgAttrW"])
     assert out["svgH"] < 250
+    assert out["svgAttrW"] == out["svgW"], "the SVG must not upscale past its viewBox"
+
+
+@pytest.mark.parametrize("bars", [9, 40])
+@pytest.mark.parametrize("width", [1200, 1440])
+def test_a_many_bar_chart_renders_under_the_480_px_frame(
+    bars: int, width: int, tmp_path: Path
+) -> None:
+    """Review round 1, M-1: the viewBox height was bounded but CSS stretched the SVG to the
+    column, so 9 bars at 1200 rendered 486 px and 40 bars 505 px. The width/height attributes
+    now pin the element to its viewBox; this test combines the cap with the wide columns the
+    earlier tests missed. The browser frame in docs/evidence additionally asserts
+    scrollHeight == clientHeight for these charts."""
+    data = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [[f"row {i}", i / bars] for i in range(1, bars + 1)],
+        }
+    }
+    out = _run(_bar_scenario(data, width), tmp_path)
+    assert out["svgAttrW"] == out["svgW"] == 880, out
+    rendered = out["svgH"] * min(width, out["svgAttrW"]) / out["svgW"] + 16
+    assert rendered <= 480, (rendered, out["svgH"], bars, width)
+    assert out["svgH"] <= 360
+    # A 14 px value label cannot occupy an 8 px band; dense charts keep the axis and the
+    # tooltip instead of painting 40 overlapping numbers.
+    values = [n for n in out["nodes"] if n["tag"] == "text" and n["cls"] == "lbl"]
+    assert bool(values) is (bars == 9), (bars, len(values))
+    boxes = out["texts"]
+    overlaps = [
+        (a["text"], b["text"])
+        for i, a in enumerate(boxes)
+        for b in boxes[i + 1 :]
+        if all(size > 0.5 for size in _overlap(a, b))
+    ]
+    assert not overlaps, overlaps
 
 
 def test_the_dark_fallback_declares_ink_that_is_readable_on_its_own_ground() -> None:
@@ -691,3 +746,14 @@ def test_the_dark_fallback_declares_ink_that_is_readable_on_its_own_ground() -> 
     assert dark["--lo-canvas"] == "#121212"
     assert dark["--lo-ink"] == "#e8e8e8"
     assert dark["--lo-ink-muted"] == "#b8b8b8"
+    # Design round 1 D1: the reference lines must recede behind the bars; the light-theme
+    # --lo-hairline (#ddd) on #121212 measured 13.79:1 against the grid and was the
+    # loudest ink in the fallback chart.
+    assert dark["--lo-hairline"] == "#333333"
+
+
+def test_a_light_mode_push_resets_native_chrome() -> None:
+    """Review round 1 m-1: `.wrap{overflow-x:auto}` table scrollbars are UA chrome; a light
+    push on a dark-OS host must reset color-scheme so they are not painted dark."""
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    assert ":root[data-mode=light]{color-scheme:light}" in css

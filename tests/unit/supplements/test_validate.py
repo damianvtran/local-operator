@@ -381,6 +381,36 @@ def test_the_scan_refuses_the_named_escapes(body: str) -> None:
     assert not result.components and result.rejected
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<style>@keyframes pulse{from{opacity:.4}to{opacity:1}}</style><div id="c"></div>',
+        '<style>.x{animation:pulse 1s infinite}</style><div class="x">x</div>',
+        '<style>.x{-webkit-animation:pulse 1s infinite}</style><div class="x">x</div>',
+        '<style>.x{transition:opacity 1s}</style><div class="x">x</div>',
+        '<div id="c" style="animation:pulse 1s infinite"></div>',
+        '<script>document.getElementById("c").style.animation="pulse 1s"</script>',
+    ],
+)
+def test_the_scan_refuses_component_motion(body: str) -> None:
+    """v5's reduced-motion universal selector was the only enforcement for component-authored
+    CSS; v6 removed it to pay for the chart shape. The memo still requires motion off, and
+    the validator is where that costs no prelude bytes (review M-2)."""
+    result = validate_output(component("{}", body), EVIDENCE)
+    assert not result.components, body
+    assert any("motion" in error for error in result.rejected[0].errors), result.rejected[0].errors
+
+
+@pytest.mark.parametrize("tag", ["h1", "h2", "h3", "h4", "h5", "h6"])
+def test_the_scan_refuses_a_drawn_heading(tag: str) -> None:
+    """QA Q-5: v5's heading rule normalized a component-authored h1 to 13 px; removing it
+    would render the UA's 2em. A heading is chrome the body-only contract forbids, so it is
+    refused at the validator (0 prelude bytes) instead of styled back."""
+    result = validate_output(component("{}", f'<{tag}>Title</{tag}><div id="c"></div>'), EVIDENCE)
+    assert not result.components, tag
+    assert result.rejected
+
+
 def test_an_oversized_component_is_refused() -> None:
     big = component("{}", "<div>" + "x" * MAX_COMPONENT_BYTES + "</div>")
     result = validate_output(big, EVIDENCE)
