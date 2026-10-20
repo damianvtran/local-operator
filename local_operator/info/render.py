@@ -178,7 +178,7 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
 
 #: Nouns whose plural is not ``+ "s"``. A map rather than a second helper so
 #: the next irregular noun is a data change.
-_IRREGULAR_PLURALS = {"trajectory": "trajectories"}
+_IRREGULAR_PLURALS = {"trajectory": "trajectories", "category": "categories"}
 
 
 def plural(count: int, noun: str) -> str:

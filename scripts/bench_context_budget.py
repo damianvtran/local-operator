@@ -1583,7 +1583,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # parameters and the nested member model; every field is load-bearing (name,
 # topic and visibility are request facts, members is the invite shape). The
 # prose was trimmed before this raise; what remains is structural.
-BUDGET_BILLED_TOKENS = 31_466
+# RAISED 31,466 -> 31,982 for the V2-4 agent ``tags`` tool, measured with THIS
+# script on this branch in an isolated HOME (final wording, after the primary
+# fallback description landed):
+#   top arm:   88,825 chars = ~31,951 billed  -> 31,982 leaves 31 headroom
+#   child arm: 80,684 chars = ~29,023 billed  -> 29,053 leaves 30 headroom
+# The delta is the tool itself: +1,188 chars of ``tool_schemas`` (its
+# description and flat params schema), +307 chars of instructions (the
+# system-prompt guidance line the design requires, reworded in review rounds 1
+# and 2 to qualify the receipt claim to ``assign``) and +7 chars of inventory.
+# The schema and the prompt line are both load-bearing — the design's own
+# prompt rule is "never spell a category the store does not contain" — and the
+# reference vocabulary was kept OFF the wire in ``read tool://tags``, whose
+# ledger entry in tests/unit/tools/test_tool_docs.py moves with this one.
+BUDGET_BILLED_TOKENS = 31_982
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1695,7 +1708,7 @@ BUDGET_BILLED_TOKENS = 31_466
 #   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
 #     arm: the channel tool is in every session's surface, children included,
 #     and no child counter moved. Ceiling = measured head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 28_538
+BUDGET_CHILD_BILLED_TOKENS = 29_053
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
