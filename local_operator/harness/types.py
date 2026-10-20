@@ -3244,6 +3244,24 @@ class LoopConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: Sentinel for the optional ``effort_choice`` argument on ``set_model``.
+#:
+#: THREE STATES, and the middle one is the reason this exists:
+#: * a level string — the caller DECIDED on that reasoning level;
+#: * ``None`` — the caller DECIDED to WITHDRAW it (``/effort auto``);
+#: * this sentinel — the call made no reasoning-level decision at all (a model
+#:   switch, a rehome, an adoption, a sampling override), so the conversation's
+#:   held choice must be left exactly as it was.
+#:
+#: Inferring the choice from the spec's level instead cannot separate a chosen
+#: level from one a failover CLAMP produced, nor see a withdrawal that did not
+#: move the level at all — both were real defects in review round 1 (M1/M3).
+#: Lives here, beside :class:`ModelSpec`, because every ``set_model``
+#: implementation and its Protocol need the same object and this module is the
+#: leaf they already share.
+EFFORT_CHOICE_UNSET = object()
+
+
 class ModelSpec(BaseModel):
     """A provider/model pair plus the knobs wire clients need."""
 

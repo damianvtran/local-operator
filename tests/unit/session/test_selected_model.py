@@ -196,11 +196,14 @@ async def test_an_explicit_resume_flag_outranks_the_journalled_switch(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_an_effort_change_is_not_a_switch(tmp_path):
-    """``/effort`` copies the spec in place; it must not journal a selection.
+async def test_an_effort_change_journals_the_level_but_is_not_a_switch(tmp_path):
+    """``/effort`` writes the SELECTION's effort, never a model-switch row.
 
-    Same-model knob changes take ``set_model``'s early return, so the journal
-    stays one row per real switch rather than one per keystroke.
+    Same-model knob changes take ``set_model``'s early return, so they do not
+    reach the switch's own journal write and must re-journal the selection
+    separately — otherwise the row's effort field freezes at whatever the last
+    switch stored. What they must NOT do is manufacture a switch: no
+    ``session_model_switch`` record, because the model did not move.
     """
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
@@ -208,7 +211,15 @@ async def test_an_effort_change_is_not_a_switch(tmp_path):
     session.set_model(MODEL.model_copy(update={"reasoning_effort": "high"}))
     await session.dispose()
 
-    assert _selection_entries(session) == []
+    rows = _selection_entries(session)
+    assert len(rows) == 1
+    assert rows[0]["effort"] == "high"
+    switch_rows = [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "custom" and entry.payload.get("custom_type") == "session_model_switch"
+    ]
+    assert switch_rows == []
     resumed = _session(tmp_path, NotifyingStream())
     assert resumed.model_label == "test/m"
     await resumed.dispose()
@@ -274,23 +285,38 @@ async def test_an_effort_change_after_a_switch_updates_the_restored_effort(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_an_effort_change_on_the_boot_model_still_does_not_journal(tmp_path):
-    """The `/effort` re-journal is scoped to a non-boot SELECTION.
+async def test_an_effort_change_on_the_boot_model_is_journalled_and_restores(tmp_path):
+    """The birth model is NOT exempt from effort persistence (the reported bug).
 
-    A boot-model effort change has no selection row to keep truthful (the boot
-    model deliberately persists none — the `/effort` non-goal), so it must not
-    manufacture one. Guards the re-journal added for F1 against widening the
-    non-goal it was careful to respect.
+    ``#240`` skipped the re-journal when the model equalled the boot selector,
+    because the restore then skipped boot-selector rows. ``#797`` removed that
+    restore skip when v2 rows became authoritative for the initial selection —
+    so the guard stopped preventing an inert write and started preventing the
+    only write that makes a chosen level survive a restart on the model the
+    conversation booted on. That is exactly the reported "set Max, restart,
+    back to High" on a session whose configured model has not been switched.
     """
+    boot = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        context_window=200_000,
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        reasoning_effort="high",
+        reasoning_default_effort="high",
+    )
     stream = NotifyingStream()
-    session = _session(tmp_path, stream)
+    session = _session(tmp_path, stream, model=boot)
 
-    session.set_model(MODEL.model_copy(update={"reasoning_effort": "high"}))
+    session.set_model(boot.model_copy(update={"reasoning_effort": "max"}))
     await session.dispose()
 
-    assert _selection_entries(session) == []
-    resumed = _session(tmp_path, NotifyingStream())
-    assert resumed.model_label == "test/m"
+    rows = _selection_entries(session)
+    assert rows and rows[-1]["effort"] == "max"
+    assert rows[-1]["selector"] == "anthropic/claude-opus-5"
+    assert rows[-1]["boot"] == "anthropic/claude-opus-5"
+
+    resumed = _session(tmp_path, NotifyingStream(), model=boot)
+    assert resumed.model.reasoning_effort == "max"
     await resumed.dispose()
 
 
@@ -337,6 +363,30 @@ async def test_an_unresolvable_selection_falls_back_to_the_boot_model(tmp_path):
 
     resumed = _session(tmp_path, NotifyingStream())
     assert resumed.model_label == "test/m"
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_selection_does_not_donate_its_level(tmp_path):
+    """A row the host cannot resolve is dropped WHOLE — its level included.
+
+    The session stays on the birth model, so a level recorded for a model that
+    no longer exists says nothing about the conversation it is actually on.
+    Recovering it (the pre-round-3 behaviour compared the row against the birth
+    spec) made a withdrawal on the vanished model ride every later switch as a
+    phantom choice (review round 3, M6).
+    """
+    birth = MODEL.model_copy(update={"reasoning_effort": "max"})
+    session = _session(tmp_path, NotifyingStream(), model=birth)
+    await session._transcript.append_custom(
+        SELECTED_MODEL_CUSTOM_TYPE,
+        {"selector": "no-such-provider/no-such-model", "effort": "max", "boot": "test/m"},
+    )
+    await session.dispose()
+
+    resumed = _session(tmp_path, NotifyingStream(), model=birth)
+    assert resumed.model_label == "test/m"
+    assert resumed.chosen_effort is None, "a dropped row donated its level"
     await resumed.dispose()
 
 

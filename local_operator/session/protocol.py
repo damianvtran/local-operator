@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_chec
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     AgentMessage,
     AskUserFn,
     EventHandler,
@@ -278,7 +279,13 @@ class SessionProtocol(Protocol):
         """``provider/model`` of the spec actually serving requests."""
         ...
 
-    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: ModelSpec,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         """Swap the model spec; in force from the very next provider call.
 
         The TUI's ``/model <provider>/<id>`` path calls this after building a
