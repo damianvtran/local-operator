@@ -842,7 +842,9 @@ class AwsProvider:
                 guest_supervisor.install_command(plan.client_password), timeout=15.0
             )
             if result.returncode == 0:
-                response = guest_supervisor.parse_output(result.stdout)
+                response = guest_supervisor.parse_output(
+                    result.stdout, guest_supervisor.is_install_payload
+                )
                 if isinstance(response, dict) and response.get("installed") is True:
                     self._supervisor_unit = guest_supervisor.installed_unit(result.stdout)
                     self._supervisor_password = plan.client_password

@@ -12,7 +12,7 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
-from typing import Any, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 from lop_osworld_v2_adapter import guest_disk
 
@@ -246,8 +246,8 @@ def report_command(unit: str, password: str) -> Sequence[str]:
     return _privileged(REPORT_SOURCE, [unit], password)
 
 
-def parse_output(output: str) -> object:
-    """Extract the guest's JSON payload from a captured escalation output.
+def parse_output(output: str, accept: Callable[[object], bool]) -> object:
+    """Extract the guest's expected JSON payload from a captured escalation output.
 
     WHY A SCAN, NOT A FIXED OFFSET. The escalation ladder captures the
     command's combined stdout+stderr and prefixes one metadata line
@@ -257,16 +257,27 @@ def parse_output(output: str) -> object:
     Reading a fixed offset after the first newline therefore handed
     ``json.loads`` a prompt line plus the payload and raised
     ``JSONDecodeError``, so the supervisor never installed and the episode ran
-    unsupervised. Scanning for the first position that decodes as a JSON
-    object is identical for the clean case and tolerates a preamble, a prompt
-    line, a payload spanning several lines and trailing noise.
+    unsupervised. Scanning for the positions that decode as a JSON object is
+    identical for the clean case and tolerates a preamble, a prompt line, a
+    payload spanning several lines and trailing noise.
 
-    The first decodable object wins: the payload is the guest's own stdout
-    JSON, and guest text printed before it is never quoted into evidence, so a
+    WHY THE CALLER PASSES THE SHAPE, AND WHY THE LAST MATCH WINS. A bare
+    "first object that decodes" accepts ANY object the preamble happens to
+    carry, so a shadow that looks like a receipt would be read instead of the
+    real envelope and report a restart as "no restart" -- the silent loss
+    this module exists to prevent. The caller therefore states what its own
+    command prints (``is_install_payload`` / ``is_receipt_payload``), and only
+    objects of that shape count. Among those, the LAST wins: the capture puts
+    the ladder's metadata and the guest's stderr noise BEFORE the payload, so
+    a preamble shadow cannot displace the command's own final output.
+
+    Guest text printed around the payload is never quoted into evidence, so a
     failure raises the named error instead of echoing what was captured.
     """
 
     decoder = json.JSONDecoder()
+    found = False
+    match: object = None
     for index, char in enumerate(output):
         if char != "{":
             continue
@@ -275,13 +286,42 @@ def parse_output(output: str) -> object:
         except ValueError:
             # Not a JSON object (or not one that starts here): keep looking.
             continue
-        return value
-    raise SupervisorOutputUnparseable("supervisor output contained no JSON object")
+        if accept(value):
+            found, match = True, value
+    if not found:
+        raise SupervisorOutputUnparseable("supervisor output contained no JSON object")
+    return match
+
+
+def is_install_payload(value: object) -> bool:
+    """The install command prints either the installed unit or a refusal reason.
+
+    Deliberately shape-only: the caller's own validation still decides whether
+    an ``installed`` answer is a usable unit, so a near-miss payload reaches it
+    instead of being skipped in favour of an unrelated object.
+    """
+
+    return isinstance(value, dict) and isinstance(value.get("installed"), bool)
+
+
+def is_receipt_payload(value: object) -> bool:
+    """The report command prints the capture envelope, whose schema is versioned.
+
+    This mirrors the first checks in ``receipt_records``; the generation and
+    record validation stay there, so an envelope-shaped object is still
+    checked before any input is authorized.
+    """
+
+    return (
+        isinstance(value, dict)
+        and value.get("schema_version") == 1
+        and isinstance(value.get("records"), list)
+    )
 
 
 def receipt_records(output: str) -> list[dict[str, Any]]:
     """An empty initialized envelope proves absence; empty/malformed output does not."""
-    value = parse_output(output)
+    value = parse_output(output, is_receipt_payload)
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise ValueError("invalid supervisor receipt")
     records = value.get("records")
@@ -319,7 +359,7 @@ def receipt_records(output: str) -> list[dict[str, Any]]:
 
 
 def installed_unit(output: str) -> str:
-    value = parse_output(output)
+    value = parse_output(output, is_install_payload)
     if not isinstance(value, dict) or value.get("installed") is not True:
         raise ValueError("invalid supervisor installation")
     unit = value.get("unit")
