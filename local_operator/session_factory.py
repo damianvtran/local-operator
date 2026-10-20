@@ -66,6 +66,7 @@ from local_operator.paths import config_dir as app_config_dir
 # Pure path policy, no engine — see local_operator/resume.py for why it is
 # its own module rather than living here.
 from local_operator.resume import ResumeNotFound, resume_dir
+from local_operator.voice import slot as voice_slot
 
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
@@ -3612,6 +3613,7 @@ def _make_system_blocks_provider(
     repo_guidance: str = "",
     language_line: str = "",
     variable_store: "VariableStore | None" = None,
+    voice_probe: Callable[[], bool] | None = None,
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -3727,6 +3729,12 @@ def _make_system_blocks_provider(
         interactive = goal_state.interactivity() if goal_state is not None else None
         can_ask = goal_state.can_ask() if goal_state is not None else None
         channel = None if can_ask is None else (CHANNEL_ASK if can_ask else CHANNEL_NONE)
+        voice = False
+        if voice_probe is not None:
+            try:
+                voice = bool(voice_probe())
+            except Exception:  # noqa: BLE001 — an unreadable slot reads as voice off
+                voice = False
         key = (
             knowledge_block,
             date_str,
@@ -3739,6 +3747,7 @@ def _make_system_blocks_provider(
             model_label,
             interactive,
             channel,
+            voice,
             tuple((tool.name, tool.description) for tool in tools),
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
@@ -3771,6 +3780,7 @@ def _make_system_blocks_provider(
             channel=channel,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
+            voice=voice,
         )
         cached_key = key
         return list(cached_blocks)
@@ -4787,6 +4797,7 @@ async def _prepare(
         repo_guidance=repo_guidance,
         language_line=language_line,
         variable_store=variable_store,
+        voice_probe=lambda: voice_slot.is_voice_session(config_dir, transcript_dir.name),
     )
 
     # The MONITOR gate's callable (``docs/design/monitor-tool.md`` §8): the

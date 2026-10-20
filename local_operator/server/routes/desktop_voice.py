@@ -8,7 +8,7 @@ The frozen contract, which both repositories build against:
         200 {active, replaced}; 404 unknown_session; 409 voice_store_busy
     POST /v1/desktop/voice/utterance   form session_id, request_id (dashed UUID),
                                        EXACTLY ONE of file (a recording) | text,
-                                       text_origin? (qwen_s2s; text door only)
+                                       text_origin? (qwen_s2s | local_moonshine; text door only)
         200 {text, path, admission}; 409 voice_not_enabled | approval_pending |
         stt_unavailable; 413 voice_upload_too_large; 429 voice_rate_limited;
         422 invalid_voice_request | empty_transcript
@@ -185,7 +185,7 @@ _REQUEST_ID = TypeAdapter(RequestID)
 #: Where a caller's words came from, when it names that (R3, kept by Q2): the
 #: rig's Parakeet final. Recorded as the message's ``input_path``. CLOSED, so an
 #: origin is a vocabulary the session's history can be read by, not free text.
-TEXT_ORIGINS = frozenset({"qwen_s2s"})
+TEXT_ORIGINS = frozenset({"qwen_s2s", "local_moonshine"})
 
 #: The recording door's ceiling. Larger than ``/messages``' audio block because
 #: this is a multipart upload that never reaches the owner: only the transcript does.

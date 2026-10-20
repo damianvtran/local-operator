@@ -117,3 +117,41 @@ def test_the_cap_falls_back_to_a_word_boundary() -> None:
 )
 def test_a_hand_edited_cap_never_breaks_voice(value: object, expected: int) -> None:
     assert sp.normalise_max_chars(value) == expected
+
+
+# -- the spoken summary (S1, L5) --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Long body here.\n\nSpoken: Short version.", "Short version."),
+        ("Body.\n\n**Spoken:** Bold label.", "Bold label."),
+        ("Body.\n\nspoken: lower case.", "lower case."),
+        ("Body.\n\nSpoken: first one.\n\nMore body.\n\nSpoken: last one.", "last one."),
+        # Not a paragraph start: the word mid-sentence is not a marker.
+        ("He said Spoken: words here.", "He said Spoken: words here."),
+        # Empty marker: falls back to the whole reply.
+        ("Whole reply.\n\nSpoken:", "Whole reply. Spoken:"),
+        ("Whole reply.\n\nSpoken:   ", "Whole reply. Spoken:"),
+        ("No marker at all.", "No marker at all."),
+    ],
+)
+def test_the_last_spoken_paragraph_is_what_is_read(text: str, expected: str) -> None:
+    assert sp.speakable(text).text == expected
+
+
+def test_a_spoken_label_inside_a_code_block_is_ignored() -> None:
+    text = "Answer.\n\n```\nnote\n\nSpoken: from code\n```"
+    spoken = sp.speakable(text).text
+    assert "from code" not in spoken
+    assert spoken.startswith("Answer.")
+
+
+def test_a_summary_over_the_cap_is_still_cut_with_the_tail() -> None:
+    summary = " ".join(["This is a sentence."] * 40)
+    spoken = sp.speakable(f"Body.\n\nSpoken: {summary}", max_chars=200)
+    assert spoken.truncated is True
+    assert len(spoken.text) <= 200
+    assert spoken.text.endswith(sp.TRUNCATION_TAIL)
+    assert "Body" not in spoken.text

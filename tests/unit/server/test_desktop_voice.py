@@ -45,6 +45,7 @@ TOKEN = "desktop-voice-token"
 SESSION_A = "a1a1a1a1a1a1"
 SESSION_B = "b2b2b2b2b2b2"
 ASSISTANT_ID = "assistant-row-1"
+SUMMARY_ID = "assistant-row-summary"
 USER_ID = "user-row-1"
 TOOL_ID = "tool-row-1"
 CUSTOM_ID = "custom-row-1"
@@ -94,6 +95,21 @@ class FakeBridge:
                     # fail here, not only on a live session (review M1).
                     "content": [
                         {"text": "Here are the files. ```\nls\n``` Done."},
+                    ],
+                },
+            },
+            SUMMARY_ID: {
+                "id": SUMMARY_ID,
+                "type": "message",
+                "ts": 1.0,
+                "ts_source": "entry",
+                "payload": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "text": "Long detailed answer. It goes on.\n\n"
+                            "Spoken: I found three files. None need changes."
+                        },
                     ],
                 },
             },
@@ -375,6 +391,16 @@ async def test_text_origin_qwen_s2s_is_recorded_as_input_path(rig: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_origin_local_moonshine_is_recorded_as_input_path(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    response = await _utter(rig, SESSION_A, "list files", text_origin="local_moonshine")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["path"] == "local_moonshine"
+    (admitted,) = rig.pool.remote.admissions
+    assert admitted["input_path"] == "local_moonshine"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("origin", ["free text", "gemini_live_transcript", "provider_stt_openai"])
 async def test_an_unknown_text_origin_is_refused(rig: Any, origin: str) -> None:
     await _enable(rig, SESSION_A)
@@ -413,6 +439,19 @@ async def test_text_reads_the_agents_message_through_speakable(rig: Any) -> None
     assert "ls" not in result["text"].split() and "```" not in result["text"]
     assert result["spoken_chars"] == len(result["text"])
     assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_text_returns_the_spoken_summary_in_text_and_segments(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    response = await _text(rig, SESSION_A, {"kind": "message", "message_id": SUMMARY_ID})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "I found three files. None need changes."
+    assert result["segments"] and "".join(result["segments"]).replace(" ", "") == result[
+        "text"
+    ].replace(" ", "")
+    assert "Spoken" not in result["text"] and "Long detailed" not in result["text"]
 
 
 @pytest.mark.asyncio

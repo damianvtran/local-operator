@@ -1856,3 +1856,23 @@ def test_marker_shaped_content_degrades_granularity_but_never_bytes() -> None:
     for text in texts:
         sections = split_tail_sections(text)
         assert assemble_system_block_sections(3, sections) == text, text
+
+
+def test_voice_section_rides_the_tail_only_when_asked_and_off_is_byte_identical() -> None:
+    from local_operator.prompts_api import VOICE_BLOCK
+
+    off = build_system_blocks(TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_ASK)
+    default = build_system_blocks(TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_ASK)
+    explicit_off = build_system_blocks(
+        TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_ASK, voice=False
+    )
+    on = build_system_blocks(
+        TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_ASK, voice=True
+    )
+    assert "<voice>" not in "".join(off)
+    assert off == default == explicit_off
+    assert on[:3] == off[:3]
+    assert on[3] == f"{off[3]}\n\n{VOICE_BLOCK}"
+    sections = split_system_block_sections(3, on[3])
+    assert "voice" in sections and "Spoken:" in sections["voice"]
+    assert "<voice>" not in sections["interactivity"]
