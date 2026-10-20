@@ -1586,11 +1586,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # RAISED 31,466 -> 31,982 for the V2-4 agent ``tags`` tool, measured with THIS
 # script on this branch in an isolated HOME (final wording, after the primary
 # fallback description landed):
-#   top arm:   88,816 chars = ~31,948 billed  -> 31,982 leaves 34 headroom
-#   child arm: 80,675 chars = ~29,020 billed  -> 29,053 leaves 33 headroom
+#   top arm:   88,825 chars = ~31,951 billed  -> 31,982 leaves 31 headroom
+#   child arm: 80,684 chars = ~29,023 billed  -> 29,053 leaves 30 headroom
 # The delta is the tool itself: +1,188 chars of ``tool_schemas`` (its
-# description and flat params schema), +286 chars of instructions (the
-# system-prompt guidance line the design requires) and +7 chars of inventory.
+# description and flat params schema), +307 chars of instructions (the
+# system-prompt guidance line the design requires, reworded in review rounds 1
+# and 2 to qualify the receipt claim to ``assign``) and +7 chars of inventory.
 # The schema and the prompt line are both load-bearing — the design's own
 # prompt rule is "never spell a category the store does not contain" — and the
 # reference vocabulary was kept OFF the wire in ``read tool://tags``, whose

@@ -982,8 +982,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "`tags` list clears the session's assignments.\n"
             "Delegated and hidden sessions are taggable; a remote/mesh session is "
             "refused with the route's `409 session_is_remote` and the device that "
-            "holds it. Every successful receipt names the categories and the session, "
-            "so the tool ledger is the audit trail. Deleting a category is a sidebar "
+            "holds it. Every successful `assign` receipt names the categories and the "
+            "session, so the tool ledger is the audit trail. Deleting a category is a sidebar "
             "action, not a tool op."
         ),
     ),

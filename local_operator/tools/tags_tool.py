@@ -23,9 +23,11 @@ misspelled name is refused with the known vocabulary — it is never created, an
 session's assignments, because the store's own semantics are a full desired
 state.
 
-Every successful receipt names the categories and the session, which is what
-makes the tool ledger the audit trail; nothing here relies on a separate log
-line (a refusal names whichever half is available and carries no audit claim).
+Every successful ``assign`` receipt names the categories and the session;
+``create``/``list``/``rename`` receipts name categories only. That split is what
+makes the tool ledger the audit trail for session assignments; nothing here
+relies on a separate log line (a refusal names whichever half is available and
+carries no audit claim).
 """
 
 from __future__ import annotations
@@ -384,8 +386,12 @@ async def execute_tags(
     # later agent call that omits ``primary`` would silently move the session
     # out of the operator's group (``effective_primary`` reads this field).
     # Passing the current primary through when it survives keeps "adding
-    # another tag never moves it" true across surfaces.
-    if params.primary is None:
+    # another tag never moves it" true across surfaces. Test the NORMALIZED
+    # name, not the raw parameter: the published schema has no ``minLength``,
+    # so a model encoding "no primary" as ``""`` (or whitespace) is a routine
+    # call shape, and keying retention on ``params.primary is None`` sent that
+    # shape down the store's ``ordered[0]`` fallback instead (R-5).
+    if primary_name is None:
         current = await asyncio.to_thread(
             read_entity_tags, root, "session", session_id, categories=categories
         )

@@ -295,6 +295,32 @@ async def test_omitting_primary_retains_a_second_position_primary(
     assert read_entity_tags(root, "session", SESSION_A)["primary"] == project_id
     assert payload(kept)["primary"] == "Project"
 
+    # A blank string is the same "no primary" intent over the wire: the
+    # published schema has no minLength, so models send "" routinely (R-5).
+    # Retention must key off the normalized name, not the raw parameter — each
+    # shape is re-seeded to a second-position primary so it proves retention
+    # rather than reading a primary the previous case happened to leave.
+    blank = await call(
+        context, op="assign", session_id=SESSION_A, tags=["Project", "Review"], primary=""
+    )
+    assert not blank.is_error
+    assert read_entity_tags(root, "session", SESSION_A)["primary"] == project_id
+    assert payload(blank)["primary"] == "Project"
+
+    await text_of(
+        context,
+        op="assign",
+        session_id=SESSION_A,
+        tags=["Review", "Project"],
+        primary="Project",
+    )
+    spaced = await call(
+        context, op="assign", session_id=SESSION_A, tags=["Project", "Review"], primary="   "
+    )
+    assert not spaced.is_error
+    assert read_entity_tags(root, "session", SESSION_A)["primary"] == project_id
+    assert payload(spaced)["primary"] == "Project"
+
     # When the primary does NOT survive, the store's first-in-order fallback is
     # correct and the receipt reports the promoted survivor.
     dropped = await call(context, op="assign", session_id=SESSION_A, tags=["Review"])
