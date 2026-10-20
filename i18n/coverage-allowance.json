@@ -1296,30 +1296,6 @@
     },
     {
       "locale": "fr",
-      "namespace": "wire.memory",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
-      ]
-    },
-    {
-      "locale": "fr",
       "namespace": "wire.settings.account_policy",
       "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",
@@ -3372,30 +3348,6 @@
       "missing": [
         "wire.host_speed.retire_below_tps.help",
         "wire.host_speed.retire_below_tps.label"
-      ]
-    },
-    {
-      "locale": "es",
-      "namespace": "wire.memory",
-      "reason": "No audited Spanish catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
       ]
     },
     {
@@ -5843,30 +5795,6 @@
       "missing": [
         "wire.host_speed.retire_below_tps.help",
         "wire.host_speed.retire_below_tps.label"
-      ]
-    },
-    {
-      "locale": "zh-CN",
-      "namespace": "wire.memory",
-      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
       ]
     },
     {
@@ -8801,30 +8729,6 @@
     },
     {
       "locale": "ru",
-      "namespace": "wire.memory",
-      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-01-31",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
-      ]
-    },
-    {
-      "locale": "ru",
       "namespace": "wire.settings.account_policy",
       "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",
@@ -10877,30 +10781,6 @@
       "missing": [
         "wire.host_speed.retire_below_tps.help",
         "wire.host_speed.retire_below_tps.label"
-      ]
-    },
-    {
-      "locale": "vi",
-      "namespace": "wire.memory",
-      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-01-31",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
       ]
     },
     {
@@ -13348,30 +13228,6 @@
       "missing": [
         "wire.host_speed.retire_below_tps.help",
         "wire.host_speed.retire_below_tps.label"
-      ]
-    },
-    {
-      "locale": "ur",
-      "namespace": "wire.memory",
-      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-03-31",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
       ]
     },
     {
@@ -16276,30 +16132,6 @@
       "missing": [
         "wire.host_speed.retire_below_tps.help",
         "wire.host_speed.retire_below_tps.label"
-      ]
-    },
-    {
-      "locale": "hi",
-      "namespace": "wire.memory",
-      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "wire.memory.capture.help",
-        "wire.memory.capture.label",
-        "wire.memory.command",
-        "wire.memory.description",
-        "wire.memory.enabled.help",
-        "wire.memory.enabled.label",
-        "wire.memory.exclude.help",
-        "wire.memory.exclude.label",
-        "wire.memory.scopes.help",
-        "wire.memory.scopes.label",
-        "wire.memory.suggest.help",
-        "wire.memory.suggest.label",
-        "wire.memory.sync.help",
-        "wire.memory.sync.label",
-        "wire.memory.title"
       ]
     },
     {
