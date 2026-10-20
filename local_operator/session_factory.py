@@ -4287,6 +4287,8 @@ def _run_delegated_sweeps(
             config_dir,
             live_policy_provider(config_manager, config_dir),
             live_dir=live_dir,
+            actor="startup",
+            trigger="session-startup",
             should_stop=stop_event.is_set,
             wait=stop_event.wait,
         )

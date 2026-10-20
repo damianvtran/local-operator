@@ -95,10 +95,11 @@ session scratchpad trees"):
 
 Rules 3-5 keep the RECORD of a session whose work may still matter (an active
 parent, an open project, a scratchpad repo with uncommitted/unpushed work);
-they were never about bytes nobody can reach. So, for EVERY delegated session
-whose record survives the record pass — INSIDE the class window too — the
-scratchpad is walked; bounded, symlinks never followed, ``.git`` never matched
-by shape — and reclaimed by three arms:
+they were never about bytes nobody can reach. So, for every delegated session
+whose ACTIVITY is older than the record window (``max_age_hours``) and whose
+record survives the record pass — an open project, an active parent or a
+scratchpad repo is what keeps it — the scratchpad is walked; bounded, symlinks
+never followed, ``.git`` never matched by shape — and reclaimed by three arms:
 
 * MERGED-CLEAN GIT TREES. A directory that is a git tree (its ``.git``
   resolves) is reclaimed WHOLE only when its HEAD resolves, its status is
@@ -164,16 +165,22 @@ by shape — and reclaimed by three arms:
   ``desktop-suite.log`` family).
 
 HARD GUARDS: nothing is content-reclaimed for the current session, a live
-claim or lease, an armed wake or monitor, a non-delegated origin — and any
-guard evaluation that fails keeps the pad and counts an error. AGE IS NOT A
-CONTENT GUARD (changed 2026-10-19): the window below still governs the RECORD,
-but a dead session's build tree is cache-shaped data and no longer waits out
-``max_age_hours``. Parent-still-active, open projects and the git hazard are
-NOT content guards: they keep the record, and that carve-out is the point.
-Unread spooled mail and open asks are not content guards either: neither is a
-running process, the record stays (reopening still finds the conversation),
-and the merged+clean+stale class is exactly what is safe to take from a
-session that may later be reopened. The pad root itself is never removed,
+claim or lease, an armed wake or monitor, a non-delegated origin, a session
+with no activity clock, or a session whose activity is inside the record
+window — and any guard evaluation that fails keeps the pad and counts an
+error. THE AGE GATE IS BACK (2026-10-19): live-adjacent content is not ours,
+and a transcript touched an hour ago means the session is being worked in even
+when no claim or wake is visible. The per-command pad cap and the watchdog
+bound live growth; reclamation serves sessions past the record window that
+are still KEPT by a parent, an open project or the git guard, where the
+transcript must stay and only cache-shaped content may go.
+Parent-still-active, open projects and the git hazard are NOT content guards:
+they keep the record, and that carve-out is the point. Unread spooled mail and
+open asks ARE content guards (restored 2026-10-19, per the incident
+requirement): a pad that can still hand the user a question, or mail they have
+not read, is untouchable even when the record survives — the merged+clean+stale
+class is not worth destroying a live conversation with the user. The pad root
+itself is never removed,
 only its subdirs where the rules took their contents; a still-failing removal
 keeps the entry and counts an error (fail closed). A rescue bundle is the one
 thing the pass WRITES back into a pad — it lives until the record is reaped,
@@ -195,8 +202,9 @@ deliberate halves rather than drift:
   tuned for THIS host's disk pressure, and it removes blob-level candidates
   with no knowledge of what the session was for;
 * THIS module's content layer is the shipped, default-on retention policy:
-  it runs against every non-live delegated pad (the record's age window is
-  not its gate), and it takes only merged-clean git trees, build shapes and
+  it runs against non-live delegated pads PAST the record window (a parent,
+  an open project or a scratchpad repo is what keeps such a pad's record),
+  and it takes only merged-clean git trees, build shapes and
   stale output, with the LIVENESS guards left standing.
 
 The thresholds differ because the audiences do: the desk automates a
@@ -263,6 +271,8 @@ from local_operator.session.cleanup import (
     _guard,
     _has_armed_monitor,
     _has_armed_wake,
+    _has_open_asks,
+    _has_spooled_mail,
     _is_delegated_dir,
     _is_deletable_dir,
     _lease_runtime_alive,
@@ -334,6 +344,22 @@ SIZE_MAX_ENTRIES = 2000
 CONTENT_MAX_DEPTH = 8
 CONTENT_MAX_ENTRIES = 20_000
 CONTENT_MAX_REPOS = 8
+
+#: WHERE a reclaim is attributable after the fact: one JSON manifest per pad
+#: under ``sessions/.cleanup-manifests/``, written BEFORE the first removal and
+#: rewritten with the completed subset after the loop. The aggregate cleanup
+#: log row carries only counts, so without this a loss cannot name the path
+#: (the incident this exists for: two pads were emptied and the log could not
+#: say what had been in them). A write failure never fails the removal — the
+#: log row records ``manifest_error`` instead.
+CONTENT_MANIFEST_DIRNAME = ".cleanup-manifests"
+CONTENT_MANIFEST_SCHEMA = "cleanup.removal.v1"
+
+#: A dry run has no manifest, so ``ContentRow.paths`` (and therefore
+#: ``--json``) carries the planned paths instead — bounded so one pathological
+#: pad cannot make the serialised result enormous; ``paths_total`` keeps the
+#: count. Real rows leave ``paths`` empty and point at the manifest.
+CONTENT_ROW_PATHS_CAP = 200
 
 #: STALE OUTPUT (the desk's measured 122 MB ``desktop-suite.log`` family):
 #: these suffixes, at least this size, untouched for this long, are removed.
@@ -492,6 +518,29 @@ class ContentRow:
     #: unique refs were bundled first). The cleanup-log row carries it so a
     #: reader can tell which of the three actually ran.
     method: str = "remove"
+    #: What ran the pass (``startup`` / ``cli``) and why (``session-startup`` /
+    #: ``manual``); the log row carries the pair so a reclaim that was never
+    #: requested by a person is distinguishable from one that was.
+    trigger: str = "startup"
+    #: Absolute path of this pad's manifest, when one was written. Empty for a
+    #: dry run (no file is written) and when every manifest write failed.
+    manifest: str = ""
+    #: Why the manifest is missing or incomplete; the log row carries it
+    #: rather than swallowing a failed write.
+    manifest_error: str = ""
+    #: Path-level provenance carried IN the row when the on-disk manifest
+    #: cannot name the taken paths: a dry run (no file), a failed manifest
+    #: write, or a failed COMPLETED rewrite whose manifest still says
+    #: ``completed: []`` — the cleanup-log row then carries these paths instead
+    #: of a bare count. Bounded by :data:`CONTENT_ROW_PATHS_CAP`; a complete
+    #: manifest leaves this empty and points at the file.
+    paths: tuple[str, ...] = ()
+    #: How many paths the manifest records (or the dry run planned); ``paths``
+    #: may hold only the first :data:`CONTENT_ROW_PATHS_CAP` of them.
+    paths_total: int = 0
+    #: How old the activity clock was at guard time, in hours. ``None`` only
+    #: for rows built by callers that did not run a guard (tests, CLI display).
+    activity_age_hours: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1300,52 +1349,171 @@ class _ContentOutcome:
     refused: int = 0
 
 
+@dataclass(frozen=True)
+class _ContentGuard:
+    """Why a pad's content may not be taken, and the clock the guard measured.
+
+    ``reason`` is ``None`` only when the pad may be planned; ``activity`` is the
+    transcript clock's value at guard time (retention's ONE clock: transcript or
+    spooled mail), carried so the log row can record how old the session was
+    when the pass decided it was old enough.
+    """
+
+    reason: str | None = None
+    activity: float | None = None
+
+    def age_hours(self, now: float) -> float | None:
+        if self.activity is None:
+            return None
+        return max(0.0, (now - self.activity) / 3600.0)
+
+
 def _content_guard(
     cand: _Cand, *, config_dir: Path, now: float, cutoff: float, live_resolved: Path | None
-) -> str | None:
+) -> _ContentGuard:
     """The content phase's OWN guards: why this pad must not be touched at all.
 
     Narrower than the record pass's :func:`_evaluate` BY DESIGN — the carve-out
     is the point: parent-still-active, open projects and the scratchpad git
     hazard keep the RECORD; only the current session, a live claim or lease, an
-    armed wake or monitor and the REAP predicate refuse CONTENT. Spooled mail
-    and open asks keep the record but not the content: neither is a running
-    process, and the desk's class (merged+clean+stale) is exactly what is safe
-    to take from a session that may later be reopened.
+    armed wake or monitor, unread spooled mail, open asks and the REAP predicate
+    refuse CONTENT. The mail and ask guards are the 2026-10-19 incident
+    requirement: a pad that can still hand the user a question, or mail they
+    have not read, outranks reclaiming cache-shaped bytes.
 
-    THE AGE REFUSAL IS DELIBERATELY GONE (policy change 2026-10-19). It refused
-    every pad inside the record window, which made a dead subagent's build tree
-    wait out the full ``max_age_hours`` — cache-shaped data with no reading as
-    scratch, held for two days only because its TRANSCRIPT was young. The desk's
-    authority is merged+clean+stale, and the liveness guards below are the
-    safety gate; the record pass's window still governs the record. ``cutoff``
-    stays in the signature for the caller's shape, but the re-stat below judges
-    against the PASS CLOCK (``now``): a session whose activity moved after the
-    scan is live work in progress whatever its age, while an in-window pad that
-    stopped changing hours ago is dead for content purposes. The caller wraps
-    this call: a probe that raises keeps the pad and counts an error (fail
-    closed).
+    THE AGE GATE IS RESTORED (2026-10-19). The policy that removed it reclaimed
+    a build shape from a transcript touched an hour ago as long as no claim,
+    lease or wake was visible — live-adjacent content, and a contradiction of
+    the incident requirement: never remove content from a session with a live
+    runtime or one whose transcript was touched inside the retention window. A
+    session with no activity clock is KEPT (fail closed): "cannot tell it is
+    old" is not "old". The per-command pad cap and the watchdog bound live
+    growth; reclamation serves a session PAST the window whose record is still
+    kept by a parent, an open project or the git guard — the transcript stays,
+    only cache-shaped content goes. The re-stat also judges against the PASS
+    CLOCK (``now``) first: a session whose activity moved after the scan is
+    live work in progress whatever its age. The caller wraps this call: a probe
+    that raises keeps the pad and counts an error (fail closed).
     """
     fresh = session_activity_path(os.fspath(cand.path))
     if fresh is not None and fresh >= now:
-        return "active since the scan"
+        return _ContentGuard("active since the scan", fresh)
     if live_resolved is not None:
         try:
             if cand.path.resolve() == live_resolved:
-                return "the current session"
+                return _ContentGuard("the current session", fresh)
         except OSError:
-            return "cannot resolve path"
+            return _ContentGuard("cannot resolve path", fresh)
     if _claimed(cand.path, now):
-        return "claimed by a live process"
+        return _ContentGuard("claimed by a live process", fresh)
     if _lease_runtime_alive(cand.path):
-        return "leased by a live process"
+        return _ContentGuard("leased by a live process", fresh)
     if _has_armed_wake(config_dir, cand.path.name):
-        return "armed wake for this session"
+        return _ContentGuard("armed wake for this session", fresh)
     if _has_armed_monitor(config_dir, cand.path.name):
-        return "armed monitor for this session"
+        return _ContentGuard("armed monitor for this session", fresh)
+    # The incident requirement: a pad that can still hand the user a question
+    # or mail is untouchable, not only one with an armed surface. Both probes
+    # fail closed (an unreadable ask log or inbox answers "yes").
+    if _has_spooled_mail(cand.path):
+        return _ContentGuard("has unread spooled mail", fresh)
+    if _has_open_asks(cand.path):
+        return _ContentGuard("has open asks", fresh)
     if not _is_deletable_dir(cand.path):
-        return "origin is not reapable"
-    return None
+        return _ContentGuard("origin is not reapable", fresh)
+    if fresh is None:
+        return _ContentGuard("no activity clock", None)
+    if fresh >= cutoff:
+        return _ContentGuard("inside the retention window", fresh)
+    return _ContentGuard(None, fresh)
+
+
+def _manifest_path(sessions_dir: Path, session: str, now: float) -> Path:
+    """This pad's manifest location: UTC-stamped so runs sort chronologically."""
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    return sessions_dir / CONTENT_MANIFEST_DIRNAME / f"{stamp}-{session}.json"
+
+
+def _write_cleanup_manifest(path: Path, payload: Mapping[str, Any]) -> None:
+    """Write ``payload`` atomically (temp beside the target, then rename).
+
+    The temp file shares the directory so the rename is same-filesystem and
+    atomic; a reader either sees the previous manifest or the new one, never a
+    half-written JSON file. Raises ``OSError`` (or a JSON encoding error) for
+    the caller to record and continue: a manifest failure never fails a
+    removal the operator asked for.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=1, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    except Exception:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _manifest_classes(removals: Iterable[_PlannedRemoval]) -> tuple[str, ...]:
+    seen = {removal.cls for removal in removals}
+    return tuple(
+        cls
+        for cls in (CONTENT_CLASS_MERGED, CONTENT_CLASS_BUILD, CONTENT_CLASS_STALE)
+        if cls in seen
+    )
+
+
+def _manifest_entries(removals: Iterable[_PlannedRemoval]) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": os.fspath(removal.path),
+            "bytes": removal.bytes,
+            "class": removal.cls,
+            "method": removal.method,
+        }
+        for removal in removals
+    ]
+
+
+def _manifest_payload(
+    cand: _Cand,
+    *,
+    now: float,
+    actor: str,
+    trigger: str,
+    planned: list[_PlannedRemoval],
+    completed: list[_PlannedRemoval],
+) -> dict[str, Any]:
+    """The manifest body: every planned path, then the subset actually taken.
+
+    The top-level ``classes``/``bytes``/``entries`` describe the list that is
+    meaningful at write time: the PLAN before the first removal, the COMPLETED
+    subset after the loop. ``planned`` always holds the full plan, so a process
+    that dies mid-pass leaves an attributable record of everything it meant to
+    take.
+    """
+    described = completed if completed else planned
+    classes = _manifest_classes(described)
+    return {
+        "schema": CONTENT_MANIFEST_SCHEMA,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "session": cand.path.name,
+        "origin": _origin(cand.path),
+        "actor": actor,
+        "trigger": trigger,
+        "policy": DELEGATED_SCRATCHPAD_POLICY,
+        "reason": " + ".join(classes),
+        "classes": list(classes),
+        "bytes": sum(removal.bytes for removal in described),
+        "entries": sum(removal.entries for removal in described),
+        "planned": _manifest_entries(planned),
+        "completed": _manifest_entries(completed),
+    }
 
 
 def _reclaim_pad_content(
@@ -1357,27 +1525,34 @@ def _reclaim_pad_content(
     live_resolved: Path | None,
     sessions_dir: Path,
     dry_run: bool,
+    actor: str,
+    trigger: str,
 ) -> _ContentOutcome:
     """Evaluate — and in a real pass execute — the content reclaim for ONE pad.
 
     The hard guards run first; a refusal comes back as ``kept`` and nothing
     below is touched. Then the pad is planned (bounded walk, no writes); then,
-    in a real pass, each planned removal goes through
+    in a real pass, the manifest's ``planned`` list is written BEFORE the first
+    removal (so a crash mid-pass still names every path the pass meant to
+    take), each planned removal goes through
     ``cleanup.remove_scratchpad_entry`` (the one guarded removal shape) —
     except a linked worktree's, which goes through ``git worktree remove`` in
-    its shared repository (its objects are not the pad's to bundle). A rescue
-    bundle is written and verified BEFORE the tree it belongs to is removed,
-    PER TREE: any bundle failure keeps only its own tree (that planned removal
-    is dropped and counted) while the pad's other removals proceed. A refusal
-    or failure of the git removal keeps that tree and counts an error the same
-    way.
+    its shared repository (its objects are not the pad's to bundle) — and the
+    manifest is rewritten with the ``completed`` subset after the loop. A
+    rescue bundle is written and verified BEFORE the tree it belongs to is
+    removed, PER TREE: any bundle failure keeps only its own tree (that planned
+    removal is dropped and counted) while the pad's other removals proceed. A
+    refusal or failure of the git removal keeps that tree and counts an error
+    the same way. A manifest write failure never fails the removal; the log row
+    carries ``manifest_error`` so the loss is still attributable as far as it
+    can be.
     """
     outcome = _ContentOutcome()
     guard = _content_guard(
         cand, config_dir=config_dir, now=now, cutoff=cutoff, live_resolved=live_resolved
     )
-    if guard is not None:
-        outcome.kept.append(guard)
+    if guard.reason is not None:
+        outcome.kept.append(guard.reason)
         return outcome
     try:
         plan = _plan_pad_content(cand.path, now=now)
@@ -1388,6 +1563,33 @@ def _reclaim_pad_content(
     outcome.kept.extend(plan.kept)
     if not plan.removals:
         return outcome
+    manifest_path = _manifest_path(sessions_dir, cand.path.name, now)
+    manifest_error = ""
+    # ``manifest_written``: a file exists to point at (the planned write, or a
+    # later successful rewrite). ``completed_written``: that file's
+    # ``completed`` list is the real one. They differ when the planned write
+    # succeeded and the completed rewrite failed — the row must then carry the
+    # taken paths itself, because the manifest on disk says completed=[]
+    # (review m1).
+    manifest_written = False
+    completed_written = False
+    if not dry_run:
+        try:
+            _write_cleanup_manifest(
+                manifest_path,
+                _manifest_payload(
+                    cand,
+                    now=now,
+                    actor=actor,
+                    trigger=trigger,
+                    planned=plan.removals,
+                    completed=[],
+                ),
+            )
+            manifest_written = True
+        except Exception as exc:
+            manifest_error = f"planned: {exc.__class__.__name__}"
+            logger.warning("session cleanup: cannot write manifest %s: %s", manifest_path, exc)
     taken: list[_PlannedRemoval] = []
     bundles: list[tuple[str, int]] = []
     for removal in plan.removals:
@@ -1440,21 +1642,38 @@ def _reclaim_pad_content(
         else:
             outcome.refused += 1
     if not taken:
+        # The planned manifest (if written) stays: it names what the pass meant
+        # to take, which is the honest record when every removal was kept
+        # (a failed bundle, a refused entry) and nothing was logged.
         return outcome
-    classes = tuple(
-        cls
-        for cls in (CONTENT_CLASS_MERGED, CONTENT_CLASS_BUILD, CONTENT_CLASS_STALE)
-        if any(removal.cls == cls for removal in taken)
-    )
-    planned = [os.fspath(removal.bundle_path) for removal in taken if removal.bundle_path]
+    classes = _manifest_classes(taken)
+    if not dry_run:
+        try:
+            _write_cleanup_manifest(
+                manifest_path,
+                _manifest_payload(
+                    cand,
+                    now=now,
+                    actor=actor,
+                    trigger=trigger,
+                    planned=plan.removals,
+                    completed=taken,
+                ),
+            )
+            manifest_written = True
+            completed_written = True
+        except Exception as exc:
+            suffix = f"completed: {exc.__class__.__name__}"
+            manifest_error = f"{manifest_error}; {suffix}" if manifest_error else suffix
+            logger.warning("session cleanup: cannot rewrite manifest %s: %s", manifest_path, exc)
+    planned_bundles = [os.fspath(removal.bundle_path) for removal in taken if removal.bundle_path]
     written = dict(bundles)
-    bundle_list = tuple(planned)
-    bundle_bytes = 0 if dry_run else sum(written.get(path, 0) for path in planned)
+    bundle_list = tuple(planned_bundles)
+    bundle_bytes = 0 if dry_run else sum(written.get(path, 0) for path in planned_bundles)
     outcome.row = ContentRow(
         session=cand.path.name,
-        # No age claim: the content layer now judges liveness, not the
-        # record window, so "past the window" would be false for an in-window
-        # dead pad. The classes are the finding the operator acts on.
+        # The classes are the finding the operator acts on; the manifest says
+        # which paths within them.
         reason=" + ".join(classes),
         title=_title(cand),
         bytes=sum(removal.bytes for removal in taken),
@@ -1465,6 +1684,20 @@ def _reclaim_pad_content(
         rescue_bundle=bundle_list[0] if bundle_list else "",
         rescue_bundle_bytes=bundle_bytes,
         rescue_bundles=bundle_list,
+        trigger=trigger,
+        manifest=os.fspath(manifest_path) if manifest_written else "",
+        manifest_error=manifest_error,
+        # Path-level provenance in-row whenever the on-disk manifest cannot
+        # name the taken paths itself: a dry run writes none, a failed planned
+        # write leaves none, and a failed completed rewrite leaves one whose
+        # ``completed`` is empty (review m1).
+        paths=(
+            tuple(os.fspath(removal.path) for removal in taken[:CONTENT_ROW_PATHS_CAP])
+            if dry_run or not completed_written
+            else ()
+        ),
+        paths_total=len(taken),
+        activity_age_hours=guard.age_hours(now),
     )
     return outcome
 
@@ -1484,7 +1717,11 @@ def _content_log_record(row: ContentRow, *, actor: str) -> dict[str, Any]:
     Same core keys as a record removal's row (``at``/``session``/``title``/
     ``policy``/``reason``/``actor``/``pid``) so one reader handles both; the
     content-specific keys are additive, and ``rescue_bundle`` is present only
-    when a bundle was actually kept beside the pad.
+    when a bundle was actually kept beside the pad. ``paths`` is an int (the
+    count) when the manifest's ``completed`` list is the record, and a bounded
+    list of the taken paths when the row had to carry them (no manifest, or an
+    incomplete one) — with ``paths_total`` alongside so a capped list is not
+    read as the whole story.
     """
     record: dict[str, Any] = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1498,7 +1735,22 @@ def _content_log_record(row: ContentRow, *, actor: str) -> dict[str, Any]:
         "entries": row.entries,
         "classes": list(row.classes),
         "method": row.method,
+        # Provenance: the aggregate counts alone cannot name a lost path, so
+        # the row points at the manifest that can, and names what ran it. With
+        # no manifest (a failed write) the row carries the taken paths itself
+        # instead of only a count — path-level provenance for every removal.
+        "trigger": row.trigger,
+        "manifest": row.manifest,
     }
+    if row.paths:
+        record["paths"] = list(row.paths)
+        record["paths_total"] = row.paths_total
+    else:
+        record["paths"] = row.paths_total
+    if row.manifest_error:
+        record["manifest_error"] = row.manifest_error
+    if row.activity_age_hours is not None:
+        record["activity_age_hours"] = round(row.activity_age_hours, 2)
     if row.rescue_bundle:
         record["rescue_bundle"] = row.rescue_bundle
         record["rescue_bundle_bytes"] = row.rescue_bundle_bytes
@@ -1612,10 +1864,10 @@ class _Scan:
     candidates: list[_Cand] = field(default_factory=list)
     #: Every REAPABLE delegated session the scan saw, with its activity clock
     #: (0.0 when there is no usable one), not only the past-window candidates.
-    #: The CONTENT layer's pool: cache-shaped data (a build tree, a stale log) is
-    #: reclaimable as soon as the session is dead, so an in-window pad must be
-    #: visible to it — the record window is the RECORD pass's gate, not the
-    #: content one. "Reapable" excludes origins
+    #: The CONTENT layer's pool: it gates on the activity clock too (restored
+    #: 2026-10-19), so an in-window or clockless pad must still be VISIBLE — its
+    #: kept reason then names the window or the missing clock instead of the pad
+    #: silently vanishing from the plan. "Reapable" excludes origins
     #: ``cleanup.deletable_origins()`` never names, which the content layer may
     #: not take content from either.
     delegated: list[_Cand] = field(default_factory=list)
@@ -1721,10 +1973,10 @@ def _scan(
         # answer this branch already asks below.
         deletable = _is_deletable_dir(path)
         if deletable:
-            # 0.0 and not a sentinel: the CONTENT layer no longer judges age,
-            # and a candidate with no clock must still reach it (the record
-            # pass below keeps the record, as rule 1 always did). The value only
-            # feeds the preview's ordering.
+            # 0.0 and not a sentinel: a candidate with no clock must still
+            # reach the CONTENT layer so its kept reason names the missing
+            # clock (the age gate restored there); the value only feeds the
+            # preview's ordering.
             scan.delegated.append(_Cand(path, clock if clock is not None else 0.0, False))
         if clock is None or clock >= cutoff:
             # Rule 1's last clause: no clock, no removal.
@@ -1834,6 +2086,7 @@ def run_delegated_pass(
     dry_run: bool = False,
     force: bool = False,
     actor: str = "startup",
+    trigger: str = "startup",
     batch_size: int | None = None,
     budget_s: "float | None | _Default" = None,
     removal_pause_s: float | None = None,
@@ -1857,7 +2110,8 @@ def run_delegated_pass(
     so a confirmed content reclaim can never include a pad the operator was not
     shown — a pad whose guard cleared since the preview is reclaimed on a later
     pass, and shown then. ``None`` leaves the phase unconfined (startup passes,
-    tests).
+    tests). ``actor`` and ``trigger`` are recorded on every reclaim (the log row
+    and the pad's manifest), so a loss can be traced to what ran the pass.
     """
     # Resolved at CALL time so the module constants are the tuning surface (a
     # default bound at import would make them inert). ``budget_s=UNBOUNDED`` is
@@ -2069,11 +2323,11 @@ def run_delegated_pass(
     content_runs = force or (policy.delegated_enabled and policy.delegated_scratchpad_enabled)
     if content_runs:
         removed_names = {row.session for row in result.removed}
-        # EVERY delegated session, not only the past-window candidates: the age
-        # refusal left ``_content_guard`` with the record pass, so an in-window
-        # pad is content-reclaimable as soon as it is dead. Parent directories
-        # are never in this pool (``_scan.delegated``), which is what keeps the
-        # user's own conversations audit-only.
+        # EVERY delegated session, not only the past-window candidates: the
+        # content guard itself names the refusal (window or missing clock), so the
+        # plan/kept list stays auditable. Parent directories are never in this
+        # pool (``_scan.delegated``), which is what keeps the user's own
+        # conversations audit-only.
         content_pool = [cand for cand in scan.delegated if cand.path.name not in removed_names]
         if content_only is not None:
             # The preview's own set (review F4): an apply reclaims from exactly
@@ -2132,6 +2386,8 @@ def run_delegated_pass(
                     live_resolved=live_resolved,
                     sessions_dir=sessions_dir,
                     dry_run=dry_run,
+                    actor=actor,
+                    trigger=trigger,
                 )
             except _PadAbort as abort:
                 result.errors += 1
@@ -2501,6 +2757,7 @@ def run_sweeps(
     should_stop: Callable[[], bool],
     wait: Callable[[float], bool],
     actor: str = "startup",
+    trigger: str = "startup",
 ) -> str:
     """Pass, wait, pass again — until stopped or the switch is off. Returns why it ended.
 
@@ -2510,7 +2767,8 @@ def run_sweeps(
     takes effect at the next launch, as the settings page says — and a pass that is
     already running notices the switch at its next batch. A drain that is not
     finished comes back after :data:`DRAIN_RESUME_S`; a finished one after
-    :data:`STEADY_SWEEP_S`.
+    :data:`STEADY_SWEEP_S`. ``actor``/``trigger`` name this host in the content
+    manifests and cleanup-log rows (``session-startup`` for this thread).
     """
     sessions_dir = config_dir / SESSIONS_DIRNAME
     while not should_stop():
@@ -2532,6 +2790,7 @@ def run_sweeps(
                         policy_provider,
                         live_dir=live_dir,
                         actor=actor,
+                        trigger=trigger,
                         should_stop=should_stop,
                     )
                     if result.skipped is None or result.skipped == "disabled during the pass":

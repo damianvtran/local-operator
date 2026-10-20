@@ -223,6 +223,28 @@ def test_remove_empty_takes_only_transcriptless_directories(tmp_path: Path) -> N
     assert not empty.exists() and not zero.exists()
 
 
+def test_a_hidden_sidecar_directory_is_not_a_removable_session(tmp_path: Path) -> None:
+    """Review M1: ``sessions/.cleanup-manifests/`` is a sidecar, not an empty session.
+
+    ``remove_empty`` used to see the manifest directory as a transcriptless
+    user session: it deleted every reclaim record whole and logged a phantom
+    removal row. A hidden name is never a conversation.
+    """
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    sidecar = tmp_path / "sessions" / ".cleanup-manifests"
+    sidecar.mkdir()
+    manifest = sidecar / "20260101T000000Z-kid.json"
+    manifest.write_text('{"schema": "cleanup.removal.v1"}', encoding="utf-8")
+    for entry in (sidecar, manifest):
+        os.utime(entry, (NOW - 5 * DAY, NOW - 5 * DAY))
+
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, remove_empty=True), now=NOW)
+
+    assert result.removed == []
+    assert sidecar.is_dir() and manifest.exists()
+    assert not (tmp_path / "sessions" / CLEANUP_LOG_NAME).exists(), "no phantom log row"
+
+
 def test_max_inactive_days_uses_last_activity_not_creation(tmp_path: Path) -> None:
     _store(tmp_path, 12, transcript=True, age_days=1)
     old = _session(tmp_path, "old", age_days=40)
