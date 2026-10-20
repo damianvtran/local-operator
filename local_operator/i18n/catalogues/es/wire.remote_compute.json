@@ -26,7 +26,9 @@
   "wire.remote_compute.no_capacity": "Radient no tiene capacidad de cómputo remoto en este momento; inténtalo de nuevo más tarde.",
   "wire.remote_compute.no_credit": "Radient no tiene crédito de cómputo para esta cuenta, así que la ejecución no fue admitida.",
   "wire.remote_compute.only_with": "{flag} solo se aplica con --remote.",
+  "wire.remote_compute.replayed": "La clave de idempotencia coincidió con un envío anterior, así que esta es la ejecución remota {run_id} y no se creó ninguna nueva.",
   "wire.remote_compute.retrying": "Radient informó de un error en esta ejecución y la reintentará, así que seguimos pendientes.",
+  "wire.remote_compute.run_identity_mismatch": "Radient respondió por la ejecución remota {answered}, no por la ejecución {asked_for} que se solicitó, así que esta respuesta no puede presentarse como el estado de esa ejecución.",
   "wire.remote_compute.status_line": "estado: {status}",
   "wire.remote_compute.status_network_matched": "red comprobada: esta ejecución está en {network_id}, la red de este dispositivo.",
   "wire.remote_compute.status_network_mismatch": "red comprobada: esta ejecución está en {network_id}, que no es la red de este dispositivo.",
@@ -35,5 +37,6 @@
   "wire.remote_compute.still_running": "La ejecución {run_id} sigue en marcha pasado el límite de {max_hours} horas que Radient le indicó, así que este comando dejó de seguirla. Compruébala con: lop exec --remote-status {run_id}",
   "wire.remote_compute.submitted": "Ejecución remota {run_id} enviada.\nred (confirmada por Radient): {network_id}",
   "wire.remote_compute.unknown_run": "Radient no tiene esa ejecución remota para el inicio de sesión seleccionado.",
-  "wire.remote_compute.unreachable": "No se pudo contactar con Radient; comprueba la red y vuelve a intentarlo."
+  "wire.remote_compute.unreachable": "No se pudo contactar con Radient; comprueba la red y vuelve a intentarlo.",
+  "wire.remote_compute.unreadable_envelope": "El formato de respuesta de Radient ha cambiado y esta versión de lop no puede leerlo. Actualiza lop con `lop-update` y vuelve a intentarlo."
 }

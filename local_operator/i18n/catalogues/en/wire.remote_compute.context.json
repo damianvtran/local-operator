@@ -183,5 +183,20 @@
     "role": "CLI runtime message for lop exec --remote",
     "tone": "plain, one sentence; commands and flags stay verbatim",
     "note": "{max_hours} is the limit the SERVER admitted the run with (it may cap what was asked for), so the sentence describes the server's bound. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+  },
+  "wire.remote_compute.replayed": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Printed to STDERR when a submit answered 200 rather than 201, i.e. the --idempotency-key matched an earlier submission and Radient returned THAT run instead of creating one. It must say both that no new run was created and which run this is; {run_id} is the run the server returned. Stdout is unaffected (the run id alone under --detach), and the watch or detach continues normally afterwards."
+  },
+  "wire.remote_compute.run_identity_mismatch": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Both placeholders are run ids: {asked_for} is the id this command sent in the path, {answered} is the id in the body Radient returned. Both must be preserved and kept distinguishable, because the point of the sentence is that they differ. It reports a response this client refuses to attribute (a cached page, a proxy, or a server bug); nothing was retried or cancelled by it."
+  },
+  "wire.remote_compute.unreadable_envelope": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim; never alarmist",
+    "note": "No placeholders. The response body looked like Radient's envelope but carried keys outside the msg/result/error set, so this build cannot parse it: the format changed after this build was cut. It says so and names `lop-update` as the remedy; a retry cannot help."
   }
 }

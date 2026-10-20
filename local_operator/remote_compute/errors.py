@@ -82,7 +82,19 @@ class RunIdentityMismatch(RemoteComputeError):
     and a cancel would look applied to a run nobody cancelled.
 
     There is nothing to retry: the id is either the one sent or it is not.
+
+    BOTH IDS ARE CARRIED, as fields rather than only inside the sentence. The
+    surface that reports this has keyed copy, so it has to build the sentence
+    itself and name both runs; parsing them back out of an English message would
+    make the copy a wire format.
     """
+
+    def __init__(self, *, asked_for: str, answered: str) -> None:
+        super().__init__(
+            f"Radient answered for run {answered!r}, not the run {asked_for!r} that was asked for."
+        )
+        self.asked_for = asked_for
+        self.answered = answered
 
 
 class InvalidIdempotencyKey(RemoteComputeError):
@@ -103,6 +115,21 @@ class InvalidIdempotencyKey(RemoteComputeError):
         super().__init__(f"the idempotency key is {reason}")
         self.reason = reason
         self.max_bytes = max_bytes
+
+
+class UnreadableEnvelope(RemoteComputeError):
+    """A success body that looks like an envelope this build cannot parse.
+
+    The envelope's key set is exact (``msg``/``result``/``error``), and a body
+    that names ``result`` BESIDE keys outside that set is neither a true envelope
+    nor the payload itself. The strict test is kept on purpose — loosening it to
+    "carries a ``result``" would truncate any object that grows such a field —
+    so the unreadable shape is surfaced as its own failure instead of being
+    guessed at.
+
+    It means Radient's response format changed after this build was cut, and the
+    remedy is a newer lop, not a retry.
+    """
 
 
 class Unreachable(RemoteComputeError):
@@ -144,4 +171,5 @@ __all__ = [
     "RunIdentityMismatch",
     "RunNotFound",
     "Unreachable",
+    "UnreadableEnvelope",
 ]

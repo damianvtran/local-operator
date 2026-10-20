@@ -532,6 +532,81 @@ def test_a_given_idempotency_key_is_reused(
     assert origin.requests[0].headers["idempotency-key"] == KEY
 
 
+def test_a_created_run_is_not_announced_as_a_replay(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """201 created the run, so nothing is said about an earlier submission."""
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(remote_cli, "_sleep", no_sleep)
+    origin.responses.extend(
+        [
+            httpx.Response(201, json=_submitted(network.network_id)),
+            _poll(_stopped(network.network_id)),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 0
+    captured = capsys.readouterr()
+    assert "matched an earlier submission" not in captured.err
+    assert "matched an earlier submission" not in captured.out
+
+
+def test_a_200_replay_says_the_key_matched_and_the_watch_goes_on(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """QA Q1 — 200 is THAT run, and the surface must say so instead of looking fresh."""
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(remote_cli, "_sleep", no_sleep)
+    origin.responses.extend(
+        [
+            httpx.Response(200, json=_submitted(network.network_id)),
+            _poll(_stopped(network.network_id)),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["--idempotency-key", KEY, "do it"], monkeypatch) == 0
+    captured = capsys.readouterr()
+    # The line is about the run, on stderr, and it says both things the operator
+    # needs: the key matched, and no new run was created.
+    assert "matched an earlier submission" in captured.err
+    assert "no new run was created" in captured.err
+    assert RUN_ID in captured.err
+    assert "matched an earlier submission" not in captured.out
+    # ...and the watch continued normally: transitions, then the finished line.
+    assert "status: pending" in captured.out
+    assert f"Remote run {RUN_ID} finished: succeeded." in captured.out
+
+
+def test_a_200_replay_with_detach_keeps_stdout_the_run_id_alone(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The replay sentence must not become part of a capturable stdout."""
+    origin.responses.append(httpx.Response(200, json=_submitted(network.network_id)))
+    assert _run(BASE + HOSTING + ["--detach", "--idempotency-key", KEY, "do it"], monkeypatch) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == RUN_ID
+    assert "matched an earlier submission" in captured.err
+
+
 def test_polling_prints_transitions_until_a_terminal_status(
     enabled: None,
     network: NetworkRecord,
@@ -755,14 +830,15 @@ def test_remote_status_prints_the_run(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The JSON is the run alone; the network verdict is the line after it."""
+    """STDOUT IS THE RUN ALONE; the network verdict is on stderr."""
     origin.responses.append(
         httpx.Response(200, json={"msg": "Run", "result": _wire_run("running", network.network_id)})
     )
     assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert json.loads(lines[0]) == _wire_run("running", network.network_id)
-    assert "this device's network" in lines[1]
+    captured = capsys.readouterr()
+    # E2-3 — a caller can parse the whole stream, not just "the first line".
+    assert json.loads(captured.out) == _wire_run("running", network.network_id)
+    assert "this device's network" in captured.err
     assert origin.paths() == [f"/v1/remote-compute/runs/{RUN_ID}"]
 
 
@@ -779,8 +855,13 @@ def test_remote_status_refuses_a_run_it_did_not_ask_for(
     origin.responses.append(httpx.Response(200, json={"msg": "Run", "result": other}))
     assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 1
     captured = capsys.readouterr()
-    assert "run_OTHER" not in captured.out
-    assert "not the run" in captured.err
+    assert captured.out == ""
+    # E2-4 — its OWN keyed sentence, naming both ids, rather than the generic
+    # "remote compute failed: …" fallback.
+    assert "remote run run_OTHER" in captured.err
+    assert f"the run {RUN_ID}" in captured.err
+    assert "cannot be reported as that run's state" in captured.err
+    assert "remote compute failed" not in captured.err
 
 
 def test_remote_status_says_so_when_the_network_does_not_resolve(
@@ -795,9 +876,9 @@ def test_remote_status_says_so_when_the_network_does_not_resolve(
         httpx.Response(200, json={"msg": "Run", "result": {"id": RUN_ID, "status": "running"}})
     )
     assert _run(["exec", "--remote-status", RUN_ID], monkeypatch) == 0
-    out = capsys.readouterr().out
-    assert "network unconfirmed" in out
-    assert json.loads(out.splitlines()[0]) == {"id": RUN_ID, "status": "running"}
+    captured = capsys.readouterr()
+    assert "network unconfirmed" in captured.err
+    assert json.loads(captured.out) == {"id": RUN_ID, "status": "running"}
 
 
 def test_remote_status_names_a_mismatch_it_can_see(
@@ -814,8 +895,9 @@ def test_remote_status_names_a_mismatch_it_can_see(
         httpx.Response(200, json={"msg": "Run", "result": _wire_run("running", other)})
     )
     assert _run(["exec", "--remote-status", RUN_ID, "--network", "home"], monkeypatch) == 0
-    out = capsys.readouterr().out
-    assert other in out and "not this device's network" in out
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["network_id"] == other
+    assert other in captured.err and "not this device's network" in captured.err
 
 
 def test_remote_status_drops_the_secret_fields_a_get_should_never_carry(
@@ -890,6 +972,29 @@ def test_a_conflict_names_the_key_flag(
     origin.responses.append(httpx.Response(409, json={"error": "conflict"}))
     assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
     assert "--idempotency-key" in capsys.readouterr().err
+
+
+def test_an_envelope_this_build_cannot_read_names_the_format_change(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """E2-5 — an envelope-shaped body with stranger keys is a format change, not a run."""
+    body = {
+        "msg": "Run created",
+        "result": {"run": _wire_run("pending", network.network_id)},
+        "trace_id": "t_1",
+    }
+    origin.responses.append(httpx.Response(201, json=body))
+    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "response format has changed" in captured.err
+    assert "lop-update" in captured.err
+    assert "remote compute failed" not in captured.err
 
 
 def test_capacity_and_credit_have_their_own_sentences(

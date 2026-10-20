@@ -26,7 +26,9 @@
   "wire.remote_compute.no_capacity": "У Radient сейчас нет свободных мощностей для удалённых вычислений; повторите попытку позже.",
   "wire.remote_compute.no_credit": "У Radient нет вычислительного кредита для этой учётной записи, поэтому запуск не был допущен.",
   "wire.remote_compute.only_with": "{flag} применяется только вместе с --remote.",
+  "wire.remote_compute.replayed": "Ключ идемпотентности совпал с более ранней отправкой, поэтому это удалённый запуск {run_id}, а новый запуск не создавался.",
   "wire.remote_compute.retrying": "Radient сообщил об ошибке этого запуска и повторит его, поэтому слежение продолжается.",
+  "wire.remote_compute.run_identity_mismatch": "Radient ответил за удалённый запуск {answered}, а не за запрошенный запуск {asked_for}, поэтому этот ответ нельзя выдать за состояние того запуска.",
   "wire.remote_compute.status_line": "статус: {status}",
   "wire.remote_compute.status_network_matched": "сеть проверена: запуск относится к {network_id}, сети этого устройства.",
   "wire.remote_compute.status_network_mismatch": "сеть проверена: запуск относится к {network_id}, а это не сеть этого устройства.",
@@ -35,5 +37,6 @@
   "wire.remote_compute.still_running": "Запуск {run_id} всё ещё выполняется после лимита в {max_hours} ч, который указал Radient, поэтому команда прекратила слежение. Проверить: lop exec --remote-status {run_id}",
   "wire.remote_compute.submitted": "Удалённый запуск {run_id} отправлен.\nсеть (подтверждена Radient): {network_id}",
   "wire.remote_compute.unknown_run": "У Radient нет такого удалённого запуска для выбранного входа.",
-  "wire.remote_compute.unreachable": "Не удалось связаться с Radient; проверьте сеть и повторите попытку."
+  "wire.remote_compute.unreachable": "Не удалось связаться с Radient; проверьте сеть и повторите попытку.",
+  "wire.remote_compute.unreadable_envelope": "Формат ответа Radient изменился, и эта сборка lop не может его прочитать. Обновите lop командой `lop-update` и повторите попытку."
 }

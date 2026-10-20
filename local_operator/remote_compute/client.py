@@ -63,6 +63,7 @@ from local_operator.remote_compute.errors import (
     RemoteComputeError,
     RunIdentityMismatch,
     Unreachable,
+    UnreadableEnvelope,
 )
 from local_operator.remote_compute.request import RunCreateRequest
 from local_operator.tunnels import api as tunnels_api
@@ -80,7 +81,9 @@ RUNS_PATH = "/v1/remote-compute/runs"
 #: that ever carried one called ``result`` would be truncated to that field by
 #: the narrower rule. ``error`` is listed because an error envelope names it —
 #: an error body is never surfaced, but an error-shaped body with a ``result``
-#: beside it is still an envelope, not a run.
+#: beside it is still an envelope, not a run. A body that names ``result``
+#: BESIDE a key outside this set is refused as :class:`UnreadableEnvelope`
+#: rather than quietly treated as the payload (see ``_decoded``).
 ENVELOPE_KEYS: frozenset[str] = frozenset({"msg", "result", "error"})
 
 #: The contract's bound on ``Idempotency-Key``: 1 to 128 BYTES.
@@ -160,11 +163,19 @@ def _run_path(run_id: str) -> str:
 def _decoded(response: httpx.Response) -> Any:
     """The result payload, unwrapped from the envelope.
 
-    ONLY AN ENVELOPE IS UNWRAPPED. The test is that the payload's whole key set
-    is a subset of :data:`ENVELOPE_KEYS` and names ``result``; anything else is
-    the payload itself. The narrower "a ``result`` key exists" rule truncated
-    any object that happened to have a top-level field of that name, and the run
-    object is exactly the kind of thing that grows fields.
+    ONLY AN ENVELOPE IS UNWRAPPED, and the test is exact: the payload's whole key
+    set is a subset of :data:`ENVELOPE_KEYS` and names ``result``. The narrower
+    "a ``result`` key exists" rule truncated any object that happened to have a
+    top-level field of that name, and the run object is exactly the kind of thing
+    that grows fields.
+
+    A BODY THAT NAMES ``result`` BESIDE OTHER KEYS IS NOT GUESSED AT. It is
+    neither an envelope (the keys are outside the set) nor the payload itself
+    (the payload of a per-run endpoint is a run, and a run's ``result`` field
+    arrives here only after unwrapping, never at this level) — so it is the
+    response format having moved on without this build. Refusing it by type is
+    the honest answer; accepting it would either truncate a run to one field or
+    hand the CLI a body it would report as a run.
 
     AN UNPARSEABLE BODY IS RAISED OUTSIDE THE HANDLER. ``json.JSONDecodeError``
     keeps the whole document on ``.doc``, so raising it (or chaining it) would
@@ -180,8 +191,13 @@ def _decoded(response: httpx.Response) -> Any:
         unparseable = True
     if unparseable:
         raise RemoteComputeError("Radient returned an invalid remote-compute response.")
-    if isinstance(payload, dict) and "result" in payload and payload.keys() <= ENVELOPE_KEYS:
-        return payload["result"]
+    if isinstance(payload, dict) and "result" in payload:
+        if payload.keys() <= ENVELOPE_KEYS:
+            return payload["result"]
+        raise UnreadableEnvelope(
+            "Radient returned a body that looks like an envelope with keys this build does "
+            "not know, so its response format has changed."
+        )
     return payload
 
 
@@ -463,9 +479,7 @@ def _single_run(payload: Any, asked_for: str) -> dict[str, Any]:
         raise RemoteComputeError("Radient returned an invalid remote-compute response.")
     answered = run_id(payload)
     if answered != asked_for:
-        raise RunIdentityMismatch(
-            f"Radient answered for run {answered!r}, not the run {asked_for!r} that was asked for."
-        )
+        raise RunIdentityMismatch(asked_for=asked_for, answered=answered)
     return payload
 
 
