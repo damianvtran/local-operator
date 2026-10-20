@@ -1697,7 +1697,7 @@ BUDGET_BILLED_TOKENS = 31_100
 # SAME +200 chars of ``tool_schemas`` — measured with this script's child arm:
 #   608fbaa01c  base (origin/main)  78,063 chars = ~28,080 billed  PASS, 20 headroom
 #   c5400d7df9  head               78,263 chars = ~28,152 billed  FAIL by 52
-# Ceiling = head + 23, the same margin shape as the top arm.
+# Ceiling = head + 23, this arm's own measured margin (the top arm is head + 19).
 BUDGET_CHILD_BILLED_TOKENS = 28_175
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

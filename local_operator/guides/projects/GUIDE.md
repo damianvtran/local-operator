@@ -63,7 +63,7 @@ Only `planning`/`active`/`qa`/`validation` can read **stale** — those are the 
 
 ### Attaching evidence
 
-The occasion picks what to attach, and it is the evidence the line already cites: a user-visible change gets the before/after frame or screenshot, a measured result the chart, table or data extract, a failure or debug the log excerpt, audio/video work the clip. Attach what you already captured — never write a second artifact just to fill the field, and never attach unrelated files.
+The occasion picks what to attach, and it is the evidence the line already cites: a user-visible change gets the before/after frame or screenshot, a measured result the chart, table or data extract, a failure the log excerpt, audio/video work the clip. Attach what you already captured — never write a second artifact just to fill the field, and never attach unrelated files.
 
 Files are copied into the project store (≤ 10 per update, ≤ 5 MB each; never referenced from their original location, so the evidence survives a reaped scratch dir), and `show` lists each with its stored path. Stored files are reclaimed with what carries them: deleting a project removes its attachment folder, and an entry evicted by the five-hundred cap takes its files with it.
 
