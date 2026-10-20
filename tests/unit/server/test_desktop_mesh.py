@@ -436,7 +436,7 @@ async def test_an_unreachable_peer_carries_glossed_words(
     assert row["reachable"] is False
     assert row["unreachable_reason"], "an unreachable peer must say why"
     assert "ConnectionRefusedError" not in row["unreachable_reason"]
-    assert row["session_count"] == 0
+    assert row["session_count"] is None, "an unreachable device cannot claim an empty catalogue"
 
 
 @pytest.mark.asyncio

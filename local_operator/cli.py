@@ -5666,6 +5666,8 @@ _REMOTE_ROW_FILL: dict[str, Any] = {
     "heartbeat_age_s": None,
     "version": "",
     "source_ref": "",
+    "waiting_on": 0,
+    "jobs_running": None,
     "subagents_running": None,
     "subagents_queued": None,
     "last_activity_s": None,

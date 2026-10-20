@@ -3123,6 +3123,9 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # Tool contexts are rebuilt per turn; presence belongs to the Session
+        # so both transition updates and the serving heartbeat read one fact.
+        self._waiting_on = 0
         # BUSY-TURN CHECKPOINT LATCH (ready-successor handoff). A coordinator asks
         # a BUSY runtime to move; ordinary retirement only ever fires on idle, so
         # this is the one path that carries a mid-turn session across a swap. An
@@ -17842,6 +17845,10 @@ class Session:
             "code_requests show for review rounds and CI."
         )
 
+    def _note_waiting(self, count: int) -> None:
+        """Record presence without I/O; serving updates publish this snapshot."""
+        self._waiting_on = max(0, int(count))
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -17854,6 +17861,7 @@ class Session:
 
         lineage = _session_lineage(self)
         return ToolContext(
+            note_waiting=self._note_waiting,
             team_id=lineage[-1] if lineage else "",
             memory_config_dir=str(self._config_dir),
             cwd=self._cwd,
