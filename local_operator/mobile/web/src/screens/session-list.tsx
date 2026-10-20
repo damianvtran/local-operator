@@ -34,6 +34,8 @@ import {
 } from "react";
 import { getAttentionUnread, getDirectories, markAllSeen, setSessionPin, startSession } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
+import { SessionTagLine } from "../components/session-tag-line";
+import { SessionTagsSheet } from "../components/session-tags-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { markPendingFocus } from "../lib/pending-focus";
@@ -561,6 +563,17 @@ function SessionCard({
 					</span>
 				) : null}
 			</div>
+			{/* THE CONVERSATION'S TAGS, as a LABEL under the title row.
+
+			    Static by construction: the whole card is one button, so an
+			    interactive chip here would nest a control in a button. Assignment is
+			    the long-press sheet; this line only says what the row carries.
+
+			    NO LINE WHEN UNTAGGED — not an empty one. A placeholder would add a
+			    line box to every untagged row and make the list's density depend on
+			    which conversations happen to be tagged, the same defect class the
+			    blank second line had. A tagged row grows by exactly one line. */}
+			<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} />
 			<div className="flex items-baseline gap-2">
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
 					{cwdText}
@@ -905,6 +918,23 @@ export function SessionListScreen() {
 	   sheet describing a stale object — the row it names is re-read from
 	   `sessions` on every render, so the toggle always acts on current state. */
 	const [pinTarget, setPinTarget] = useState<string | null>(null);
+	/* The row whose TAG sheet is open, held as the id for the same reason as
+	   `pinTarget`: a repaint must not leave the sheet describing a stale object,
+	   so the row is re-read from live `sessions` on every render. */
+	const [tagsTarget, setTagsTarget] = useState<string | null>(null);
+	/* Monotonic count of LIST FRAMES applied since mount. The tag sheet compares
+	   it at write start and at read-back, so a write's answer cannot paint over a
+	   newer authoritative frame (the relay wakes the list on success, so the
+	   frame usually arrives first). Counted from the store's array identity —
+	   every SSE frame replaces it — rather than from a tag-specific value, because
+	   the rule is about frame ORDER, not about which field moved. */
+	const lastFrameSource = useRef(sessions);
+	const [frame, setFrame] = useState(0);
+	useEffect(() => {
+		if (lastFrameSource.current === sessions) return;
+		lastFrameSource.current = sessions;
+		setFrame((count) => count + 1);
+	}, [sessions]);
 	/* THE REFUSAL TO RENDER INSIDE THAT SHEET, and the row it answers for.
 
 	   Held as a pair rather than as one sentence because the answer can land
@@ -1153,6 +1183,14 @@ export function SessionListScreen() {
 	const pinRow = pinTarget
 		? sessions.find((session) => session.session_id === pinTarget) ?? null
 		: null;
+	/* LIVE row, and `null` when it is gone: the sheet is open only while the row
+	   exists, the same rule the pin sheet follows. */
+	const tagsRow = tagsTarget
+		? sessions.find((session) => session.session_id === tagsTarget) ?? null
+		: null;
+	/* A RELAY capability, and the only gate: `features.session_tags` is core's
+	   build fact and is `1` on released relays whose routes would 404 here. */
+	const tagsAvailable = capabilities?.session_tags?.available === true;
 	/* Busy is about THIS row's action, not about any request: a press on one row
 	   never disables another row's sheet. */
 	const pinBusy = pinRow !== null && pinPending.has(pinRow.session_id);
@@ -1717,6 +1755,30 @@ export function SessionListScreen() {
 						    for THIS row is outstanding the verb claims nothing at all. */}
 						{pinActionLabel}
 					</button>
+					{/* THE SECOND ACTION, and only when the RELAY serves the routes. A
+					    long-press is already the row's "what can I do with this" gesture, so
+					    tags belong in this sheet rather than on the card: one gesture, two
+					    verbs, and nothing added to a row whose width is its scarcest
+					    resource. It CLOSES this sheet before opening the other one — the
+					    system draws one panel, and a second scrim would make Back mean two
+					    things. HIDDEN, never disabled, on a relay without the capability:
+					    a dead control promises a screen this build cannot serve. */}
+					{tagsAvailable ? (
+						<button
+							type="button"
+							onClick={() => {
+								if (!pinRow) return;
+								setPinTarget(null);
+								setTagsTarget(pinRow.session_id);
+							}}
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
+						>
+							<span className="w-4 shrink-0 text-accent" aria-hidden>
+								#
+							</span>
+							{messageRuntime.t("relay.session.tags.action")}
+						</button>
+					) : null}
 					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own
 					    column, not an overlay: it takes layout space, so it cannot cover
 					    another control, and nothing on the list scrolls or reorders to
@@ -1745,6 +1807,14 @@ export function SessionListScreen() {
 					</p>
 				</div>
 			</Sheet>
+			<SessionTagsSheet
+				open={tagsRow !== null}
+				onClose={() => setTagsTarget(null)}
+				sessionId={tagsRow?.session_id ?? ""}
+				assigned={tagsRow?.tags ?? []}
+				primary={tagsRow?.primary ?? null}
+				revision={frame}
+			/>
 		</div>
 	);
 }

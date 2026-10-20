@@ -555,6 +555,38 @@ export interface SessionOpenedBy {
 	session: string | null;
 }
 
+/** One category ASSIGNED to a conversation, as every local row carries it.
+    The name comes from ONE registry snapshot per listing, so two rows in the
+    same frame cannot spell one category two ways; `id` is what a write sends
+    (desired state), and the pair is what a row renders. */
+export interface TagRef {
+	id: string;
+	name: string;
+}
+
+/** One row of `GET /api/tags`, the SHARED registry (read only here).
+    `order` is the registry's own ordering field and `conversations` its count
+    of distinct existing session directories — the phone displays it but never
+    derives it, and there is deliberately no catalogue write on this surface. */
+export interface TagCatalogueEntry {
+	id: string;
+	name: string;
+	order: number;
+	conversations: number;
+}
+
+export interface TagsResponse {
+	tags: TagCatalogueEntry[];
+}
+
+/** The canonical answer to `PUT /api/sessions/{id}/tags`: the state the store
+    READ BACK, which is what a client paints rather than its own request. */
+export interface SessionTagsResponse {
+	session_id: string;
+	tags: TagRef[];
+	primary: string | null;
+}
+
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
@@ -604,6 +636,16 @@ export interface SessionSummary {
 	    The string `degraded` is the daemon's own name for the state
 	    (`types.py`); the row renders it as the word the reader needs. */
 	degraded?: boolean;
+	/** The categories assigned to this conversation, in ASSIGNMENT order, and
+	    the one the row marks as primary. A relay that serves the routes always
+	    sends both — untagged is `[]` and `null`, not an absence check. An OLDER
+	    relay omits them, which this client reads as untagged; the capability
+	    (`Capabilities.session_tags`) is what decides whether assignment controls
+	    exist, so a missing field can never be mistaken for a writable empty
+	    assignment. Remote/mesh rows carry them empty explicitly because their
+	    assignment lives in the other device's store. */
+	tags?: TagRef[];
+	primary?: string | null;
 	/** How many of this session's OWN delegated children are RUNNING. `null`
 	    means the daemon did not report a count, and MUST NOT be read as zero: a
 	    row that could not be asked must not be told "no subagents". The daemon
@@ -692,6 +734,11 @@ export interface PastSession {
 	    — same name, same age — so the list tags it, exactly as the TUI's
 	    /resume picker does. Clears the moment the fork names itself. */
 	forked?: boolean;
+	/** Same additive/defaulted contract as `SessionSummary.tags`/`primary`:
+	    the relay always sends them, an older one omits them, and absence reads
+	    as untagged. */
+	tags?: TagRef[];
+	primary?: string | null;
 }
 
 export interface Directories {
@@ -746,6 +793,12 @@ export interface Capabilities {
 	library?: number;
 	/** The organizing agent exists on this build. Additive to `library`. */
 	librarian?: number;
+	/** The relay serves the conversation-tag catalogue and the per-session
+	    assignment route. A RELAY capability like `i18n`, deliberately not
+	    `features.session_tags` (core's build fact, which is `1` on released
+	    relays that have none of these routes). Absent on an older relay, which
+	    must HIDE the action rather than offer a control whose request would 404. */
+	session_tags?: { available: boolean };
 }
 
 export type CommandOp =
