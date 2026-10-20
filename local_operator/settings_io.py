@@ -5568,9 +5568,10 @@ SETTINGS: tuple[Setting, ...] = (
     # start), and `_consumer_defaults()` in tests/unit/test_settings_io.py
     # imports DEFAULT_TEAM_BRIDGE_* from ``local_operator.team_bridge.settings``
     # to pin that the two cannot drift. Every path is a genuinely NESTED tuple;
-    # the fail-closed normalisation of each value lives with the consumer, so a
-    # hand-edited value reads as the shipped default rather than crashing a
-    # surface.
+    # the fail-closed normalisation of each value lives with the consumer, so an
+    # ABSENT key reads the shipped default and a PRESENT but unparseable
+    # ``team_bridge.enabled`` reads OFF (the ON default performs a consent
+    # write) rather than crashing or consenting on a bad value.
     #
     # TWO ROWS, DELIBERATELY. ``team_bridge.onboarding`` is internal UI
     # bookkeeping (the one-time dialog's shown-flag) and is NOT registered: a
@@ -5587,7 +5588,13 @@ SETTINGS: tuple[Setting, ...] = (
         section="team_bridge",
         label=_t(_ws.team_bridge_enabled_label()),
         kind=Kind.BOOL,
-        default=False,
+        # ON by default (opt-out): a signed-in account on an eligible Team plan
+        # gets agent messages without an opt-in dialog, and this row is where
+        # the machine turns it off. The literal is pinned to
+        # ``DEFAULT_TEAM_BRIDGE_ENABLED`` by ``_consumer_defaults()`` in
+        # tests/unit/test_settings_io.py; the server half (eligibility, consent,
+        # launch) still decides whether anything can run.
+        default=True,
         help=_t(_ws.team_bridge_enabled_help()),
     ),
     Setting(
