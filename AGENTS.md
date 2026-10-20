@@ -1745,10 +1745,14 @@ into a claim nobody checked. **The scope is the claim.**
 cannot tell you when that data is stale.** A ceiling derived from a weight
 manifest is exactly as trustworthy as the manifest. Measured in this
 repository on 2026-10-19, the unit tree's heaviest shard projected **7,232 s**
-from `tests/durations.json` at `8497001139`, against **4,466 s** from the
-refreshed manifest in `#2689` applied to the same tree — an overstatement of
-about **62%** — so a shard ceiling and its own guard agreed with each other
-about a number neither had re-derived.
+from `tests/durations.json` at `8497001139`, against roughly **4,470 s** from
+the refreshed manifest in `#2689` applied to the same tree — an overstatement
+of about **62%** — so a shard ceiling and its own guard agreed with each other
+about a number neither had re-derived. (Those figures are quoted to the
+precision that matters; the same quantity measured on three trees the same
+night came out at 7,232 / 7,239 and 4,466 / 4,469 s, so a reader who needs
+the third digit should re-measure on the tree in front of them — which is the
+point of the paragraph.)
 
 **The cause is worth naming, because it is not "stale entries":** there were
 **no orphaned manifest entries at all**, and the inflation came from the
