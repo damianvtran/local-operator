@@ -258,6 +258,29 @@ async def test_an_unversioned_renderer_source_is_completed_not_refused(api) -> N
     assert holder["anon"].calls == []
 
 
+async def test_a_malformed_hub_source_is_the_normal_origin_conflict(api) -> None:
+    """A bracketed host fails in ``urlsplit``; the route must not leak that.
+
+    Completion runs before approval, so a raw ``ValueError`` used to reach the
+    route's generic handler and answer 409 with the parser's own sentence. The
+    refusal is the same nondisclosing 422 every unapproved origin gets, and no
+    client is built.
+    """
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="http://[::1"),
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "origin-conflict"
+    assert "Invalid IPv6 URL" not in detail["message"]
+    assert holder["anon"].calls == []
+
+
 async def test_an_org_pull_uses_the_org_client_and_records_the_tenant(api) -> None:
     client, root, holder = api
     holder["client"] = SkillClient(BASE, org_envelope(manifest()), api_key="org-key")
