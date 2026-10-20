@@ -16199,6 +16199,54 @@
         "wire.tunnel_setup.in_progress",
         "wire.tunnel_setup.unavailable"
       ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.memory",
+      "reason": "Chinese is SECURITY HELD in scripts/i18n/generate.py; no core catalogue may ship.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "wire.memory.capture.help",
+        "wire.memory.capture.label",
+        "wire.memory.command",
+        "wire.memory.description",
+        "wire.memory.enabled.help",
+        "wire.memory.enabled.label",
+        "wire.memory.exclude.help",
+        "wire.memory.exclude.label",
+        "wire.memory.scopes.help",
+        "wire.memory.scopes.label",
+        "wire.memory.suggest.help",
+        "wire.memory.suggest.label",
+        "wire.memory.sync.help",
+        "wire.memory.sync.label",
+        "wire.memory.title"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.memory",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-03-31",
+      "missing": [
+        "wire.memory.capture.help",
+        "wire.memory.capture.label",
+        "wire.memory.command",
+        "wire.memory.description",
+        "wire.memory.enabled.help",
+        "wire.memory.enabled.label",
+        "wire.memory.exclude.help",
+        "wire.memory.exclude.label",
+        "wire.memory.scopes.help",
+        "wire.memory.scopes.label",
+        "wire.memory.suggest.help",
+        "wire.memory.suggest.label",
+        "wire.memory.sync.help",
+        "wire.memory.sync.label",
+        "wire.memory.title"
+      ]
     }
   ]
 }

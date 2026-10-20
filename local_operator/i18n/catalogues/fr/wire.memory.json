@@ -1,19 +1,19 @@
 {
   "wire.memory.title": "Mémoire",
   "wire.memory.command": "Inspecter, rechercher, corriger ou oublier la mémoire par portée",
-  "wire.memory.description": "Rappel local borné et capture au mieux lors du compactage ; les faits récupérés ne sont pas fiables.",
+  "wire.memory.description": "Rappel local borné et capture au compactage, sans garantie  ; les faits récupérés ne sont pas fiables.",
   "wire.memory.enabled.label": "Mémoire par portée",
-  "wire.memory.enabled.help": "Active la banque de mémoire SQLite à capacité bornée. La désactiver n’efface pas les faits conservés.",
+  "wire.memory.enabled.help": "Activer la banque de mémoire SQLite à capacité bornée. La désactiver n’efface pas les faits conservés.",
   "wire.memory.capture.label": "Capture au compactage",
-  "wire.memory.capture.help": "Capture les décisions, les objectifs et la progression après chaque compactage confirmé ; le mode context-full réutilise aussi son résumé existant. Les enregistrements explicites restent la voie garantie pour les objectifs et les décisions.",
+  "wire.memory.capture.help": "Capturer les décisions, les objectifs et la progression après chaque compactage validé  ; le mode context-full réutilise aussi le résumé existant. Les enregistrements explicites restent le moyen garanti pour les objectifs et les décisions.",
   "wire.memory.capture.locators.label": "Localisateurs comme contexte",
   "wire.memory.capture.locators.help": "Conserver aussi les chemins, les URL et les ids, mais uniquement comme contexte rattaché à une décision, un objectif ou une note de progression capturés dans la même section ; jamais comme des faits à part entière. Désactivé par défaut. Désactiver cette option laisse les faits existants intacts.",
   "wire.memory.suggest.label": "Suggestions de rappel",
-  "wire.memory.suggest.help": "Suggère jusqu’à trois titres non fiables à partir du message actuel de l’utilisateur, sous un plafond distinct de 180 tokens. Aucune requête réseau ni d’embedding.",
-  "wire.memory.sync.label": "Synchronisation de la mémoire",
-  "wire.memory.sync.help": "Partage de façon incrémentale les portées sélectionnées avec les pairs déjà appairés qui disposent du rôle receiver-admin et prennent en charge memory-sync-v1. Cela inclut les mémoires de session, sans copier les transcriptions.",
+  "wire.memory.suggest.help": "Suggérer jusqu’à trois titres non fiables à partir du message actuel de l’utilisateur, sous son propre plafond de 180 tokens. Aucune requête réseau ni embedding.",
+  "wire.memory.sync.label": "Synchronisation entre pairs",
+  "wire.memory.sync.help": "Partager de façon incrémentale les portées sélectionnées avec les pairs déjà appairés qui disposent du rôle receiver-admin et prennent en charge memory-sync-v1. Cela inclut les mémoires de session, sans copier les transcriptions.",
   "wire.memory.scopes.label": "Portées à synchroniser",
-  "wire.memory.scopes.help": "Seules ces portées sont partagées. Les propriétaires de session, d’équipe et d’agent restent des ID exacts du registre ou de la session ; les quatre portées sont prises en charge.",
+  "wire.memory.scopes.help": "Seules ces portées sont partagées. Les propriétaires de session, d’équipe et d’agent doivent être des ID exacts du registre ou de la session  ; les quatre portées sont prises en charge.",
   "wire.memory.exclude.label": "Pairs exclus de la mémoire",
-  "wire.memory.exclude.help": "ID d’appareil exclus de la réplication de la mémoire. Cela ne modifie ni l’appairage, ni la confiance, ni les autorisations d’enrôlement."
+  "wire.memory.exclude.help": "Les ID d’appareil exclus de la réplication de la mémoire. Cela ne modifie ni l’appairage, ni la confiance, ni les autorisations d’enrôlement."
 }
