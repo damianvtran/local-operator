@@ -1702,6 +1702,21 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
             # still never reach a typed consumer.
             continue
         state = st.effective_state(item, now)
+        # A ROW THAT CARRIES AN ERROR IS FAILED IN THIS PROJECTION. The store
+        # deliberately keeps a retryable row ``available`` so the timer can still
+        # act on it, and the desktop sidebar compensates by also reading
+        # ``error_class`` -- but every other consumer of this projection sees
+        # only ``state`` and ``counts``. Deriving the failure HERE, for every
+        # kind, means one rule rather than per-kind compensation: a carried
+        # error is counted in ``counts.failed`` and a consumer can act on
+        # ``state`` alone.
+        #
+        # ``no-credential`` is NOT a failure -- it is the sign-in fact an
+        # up-to-date row is listed FOR (UX round 2, U11) -- and a row a writer
+        # still holds in ``updating`` has not failed yet.
+        error_class = item.get("error_class")
+        if error_class and error_class != "no-credential" and state != "updating":
+            state = "failed"
         counts[state] = counts.get(state, 0) + 1
         # An up-to-date item is listed only when it carries the sign-in fact
         # (``no-credential``): the user has no login for an item they have linked, and

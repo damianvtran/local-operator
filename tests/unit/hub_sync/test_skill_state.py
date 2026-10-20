@@ -575,6 +575,67 @@ def test_skill_rows_reach_the_updates_status_and_can_be_retried(tmp_path: Path) 
     assert not (ctx.config_dir / "skills" / ALIAS).exists()
 
 
+# -- updates projection ----------------------------------------------------------------
+
+
+def test_a_failed_skill_update_is_counted_and_reported_as_failed(tmp_path: Path) -> None:
+    """QA F3: an errored row must be failed for consumers that read only state.
+
+    The store keeps a retryable row ``available`` on purpose, and the sidebar
+    compensates by also reading ``error_class``; anything else reading the
+    updates projection misses the failure entirely. The projection must derive
+    the failure itself and count it.
+    """
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    checks = svc.check_items(ctx, kinds=("skill",))
+    report = svc.apply_items(ctx, kind="skill", checks=checks, replace="local", allow_llm=False)
+    assert report.reports[0].outcome == "refused"
+    assert report.reports[0].error_class == "merge-refused"
+
+    status = svc.status_snapshot(ctx)
+    (row,) = status["items"]
+    assert row["kind"] == "skill" and row["error_class"] == "merge-refused"
+    assert row["state"] == "failed"
+    assert status["counts"]["failed"] == 1 and status["counts"]["available"] == 0
+    assert "failed" in svc.render_status(status)
+
+
+def test_an_errored_row_is_failed_for_every_kind_in_the_projection(tmp_path: Path) -> None:
+    """One rule, no per-kind special case: agents and skills fail the same way."""
+
+    root = tmp_path / "profile"
+    ctx = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=lambda _tenant: None,
+    )
+
+    def fold(doc: dict[str, Any]) -> None:
+        items = doc.setdefault("items", {})
+        for kind, local_id, state in (
+            ("agent", "a1", "available"),
+            ("skill", "s1", "available"),
+            ("team", "t1", "up-to-date"),
+        ):
+            items[f"{kind}:{local_id}"] = {
+                "kind": kind,
+                "name": local_id,
+                "local_id": local_id,
+                "state": state,
+                "error_class": "hub-error" if local_id != "t1" else "no-credential",
+                "last_error": "could not reach the hub",
+            }
+
+    st.StatusStore(root).mutate(fold)
+    status = svc.status_snapshot(ctx)
+    states = {row["name"]: row["state"] for row in status["items"]}
+    assert states == {"a1": "failed", "s1": "failed", "t1": "up-to-date"}
+    assert status["counts"]["failed"] == 2
+    assert status["counts"]["up-to-date"] == 1
+
+
 # -- scope ---------------------------------------------------------------------------
 
 
