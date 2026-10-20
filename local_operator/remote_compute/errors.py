@@ -72,6 +72,19 @@ class NetworkMismatch(RemoteComputeError):
     """
 
 
+class RunIdentityMismatch(RemoteComputeError):
+    """The run Radient answered with is not the run that was asked for.
+
+    Every read is addressed by id (``GET /runs/:id``, ``POST /runs/:id/cancel``),
+    so a body naming another run is a response this client cannot attribute: a
+    cached page, a proxy that answered the wrong path, or a server bug. Printing
+    it would show a state that belongs to work the operator did not ask about,
+    and a cancel would look applied to a run nobody cancelled.
+
+    There is nothing to retry: the id is either the one sent or it is not.
+    """
+
+
 class InvalidIdempotencyKey(RemoteComputeError):
     """A key this client will not put in the header, and WHY, as a code.
 
@@ -128,6 +141,7 @@ __all__ = [
     "InvalidRequest",
     "NetworkMismatch",
     "RemoteComputeError",
+    "RunIdentityMismatch",
     "RunNotFound",
     "Unreachable",
 ]

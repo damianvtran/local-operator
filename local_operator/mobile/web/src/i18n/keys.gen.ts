@@ -342,7 +342,13 @@ export type MessageParams = {
   "wire.remote_compute.detached": { "run_id": string; "network_id": string; "idempotency_key": string };
   "wire.remote_compute.disabled": undefined;
   "wire.remote_compute.failed": { "error": string };
-  "wire.remote_compute.finished": { "run_id": string; "status": string };
+  "wire.remote_compute.finished_cancelled": { "run_id": string };
+  "wire.remote_compute.finished_charged": { "amount": string };
+  "wire.remote_compute.finished_exit_code": { "exit_code": string };
+  "wire.remote_compute.finished_expired": { "run_id": string };
+  "wire.remote_compute.finished_failed": { "run_id": string };
+  "wire.remote_compute.finished_succeeded": { "run_id": string };
+  "wire.remote_compute.finished_unknown": { "run_id": string };
   "wire.remote_compute.interrupted": { "run_id": string };
   "wire.remote_compute.invalid_request": undefined;
   "wire.remote_compute.key_empty": undefined;
@@ -355,7 +361,11 @@ export type MessageParams = {
   "wire.remote_compute.no_capacity": undefined;
   "wire.remote_compute.no_credit": undefined;
   "wire.remote_compute.only_with": { "flag": string };
+  "wire.remote_compute.retrying": undefined;
   "wire.remote_compute.status_line": { "status": string };
+  "wire.remote_compute.status_network_matched": { "network_id": string };
+  "wire.remote_compute.status_network_mismatch": { "network_id": string };
+  "wire.remote_compute.status_network_unconfirmed": undefined;
   "wire.remote_compute.status_unknown": { "status": string };
   "wire.remote_compute.still_running": { "run_id": string; "max_hours": string };
   "wire.remote_compute.submitted": { "run_id": string; "network_id": string };
