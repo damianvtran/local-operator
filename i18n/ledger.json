@@ -2818,8 +2818,8 @@
       "namespace": "wire.settings",
       "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
       "translator": {
-        "agent": "i18n-translator",
-        "model": "unrecorded (feature commit 091db91ef names none)",
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
         "date": "2026-10-19"
       },
       "auditor": {
@@ -2837,8 +2837,8 @@
       "namespace": "wire.settings",
       "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
       "translator": {
-        "agent": "i18n-translator",
-        "model": "unrecorded (feature commit 091db91ef names none)",
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
         "date": "2026-10-19"
       },
       "auditor": {
@@ -2856,8 +2856,8 @@
       "namespace": "wire.settings",
       "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
       "translator": {
-        "agent": "i18n-translator",
-        "model": "unrecorded (feature commit 091db91ef names none)",
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
         "date": "2026-10-19"
       },
       "auditor": {
@@ -2875,8 +2875,8 @@
       "namespace": "wire.settings",
       "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
       "translator": {
-        "agent": "i18n-translator",
-        "model": "unrecorded (feature commit 091db91ef names none)",
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
         "date": "2026-10-19"
       },
       "auditor": {
@@ -2894,8 +2894,8 @@
       "namespace": "wire.settings",
       "source_sha256": "7af5a4d11728d7747c59a27ebd4229452cac814318f60b97e4049f45bb773158",
       "translator": {
-        "agent": "i18n-translator",
-        "model": "unrecorded (feature commit 091db91ef names none)",
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
         "date": "2026-10-19"
       },
       "auditor": {
