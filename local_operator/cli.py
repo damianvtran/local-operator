@@ -8722,6 +8722,16 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     # route and the TUI band read.
                     "unavailable_since": raw.get("unavailable_since") or 0,
                     "last_error": raw.get("last_error") or "",
+                    # The blind state and the suppression counts: ``health_hint``
+                    # renders from the INDEX row, so a listing that dropped
+                    # them could only ever say "nothing has changed" for a
+                    # watch that was suppressing changes or comparing a
+                    # truncated result.
+                    "suppressed": (
+                        raw.get("suppressed") if isinstance(raw.get("suppressed"), dict) else {}
+                    ),
+                    "blind": bool(raw.get("blind")),
+                    "blind_reason": raw.get("blind_reason") or "",
                     "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
@@ -8756,6 +8766,18 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "dormant"
     if row["disabled"]:
         return "disabled"
+    # EXPIRED outranks blind (review round 1, F5): a watch past ``until_at``
+    # will not tick again, so "cannot compare" names a failure that can no
+    # longer cost a missed change. The same rule in ``store.health_hint`` and
+    # the TUI band keeps all surfaces on one precedence.
+    until = row.get("until_at")
+    if isinstance(until, int) and not isinstance(until, bool) and until <= int(time.time() * 1000):
+        return "expired"
+    if row.get("blind"):
+        # A blind watch is armed and ticking but reports nothing; like disabled
+        # it outranks the clock, because the due time is the one thing that
+        # still looks healthy.
+        return "blind"
     if row["due_in_s"] is None:
         return "waiting"
     from local_operator.monitors import store as monitor_store
@@ -8766,38 +8788,30 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
 
 
 def _monitor_detail(row: "dict[str, Any]") -> str:
-    """The monitor row's tail: health FIRST, then the interval and counters.
+    """The monitor row's tail: the interval and counters.
 
-    ORDER IS THE DEGRADATION POLICY (design review round 1, D6). The table is
-    clamped to the terminal, and a hint appended last was the first thing cut —
-    measured at ``COLUMNS=80``, every hint was truncated away while the counters
-    beside it survived. Leading with the health means a narrow row loses the
-    boilerplate instead, and the DUE column's state word (``idle``) carries the
-    short form of the same fact.
+    The health sentence is NOT here (design review round 1, D2). Leading with
+    it was the round-1 degradation policy, but at 60–80 columns the whole row
+    was clipped after the label and counters, so the one fact that must not be
+    lost went first — ``m_supp … · 20 checks, 0 deliveries — 7…``. The hint now
+    prints on its own indented line beneath the row (``monitor_command``),
+    wrapped to the terminal, where no column budget can eat it. The hint is
+    still read here for the duplication rules below (the zero-deliveries hint
+    already names the counters it would otherwise repeat).
     """
     from local_operator.harness.wake import format_duration
     from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
     now = int(time.time() * 1000)
-    # The hint is shared with the agent tool, the desktop route and the TUI band
-    # (§D6) so one monitor cannot read as healthy on one surface and stalled on
-    # another.
     hint = monitor_store.health_hint(row, now)
 
     parts: list[str] = []
     clause = ""
     if row.get("disabled"):
-        # ``disabled_clause``, not the stored string: it folds the reason into
-        # one line (a live disable carries ``invalid arguments:\n- path: …``,
-        # which printed its continuation at column 0 and broke the table — UX
-        # round 1, U3) and prefers the counters' plain cause to a raw tool
-        # banner (U4). The row leads with it, so it has to be readable.
         clause = monitor_store.disabled_clause(row)
         if clause:
             parts.append(clause)
-    if hint:
-        parts.append(hint)
     if monitor_store.is_idle(row, now) and not (hint and hint.startswith("never checked")):
         # "overdue by 2h — session not open" and "never checked — its session was
         # not open since arming" are ONE fact said twice (D7): the idle detail
@@ -8810,10 +8824,12 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
         parts.append("once")
     if row.get("checks"):
         # The zero-deliveries hint OPENS with the same count ("12 checks, 0
-        # deliveries"), so the standalone counter would say it twice in one row
-        # — the D7 defect in its other form.
+        # deliveries"), and the suppression hint names it inside its news clause
+        # ("7 changes suppressed as non-material (12 checks, 0 deliveries) —
+        # …"). Either spelling means the standalone counter would say it twice
+        # in one row — the D7 defect in its other form (review round 2, F2).
         counter_clause = f"{int(row['checks'])} checks"
-        if not (hint and hint.startswith(counter_clause)):
+        if not (hint and (hint.startswith(counter_clause) or f"({counter_clause}" in hint)):
             parts.append(counter_clause)
     age = row.get("last_check_age_s")
     if age is not None:
@@ -8849,16 +8865,23 @@ def monitor_command(args: argparse.Namespace) -> int:
         return 0
 
     import shutil
+    import textwrap
+
+    from local_operator.monitors import store as monitor_store
 
     # A fixed-width table, matching `lop wake list` right next door rather
     # than inventing a second listing convention. The monitor label is what
     # gets clamped (the reader recognises a name from its opening words);
-    # the state word and the tail are never cut silently.
+    # the state word and the tail are never cut silently. A health hint is not
+    # part of the clampable detail: it prints on its own indented, wrapped line
+    # beneath the row, because at 60–80 columns the row budget cut the hint
+    # AND its reason away (design review round 1, D2).
     term_width = shutil.get_terminal_size((80, 24)).columns
     state_w = max(11, max(len(_monitor_state_word(row)) for row in rows))
     id_w = 13
     detail_w = max(24, term_width - state_w - id_w - 2)
     print(f"{'DUE':>{state_w}} {'SESSION':<{id_w}} MONITOR")
+    now = int(time.time() * 1000)
     for row in rows:
         state = _monitor_state_word(row)
         label = f"{row['monitor_id']} {row['name']}".strip()
@@ -8868,6 +8891,15 @@ def monitor_command(args: argparse.Namespace) -> int:
             detail = detail[: max(detail_w - 1, 1)] + "…"
         line = f"{state:>{state_w}} {_elide_id(row['session_id'], id_w):<{id_w}} {detail}"
         print(line.rstrip())
+        hint = monitor_store.health_hint(row, now)
+        if hint:
+            for wrapped in textwrap.wrap(
+                hint,
+                width=max(20, term_width),
+                initial_indent="  ",
+                subsequent_indent="  ",
+            ):
+                print(wrapped.rstrip())
 
     # One legend under the table rather than the same sentence on every row,
     # and only for the states actually present (the wake list's rule).
@@ -8886,9 +8918,17 @@ def monitor_command(args: argparse.Namespace) -> int:
         # One clause, because the row above already says "session not open"
         # (D7): the legend's job is to say what to DO, not to restate the row.
         legend.append(("idle", "no session is hosting it — reopen it to resume"))
+    if any(row.get("blind") for row in rows) and any(
+        _monitor_state_word(row) == "blind" for row in rows
+    ):
+        legend.append(
+            (
+                "blind",
+                "it cannot compare its full result, so changes are not reported; "
+                "the indented health line beneath its row names the reason",
+            )
+        )
     if legend:
-        import textwrap
-
         legend_w = max(len(word) for word, _ in legend) + 1
         for word, text in legend:
             print()
