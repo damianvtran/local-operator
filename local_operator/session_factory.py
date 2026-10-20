@@ -2005,7 +2005,7 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
     # hint row at the global tree for a row that does not live there. Older
     # callers and tests pass a duck-typed registry without the seam; keep the
     # historical global path for those rather than failing hint enrichment.
-    agent_dir_method = getattr(agent_registry, "agent_dir", None)
+    agent_dir_method: Callable[[str], Path] | None = getattr(agent_registry, "agent_dir", None)
     for agent in agents:
         semantic_parts = [
             sanitize_prompt_line(str(agent.description or "")),
@@ -2015,11 +2015,11 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         semantic = " ".join(part for part in semantic_parts if part).strip()
         if not semantic:
             continue
-        agent_dir = (
-            agent_dir_method(agent.id)
-            if callable(agent_dir_method)
-            else Path(agent_registry.config_dir) / "agents" / agent.id
-        )
+        agent_dir: Path
+        if agent_dir_method is not None:
+            agent_dir = agent_dir_method(agent.id)
+        else:
+            agent_dir = Path(agent_registry.config_dir) / "agents" / agent.id
         hints.append(
             Skill(
                 name=f"registered-agent-{agent.id}",
