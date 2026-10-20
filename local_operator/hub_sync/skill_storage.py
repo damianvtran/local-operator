@@ -67,9 +67,12 @@ class ManagedSkillStorage:
         ``baseline_path`` validates ``local_id`` as a single safe path segment; reusing
         it means the marker cannot be aimed outside ``hub/unpull`` by a crafted id.
         """
-        return self.config_dir / "hub" / "unpull" / baseline_path(
-            self.config_dir, "skill", local_id
-        ).name
+        return (
+            self.config_dir
+            / "hub"
+            / "unpull"
+            / baseline_path(self.config_dir, "skill", local_id).name
+        )
 
     def _tombstone(self, local_id: str, operation: str) -> Path:
         return self.config_dir / "hub" / "backups" / f"skill-{local_id}-unpull-{operation}"

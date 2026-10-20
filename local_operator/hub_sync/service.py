@@ -1306,9 +1306,7 @@ def _apply_skill(
         # The disk copy is alias-rendered; its fingerprint is what the storage
         # re-verifies under its lock (a local edit since this check refuses).
         # An absent link has no bytes, so the precondition is exactly None.
-        before_fingerprint = (
-            None if local_doc is None else local_doc.with_name(alias).fingerprint
-        )
+        before_fingerprint = None if local_doc is None else local_doc.with_name(alias).fingerprint
     except SkillValidationError as exc:
         return fail(
             "merge-refused", f"the merged skill cannot be rendered locally: {exc}", "refused"
@@ -2344,7 +2342,10 @@ def _resolve_remote_skill(
         _served_by,
     )
     from local_operator.hub_sync.identity import approve_source
-    from local_operator.hub_sync.skill_document import SkillValidationError, validate_name
+    from local_operator.hub_sync.skill_document import (
+        SkillValidationError,
+        validate_name,
+    )
     from local_operator.providers.radient_credentials import (
         ORG_LOGIN_REMEDY,
         configured_radient_base_url,
@@ -2474,7 +2475,10 @@ def install_skill(
 
     from local_operator.config import read_config_values
     from local_operator.hub_sync import policies as pol
-    from local_operator.hub_sync.skill_document import SkillDocument, SkillValidationError
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
     from local_operator.hub_sync.skill_storage import ManagedSkillStorage
     from local_operator.hub_sync.transactions import TransactionError
 
