@@ -10,7 +10,7 @@ incredibly slick", did not align with the message column, and had "a weird bar o
 **Base:** `origin/main` at `4da76988b5` (prelude v5) for the three-width before set.
 **Round-1 head:** `ce84e17e2d` (prelude v6) for the many-bar before set — the case the first
 round did not cover.
-**After:** this remediation, prelude v7 (`b227c3ed80`) for the shape set and v8 (`fbd90306e0`) for the vertical scroll-lock set.
+**After:** prelude v7 (`b227c3ed80`) for the shape set, v8 (`fbd90306e0`) for the vertical scroll-lock set, and v9 (`f52360cb25`) for the tall-content scroller.
 
 This directory lives on an evidence-only branch so the PR branch carries no evidence files.
 It is not merged.
@@ -58,7 +58,31 @@ and leave the grid louder than the bars. The v7 after frames keep one compact ba
 label column to the longest label, end the two-tick axis on 0.6, put every value outside its
 bar, and suppress value/last-category labels only when a 14 px label cannot fit the band.
 
+
+
+## v9 tall content — 30-row table
+
+`html{overflow:hidden}` alone clipped a 30-row table (876 px document) at the 480 px host
+clamp with no affordance. v9 makes the body the scroller (`overflow:hidden auto;max-height:100vh`)
+and reports `body.scrollHeight`; normal content never scrolls, oversized content scrolls to its
+last row. The chart width is the viewport minus the body's 4 px padding, so a body scrollbar
+cannot narrow a chart and recreate the 379/373 lock.
+
+| case | v8 before | v9 after |
+|---|---|---|
+| 30 rows @810, seed 320 | body `810×876`, body scrollbar 0, `bodyTop 0`, row 30 bottom 868, not visible | body `795×480`, body scrollbar 15, `bodyTop 396.5`, row 30 bottom 471, visible |
+| 30 rows @620 | — | body `605×480`, scrollbar 15, row 30 visible |
+| 30 rows @1200 | — | body `1185×480`, scrollbar 15, row 30 visible |
+| 4-bar @810, seed 373 | `810×373`, 15 px strip | `810×379`, scrollbar 0, reports `[379,379,379]` |
+| 4-bar @620 / @1200 | — | `620×293` / `1200×412`, scrollbar 0 |
+
+Frames: `table-before-810.png` (clipped at row 16, no scrollbar), `table-after-810.png`
+(scrolled to row 30, body scrollbar), `table-after-620.png`, `table-after-1200.png`;
+`vertical-after-810.png` (no strip). `render_table.py` builds the clamped host and scrolls
+the body to the end; `render_vertical.py` logs the resize reports.
+
 ## v8 scroll-lock — vertical four-bar chart
+
 
 The operator's "weird bar on the right" was a VERTICAL four-bar chart at an 810 px column.
 The host seeds `height_hint` 320, but the prelude's first layout at 810 is 363 px; with the
