@@ -28,7 +28,7 @@
   "wire.remote_compute.only_with": "{flag} केवल --remote के साथ लागू होता है।",
   "wire.remote_compute.replayed": "आइडेम्पोटेंसी कुंजी पहले भेजे गए किसी अनुरोध से मेल खाती है, इसलिए यह रिमोट रन {run_id} ही है और कोई नया रन नहीं बनाया गया।",
   "wire.remote_compute.retrying": "Radient ने इस रन में त्रुटि बताई है और इसे फिर से आज़माएगा, इसलिए निगरानी जारी है।",
-  "wire.remote_compute.run_identity_mismatch": "Radient ने रिमोट रन {answered} के लिए उत्तर दिया, उस रन {asked_for} के लिए नहीं जिसके लिए अनुरोध किया गया था, इसलिए इस उत्तर को उस रन की स्थिति के रूप में नहीं बताया जा सकता।",
+  "wire.remote_compute.run_identity_mismatch": "Radient ने रिमोट रन {answered} लौटाया, न कि वह रन {asked_for} जिसके लिए अनुरोध किया गया था, इसलिए इस उत्तर को उस रन की स्थिति के रूप में नहीं बताया जा सकता।",
   "wire.remote_compute.status_line": "स्थिति: {status}",
   "wire.remote_compute.status_network_matched": "नेटवर्क जाँचा गया: यह रन {network_id} में है, जो इस डिवाइस का नेटवर्क है।",
   "wire.remote_compute.status_network_mismatch": "नेटवर्क जाँचा गया: यह रन {network_id} में है, जो इस डिवाइस का नेटवर्क नहीं है।",
@@ -38,5 +38,5 @@
   "wire.remote_compute.submitted": "रिमोट रन {run_id} सबमिट हो गया।\nनेटवर्क (Radient द्वारा पुष्टि किया गया): {network_id}",
   "wire.remote_compute.unknown_run": "चुने गए लॉगिन के लिए Radient के पास ऐसा कोई रिमोट रन नहीं है।",
   "wire.remote_compute.unreachable": "Radient तक पहुँचा नहीं जा सका; नेटवर्क जाँचें और फिर कोशिश करें।",
-  "wire.remote_compute.unreadable_envelope": "Radient की प्रतिक्रिया का प्रारूप बदल गया है और lop का यह बिल्ड उसे पढ़ नहीं सकता। lop को `lop-update` से अपडेट करें और फिर से प्रयास करें।"
+  "wire.remote_compute.unreadable_envelope": "Radient की प्रतिक्रिया का प्रारूप बदल गया है और lop का यह संस्करण उसे पढ़ नहीं सकता। lop को `lop-update` से अपडेट करें और फिर से प्रयास करें।"
 }

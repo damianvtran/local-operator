@@ -2913,7 +2913,7 @@
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
@@ -2930,28 +2930,28 @@
     {
       "locale": "es",
       "namespace": "wire.remote_compute",
-      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "source_sha256": "be62c15c9089fee33586214f2be22d01093738177b4020830b26aaba78dde1bb",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
       "auditor": {
-        "agent": "i18n-auditor (independent)",
+        "agent": "i18n-auditor (independent, scoped re-audit)",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20",
         "result": "passed",
         "findings": 1
       },
       "status": "passed",
-      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal."
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'Radient respondió por … no por …', which asserts answering ON A RUN'S BEHALF; it now uses the construction this namespace already uses for the same fact (network_mismatch 'respondió con'): 'respondió con la ejecución remota {answered}, no con la ejecución {asked_for} solicitada'. unreadable_envelope keeps 'esta versión' (finished_unknown/status_unknown) for build; replayed's 'no se creó ninguna nueva' is read as the run and left alone. Rendered 158/225/139 cells; run_identity_mismatch wraps to 3 terminal lines at 80 columns, as en does there. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set)."
     },
     {
       "locale": "fr",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
@@ -2968,28 +2968,28 @@
     {
       "locale": "fr",
       "namespace": "wire.remote_compute",
-      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "source_sha256": "be62c15c9089fee33586214f2be22d01093738177b4020830b26aaba78dde1bb",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
       "auditor": {
-        "agent": "i18n-auditor (independent)",
+        "agent": "i18n-auditor (independent, scoped re-audit)",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20",
         "result": "passed",
-        "findings": 0
+        "findings": 1
       },
       "status": "passed",
-      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Every round-1 typography fix verified landed: U+202F before : ; ? ! across both namespaces (36 + 7 occurrences, no NBSP, no ASCII apostrophe), including status_line, detached and still_running. Tenant 'confirmé par Radient' in submitted and detached; no isolation/containment claim. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Every round-1 typography fix verified landed: U+202F before : ; ? ! across both namespaces (36 + 7 occurrences, no NBSP, no ASCII apostrophe), including status_line, detached and still_running. Tenant 'confirmé par Radient' in submitted and detached; no isolation/containment claim. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'a répondu pour … et non pour …', the on-behalf-of sense; now 'a répondu avec … et non avec …', matching network_mismatch's 'a répondu avec'. U+202F before : kept in both new colons (2 occurrences across the three keys), no NBSP, no ASCII apostrophe, ’ preserved. Rendered 182/232/138 cells: replayed takes 3 wrapped lines at 80 columns where en takes 2, which no compliant fr rendering avoids (+25% of 137 is 171, itself 3 lines) and which disappears at 100 columns where both are 2; stderr wraps, nothing truncates. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set)."
     },
     {
       "locale": "hi",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
@@ -3006,28 +3006,28 @@
     {
       "locale": "hi",
       "namespace": "wire.remote_compute",
-      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "source_sha256": "be62c15c9089fee33586214f2be22d01093738177b4020830b26aaba78dde1bb",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
       "auditor": {
-        "agent": "i18n-auditor (independent)",
+        "agent": "i18n-auditor (independent, scoped re-audit)",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20",
         "result": "passed",
         "findings": 2
       },
       "status": "passed",
-      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: 'Radient द्वारा पुष्टि किया गया' in submitted and detached, detach 'निगरानी करने के बजाय', network 'जिस नेटवर्क से रन सबमिट करना है'. 2 MINOR fixed in still_running (changed key): the watch is PAST tense ('निगरानी रोक चुका है', was present 'रोक रहा है'), and 'इसे यहाँ जाँचें' (check it here) became 'जाँचने के लिए', the file's own '<verb> के लिए: <command>' pattern as in interrupted. No isolation wording; placeholders and flags byte-identical. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 68/81 cells against en's 77/98, every line inside the terminal."
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: 'Radient द्वारा पुष्टि किया गया' in submitted and detached, detach 'निगरानी करने के बजाय', network 'जिस नेटवर्क से रन सबमिट करना है'. 2 MINOR fixed in still_running (changed key): the watch is PAST tense ('निगरानी रोक चुका है', was present 'रोक रहा है'), and 'इसे यहाँ जाँचें' (check it here) became 'जाँचने के लिए', the file's own '<verb> के लिए: <command>' pattern as in interrupted. No isolation wording; placeholders and flags byte-identical. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 68/81 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 2 findings fixed: (1) run_identity_mismatch read 'रिमोट रन {answered} के लिए उत्तर दिया, उस रन {asked_for} के लिए नहीं' — the 'for' sense drifts toward answering on a run's behalf; it now uses this namespace's own 'लौटाया' (network_mismatch): 'रिमोट रन {answered} लौटाया, न कि वह रन {asked_for} जिसके लिए अनुरोध किया गया था'. (2) unreadable_envelope said 'बिल्ड' where both finished_unknown and status_unknown render build as 'संस्करण'; now 'lop का यह संस्करण'. Polite imperative (करें), danda, 'नहीं बताया जा सकता' and the `<verb> के लिए: <command>` pattern preserved; no ZWJ/ZWNJ; lop and `lop-update` stay Latin. Rendered 118/174/110 cells, no extra terminal line at 80 or 100 columns. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set)."
     },
     {
       "locale": "ru",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
@@ -3044,28 +3044,28 @@
     {
       "locale": "ru",
       "namespace": "wire.remote_compute",
-      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "source_sha256": "be62c15c9089fee33586214f2be22d01093738177b4020830b26aaba78dde1bb",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
       "auditor": {
-        "agent": "i18n-auditor (independent)",
+        "agent": "i18n-auditor (independent, scoped re-audit)",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20",
         "result": "passed",
-        "findings": 0
+        "findings": 1
       },
       "status": "passed",
-      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: network_mismatch 'отнести к запускам этой сети', still_running 'команда прекратила слежение' (past tense), retranslated for the new 'limit Radient reported' wording. Tenant 'подтверждена Radient' in submitted and detached; no isolation/containment claim; no typographic space before : ; as the ru guide requires. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: network_mismatch 'отнести к запускам этой сети', still_running 'команда прекратила слежение' (past tense), retranslated for the new 'limit Radient reported' wording. Tenant 'подтверждена Radient' in submitted and detached; no isolation/containment claim; no typographic space before : ; as the ru guide requires. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'ответил за …', which in Russian means answering (or taking responsibility) FOR something, not answering with it; now 'вернул удалённый запуск {answered}, а не запрошенный запуск {asked_for}', matching network_mismatch's 'вернул запуск из другой сети'. unreadable_envelope keeps 'эта сборка', the term finished_unknown and status_unknown use. Rendered 150/191/129 cells; run_identity_mismatch is 3 lines at 80 columns, as en is there. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set)."
     },
     {
       "locale": "vi",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
@@ -3082,21 +3082,21 @@
     {
       "locale": "vi",
       "namespace": "wire.remote_compute",
-      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "source_sha256": "be62c15c9089fee33586214f2be22d01093738177b4020830b26aaba78dde1bb",
       "translator": {
-        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20"
       },
       "auditor": {
-        "agent": "i18n-auditor (independent)",
+        "agent": "i18n-auditor (independent, scoped re-audit)",
         "model": "deepseek/deepseek-flash",
         "date": "2026-10-20",
         "result": "passed",
-        "findings": 0
+        "findings": 2
       },
       "status": "passed",
-      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 2 findings fixed: (1) run_identity_mismatch read 'trả lời cho lần chạy từ xa {answered}', i.e. replying TO a run; it now uses network_mismatch's 'trả về': 'Radient trả về lần chạy từ xa {answered} …'. (2) unreadable_envelope said 'bản lop này' where finished_unknown and status_unknown render build as 'bản dựng'; now 'bản dựng lop này'. NFC throughout, no ASCII apostrophe, 'Khóa idempotency' matches the four existing key_* rows, verb-only address. Rendered 156/207/126 cells; run_identity_mismatch is 3 lines at 80 and 100 columns, en being 195 cells is 2 only by 5 cells at 100. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set)."
     }
   ]
 }
