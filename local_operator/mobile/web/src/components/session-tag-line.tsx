@@ -19,7 +19,6 @@
  */
 import { cn } from "../lib/cn";
 import { compressedTags } from "../lib/session-tags";
-import { messageRuntime } from "../store";
 import type { TagRef } from "../types";
 
 export function SessionTagLine({
@@ -49,9 +48,7 @@ export function SessionTagLine({
 					{tag.id === primary ? (
 						<>
 							<span aria-hidden>•</span>
-							<span className="sr-only">
-								{messageRuntime.t("relay.session.tags.primary")}
-							</span>
+							<span className="sr-only">primary</span>
 						</>
 					) : null}
 					<span className="truncate">{tag.name}</span>
@@ -60,9 +57,7 @@ export function SessionTagLine({
 			{overflow > 0 ? (
 				<span
 					className="shrink-0"
-					aria-label={messageRuntime.t("relay.session.tags.more", {
-						count: overflow,
-					})}
+					aria-label={`${overflow} more ${overflow === 1 ? "tag" : "tags"}`}
 				>
 					+{overflow}
 				</span>

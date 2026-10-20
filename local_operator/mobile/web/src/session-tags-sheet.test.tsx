@@ -14,7 +14,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionTagsSheet } from "./components/session-tags-sheet";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import type { TagCatalogueEntry, TagRef } from "./types";
 
 const getTags = vi.fn();
@@ -492,13 +491,21 @@ describe("the frame race", () => {
 });
 
 describe("copy and storage", () => {
-	it("ships every tag key in the English bundle", () => {
-		const messages = BUNDLED_OWNED["relay.session"] ?? {};
-		const keys = Object.keys(messages).filter((key) =>
-			key.startsWith("relay.session.tags."),
-		);
-		expect(keys).toHaveLength(18);
-		for (const key of keys) expect(messages[key]).not.toBe("");
+	/* The tag copy is advisory literal copy this slice deliberately does not
+	   extract (the catalogue keys land with the baseline i18n lane), so a bundle
+	   test would assert nothing. What must hold is that the sheet RENDERS the
+	   copy: the title, the completion control, the primary legend and label, and
+	   the destructive entry. */
+	it("renders the tag copy as visible text", async () => {
+		renderSheet({ assigned: [WORK], primary: "work" });
+		await ready();
+		expect(screen.getByRole("dialog", { name: "tags" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "done" })).toBeTruthy();
+		expect(screen.getByText("primary")).toBeTruthy();
+		expect(
+			screen.getByRole("radio", { name: "make Work the primary tag" }),
+		).toBeTruthy();
+		expect(screen.getByRole("button", { name: "remove all tags" })).toBeTruthy();
 	});
 
 	it("keeps no local store: the relay's assignment is the only one", async () => {

@@ -35,7 +35,11 @@ import {
 import { getAttentionUnread, getDirectories, markAllSeen, setSessionPin, startSession } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
 import { SessionTagLine } from "../components/session-tag-line";
-import { SessionTagsSheet } from "../components/session-tags-sheet";
+import {
+	PIN_AND_TAGS_HINT_TEXT,
+	SessionTagsSheet,
+	TAGS_ACTION_LABEL,
+} from "../components/session-tags-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { markPendingFocus } from "../lib/pending-focus";
@@ -1627,9 +1631,7 @@ export function SessionListScreen() {
 							</p>
 							{tagsAvailable ? (
 								<p className="mx-2 mb-2 text-meta text-ink-dim">
-									{messageRuntime.t(
-										"relay.session.list.pin_and_tags_hint",
-									)}
+									{PIN_AND_TAGS_HINT_TEXT}
 								</p>
 							) : null}
 						</div>
@@ -1816,7 +1818,7 @@ export function SessionListScreen() {
 							<span className="w-4 shrink-0 text-accent" aria-hidden>
 								#
 							</span>
-							{messageRuntime.t("relay.session.tags.action")}
+							{TAGS_ACTION_LABEL}
 						</button>
 					) : null}
 					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own

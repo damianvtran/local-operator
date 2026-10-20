@@ -26,10 +26,6 @@ def list_no_matches() -> Msg:
     return Msg("relay.session.list.no_matches", {})
 
 
-def list_pin_and_tags_hint() -> Msg:
-    return Msg("relay.session.list.pin_and_tags_hint", {})
-
-
 def list_search_placeholder() -> Msg:
     return Msg("relay.session.list.search_placeholder", {})
 
@@ -68,78 +64,6 @@ def past_loading() -> Msg:
 
 def past_search_placeholder() -> Msg:
     return Msg("relay.session.past.search_placeholder", {})
-
-
-def tags_action() -> Msg:
-    return Msg("relay.session.tags.action", {})
-
-
-def tags_cancel() -> Msg:
-    return Msg("relay.session.tags.cancel", {})
-
-
-def tags_done() -> Msg:
-    return Msg("relay.session.tags.done", {})
-
-
-def tags_empty() -> Msg:
-    return Msg("relay.session.tags.empty", {})
-
-
-def tags_empty_hint() -> Msg:
-    return Msg("relay.session.tags.empty_hint", {})
-
-
-def tags_limit_hint(*, count: str) -> Msg:
-    return Msg("relay.session.tags.limit_hint", {"count": count})
-
-
-def tags_load_error() -> Msg:
-    return Msg("relay.session.tags.load_error", {})
-
-
-def tags_loading() -> Msg:
-    return Msg("relay.session.tags.loading", {})
-
-
-def tags_make_primary(*, name: str) -> Msg:
-    return Msg("relay.session.tags.make_primary", {"name": name})
-
-
-def tags_missing() -> Msg:
-    return Msg("relay.session.tags.missing", {})
-
-
-def tags_more(*, count: int | float) -> Msg:
-    return Msg("relay.session.tags.more", {"count": count})
-
-
-def tags_primary() -> Msg:
-    return Msg("relay.session.tags.primary", {})
-
-
-def tags_remove_all() -> Msg:
-    return Msg("relay.session.tags.remove_all", {})
-
-
-def tags_remove_all_confirm() -> Msg:
-    return Msg("relay.session.tags.remove_all_confirm", {})
-
-
-def tags_retry() -> Msg:
-    return Msg("relay.session.tags.retry", {})
-
-
-def tags_save_error() -> Msg:
-    return Msg("relay.session.tags.save_error", {})
-
-
-def tags_saving() -> Msg:
-    return Msg("relay.session.tags.saving", {})
-
-
-def tags_sheet_title() -> Msg:
-    return Msg("relay.session.tags.sheet_title", {})
 
 
 def view_back() -> Msg:
