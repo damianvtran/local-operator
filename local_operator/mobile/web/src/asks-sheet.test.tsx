@@ -32,7 +32,7 @@ vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
-		useSessions: () => ({ sessions: rows, connected: true }),
+		useSessions: () => ({ sessions: rows, connected: true, revision: 0 }),
 		useProjection: () => slot,
 		useAsksRevision: () => {
 			const next = actual.asksPopulationSignature(rows);

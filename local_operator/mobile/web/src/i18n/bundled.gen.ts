@@ -26,6 +26,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.session.directory.sheet_title": "working directory",
     "relay.session.list.empty_hint": "start one below, or from the TUI on your machine",
     "relay.session.list.no_matches": "no matching conversations",
+    "relay.session.list.pin_and_tags_hint": "touch and hold a row to pin or tag it",
     "relay.session.list.search_placeholder": "Search conversations\u2026",
     "relay.session.list.start_busy": "starting\u2026",
     "relay.session.list.start_idle": "new session",

@@ -330,7 +330,28 @@ function SessionCard({
 			onPointerUp={cancelPress}
 			onPointerLeave={cancelPress}
 			onPointerCancel={cancelPress}
-			onContextMenu={(event) => event.preventDefault()}
+			/* THE SAME REQUEST, WITHOUT A POINTER. A right-click and the platform's
+			   long-press context menu both mean "actions for this row", so they open
+			   the sheet instead of being swallowed. */
+			onContextMenu={(event) => {
+				event.preventDefault();
+				onLongPress?.();
+			}}
+			/* Shift+F10 and the dedicated ContextMenu key are the keyboard's version
+			   of that request. Enter and Space are deliberately NOT here: on this
+			   control they activate the row and open the conversation, and making them
+			   also open a sheet would leave one key with two meanings. */
+			onKeyDown={(event) => {
+				if (
+					(event.key === "F10" && event.shiftKey) ||
+					event.key === "ContextMenu"
+				) {
+					event.preventDefault();
+					onLongPress?.();
+				}
+			}}
+			aria-haspopup="dialog"
+			aria-keyshortcuts="Shift+F10"
 			onClick={() => {
 				if (suppressClick.current) {
 					suppressClick.current = false;
@@ -848,7 +869,7 @@ function usePaintedRows(
 }
 
 export function SessionListScreen() {
-	const { sessions, connected } = useSessions();
+	const { sessions, connected, revision } = useSessions();
 	const capabilities = useCapabilities();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and
 	   its top in LAYOUT space (see `layoutTop`). The element is part of the
@@ -922,19 +943,12 @@ export function SessionListScreen() {
 	   `pinTarget`: a repaint must not leave the sheet describing a stale object,
 	   so the row is re-read from live `sessions` on every render. */
 	const [tagsTarget, setTagsTarget] = useState<string | null>(null);
-	/* Monotonic count of LIST FRAMES applied since mount. The tag sheet compares
-	   it at write start and at read-back, so a write's answer cannot paint over a
-	   newer authoritative frame (the relay wakes the list on success, so the
-	   frame usually arrives first). Counted from the store's array identity —
-	   every SSE frame replaces it — rather than from a tag-specific value, because
-	   the rule is about frame ORDER, not about which field moved. */
-	const lastFrameSource = useRef(sessions);
-	const [frame, setFrame] = useState(0);
-	useEffect(() => {
-		if (lastFrameSource.current === sessions) return;
-		lastFrameSource.current = sessions;
-		setFrame((count) => count + 1);
-	}, [sessions]);
+	/* The row that OPENED the tag sheet, so Done/Escape returns focus there. The
+	   opener is the row, not the pin sheet's `Tags…` button: that button is
+	   unmounted in the same commit the tag sheet opens, and focused elements
+	   removed from the DOM drop focus to `<body>`. Captured before the close so
+	   the ref is already pointing at a live element when `Sheet` reads it. */
+	const tagsReturnFocusRef = useRef<HTMLElement | null>(null);
 	/* THE REFUSAL TO RENDER INSIDE THAT SHEET, and the row it answers for.
 
 	   Held as a pair rather than as one sentence because the answer can land
@@ -1594,9 +1608,30 @@ export function SessionListScreen() {
 						aria-hidden={showPinHint ? undefined : true}
 					>
 						<div className="overflow-hidden">
-							<p className="mx-2 mb-2 text-meta text-ink-dim">
+							{/* TWO SENTENCES, ONE SLOT. When the relay serves tags the caption
+							    must name BOTH gestures a long-press offers; on a relay without
+							    the capability the old sentence stays exactly as it was, because
+							    promising "or tag it" there would advertise a sheet whose
+							    requests 404. Each variant is its own paragraph so the one that
+							    does not apply is `display: none` (out of the accessibility tree
+							    and out of the collapse's measured height), and the first keeps
+							    the original paragraph as its text element — the shape both the
+							    copy baseline and the caption's own geometry tests read. */}
+							<p
+								className={cn(
+									"mx-2 mb-2 text-meta text-ink-dim",
+									tagsAvailable && "hidden",
+								)}
+							>
 								touch and hold a row to pin it
 							</p>
+							{tagsAvailable ? (
+								<p className="mx-2 mb-2 text-meta text-ink-dim">
+									{messageRuntime.t(
+										"relay.session.list.pin_and_tags_hint",
+									)}
+								</p>
+							) : null}
 						</div>
 					</div>
 					{rows.length === 0 ? (
@@ -1768,6 +1803,11 @@ export function SessionListScreen() {
 							type="button"
 							onClick={() => {
 								if (!pinRow) return;
+								/* Captured while the row is still on screen: `Sheet` reads
+								   `returnFocusRef` when it opens, and the pin sheet's own
+								   button is unmounted in that same commit. */
+								tagsReturnFocusRef.current =
+									cardRefs.current.get(pinRow.session_id) ?? null;
 								setPinTarget(null);
 								setTagsTarget(pinRow.session_id);
 							}}
@@ -1813,7 +1853,8 @@ export function SessionListScreen() {
 				sessionId={tagsRow?.session_id ?? ""}
 				assigned={tagsRow?.tags ?? []}
 				primary={tagsRow?.primary ?? null}
-				revision={frame}
+				revision={revision}
+				returnFocusRef={tagsReturnFocusRef}
 			/>
 		</div>
 	);

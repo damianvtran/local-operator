@@ -8,7 +8,7 @@
 // released relays that have none of these routes, so a build gated on it would
 // offer a screen whose requests 404. `capabilities.session_tags.available` is
 // the only gate, and absence must leave NO control behind.
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionListScreen } from "./screens/session-list";
 import type { Capabilities, SessionSummary, TagCatalogueEntry } from "./types";
@@ -27,7 +27,7 @@ vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
-		useSessions: () => ({ sessions: sessionList, connected: true }),
+		useSessions: () => ({ sessions: sessionList, connected: true, revision: 0 }),
 		useCapabilities: () => capabilities,
 		retainSessionListStream: () => () => {},
 		applySessionPin: () => {},
@@ -241,5 +241,86 @@ describe("reaching the assignment sheet", () => {
 		longPress(cardByName("Alpha"));
 		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
 		expect(await screen.findByRole("button", { name: "Tags…" })).toBeTruthy();
+	});
+});
+
+describe("the action sheet without a pointer", () => {
+	it("advertises the sheet and opens it from Shift+F10", async () => {
+		capabilities = { session_tags: { available: true } };
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const card = cardByName("Alpha");
+		expect(card.getAttribute("aria-haspopup")).toBe("dialog");
+		expect(card.getAttribute("aria-keyshortcuts")).toBe("Shift+F10");
+
+		fireEvent.keyDown(card, { key: "F10", shiftKey: true });
+		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+	});
+
+	it("opens from the dedicated ContextMenu key", async () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		fireEvent.keyDown(cardByName("Alpha"), { key: "ContextMenu" });
+		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+	});
+
+	it("opens from the pointer's context menu", async () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		fireEvent.contextMenu(cardByName("Alpha"));
+		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+	});
+
+	it("leaves Enter and Space to the row's own navigation", () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const card = cardByName("Alpha");
+		fireEvent.keyDown(card, { key: "Enter" });
+		fireEvent.keyDown(card, { key: " " });
+		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+	});
+});
+
+describe("the tag sheet's focus", () => {
+	it("returns focus to the row that opened it when Done closes the sheet", async () => {
+		capabilities = { session_tags: { available: true } };
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const card = cardByName("Alpha");
+		fireEvent.keyDown(card, { key: "F10", shiftKey: true });
+		fireEvent.click(await screen.findByRole("button", { name: "Tags…" }));
+		await screen.findByRole("checkbox", { name: "Work" });
+
+		fireEvent.click(screen.getByRole("button", { name: "done" }));
+
+		/* The pin sheet's `Tags…` button unmounted when the tag sheet opened; the
+		   row is the opener that survives, and it is where focus must land. */
+		await waitFor(() => expect(document.activeElement).toBe(card));
+	});
+});
+
+describe("the long-press caption", () => {
+	it("names both gestures when the relay serves tags", () => {
+		capabilities = { session_tags: { available: true } };
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		expect(
+			screen.getByText("touch and hold a row to pin or tag it"),
+		).toBeTruthy();
+		/* The older sentence remains in the DOM as the capability-FALSE branch;
+		   it must be hidden, not merely unused. */
+		expect(
+			screen.getByText("touch and hold a row to pin it").className,
+		).toContain("hidden");
+	});
+
+	it("keeps the pin-only sentence on a relay without the capability", () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const old = screen.getByText("touch and hold a row to pin it");
+		expect(old.className).not.toContain("hidden");
+		expect(
+			screen.queryByText("touch and hold a row to pin or tag it"),
+		).toBeNull();
 	});
 });

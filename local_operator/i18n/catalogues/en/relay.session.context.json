@@ -14,6 +14,11 @@
     "tone": "Preserve current copy and casing, lowercase.",
     "note": "Owned relay SPA session copy. Shown when every list section is empty, i.e. a query matched nothing or every row was pinned away."
   },
+  "relay.session.list.pin_and_tags_hint": {
+    "role": "long-press discoverer when the relay also serves tags",
+    "tone": "Preserve current copy and casing, lowercase. Names both verbs a long-press offers.",
+    "note": "Owned relay SPA session copy. Rendered only when capabilities.session_tags.available is true; relays without the tag routes keep the pin-only sentence, so the hint never promises a screen this build cannot serve."
+  },
   "relay.session.list.start_idle": {
     "role": "start-session footer control label (idle)",
     "tone": "Preserve current copy and casing, lowercase.",

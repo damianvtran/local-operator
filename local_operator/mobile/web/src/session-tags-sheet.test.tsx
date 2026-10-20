@@ -10,7 +10,7 @@
 // Both are only observable by holding a promise open and rerendering with a
 // newer revision — which is exactly what the relay does when it wakes the list
 // stream after a successful write.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionTagsSheet } from "./components/session-tags-sheet";
@@ -198,6 +198,167 @@ describe("assignment writes", () => {
 			).toBe(true),
 		);
 		expect(screen.queryByText("saving…")).toBeNull();
+	});
+
+	it("paints the relay's canonical answer, not an echo of the request", async () => {
+		/* A DISCRIMINATING read-back: the mock echoes the request in every other
+		   write test, so deleting the `setDraft(answer)` line left them green.
+		   Here the store answers with a DIFFERENT assignment (assignment order
+		   normalised elsewhere, possibly a fallback primary): the sheet must paint
+		   the answer, and the request's own ids must not survive. */
+		setSessionTags.mockResolvedValueOnce({
+			session_id: "s1",
+			tags: [RESEARCH],
+			primary: "research",
+		});
+		renderSheet();
+		await ready();
+		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
+		await waitFor(() =>
+			expect(
+				(screen.getByRole("checkbox", { name: "Research" }) as HTMLInputElement)
+					.checked,
+			).toBe(true),
+		);
+		expect(
+			(screen.getByRole("checkbox", { name: "Work" }) as HTMLInputElement).checked,
+		).toBe(false);
+		expect(
+			(screen.getByRole("radio", {
+				name: "make Research the primary tag",
+			}) as HTMLInputElement).checked,
+		).toBe(true);
+	});
+});
+
+describe("the primary column", () => {
+	it("labels the column once a tag is selected", async () => {
+		renderSheet({ assigned: [WORK], primary: "work" });
+		await ready();
+		expect(screen.getByText("primary")).toBeTruthy();
+	});
+
+	it("hides the legend when nothing is selected", async () => {
+		renderSheet();
+		await ready();
+		expect(screen.queryByText("primary")).toBeNull();
+	});
+
+	it("gives the radio a 44px box outside the checkbox label", async () => {
+		renderSheet({ assigned: [WORK], primary: "work" });
+		await ready();
+		const radio = screen.getByRole("radio", {
+			name: "make Work the primary tag",
+		});
+		/* The disc stays 16px; the box around it is the touch target. */
+		expect(radio.className).toContain("size-4");
+		const box = radio.closest("label");
+		expect(box).not.toBeNull();
+		expect(box?.className).toContain("size-11");
+		/* A press in that box must mean ONE thing: the radio lives outside the
+		   checkbox's label, so it cannot also toggle the row's membership. */
+		const checkboxLabel = screen
+			.getByRole("checkbox", { name: "Work" })
+			.closest("label");
+		expect(checkboxLabel).not.toBeNull();
+		expect(checkboxLabel?.contains(radio)).toBe(false);
+	});
+});
+
+describe("a target change while a write is in flight", () => {
+	function props(over: Partial<{
+		open: boolean;
+		sessionId: string;
+		assigned: TagRef[];
+		primary: string | null;
+	}> = {}) {
+		return {
+			open: true,
+			onClose: () => {},
+			sessionId: "a",
+			assigned: [WORK] as TagRef[],
+			primary: "work" as string | null,
+			revision: 0,
+			...over,
+		};
+	}
+
+	async function openB(view: ReturnType<typeof render>) {
+		view.rerender(<SessionTagsSheet {...props({ open: false })} />);
+		view.rerender(
+			<SessionTagsSheet
+				{...props({ sessionId: "b", assigned: [], primary: null })}
+			/>,
+		);
+		await screen.findByRole("checkbox", { name: "Work" });
+	}
+
+	it("drops row A's late read-back after the sheet reopens on row B", async () => {
+		let resolveWrite!: (value: {
+			session_id: string;
+			tags: TagRef[];
+			primary: string | null;
+		}) => void;
+		setSessionTags.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					resolveWrite = resolve;
+				}),
+		);
+		const view = render(<SessionTagsSheet {...props()} />);
+		await ready();
+		fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
+		expect(await screen.findByText("saving…")).toBeTruthy();
+
+		await openB(view);
+		/* A's answer lands only now: it must not set B's draft or B's error. */
+		await act(async () => {
+			resolveWrite({ session_id: "a", tags: [WORK, RESEARCH], primary: "work" });
+		});
+		expect(
+			(screen.getByRole("checkbox", { name: "Work" }) as HTMLInputElement).checked,
+		).toBe(false);
+		expect(
+			(screen.getByRole("checkbox", { name: "Research" }) as HTMLInputElement)
+				.checked,
+		).toBe(false);
+		expect(screen.getByRole("alert").textContent).toBe("");
+
+		/* And B's next press sends B's state, not A's answer. */
+		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
+		await waitFor(() =>
+			expect(setSessionTags).toHaveBeenLastCalledWith("b", ["work"], null),
+		);
+	});
+
+	it("drops row A's late refusal after the sheet reopens on row B", async () => {
+		const { HttpError } = await import("./api");
+		let rejectWrite!: (error: unknown) => void;
+		setSessionTags.mockImplementationOnce(
+			() =>
+				new Promise((_resolve, reject) => {
+					rejectWrite = reject;
+				}),
+		);
+		const view = render(<SessionTagsSheet {...props()} />);
+		await ready();
+		fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
+		expect(await screen.findByText("saving…")).toBeTruthy();
+
+		await openB(view);
+		await act(async () => {
+			rejectWrite(new HttpError(422, "Unknown category id"));
+		});
+		expect(screen.getByRole("alert").textContent).toBe("");
+		expect(
+			(screen.getByRole("checkbox", { name: "Research" }) as HTMLInputElement)
+				.checked,
+		).toBe(false);
+
+		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
+		await waitFor(() =>
+			expect(setSessionTags).toHaveBeenLastCalledWith("b", ["work"], null),
+		);
 	});
 });
 
