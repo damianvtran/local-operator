@@ -2813,7 +2813,7 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
             "the runtime never armed its signal handlers:\n"
             f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
         )
-        assert "SIGUSR1 task dump installed" in readiness, readiness[-1000:]
+        assert "SIGUSR1 evidence signal installed" in readiness, readiness[-1000:]
         os.kill(pid, signal_module.SIGUSR1)
         deadline = time.monotonic() + 60.0
         while "state: streaming=" not in _log_text(config_dir):

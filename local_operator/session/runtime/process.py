@@ -5380,7 +5380,9 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # constraint on the FATAL path added beside this one, not on this asyncio dump:
     # see ``stall_watchdog._enable_fatal_report``.)
     logger.info(
-        "signal handlers ready: clean stop on SIGTERM/SIGINT; SIGUSR1 task dump %s",
+        "signal handlers ready: clean stop on SIGTERM/SIGINT; SIGUSR1 evidence signal %s; "
+        "task-dump callback %s",
+        "installed" if stall_watchdog.is_armed() else "not installed",
         "installed" if task_dump_installed else "disabled",
     )
     # The self-reaper: a phone session nobody watches and nothing runs is a

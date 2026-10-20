@@ -2557,7 +2557,7 @@ def _enable_fatal_report(armed: "_Armed") -> bool:
         return False
     try:
         faulthandler.enable(file=armed.handle, all_threads=False)
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, MemoryError):
         # A partial enable can leave fatal handlers installed on the handle this
         # arm is about to close. The arm did not agree to own them, so clear them
         # here rather than leave a stale descriptor behind the failure.
