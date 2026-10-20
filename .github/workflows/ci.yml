@@ -481,6 +481,20 @@ jobs:
     timeout-minutes: 10
     strategy:
       fail-fast: false
+      # ONE AT A TIME, on 2026-10-19. These three legs are cheap (a wheel
+      # install and a server start, MEASURED at 44-52 s each in run
+      # 39316047502 and 44 s locally) and they are NOT on any
+      # critical path, so running them three at a time bought nothing and
+      # cost three pending jobs per run. Under a saturated account-wide pool a
+      # PENDING job is the expensive kind: it is what a release gate's jobs
+      # queue behind. These legs each also hold a runner slot while they
+      # install, so a run that starts all three at once is three slots of
+      # contention for a check whose own deadline is generous.
+      #
+      # The three interpreter classes are still all covered, and `fail-fast:
+      # false` still reports each class separately: the COVERAGE is unchanged,
+      # only the ORDER in which the three legs are scheduled.
+      max-parallel: 1
       matrix:
         # Each entry is a DIFFERENT failure class, not a hunch:
         #   3.12 - the `requires-python` floor and today's only PR-CI
@@ -1281,24 +1295,57 @@ jobs:
     # own `flock` files and its own app lifecycles, so no shard can see a
     # sibling's hang.
     #
-    # WHY THREE AND NOT TWO, and what the trade is. Measured on run 35420676112
-    # (the split from CI-measured timings): legs of 414/412/401 s on ubuntu and
-    # 442/441/400 s on macOS, i.e. ~7.5 min per leg including install, against a
-    # unit shard whose job wall is ~12-15 min. So the e2e job is NO LONGER the
-    # critical path at three shards, and two shards (~11 min per leg) would also
-    # finish first. Three buys earlier freeze-guard feedback on a tree that only
-    # grows, and costs two more jobs per run: this matrix takes a pull request
-    # from 17 jobs to 21, against the ~20-job account-wide budget the `test`
+    # WHY TWO SHARDS, and what the trade is. This matrix was three shards
+    # until 2026-10-19, and the trade was recorded then: three bought earlier
+    # freeze-guard feedback and cost two more jobs per run, on the explicit
+    # understanding that "if runner queue pressure becomes the binding
+    # constraint, `shard: [0, 1]` with `--total 2` restores the job count at
+    # the same critical path". Runner queue pressure then became the binding
+    # constraint, and this is the trade being taken.
+    #
+    # The critical path is unchanged, and that is the property three shards
+    # were buying. At two shards the heaviest e2e leg projects 1165.8350s
+    # (19.4 min) on one worker, against the unit shard's 1805.1008s (30.1
+    # min) on 4, so the freeze guard still lands first. (The "~7.5 min per
+    # leg" figure below was measured on run 35420676112, when the e2e tree was
+    # half this size; the leg grew with it, and the number that matters now is
+    # the projection above.)
+    #
+    # What it costs is two jobs per run, and the two it costs are the ones the
+    # account cannot afford: HALF of this matrix's jobs land on macOS, whose
+    # concurrent-job cap is 5 for the WHOLE ACCOUNT, so 22 in-flight pull
+    # requests were asking for 66 macOS jobs to compete for 5 slots. Two
+    # shards ask for 44.
+    #
+    # The job count this matrix contributes to a pull request went from 6 to
+    # 4, against the ~20-job account-wide budget the `test`
     # job's comment names, on main from 20 to 24. That is a deliberate trade,
     # not an oversight: if runner queue pressure becomes the binding constraint,
     # `shard: [0, 1]` with `--total 2` restores the job count at the same
     # critical path — which is why the matrix and `--total` are asserted equal
     # in tests/unit/test_ci_hygiene.py rather than kept in sync by hand.
+    #
+    # AND THAT TRADE WAS TAKEN, on 2026-10-19, because the account-wide runner
+    # pool turned out to be the binding constraint. Measured across the three
+    # active repositories: 26-28 workflow runs in flight, 53-118 jobs queued,
+    # a median pending-job AGE of 25.8 min (p90 35.0, max 48.8), and a
+    # four-minute sample in which zero jobs started. This stage is the worst
+    # offender because HALF of its jobs land on macOS, and macOS has its own
+    # cap of 5 concurrent jobs for the WHOLE account (the standard-runner
+    # table: Pro is 40 total and 5 macOS) -- so 22 in-flight pull requests
+    # asked for 66 macOS jobs to compete for 5 slots. Two shards ask for 44.
+    #
+    # It is still NOT the critical path, which is the property three shards
+    # were buying. At 2 shards the heaviest e2e leg projects 1165.8350s
+    # (19.4 min) on one worker, against the unit shard's 1805.1008s (30.1 min)
+    # at this tree, so the freeze guard still finishes before the unit suite
+    # does. The coverage is unchanged either way: the same e2e tree, the same
+    # two platforms, the same test files -- only the partition differs.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [0, 1, 2]
+        shard: [0, 1]
     runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
     # need a real OpenRouter key, so they are skipped on fork PRs that cannot
@@ -1367,7 +1414,13 @@ jobs:
     # real hang report any sooner. `tests/unit/test_ci_hygiene.py` pins the
     # relationship in the direction that matters: the ceiling must exceed every
     # shard wall the manifest projects.
-    timeout-minutes: 20
+    # 20 -> 22 on 2026-10-19, for the two-shard partition above: the heaviest
+    # e2e leg projects 1165.8350s, so the guard's own minimum is
+    # ceil((1165.8350 + 60)/60) = 21 minutes, and 22 leaves +94.1650s over
+    # the 1200s budget at 21. A ceiling is not a reservation -- it is only
+    # paid by a leg that is genuinely stuck -- and the e2e tree grows, so the
+    # extra minute is cheaper here than a cancellation.
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v7
       - name: Set Up Python 3.12
@@ -1396,7 +1449,7 @@ jobs:
         # log records exactly which files ran in this shard, on this leg.
         run: |
           python scripts/shard_tests.py \
-            --tree e2e --shard ${{ matrix.shard }} --total 3 --out e2e_tests.txt
+            --tree e2e --shard ${{ matrix.shard }} --total 2 --out e2e_tests.txt
       - name: Print the shard's file list
         # Cheap, and it is the difference between "a shard failed" and "which
         # tests were in it". Ordered as the partitioner ordered it.
