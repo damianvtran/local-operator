@@ -287,7 +287,10 @@ def test_apply_on_an_absent_row_installs_wholesale(tmp_path: Path) -> None:
     ctx, _manager, _remote, base, document = _rig(tmp_path)
     _subscribe(ctx, base)
 
-    report = svc.apply_items(ctx, kind="skill", auto=True, allow_llm=False)
+    # The explicit per-item apply is the install the subscription was waiting
+    # for; it is the same shape the per-item route composes (auto is False).
+    checks = svc.check_items(ctx, kinds=("skill",))
+    report = svc.apply_items(ctx, kind="skill", checks=checks, allow_llm=False)
 
     (result,) = report.reports
     assert result.outcome == "merged" and result.applied is True
@@ -343,14 +346,16 @@ def test_skill_rows_reach_the_updates_status_and_can_be_retried(tmp_path: Path) 
     assert row["state"] == "failed" and row["error_class"] == "hub-item-missing"
     assert row["next_retry_at"] is not None
 
-    # The retry the route composes: clear the backoff, check again, prove the
-    # update computes, then retire the stale failure.
+    # The retry the route composes: clear the backoff and check again. The
+    # successful check retires the 404 class and reports the remote as
+    # available; the apply step is UNATTENDED, so it skips the install and the
+    # row stays available for an explicit pull.
     svc.clear_retry(ctx, "skill", ALIAS)
     remote.error = None
     checks = svc.check_items(ctx, kinds=("skill",))
     report = svc.apply_items(ctx, kind="skill", checks=checks, auto=True, dry_run=True)
-    assert report.reports[0].outcome == "would-merge"
-    svc.clear_failure(ctx, "skill", ALIAS)
+    assert report.reports[0].outcome == "skipped"
+    assert report.reports[0].skipped_reason == "install-requires-pull"
 
     (row,) = [
         item
@@ -358,6 +363,7 @@ def test_skill_rows_reach_the_updates_status_and_can_be_retried(tmp_path: Path) 
         if item["kind"] == "skill" and item["name"] == ALIAS
     ]
     assert row["error_class"] is None and row["state"] == "available"
+    assert not (ctx.config_dir / "skills" / ALIAS).exists()
 
 
 # -- scope ---------------------------------------------------------------------------
