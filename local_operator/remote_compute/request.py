@@ -3,9 +3,15 @@
 WHY A MODEL INSTEAD OF A DICT. The server keys a remote run by the network it
 was submitted through; a request built without one would have to be refused at
 the far end, after the work was already addressed to a host. Making
-``network_id`` a required field means a later slice cannot construct the body at
+``binding`` a required field means a later slice cannot construct the body at
 all without deciding the tenant — the type checker catches the omission, not a
 remote 4xx.
+
+WHY A BINDING AND NOT AN ID. ``NetworkBinding`` is issued only by
+``resolve_network``, which answers from this device's local mesh store. A bare
+``str`` would accept ANY well-formed id, so the membership guarantee would hold
+only while every caller happened to resolve; requiring the binding makes it a
+type fact. The id on the wire is read from the binding.
 
 THE REMAINING FIELDS ARE DELIBERATELY NOT FROZEN HERE. This slice only settles
 the tenant half of the contract; the command, environment, timeout and result
@@ -35,12 +41,13 @@ class RunCreateRequest:
     """A run-create body bound to one network, ready to serialise.
 
     Build it from a :class:`~local_operator.remote_compute.resolve.NetworkBinding`
-    — the only way this package produces a valid id — or from an id that has the
-    minted shape. Either spelling is validated here, because this object is the
-    last place before the id goes on the wire.
+    — the only value that proves membership — and the id travels from there.
+    The shape check is repeated here with ``fullmatch`` because this object is
+    the last place before the id goes on the wire; it is the same constant, not
+    a second rule.
     """
 
-    network_id: str
+    binding: NetworkBinding
     #: Everything else the run-create body carries, unchanged into the JSON.
     body: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -49,11 +56,21 @@ class RunCreateRequest:
         # itself light); a refusal is raised out of the same typed family.
         from local_operator.network.types import MeshRefusal
 
-        if not NETWORK_ID_PATTERN.match(self.network_id):
+        # ``isinstance`` rather than a type annotation alone: annotations are
+        # not enforced at runtime, and a bare id is the exact mistake this model
+        # exists to make unreachable.
+        if not isinstance(self.binding, NetworkBinding):
+            raise TypeError(
+                "RunCreateRequest takes a NetworkBinding issued by "
+                "remote_compute.resolve_network(); a bare network id cannot "
+                "prove this device is a member of the network it names"
+            )
+        if not NETWORK_ID_PATTERN.fullmatch(self.binding.network_id):
             raise MeshRefusal(
                 CODE_INVALID_NETWORK_ID,
-                f"{self.network_id!r} is not a minted mesh network id; resolve the "
-                "network first (remote_compute.resolve_network) and use its id",
+                f"{self.binding.network_id!r} is not a minted mesh network id; "
+                "resolve the network first (remote_compute.resolve_network) and "
+                "use its binding",
             )
         if "network_id" in self.body:
             raise MeshRefusal(
@@ -62,13 +79,11 @@ class RunCreateRequest:
                 "field of this model, and two spellings of it could disagree",
             )
 
-    @classmethod
-    def for_binding(
-        cls, binding: NetworkBinding, body: Mapping[str, Any] | None = None
-    ) -> "RunCreateRequest":
-        """The body for a resolved binding — the intended construction path."""
-        return cls(network_id=binding.network_id, body=dict(body or {}))
+    @property
+    def network_id(self) -> str:
+        """The tenant id, read from the binding — never from a caller's string."""
+        return self.binding.network_id
 
     def to_json(self) -> dict[str, Any]:
         """The wire object: the caller's fields, then the tenant field on top."""
-        return {**self.body, "network_id": self.network_id}
+        return {**self.body, "network_id": self.binding.network_id}

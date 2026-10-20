@@ -101,7 +101,7 @@
   "wire.settings.remote_compute_enabled.help": {
     "role": "settings row help",
     "tone": "plain, precise",
-    "note": "Must state this is a preview and that it sends the user's work to Radient-hosted compute. 'Radient' is a product name: keep it unchanged. Keep near 67 cells; the detail line sheds longer copy."
+    "note": "Must state this is a preview, that it sends the user's work to Radient-hosted compute, and that the run is bound to ONE of the user's mesh networks — the tenant claim. The old wording said 'in your mesh network', which read as containment and is not what the slice enforces. 'Radient' is a product name: keep it unchanged. Keep near 67 cells (en is 66; the 80x24 detail line sheds longer copy, so stay within 74)."
   },
   "wire.settings.remote_compute_enabled.choice.true.description": {
     "role": "boolean choice description",

@@ -3,11 +3,15 @@
 WHAT THIS PACKAGE IS FOR. A remote run leaves the operator's machine, so two
 questions have to be answered before one can be built at all: is the preview
 switched on, and WHICH mesh network does this workload belong to. The second is
-the tenant segmentation guarantee on the client side — a request may only carry a
-network THIS DEVICE IS A MEMBER OF, resolved from the local mesh store, never a
-name a caller invented and never a guess between two networks. Everything here
-serves those two answers; the transport, the wire fields besides ``network_id``
-and every surface that offers the feature belong to later slices.
+the tenant segmentation guarantee on the client side, and it is ENFORCED BY THE
+TYPES, not by convention: a request carries a :class:`NetworkBinding`, and only
+:func:`resolve_network` can issue one — it answers from this device's local mesh
+store, and a binding it did not issue raises ``TypeError``. What that
+guarantees, exactly, is "a network this device's LOCAL RECORD shows it is an
+active member of": a removal this device has not yet received is not visible
+locally, and no local read can show it. Everything here serves those two
+answers; the transport, the wire fields besides ``network_id`` and every
+surface that offers the feature belong to later slices.
 
 IMPORTS ARE DELIBERATELY LIGHT. :func:`is_enabled` is called from
 ``server.features.feature_flags()``, which runs on every capability negotiation,
@@ -66,8 +70,12 @@ def is_enabled(config_dir: Path | None = None) -> bool:
     FAILS CLOSED. ``read_config_values`` answers ``None`` for a file that cannot
     be read or parsed right now (a torn editor save); that is not evidence the
     user turned the switch on, so the default applies. Only a real boolean
-    ``true`` enables it — a hand-edited ``"yes"`` or ``1`` is not coerced,
-    because the value decides whether work leaves the device.
+    ``True`` enables it. A QUOTED string is never coerced — ``"yes"`` is text,
+    not consent — but the TYPE of an unquoted scalar is the YAML loader's to
+    decide: under YAML 1.1 an unquoted ``yes``/``on`` IS the boolean ``True`` and
+    therefore enables the switch, exactly as an unquoted ``true`` does. Quoting
+    is what makes a value text. The value decides whether work leaves the device,
+    so anything that is not a boolean is off.
     """
     # IMPORTED HERE, not at module scope: see the module docstring.
     from local_operator.config import read_config_values

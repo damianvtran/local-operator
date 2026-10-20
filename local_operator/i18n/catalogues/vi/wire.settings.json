@@ -496,7 +496,7 @@
   "wire.settings.remote_compute.title": "Tính toán từ xa",
   "wire.settings.remote_compute_enabled.choice.false.description": "chỉ cục bộ",
   "wire.settings.remote_compute_enabled.choice.true.description": "cho phép chạy từ xa",
-  "wire.settings.remote_compute_enabled.help": "Bản xem trước: gửi việc tới hạ tầng tính toán Radient trong mạng mesh.",
+  "wire.settings.remote_compute_enabled.help": "Bản xem trước: gửi việc tới tính toán Radient, gắn với một mạng mesh.",
   "wire.settings.remote_compute_enabled.label": "Tính toán từ xa",
   "wire.settings.retired.description": "Các khóa vẫn được đọc nhưng không còn tác dụng gì.",
   "wire.settings.retired.title": "Đã ngừng dùng",
