@@ -102,6 +102,17 @@ def feature_flags() -> dict[str, Any]:
         # agents and teams). A consumer of that projection must tolerate the
         # third kind; it was a deliberate contract change, not a silent one.
         "hub_links": 1,
+        # THE COMPLETE INITIAL SKILLS ADAPTER: public/org remote reads, the
+        # `org_skills.list`/`org_skill.get` credential proxy, local pull/install,
+        # and initial publication (dry-run preview receipt + confirm) with the
+        # baseline/policy link row it materializes. Its OWN key rather than a
+        # bump of `hub_links`: a renderer gated on `hub_links` keeps its working
+        # agents/teams inventory and never offers a Skills surface whose pull or
+        # publish half would 404 on this backend. The key is a promise about the
+        # WHOLE adapter, so it is advertised only while every route below exists;
+        # the pin in tests/unit/server/test_desktop_hub_skills.py fails if one is
+        # removed without also removing this key.
+        "hub_skills": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #

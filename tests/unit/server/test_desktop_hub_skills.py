@@ -217,8 +217,9 @@ async def test_a_public_pull_installs_every_file_and_reads_back_the_contract(api
     assert record.local_alias == ALIAS and record.hub_id == HUB_ID
     assert dict(record.fields)["files"] == manifest()["files"]
 
-    # The partial-adapter milestone must NOT advertise `hub_skills` yet.
-    assert "hub_skills" not in svc_features.feature_flags()
+    # The complete-adapter milestone advertises `hub_skills` beside the links key;
+    # the route pin below fails if the routes it promises are removed.
+    assert svc_features.feature_flags().get("hub_skills") == 1
     assert "hub_links" in svc_features.feature_flags()
 
     # A public fetch is anonymous: the client carried no credential.
