@@ -638,8 +638,20 @@ DEFAULT_CONFIG = Config(
             # read through ``cleanup.DELEGATED_PATH``; the content layer's
             # rules, guards and thresholds live in
             # ``local_operator.session.delegated_retention`` ("THE CONTENT
-            # LAYER"). They are absent from this mapping on purpose: the
-            # defaults live in one place, the consuming module's constants.
+            # LAYER"). The content layer's THIRD arm — plain non-git directory
+            # copies — is the exception to the on-by-default pair: it is
+            # ``non_git_copies.enabled``, OFF by default, because its proof is
+            # per FILE against a reference repository the operator names
+            # (``non_git_copies.reference_repos``), and a machine with no
+            # reference configured could not prove anything. Preview the class
+            # with ``lop sessions cleanup --dry-run --report-non-git-copies``
+            # before turning it on. ``non_git_copies.hold_sessions`` is the
+            # operator's "this one is mine": a pathsep- or comma-separated list
+            # of session ids this arm refuses even when the proof passes — the
+            # hold outranks proof, because a reservation stated in conversation
+            # does not bind a background pass. They are absent from this
+            # mapping on purpose: the defaults live in one place, the consuming
+            # module's constants.
             "session": {
                 "cleanup": {
                     "enabled": False,

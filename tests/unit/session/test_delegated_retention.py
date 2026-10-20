@@ -2421,3 +2421,484 @@ def test_a_spent_budget_stops_even_when_no_pad_has_reclaimable_content(root: Pat
     assert result.content == []
     assert result.content_budget_exhausted is True
     assert result.content_remaining == 2
+
+
+# --------------------------------------------------------------------------
+# The non-git COPY arm (content rule (d))
+# --------------------------------------------------------------------------
+
+#: The candidate floor is 50 MiB and the proof hash-reads every byte, so these
+#: tests build a real 55 MiB file rather than patching the constant: the module
+#: binds ``min_bytes`` as a default argument, and a patched global would prove
+#: nothing about the shipped floor.
+COPY_MB = 55
+
+
+def _big_file(path: Path, *, fill: bytes = b"\0", size_mb: int = COPY_MB) -> Path:
+    """A real file of ``size_mb``; ``fill`` changes the last byte (and the blob)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(fill[-1:])
+    return path
+
+
+def _copy_reference(root: Path, name: str = "source") -> Path:
+    """A reference repo with a bare origin, kept OUTSIDE every pad."""
+    origin = root / "copy-origins" / f"{name}.git"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "--bare", "-b", "main", os.fspath(origin))
+    repo = root / "copy-refs" / name
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "remote", "add", "origin", os.fspath(origin))
+    return repo
+
+
+def _publish(repo: Path) -> None:
+    """Commit everything and publish ``main`` as the merged trunk."""
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "content")
+    _git(repo, "push", "-q", "origin", "HEAD:main")
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+
+def _copy_tree(source: Path, dest: Path) -> Path:
+    """Copy every working-tree file of ``source`` to ``dest`` (never ``.git``)."""
+    dest.mkdir(parents=True)
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if ".git" in relative.parts:
+            continue
+        if path.is_dir():
+            (dest / relative).mkdir(parents=True, exist_ok=True)
+        else:
+            (dest / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dest / relative)
+    return dest
+
+
+def _copy_policy(references: tuple[Path, ...] = (), **kwargs: Any) -> CleanupPolicy:
+    return CleanupPolicy(
+        delegated_enabled=True,
+        delegated_scratchpad_enabled=True,
+        delegated_non_git_copies_enabled=True,
+        delegated_non_git_copy_references=tuple(os.fspath(path) for path in references),
+        **kwargs,
+    )
+
+
+def _copy_provider(*references: Path, **kwargs: Any):
+    """``run_delegated_pass`` takes a provider, not a policy instance."""
+    policy = _copy_policy(references, **kwargs)
+    return lambda: policy
+
+
+def _published_source(root: Path) -> Path:
+    source = _copy_reference(root)
+    _big_file(source / "payload")
+    (source / "sub").mkdir()
+    (source / "sub" / "a.txt").write_text("alpha\n")
+    _publish(source)
+    return source
+
+
+def test_a_fully_reproducible_copy_is_reclaimed_file_by_file(root: Path) -> None:
+    """Every byte exists at the same path in a merged tree: the files go."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "copied")
+    copy = _copy_tree(source, pad / "copy")
+    total = sum(path.stat().st_size for path in copy.rglob("*") if path.is_file())
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert not (copy / "payload").exists()
+    assert not (copy / "sub" / "a.txt").exists()
+    assert copy.exists(), "only matched FILES are removed; the directory stays"
+    assert [(row.session, row.classes, row.entries) for row in result.content] == [
+        ("copied", ("non-git copy",), 2)
+    ]
+    assert result.content[0].bytes == total
+    assert result.copy_candidates == 1
+    assert result.copy_candidate_bytes == total
+    assert result.copy_reclaimed_bytes == total
+    assert result.copy_skipped is None
+    assert result.errors == 0
+
+
+def test_a_copy_with_unique_files_keeps_only_them(root: Path) -> None:
+    """Path+blob mismatch is a keep: session artifacts are never proof."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "partial")
+    copy = _copy_tree(source, pad / "copy")
+    artifact = copy / "artifact.log"
+    artifact.write_text("only this run produced it\n")
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert artifact.exists()
+    assert not (copy / "payload").exists() and not (copy / "sub" / "a.txt").exists()
+    assert [(name, "unmatched file(s)" in reason) for name, reason in result.content_kept] == [
+        ("partial", True)
+    ]
+    assert "artifact.log" in result.content_kept[0][1]
+
+
+def test_a_copy_below_the_share_threshold_keeps_everything(root: Path) -> None:
+    """0% matched is a refusal of the WHOLE candidate, with the share named."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "foreign")
+    copy = pad / "copy"
+    _big_file(copy / "payload", fill=b"x")  # same name, different bytes
+    (copy / "sub").mkdir()
+    (copy / "sub" / "a.txt").write_text("alpha\n")
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert (copy / "payload").exists() and (copy / "sub" / "a.txt").exists()
+    assert result.content == []
+    assert result.copy_reclaimed_bytes == 0
+    reason = dict(result.content_kept)["foreign"]
+    assert "only 0% of its bytes" in reason and "match a merged tree" in reason
+
+
+def test_a_copy_with_no_reference_repository_is_kept(root: Path) -> None:
+    """No configured reference and none in the pad: nothing can be proved."""
+    pad = _kept_pad(root, "unprovable")
+    copy = pad / "copy"
+    _big_file(copy / "payload")
+
+    result = _pass(root, policy=lambda: _copy_policy())
+
+    assert (copy / "payload").exists()
+    assert result.content == []
+    assert result.copy_candidates == 0
+    assert result.copy_skipped == "no reference repository"
+
+
+def test_a_nested_git_refuses_the_copy_and_the_git_arm_still_sees_it(root: Path) -> None:
+    """The copy arm must never delete a repository arm (c) would keep."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "nested")
+    copy = _copy_tree(source, pad / "code")
+    nested = copy / "project"
+    nested.mkdir()
+    _git(nested, "init", "-q", "-b", "main")
+    (nested / "f").write_text("x")
+    _git(nested, "add", "f")
+    _git(nested, "commit", "-qm", "c")  # no remote: unmerged
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert (copy / "payload").exists(), "a nested repository blocks this arm below it"
+    reasons = [reason for name, reason in result.content_kept if name == "nested"]
+    assert any("contains a git repository" in reason for reason in reasons)
+    assert any("project:" in reason for reason in reasons), reasons
+    assert result.copy_reclaimed_bytes == 0
+
+
+def test_an_unmerged_reference_does_not_qualify(root: Path) -> None:
+    """A repo with no remote trunk proves nothing, however matching it looks."""
+    source = _published_source(root)
+    unmerged = root / "copy-refs" / "unmerged"
+    unmerged.mkdir(parents=True)
+    _git(unmerged, "init", "-q", "-b", "main")
+    _big_file(unmerged / "payload")
+    _git(unmerged, "add", "payload")
+    _git(unmerged, "commit", "-qm", "c")
+    pad = _kept_pad(root, "nostrunk")
+    copy = _copy_tree(source, pad / "copy")
+
+    result = _pass(root, policy=_copy_provider(unmerged))
+
+    assert (copy / "payload").exists()
+    assert result.copy_candidates == 0
+    reasons = [reason for name, reason in result.content_kept if name == "nostrunk"]
+    assert any("no qualifying reference repository" in reason for reason in reasons), reasons
+
+
+def test_an_empty_directory_scaffold_is_not_an_error(root: Path) -> None:
+    """Measured: a scratch HOME's empty ``Library`` has entries and zero bytes."""
+    pad = _kept_pad(root, "scaffold")
+    (pad / "review-home" / "Library" / "Caches").mkdir(parents=True)
+
+    report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+
+    assert report.errors == 0 and report.candidates == []
+
+    result = _pass(root, policy=_copy_provider(_published_source(root)))
+    assert result.errors == 0
+    assert not any("zero files" in reason for _, reason in result.content_kept)
+
+
+def test_zero_files_with_real_bytes_is_still_an_impossible_result(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard needs a SECOND source; its contradiction is what it reports."""
+    pad = _kept_pad(root, "vacuouscopy")
+    scaffold = pad / "link-only"
+    scaffold.mkdir()
+    os.symlink("/nonexistent", scaffold / "link")
+    # The walk sees one entry and no regular files; the independent measure
+    # reports bytes, which is the measured "0 files in a 1.0 GB copy" shape.
+    monkeypatch.setattr(dr, "_bounded_dir_stats", lambda *a, **k: (4096, 1))
+
+    with pytest.raises(dr.NonGitCopyScanError, match="zero files from a non-empty tree"):
+        dr._prove_copy(scaffold, trees=())
+
+    report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    assert report.errors == 1
+    assert report.candidates[0].error is True
+    assert "zero files" in report.candidates[0].reason
+
+    result = _pass(root, policy=_copy_provider(_published_source(root)))
+    assert result.errors == 1
+    assert any("zero files" in reason for _, reason in result.content_kept)
+
+
+def test_the_store_guard_raises_and_an_empty_store_does_not(root: Path) -> None:
+    """A big store with no copy children is an instrument failure, not a pass."""
+    session = root / "sessions" / "fileonly"
+    (session / "scratchpad").mkdir(parents=True)
+    (session / "scratchpad" / "notes.txt").write_text("x")
+    with pytest.raises(dr.NonGitCopyScanError, match="zero non-git copy children"):
+        dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+
+    empty = root / "empty-store" / "sessions"
+    empty.mkdir(parents=True)
+    assert dr.scan_non_git_copies(empty, min_store_bytes=1).candidates == []
+
+
+def test_an_unreadable_file_refuses_the_candidate_without_aborting_the_pad(
+    root: Path,
+) -> None:
+    """Measured: a mode-000 fixture inside a real candidate must not raise."""
+    source = _published_source(root)
+    # The reference must hold the SAME path, or the proof would never open the
+    # file (a path no tree has is unmatched without a read) and the test would
+    # prove nothing about the unreadable case.
+    (source / "sub" / "private.txt").write_text("published\n")
+    _publish(source)
+    pad = _kept_pad(root, "private")
+    copy = _copy_tree(source, pad / "copy")
+    private = copy / "sub" / "private.txt"
+    private.write_text("secret\n")
+    os.chmod(private, 0o000)
+    other = _stale_file(pad / "big.log")  # the pad's other arms must still run
+
+    try:
+        result = _pass(root, policy=_copy_provider(source))
+    finally:
+        os.chmod(private, 0o600)
+
+    assert (copy / "payload").exists(), "the whole candidate is kept"
+    reasons = [reason for name, reason in result.content_kept if name == "private"]
+    assert any("cannot read" in reason for reason in reasons), reasons
+    assert not other.exists(), "the stale-output arm on the rest of the pad still ran"
+    assert result.errors == 0
+
+
+def test_a_report_lists_both_provable_and_withheld_copies(root: Path) -> None:
+    """``would reclaim now`` and ``proof ok, inside the window`` are separate."""
+    source = _published_source(root)
+    old_pad = _kept_pad(root, "oldcopy")
+    _copy_tree(source, old_pad / "copy")
+    # A KEPT record that is nevertheless young: the parent's roster keeps the
+    # session, while its own 1 h transcript clock puts it inside the window.
+    _mk(root, "parent-youngcopy", None, age_h=10, roster=["youngcopy"])
+    young_pad = _mk(root, "youngcopy", age_h=1) / "scratchpad"
+    young_pad.mkdir()
+    _copy_tree(source, young_pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+
+    rows = {row.session: row for row in report.candidates}
+    assert rows["oldcopy"].proof_ok and rows["oldcopy"].would_reclaim
+    assert rows["youngcopy"].proof_ok and not rows["youngcopy"].would_reclaim
+    assert "inside the 48h window" in rows["youngcopy"].reason
+    assert report.reclaimable_pads == 1 and report.within_window_pads == 1
+    assert report.reclaimable_bytes == rows["oldcopy"].matched_bytes
+    assert rows["oldcopy"].proved_by == (os.path.realpath(source),)
+
+
+def test_a_dry_run_lists_the_copy_and_removes_nothing(root: Path) -> None:
+    source = _published_source(root)
+    pad = _kept_pad(root, "drycopy")
+    copy = _copy_tree(source, pad / "copy")
+    total = sum(path.stat().st_size for path in copy.rglob("*") if path.is_file())
+
+    result = _pass(root, policy=_copy_provider(source), dry_run=True)
+
+    assert (copy / "payload").exists()
+    assert [(row.classes, row.bytes) for row in result.content] == [(("non-git copy",), total)]
+    assert result.copy_reclaimed_bytes == total
+
+
+def test_the_hash_budget_defers_a_candidate(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _published_source(root)
+    pad = _kept_pad(root, "budgeted")
+    copy = _copy_tree(source, pad / "copy")
+    monkeypatch.setattr(dr, "NON_GIT_COPY_HASH_BUDGET_BYTES", 1)
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert (copy / "payload").exists()
+    assert result.copy_budget_exhausted is True
+    assert result.copy_candidates == 1 and result.copy_reclaimed_bytes == 0
+    assert "hash budget" in dict(result.content_kept)["budgeted"]
+
+
+def test_the_copy_arm_off_leaves_the_copy_alone(root: Path) -> None:
+    """The switch is the gate: no proof runs and nothing under the copy moves."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "offcopy")
+    copy = _copy_tree(source, pad / "copy")
+
+    result = _pass(
+        root,
+        policy=lambda: CleanupPolicy(delegated_enabled=True, delegated_scratchpad_enabled=True),
+    )
+
+    assert (copy / "payload").exists()
+    assert result.content == []
+    assert result.copy_candidates == 0
+    assert result.copy_skipped == "disabled"
+
+
+def test_a_refused_removal_keeps_the_file_and_counts_an_error(root: Path) -> None:
+    source = _published_source(root)
+    pad = _kept_pad(root, "stuckcopy")
+    copy = _copy_tree(source, pad / "copy")
+    os.chmod(copy, 0o555)  # readable, not writable: the unlink fails
+    try:
+        result = _pass(root, policy=_copy_provider(source))
+    finally:
+        os.chmod(copy, 0o755)
+
+    assert (copy / "payload").exists(), "the refused file is kept"
+    assert result.errors == 1
+    assert all(row.bytes == 6 for row in result.content), "only sub/a.txt was removable"
+    assert any("cannot be removed" in reason for _, reason in result.content_kept)
+
+
+def test_candidates_are_recursive_and_the_largest_provable_subtree_wins(root: Path) -> None:
+    """``qa-1232/`` matches nothing; its ``base-repo/`` child matches nearly all."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "qacopy")
+    run = pad / "qa-1232"
+    run.mkdir()
+    (run / "notes.md").write_text("session artifacts\n")
+    copy = _copy_tree(source, run / "base-repo")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+    rows = {row.path: row for row in report.candidates}
+    parent = rows["qacopy/scratchpad/qa-1232"]
+    child = rows["qacopy/scratchpad/qa-1232/base-repo"]
+    assert parent.top_level and not parent.proof_ok
+    assert not child.top_level and child.proof_ok
+    assert report.count == 1, "the summary counts the top-most attempt only"
+
+    result = _pass(root, policy=_copy_provider(source))
+    assert not (copy / "payload").exists()
+    assert result.copy_candidates == 1
+    assert result.copy_reclaimed_bytes > 0
+
+
+def test_the_proof_is_a_union_across_reference_repositories(root: Path) -> None:
+    """A file proves when ANY reference has it: one repo per half is enough."""
+    first = _copy_reference(root, "first")
+    _big_file(first / "payload")
+    _publish(first)
+    second = _copy_reference(root, "second")
+    (second / "sub").mkdir()
+    (second / "sub" / "a.txt").write_text("alpha\n")
+    _publish(second)
+    pad = _kept_pad(root, "unioned")
+    copy = _copy_tree(first, pad / "copy")
+    (copy / "sub").mkdir()
+    (copy / "sub" / "a.txt").write_text("alpha\n")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions",
+        references=(os.fspath(first), os.fspath(second)),
+        now=NOW,
+        window_hours=48,
+    )
+    row = report.candidates[0]
+    assert row.proof_ok and row.matched_bytes >= COPY_MB * 1024 * 1024
+    assert set(row.proved_by) == {
+        os.path.realpath(first),
+        os.path.realpath(second),
+    }
+
+
+def test_an_operator_hold_refuses_a_provable_copy_in_both_surfaces(root: Path) -> None:
+    """A hold outranks proof: the held pad takes nothing, its sibling still goes."""
+    source = _published_source(root)
+    held_pad = _kept_pad(root, "heldcopy")
+    held_copy = _copy_tree(source, held_pad / "copy")
+    free_pad = _kept_pad(root, "freecopy")
+    free_copy = _copy_tree(source, free_pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions",
+        references=(os.fspath(source),),
+        holds=("heldcopy",),
+        now=NOW,
+        window_hours=48,
+    )
+    rows = {row.session: row for row in report.candidates}
+    assert rows["heldcopy"].would_reclaim is False
+    assert rows["heldcopy"].reason == "operator hold"
+    assert rows["freecopy"].would_reclaim is True and rows["freecopy"].reason == ""
+
+    result = _pass(
+        root,
+        policy=_copy_provider(source, delegated_non_git_copy_holds=("heldcopy",)),
+    )
+
+    assert (held_copy / "payload").exists(), "the held copy is untouched"
+    assert not (free_copy / "payload").exists(), "its unheld sibling is reclaimed"
+    assert any(
+        name == "heldcopy" and "operator hold" in reason for name, reason in result.content_kept
+    )
+    assert result.copy_candidates == 1, "only the unheld sibling was attempted"
+
+
+def test_unreadable_holds_skip_the_arm_entirely(root: Path) -> None:
+    """An unparseable hold list is "I cannot tell", never "nothing is held"."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "unreadableholds")
+    copy = _copy_tree(source, pad / "copy")
+    policy = _copy_policy((source,), delegated_non_git_copy_holds_unreadable=True)
+
+    result = _pass(root, policy=lambda: policy)
+
+    assert (copy / "payload").exists(), "a skipped arm takes nothing"
+    assert result.copy_skipped == "holds unreadable"
+    assert result.copy_candidates == 0
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), holds=None, now=NOW
+    )
+    assert report.skipped == "holds unreadable" and report.candidates == []
+
+
+def test_a_sub_threshold_parent_is_descended_into(root: Path) -> None:
+    """The measured shape: the copy sits under a small run dir (``r3/normal-prev``)."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "nestedrun")
+    run = pad / "r3"  # a few bytes of artifacts, far below the 50 MiB floor
+    run.mkdir()
+    (run / "notes.md").write_text("run artifacts\n")
+    copy = _copy_tree(source, run / "normal-prev")
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert not (copy / "payload").exists()
+    assert result.copy_reclaimed_bytes > 0
