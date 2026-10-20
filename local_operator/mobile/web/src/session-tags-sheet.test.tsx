@@ -99,6 +99,9 @@ describe("the catalogue's states", () => {
 		).toBeTruthy();
 		/* The empty state is NOT the loading state: no spinner copy survives it. */
 		expect(screen.queryByText("loading…")).toBeNull();
+		/* And it is still a state you can FINISH: Done lives outside the row
+		   ladder, so an empty catalogue is not a sheet you escape only via ✕. */
+		expect(screen.getByRole("button", { name: "done" })).toBeTruthy();
 	});
 
 	it("shows the failure and recovers through retry", async () => {
