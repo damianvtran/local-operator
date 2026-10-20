@@ -990,15 +990,40 @@ class AwsProvider:
                 records = guest_supervisor.receipt_records(result.stdout)
                 if not records or records[-1]["restart"] == self._supervisor_restart:
                     return guest_supervisor.ReceiptResult("verified_none")
-                restart = records[-1]["restart"]
                 # Keep the console evidence's fail-closed treatment. A withheld
                 # stderr payload is explicitly marked, never a silent clean [].
                 safe = guest_loss._scrub(json.dumps(records), self._known_secret_values)
                 self._supervisor_records = json.loads(safe) if safe is not None else []
-                # Commit the seen generation only after receipt processing has
-                # completed. Otherwise a scrub/parse error could make the retry
-                # mistake this unbound generation for an already accepted one.
-                self._supervisor_restart = restart
+                # A RECEIPT ONLY SAYS systemd's MainPID was replaced. Under
+                # ``KillMode=process`` every other holder survives that restart
+                # and can keep answering the action port with pre-restart screen
+                # state, so the receipt alone is NOT recovery. Bounce every
+                # process in the unit's cgroup and prove the listener is one
+                # that did not hold the port before; an unproved listener fails
+                # closed instead of authorizing input against a survivor.
+                verification = self._restart_supervisor_unit(self._supervisor_unit)
+                if verification["status"] != "verified":
+                    self._write_supervisor_evidence(
+                        "guest-supervisor-recovery.json",
+                        {
+                            "recovered": False,
+                            "read_failed": False,
+                            "receipt_unavailable": False,
+                            "records_withheld": safe is None,
+                            "cause": "post-restart listener is not fresh",
+                            "restart_verification": verification,
+                            "failed_action_delivery": delivery,
+                            "remaining_batch": "not_sent",
+                            "records": self._supervisor_records,
+                        },
+                    )
+                    # The existing recovery failure, with a fixed cause: the
+                    # caller stops before posting the pending action.
+                    return guest_supervisor.ReceiptResult("read_failed", recovery_exhausted=True)
+                # Commit the generation the restart itself produced. Without
+                # this, the next poll would read the same record as a second
+                # restart and bounce a healthy server in a loop.
+                self._supervisor_restart = verification["latest_restart"]
                 self._write_supervisor_evidence(
                     "guest-supervisor-recovery.json",
                     {
@@ -1006,6 +1031,7 @@ class AwsProvider:
                         "read_failed": False,
                         "receipt_unavailable": False,
                         "records_withheld": safe is None,
+                        "restart_verification": verification,
                         "failed_action_delivery": delivery,
                         "remaining_batch": "not_sent",
                         "records": self._supervisor_records,
@@ -1036,6 +1062,29 @@ class AwsProvider:
             },
         )
         return guest_supervisor.ReceiptResult("read_failed")
+
+    def _restart_supervisor_unit(self, unit: str) -> dict[str, Any]:
+        """Explicit all-process restart + freshness proof; never raises.
+
+        The socket deadline is DERIVED from the guest's own restart budget, so
+        the guest reaches its internal deadline first and ANSWERS (the same
+        ordering ``_run_guest_command`` enforces for every command). Any
+        transport, command or parse failure becomes the fixed
+        ``command_failed`` status -- never guest text -- and the caller fails
+        closed.
+        """
+
+        socket_timeout = guest_supervisor.RESTART_GUEST_DEADLINE_S + GUEST_TRANSPORT_MARGIN_S
+        try:
+            result = self._run_guest_command(
+                guest_supervisor.restart_command(unit, self._supervisor_password),
+                timeout=socket_timeout,
+            )
+            if result.returncode != 0:
+                return guest_supervisor.empty_restart("command_failed")
+            return guest_supervisor.restart_record(result.stdout)
+        except Exception:
+            return guest_supervisor.empty_restart("command_failed")
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float

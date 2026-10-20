@@ -67,18 +67,24 @@ def _script_guest(
     *,
     props: dict[str, str] | None = None,
     effective_props: dict[str, str] | None = None,
+    ppid: int = 8000,
 ) -> tuple[Any, list[Any]]:
     """Run the exact install source; only OS-boundary modules are substituted."""
     proc = tmp_path / "proc/8000"
     proc.mkdir(parents=True)
     (proc / "cmdline").write_bytes(b"python3\0/home/user/server/main.py\0")
     (proc / "cgroup").write_text("0::/system.slice/action-server.service\n")
+    # The install now anchors on the listening socket, not on the ancestry pid
+    # being MainPID: the AMI's real layout has a second :5000 holder beside the
+    # unit's MainPID, and that is the case the fixture must reproduce.
+    _write_listeners(tmp_path / "proc", {8000: 4242})
     properties = {
         "MainPID": "8000",
         "ExecStart": "/usr/bin/python3 /home/user/server/main.py",
         "StandardError": "journal",
         "Type": "simple",
         "LoadState": "loaded",
+        "ControlGroup": "/system.slice/action-server.service",
         "NRestarts": "0",
         "ActiveEnterTimestampMonotonic": "100",
     }
@@ -109,9 +115,9 @@ def _script_guest(
 
     modules = {
         "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
-        "os": SimpleNamespace(getppid=lambda: 8000),
+        "os": SimpleNamespace(getppid=lambda: ppid, readlink=os.readlink),
         "subprocess": SimpleNamespace(check_output=check_output),
-        "sys": SimpleNamespace(argv=["-c", guest_supervisor.CAPTURE_SOURCE]),
+        "sys": SimpleNamespace(argv=["-c", guest_supervisor.CAPTURE_SOURCE, "5000"]),
     }
     real_import = builtins.__import__
 
@@ -359,20 +365,23 @@ def test_recovery_record_contains_cause_and_stderr(
             "service_result": "exit-code",
             "stderr_tail": "fatal crash",
         }
-        monkeypatch.setattr(
-            provider,
-            "_run_guest_command",
-            lambda *a, **k: guest_disk.CommandResult(
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            if _is_restart_command(argv):
+                return _restart_document(receipt=_envelope([record]))
+            return guest_disk.CommandResult(
                 0,
                 "escalation=agentless\n" + json.dumps(_envelope([record])),
                 "",
-            ),
-        )
+            )
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
         assert provider._recover_guest_supervisor("ambiguous").state == "new_restart"
         assert provider._recover_guest_supervisor().state == "verified_none"
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["records"] == [record]
         assert evidence["failed_action_delivery"] == "ambiguous"
+        assert evidence["restart_verification"]["status"] == "verified"
 
 
 @pytest.mark.asyncio
@@ -466,6 +475,19 @@ async def test_real_server_process_dies_restarts_and_next_batch_continues(
             provider = _provider_over(stubs, tmp_path)
             assert provider._cache_root is not None
             provider._supervisor_unit = "action-server.service"
+            # The explicit restart is a privileged guest command a macOS host
+            # cannot execute; the script tests own that surface. Intercept ONLY
+            # that command and give its verification the same receipt the real
+            # report command reads, so this test still exercises the real HTTP
+            # transport for the refusal, the receipt and the rebind.
+            real_command = provider._run_guest_command
+
+            def command(argv: Any, timeout: float) -> guest_disk.CommandResult:
+                if _is_restart_command(argv):
+                    return _restart_document(receipt=json.loads(report.read_text()))
+                return real_command(argv, timeout)
+
+            monkeypatch.setattr(provider, "_run_guest_command", command)
             real = aws_mod.build_clients(provider._credentials, provider._region)
             provider._clients.http_get = real.http_get
             provider._clients.http_post_json = real.http_post_json
@@ -934,6 +956,50 @@ def _receipt(records: list[dict[str, Any]]) -> guest_disk.CommandResult:
     )
 
 
+def _is_restart_command(argv: Any) -> bool:
+    return "--kill-whom=all" in " ".join(str(part) for part in argv)
+
+
+def _restart_document(
+    *,
+    pre: tuple[int, ...] = (1637, 1887),
+    post: tuple[int, ...] = (1901,),
+    main_pid: int = 1901,
+    receipt: dict[str, Any] | None = None,
+    pre_complete: bool = True,
+    post_complete: bool = True,
+) -> guest_disk.CommandResult:
+    """One RESTART_SOURCE-shaped payload, with the real AMI's two-holder shape."""
+    document = {
+        "schema_version": 1,
+        "unit": "action-server.service",
+        "pre_restart_pids": list(pre),
+        "pre_restart_count": len(pre),
+        "pre_scan_complete": pre_complete,
+        "post_restart_pids": list(post),
+        "post_restart_count": len(post),
+        "post_scan_complete": post_complete,
+        "new_main_pid": main_pid,
+        "kill_ok": True,
+        "start_ok": True,
+        "receipt": receipt if receipt is not None else _envelope([_restart_record()]),
+    }
+    return guest_disk.CommandResult(0, "escalation=agentless\n" + json.dumps(document), "")
+
+
+def _supervisor_transport(
+    report: Callable[[], guest_disk.CommandResult],
+    restart: guest_disk.CommandResult | None = None,
+) -> Callable[..., guest_disk.CommandResult]:
+    """Answer receipt reads and the one restart command from one transport."""
+
+    def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+        return restart_doc if _is_restart_command(argv) else report()
+
+    restart_doc = restart if restart is not None else _restart_document()
+    return command
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure", ["warning", "empty", "empty_list", "nonzero", "exception", "scrub_exception"]
@@ -1006,6 +1072,8 @@ async def test_a_receipt_behind_a_guest_warning_is_read_and_its_restart_is_not_i
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             calls.append(argv)
             assert "/var/lib/lop-action-supervisor" in str(argv), "stale input was posted"
+            if _is_restart_command(argv):
+                return _restart_document()
             return guest_disk.CommandResult(
                 0, "sudo warning\n" + _receipt([_restart_record()]).stdout, ""
             )
@@ -1013,7 +1081,7 @@ async def test_a_receipt_behind_a_guest_warning_is_read_and_its_restart_is_not_i
         monkeypatch.setattr(provider, "_run_guest_command", command)
         with pytest.raises(GuestServerRecovered):
             await provider.execute(["must_not_post()", "nor_this()"])
-        assert len(calls) == 1
+        assert len(calls) == 2
         # The planted restart was READ, never quietly reported as "no restart".
         assert provider._supervisor_restart == 42
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
@@ -1044,6 +1112,8 @@ async def test_a_shadow_envelope_before_the_receipt_cannot_report_no_restart(
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             calls.append(argv)
             assert "/var/lib/lop-action-supervisor" in str(argv), "stale input was posted"
+            if _is_restart_command(argv):
+                return _restart_document()
             return guest_disk.CommandResult(
                 0,
                 "escalation=agentless>supplied\n"
@@ -1056,7 +1126,7 @@ async def test_a_shadow_envelope_before_the_receipt_cannot_report_no_restart(
         monkeypatch.setattr(provider, "_run_guest_command", command)
         with pytest.raises(GuestServerRecovered):
             await provider.execute(["must_not_post()", "nor_this()"])
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert provider._supervisor_restart == 42
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is True
@@ -1095,7 +1165,13 @@ def test_transient_receipt_failure_retries_before_accepting_a_result(
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
         monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
-        replies = iter([guest_disk.CommandResult(1, "", ""), _receipt([_restart_record()])])
+        replies = iter(
+            [
+                guest_disk.CommandResult(1, "", ""),
+                _receipt([_restart_record()]),
+                _restart_document(),
+            ]
+        )
         monkeypatch.setattr(provider, "_run_guest_command", lambda *a, **k: next(replies))
         assert provider._recover_guest_supervisor().state == "new_restart"
         assert stubs.slept == [0.1]
@@ -1109,9 +1185,13 @@ def test_withheld_records_are_explicitly_marked(
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
         monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
-        monkeypatch.setattr(
-            provider, "_run_guest_command", lambda *a, **k: _receipt([_restart_record()])
-        )
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            if _is_restart_command(argv):
+                return _restart_document()
+            return _receipt([_restart_record()])
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
         monkeypatch.setattr(aws_mod.guest_loss, "_scrub", lambda *args: None)
         assert provider._recover_guest_supervisor().state == "new_restart"
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
@@ -1157,6 +1237,8 @@ async def test_statement_three_restart_interrupts_batch_and_rebinds_before_next_
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             nonlocal reads
+            if _is_restart_command(argv):
+                return _restart_document()
             if "/var/lib/lop-action-supervisor" in str(argv):
                 reads += 1
                 return _receipt([] if reads < 3 else [_restart_record()])
@@ -1985,10 +2067,13 @@ def _write_listeners(proc: Path, inodes_by_pid: dict[int, int]) -> None:
     """Point each pid's fd at its own listening socket and publish the inodes."""
     for pid, inode in inodes_by_pid.items():
         directory = proc / str(pid) / "fd"
-        directory.mkdir(parents=True)
-        (directory / "3").symlink_to(f"socket:[{inode}]")
+        directory.mkdir(parents=True, exist_ok=True)
+        link = directory / "3"
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(f"socket:[{inode}]")
     net = proc / "net"
-    net.mkdir()
+    net.mkdir(exist_ok=True)
     lines = ["  sl  local_address rem_address   st"]
     for inode in inodes_by_pid.values():
         lines.append(f"   0: 00000000:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 {inode}")
@@ -2347,3 +2432,406 @@ def test_several_socket_owners_still_print_inside_the_guest_deadline(
     record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
     assert record["status"] == "ok"
     assert record["other_socket_owners_share_unit_cgroup"] is True
+
+
+def _add_socket_holder(tmp_path: Path, pid: int, inode: int, cgroup: str) -> None:
+    """Add one more :5000 holder beside the fixture's MainPID 8000."""
+    directory = tmp_path / "proc" / str(pid)
+    directory.mkdir(parents=True)
+    (directory / "cmdline").write_bytes(b"python3\0/home/user/server/main.py\0")
+    (directory / "cgroup").write_text(f"0::{cgroup}\n")
+    _write_listeners(tmp_path / "proc", {8000: 4242, pid: inode})
+
+
+def test_install_accepts_the_real_two_holder_layout_when_the_mainpid_owns_one(
+    tmp_path: Path,
+) -> None:
+    """The AMI's socket_pids [1637, 1887] must not be read as "not ours".
+
+    The fixed check anchors on the unit's MainPID being ONE of the socket's
+    owners. The second holder is a forked server in the same cgroup, so the
+    explicit cgroup-wide kill in the restart path can still reach it.
+    """
+    install, calls = _script_guest(tmp_path, ppid=8100)
+    _add_socket_holder(tmp_path, 8100, 4243, "/system.slice/action-server.service")
+    install()
+    policy = (
+        tmp_path / "etc/systemd/system/action-server.service.d/90-lop-supervisor.conf"
+    ).read_text()
+    assert "KillMode=process" in policy
+    # No restart at install time, even with a second holder present.
+    assert not any(args[1] in {"restart", "start", "stop", "kill"} for args in calls)
+
+
+def test_install_refuses_a_socket_owner_outside_the_unit_control_group(
+    tmp_path: Path,
+) -> None:
+    """A holder outside the cgroup survives even an explicit all-process kill."""
+    install, calls = _script_guest(tmp_path)
+    _add_socket_holder(tmp_path, 8100, 4243, "/system.slice/zombie.service")
+    with pytest.raises(RuntimeError, match=guest_supervisor.SOCKET_OWNER_UNREACHABLE):
+        install()
+    assert not (tmp_path / "etc").exists()
+    assert not any(args[1] == "daemon-reload" for args in calls)
+
+
+def test_install_refuses_when_nothing_listens_on_the_action_port(tmp_path: Path) -> None:
+    install, _ = _script_guest(tmp_path)
+    _write_listeners(tmp_path / "proc", {})
+    with pytest.raises(RuntimeError, match=guest_supervisor.NO_LISTENING_SOCKET):
+        install()
+    assert not (tmp_path / "etc").exists()
+
+
+def _execute_restart_script(
+    tmp_path: Path,
+    *,
+    on_kill: Callable[[Path], None] | None = None,
+    on_start: Callable[[Path], None] | None = None,
+    main_pid_after: int = 9100,
+) -> tuple[dict[str, Any], list[Any], float]:
+    """Run the shipped RESTART_SOURCE against a redirected /proc and fake systemd.
+
+    The virtual clock makes the bounded waits deterministic and instant while
+    still proving the script cannot outlive its budget. The fake manager owns
+    the observable state: handlers mutate the /proc tree exactly as a real
+    kill/start would.
+    """
+    proc = tmp_path / "proc"
+    _write_listeners(proc, {9000: 4242})
+    root = tmp_path / "var/lib/lop-action-supervisor"
+    root.mkdir(parents=True)
+    (root / "action-server.service.json").write_text(json.dumps(_envelope([_restart_record()])))
+    calls: list[Any] = []
+    state = {"main": 9000, "now": 0.0}
+
+    def check_output(args: Any, **kwargs: Any) -> str:
+        calls.append(args)
+        if args[1] == "show":
+            return "MainPID=%d" % state["main"]
+        if args[1] == "kill" and on_kill is not None:
+            on_kill(proc)
+        if args[1] == "start":
+            if on_start is not None:
+                on_start(proc)
+            state["main"] = main_pid_after
+        return ""
+
+    def sleep(seconds: float) -> None:
+        state["now"] += seconds
+
+    modules = {
+        "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
+        "os": SimpleNamespace(readlink=os.readlink),
+        "subprocess": SimpleNamespace(check_output=check_output),
+        "sys": SimpleNamespace(
+            argv=["-c", guest_supervisor.RESTART_SOURCE, "action-server.service", "5000"]
+        ),
+        "time": SimpleNamespace(monotonic=lambda: state["now"], sleep=sleep),
+    }
+    real_import = builtins.__import__
+
+    def importer(name: str, *args: Any, **kwargs: Any) -> Any:
+        return modules[name] if name in modules else real_import(name, *args, **kwargs)
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(
+            guest_supervisor.RESTART_SOURCE,
+            {"__builtins__": {**vars(builtins), "__import__": importer}},
+        )
+    return json.loads(out.getvalue()), calls, state["now"]
+
+
+def _drop_listener(proc: Path, pid: int) -> None:
+    (proc / str(pid) / "fd" / "3").unlink()
+
+
+def test_restart_script_kills_all_then_starts_and_reports_a_fresh_mainpid(
+    tmp_path: Path,
+) -> None:
+    payload, calls, elapsed = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _write_listeners(proc, {9100: 4343}),
+    )
+    order = [args[1] for args in calls if args[1] in {"kill", "start"}]
+    assert order == ["kill", "start"], "the explicit kill must precede the start"
+    kill = next(args for args in calls if args[1] == "kill")
+    assert "--kill-whom=all" in kill and "action-server.service" in kill
+    assert payload["pre_restart_pids"] == [9000]
+    assert payload["post_restart_pids"] == [9100]
+    assert payload["new_main_pid"] == 9100
+    assert payload["receipt"]["schema_version"] == 1
+    assert elapsed < guest_supervisor.RESTART_GUEST_DEADLINE_S
+    record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "verified"
+    assert record["fresh"] is True
+    assert record["listener_is_new_main_pid"] is True
+
+
+def test_restart_script_still_reports_the_survivor_as_listening(tmp_path: Path) -> None:
+    """The zombie case, constructed: SIGTERM does not reap the old holder.
+
+    ``systemctl kill --kill-whom=all`` is issued, but in this script test the
+    holder ignores it (a real survivor of ``KillMode=process`` is exactly the
+    process systemd never signalled). The new MainPID is a different pid, yet
+    the listener is still the pre-restart one -- the payload must say so, and
+    the host must refuse it.
+    """
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        on_kill=None,
+        on_start=None,
+        main_pid_after=9100,
+    )
+    assert payload["pre_restart_pids"] == [9000]
+    assert payload["post_restart_pids"] == [9000]
+    assert payload["new_main_pid"] == 9100
+    record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "stale_listener"
+    assert record["fresh"] is False
+    assert record["listener_is_new_main_pid"] is False
+
+
+def test_restart_script_reports_a_forked_listener_not_the_mainpid(tmp_path: Path) -> None:
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _drop_listener(proc, 9000),
+        on_start=lambda proc: _write_listeners(proc, {9101: 4343}),
+        main_pid_after=9100,
+    )
+    assert payload["post_restart_pids"] == [9101]
+    assert payload["new_main_pid"] == 9100
+    record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "verified"
+    assert record["fresh"] is True
+    assert record["listener_is_new_main_pid"] is False
+
+
+def test_restart_script_is_bounded_when_no_listener_appears(tmp_path: Path) -> None:
+    payload, calls, elapsed = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _drop_listener(proc, 9000),
+        main_pid_after=0,
+    )
+    assert payload["post_restart_pids"] == []
+    assert elapsed <= guest_supervisor.RESTART_GUEST_DEADLINE_S
+    assert any(args[1] == "start" for args in calls)
+    record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["status"] == "verification_timeout"
+    assert record["fresh"] is False
+
+
+def _restart_payload(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "schema_version": 1,
+        "unit": "action-server.service",
+        "pre_restart_pids": [1637, 1887],
+        "pre_restart_count": 2,
+        "pre_scan_complete": True,
+        "post_restart_pids": [1901],
+        "post_restart_count": 1,
+        "post_scan_complete": True,
+        "new_main_pid": 1901,
+        "kill_ok": True,
+        "start_ok": True,
+        "receipt": _envelope([_restart_record()]),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_restart_record_refuses_a_stale_listener() -> None:
+    record = guest_supervisor.restart_record(
+        json.dumps(_restart_payload(post_restart_pids=[1887], new_main_pid=1901))
+    )
+    assert record["status"] == "stale_listener"
+    assert record["fresh"] is False
+    assert record["listener_is_new_main_pid"] is False
+    assert record["post_restart_owner"] == 1887
+
+
+def test_restart_record_accepts_a_fresh_mainpid() -> None:
+    record = guest_supervisor.restart_record(json.dumps(_restart_payload()))
+    assert record["status"] == "verified"
+    assert record["fresh"] is True
+    assert record["listener_is_new_main_pid"] is True
+    assert record["latest_restart"] == 42
+
+
+def test_restart_record_accepts_a_forked_child_with_the_claim_recorded() -> None:
+    record = guest_supervisor.restart_record(
+        json.dumps(_restart_payload(post_restart_pids=[1901], new_main_pid=1900))
+    )
+    assert record["status"] == "verified"
+    assert record["fresh"] is True
+    assert record["listener_is_new_main_pid"] is False
+
+
+def test_restart_record_deduplicates_pids_and_refuses_an_absent_listener() -> None:
+    assert guest_supervisor.listener_is_fresh([1637, 1637, 1887], [1901]) is True
+    assert guest_supervisor.listener_is_fresh([1637, 1887], []) is False
+    assert guest_supervisor.listener_is_fresh([1637], [1637]) is False
+    verified = guest_supervisor.restart_record(
+        json.dumps(_restart_payload(pre_restart_pids=[1637, 1637, 1887], pre_restart_count=2))
+    )
+    assert verified["pre_restart_pids"] == [1637, 1887]
+    assert verified["status"] == "verified"
+    absent = guest_supervisor.restart_record(
+        json.dumps(_restart_payload(post_restart_pids=[], post_restart_count=0, new_main_pid=0))
+    )
+    assert absent["status"] == "verification_timeout"
+    assert absent["fresh"] is False
+    assert absent["post_restart_owner"] is None
+
+
+def test_restart_record_fails_closed_on_an_incomplete_owner_set() -> None:
+    record = guest_supervisor.restart_record(
+        json.dumps(
+            _restart_payload(
+                pre_restart_pids=list(range(1, 9)),
+                pre_restart_count=9,
+                post_restart_pids=[1901],
+            )
+        )
+    )
+    assert record["status"] == "incomplete_scan"
+    assert record["fresh"] is False
+    assert record["post_restart_pids"] == [1901]
+
+
+def test_restart_record_ignores_guest_claims_about_freshness() -> None:
+    payload = _restart_payload(post_restart_pids=[1887], new_main_pid=1901)
+    payload.update(status="verified", fresh=True, listener_is_new_main_pid=True)
+    record = guest_supervisor.restart_record(json.dumps(payload))
+    assert record["status"] == "stale_listener"
+    assert record["fresh"] is False
+
+
+def test_restart_record_requires_a_reconcilable_receipt() -> None:
+    broken = _envelope([_restart_record()])
+    broken["systemd_nrestarts"] = 5  # disagrees with captured_exits == 1
+    record = guest_supervisor.restart_record(json.dumps(_restart_payload(receipt=broken)))
+    assert record["status"] == "receipt_unavailable"
+    assert record["fresh"] is True
+    assert record["latest_restart"] is None
+
+
+def _recovering_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: guest_disk.CommandResult
+) -> tuple[Any, list[str]]:
+    """A provider whose receipt shows one restart and whose bounce is scripted."""
+    stubs = _Stubs()
+    provider = _provider_over(stubs, tmp_path)
+    provider._supervisor_unit = "action-server.service"
+    monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+    posts: list[str] = []
+
+    def command(argv: Any, timeout: float) -> guest_disk.CommandResult:
+        if _is_restart_command(argv):
+            return restart
+        if "/var/lib/lop-action-supervisor" in str(argv):
+            return _receipt([_restart_record()])
+        posts.append(" ".join(str(part) for part in argv))
+        return guest_disk.CommandResult(0, "", "")
+
+    monkeypatch.setattr(provider, "_run_guest_command", command)
+    return provider, posts
+
+
+@pytest.mark.asyncio
+async def test_a_verified_restart_posts_the_next_action_only_after_rebinding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, posts = _recovering_provider(tmp_path, monkeypatch, _restart_document())
+    with pytest.raises(GuestServerRecovered):
+        await provider.execute(["must_not_post()"])
+    assert posts == [], "the refused batch must not be replayed"
+    await provider.execute(["after_rebind()"])
+    assert len(posts) == 1
+    encoded = posts[0].split()[-1]
+    assert base64.b64decode(encoded).decode() == "after_rebind()"
+    assert provider._supervisor_restart == 42
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    assert evidence["recovered"] is True
+    assert evidence["restart_verification"]["status"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_a_surviving_stale_holder_fails_closed_and_never_posts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zombie: a receipt says restarted, the old holder still answers."""
+    stale = _restart_document(pre=(1637, 1887), post=(1887,), main_pid=1900)
+    provider, posts = _recovering_provider(tmp_path, monkeypatch, stale)
+    with pytest.raises(aws_mod.GuestExecutionError):
+        await provider.execute(["must_not_post()"])
+    assert posts == [], "input must not reach an unverified listener"
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    assert evidence["recovered"] is False
+    assert evidence["cause"] == "post-restart listener is not fresh"
+    assert evidence["restart_verification"]["status"] == "stale_listener"
+    assert evidence["restart_verification"]["post_restart_owner"] == 1887
+    assert evidence["remaining_batch"] == "not_sent"
+
+
+@pytest.mark.asyncio
+async def test_a_forked_listener_is_accepted_after_an_explicit_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forked = _restart_document(pre=(1637, 1887), post=(1901,), main_pid=1900)
+    provider, posts = _recovering_provider(tmp_path, monkeypatch, forked)
+    with pytest.raises(GuestServerRecovered):
+        await provider.execute(["must_not_post()"])
+    await provider.execute(["after_rebind()"])
+    assert len(posts) == 1
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    assert evidence["restart_verification"]["status"] == "verified"
+    assert evidence["restart_verification"]["listener_is_new_main_pid"] is False
+
+
+@pytest.mark.asyncio
+async def test_restart_verification_timeout_is_bounded_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        timeouts: list[float] = []
+        posts: list[str] = []
+
+        def command(argv: Any, timeout: float) -> guest_disk.CommandResult:
+            if _is_restart_command(argv):
+                timeouts.append(timeout)
+                raise TimeoutError("guest did not answer")
+            if "/var/lib/lop-action-supervisor" in str(argv):
+                return _receipt([_restart_record()])
+            posts.append(" ".join(str(part) for part in argv))
+            return guest_disk.CommandResult(0, "", "")
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        assert provider._cache_root is not None
+        with pytest.raises(aws_mod.GuestExecutionError):
+            await provider.execute(["must_not_post()"])
+        assert posts == []
+        assert timeouts == [
+            guest_supervisor.RESTART_GUEST_DEADLINE_S + aws_mod.GUEST_TRANSPORT_MARGIN_S
+        ]
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["restart_verification"]["status"] == "command_failed"
+        assert evidence["recovered"] is False
+
+
+def test_the_restart_script_budgets_match_the_host_constants() -> None:
+    """The guest literals and the host's derived deadline are one fact.
+
+    Drifting the script's budget above ``RESTART_GUEST_DEADLINE_S`` would let
+    our socket timeout expire while the guest was still restarting -- the
+    ambiguous ordering ``guest_deadline_for`` exists to prevent.
+    """
+    source = guest_supervisor.RESTART_SOURCE
+    assert "DEADLINE = time.monotonic() + %r" % guest_supervisor.RESTART_GUEST_DEADLINE_S in source
+    assert "KILL_GRACE = %r" % guest_supervisor.RESTART_KILL_GRACE_S in source
+    assert "VERIFY = %r" % guest_supervisor.RESTART_VERIFY_S in source

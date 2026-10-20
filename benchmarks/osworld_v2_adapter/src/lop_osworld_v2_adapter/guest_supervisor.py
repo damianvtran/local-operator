@@ -37,6 +37,14 @@ LAYOUT_BUDGET_S = 4.0
 #: authoritative regardless of how long the guest side is allowed.
 LAYOUT_GUEST_DEADLINE_S = 3.5
 
+#: Refusal strings for the socket-ownership checks the install adds. They are
+#: fixed vocabulary raised by ``INSTALL_SOURCE`` and, like every other refusal
+#: tied to the guest's process layout, they trigger the read-only layout
+#: capture when they fire.
+SOCKET_SCAN_INCOMPLETE = "action-server socket scan was incomplete"
+NO_LISTENING_SOCKET = "action server has no listening socket"
+SOCKET_OWNER_UNREACHABLE = "socket owner is outside the action-server service"
+
 #: Refusals decided by what the guest's units look like. The install command's
 #: other refusals (journal policy, an existing hook, a oneshot service) already
 #: name a property of a discovered unit, so they need no process layout. This is
@@ -49,6 +57,9 @@ LAYOUT_REFUSALS = frozenset(
         "action server has no private service",
         "unsupported service name",
         "service does not exclusively own action server",
+        SOCKET_SCAN_INCOMPLETE,
+        NO_LISTENING_SOCKET,
+        SOCKET_OWNER_UNREACHABLE,
     }
 )
 
@@ -62,6 +73,17 @@ LAYOUT_REFUSALS = frozenset(
 #: membership fact still decides whether an explicit cgroup-wide kill can
 #: reach such a holder.
 SUPERVISOR_KILL_MODE = "process"
+
+#: The explicit restart's internal budget, in the guest. ``RESTART_KILL_GRACE_S``
+#: is the bounded wait after SIGTERM for every recorded holder to release the
+#: socket; ``RESTART_VERIFY_S`` is the bounded wait for a FRESH listener to
+#: appear after ``systemctl start``. Their sum leaves the remainder of
+#: ``RESTART_GUEST_DEADLINE_S`` for the two ``systemctl`` calls. A guest restart
+#: that cannot prove freshness inside that budget fails closed rather than
+#: reporting a pending listener as recovered.
+RESTART_KILL_GRACE_S = 2.0
+RESTART_VERIFY_S = 4.0
+RESTART_GUEST_DEADLINE_S = 7.0
 
 
 class GenerationMismatch(ValueError):
@@ -134,11 +156,66 @@ persist()
 # scope must never gain a restart policy because it owns the GUI. Inspect only
 # our HTTP command's ancestors, never arbitrary process or task paths.
 INSTALL_SOURCE = r"""
-import json, os, pathlib, re, subprocess, sys
+import json, os, pathlib, re, subprocess, sys, time
+
+# The socket scan, not the ancestry walk, decides ownership. Bounded so a
+# loaded guest cannot turn an install into an unbounded privileged probe; an
+# incomplete scan refuses rather than claiming an owner set it did not see.
+SCAN_DEADLINE = time.monotonic() + 2.0
 
 def run(*args):
     return subprocess.check_output(args, text=True, timeout=3)
 
+def listening_inodes(port):
+    inodes = set()
+    readable = False
+    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            lines = pathlib.Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        readable = True
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != '0A':
+                continue
+            try:
+                if int(fields[1].rsplit(':', 1)[1], 16) != port:
+                    continue
+                inodes.add(int(fields[9]))
+            except (IndexError, ValueError):
+                continue
+    return inodes, readable
+
+def socket_owners(port):
+    inodes, readable = listening_inodes(port)
+    if not readable:
+        return [], False
+    owners = set()
+    for entry in pathlib.Path('/proc').iterdir():
+        if time.monotonic() > SCAN_DEADLINE:
+            return sorted(owners), False
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in entry.joinpath('fd').iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                link = re.fullmatch(r'socket:\[(\d+)\]', target)
+                if link and int(link[1]) in inodes:
+                    owners.add(int(entry.name))
+                    break
+        except OSError:
+            continue
+    return sorted(owners), True
+
+def cgroup_of(pid):
+    text = pathlib.Path('/proc/%d/cgroup' % pid).read_text()
+    return text.split('::', 1)[1].strip() if '::' in text else ''
+
+port = int(sys.argv[2])
 pid = os.getppid()
 for _ in range(8):
     proc = pathlib.Path('/proc/%d' % pid)
@@ -160,10 +237,41 @@ if not re.fullmatch(r'[A-Za-z0-9_.-]+\.service', unit):
 props = dict(line.split('=', 1) for line in run('systemctl', 'show', unit,
     '-p', 'MainPID', '-p', 'ExecStart', '-p', 'ExecStartPre', '-p', 'ExecStartPost',
     '-p', 'ExecStop', '-p', 'ExecStopPost', '-p', 'StandardError', '-p', 'StandardOutput',
-    '-p', 'Type', '-p', 'LoadState', '-p', 'NRestarts', '-p', 'ActiveEnterTimestampMonotonic'
+    '-p', 'Type', '-p', 'LoadState', '-p', 'ControlGroup', '-p', 'NRestarts',
+    '-p', 'ActiveEnterTimestampMonotonic'
     ).splitlines())
-if props.get('MainPID') != str(pid) or 'main.py' not in props.get('ExecStart', ''):
+# THE UNIT'S MainPID MUST BE ONE OF THE SOCKET'S OWNERS, not the single owner.
+# The AMI's real layout is MainPID 1637 plus a forked 1887 both holding :5000;
+# requiring the ancestry pid to equal MainPID refused that healthy case. What
+# is still refused is an owner the unit's cgroup-wide kill could not reach: a
+# holder outside the service's control group survives even an explicit kill
+# and can keep answering with stale screen state.
+if 'main.py' not in props.get('ExecStart', ''):
     raise RuntimeError('service does not exclusively own action server')
+if not props.get('MainPID', '').isdigit() or int(props['MainPID']) <= 0:
+    raise RuntimeError('service does not exclusively own action server')
+main_pid = int(props['MainPID'])
+control_group = props.get('ControlGroup', '')
+if not control_group:
+    raise RuntimeError('action server has no private service')
+owners, complete = socket_owners(port)
+if not complete:
+    raise RuntimeError('action-server socket scan was incomplete')
+if not owners:
+    raise RuntimeError('action server has no listening socket')
+if main_pid not in owners:
+    raise RuntimeError('service does not exclusively own action server')
+prefix = control_group.rstrip('/') + '/'
+for owner in owners:
+    if owner == main_pid:
+        continue
+    try:
+        owner_cgroup = cgroup_of(owner)
+    except OSError:
+        owner_cgroup = ''
+    if not owner_cgroup or not (owner_cgroup == control_group or
+                                owner_cgroup.startswith(prefix)):
+        raise RuntimeError('socket owner is outside the action-server service')
 if props.get('StandardError') != 'journal' and not (
         props.get('StandardError') == 'inherit' and props.get('StandardOutput') == 'journal'):
     raise RuntimeError('existing server stderr is not journalled')
@@ -249,6 +357,138 @@ except Exception:
         run('systemctl', 'daemon-reload')
     raise
 print(json.dumps({'unit': unit, 'installed': True}))
+"""
+
+#: One explicit, all-process restart followed by a proved-fresh listener.
+#: ``KillMode=process`` makes systemd's own restart signal only the MainPID, so
+#: a second holder of the action port survives it and can keep answering with
+#: stale screen state -- a false success, worse than no supervision. This script
+#: therefore signals EVERY process in the unit's cgroup, waits (bounded) for the
+#: recorded holders to release the socket, starts the unit, and reports the
+#: pre/post owner sets plus the new MainPID. The host derives freshness: a
+#: post-restart listener is acceptable only when its pid was not one of the pre-
+#: restart holders. The receipt envelope is read here too, so the host can
+#: consume the generation this restart produced instead of bouncing again.
+RESTART_SOURCE = r"""
+import json, os, pathlib, re, subprocess, sys, time
+
+UNIT = sys.argv[2]
+PORT = int(sys.argv[3])
+DEADLINE = time.monotonic() + 7.0
+KILL_GRACE = 2.0
+VERIFY = 4.0
+RECEIPT = pathlib.Path('/var/lib/lop-action-supervisor') / (UNIT + '.json')
+
+def run(*args):
+    left = DEADLINE - time.monotonic()
+    if left <= 0.2:
+        raise RuntimeError('restart budget exhausted')
+    return subprocess.check_output(args, text=True, timeout=min(2.0, left))
+
+def listening_inodes():
+    inodes = set()
+    readable = False
+    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            lines = pathlib.Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        readable = True
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != '0A':
+                continue
+            try:
+                if int(fields[1].rsplit(':', 1)[1], 16) != PORT:
+                    continue
+                inodes.add(int(fields[9]))
+            except (IndexError, ValueError):
+                continue
+    return inodes, readable
+
+def owners():
+    inodes, readable = listening_inodes()
+    if not readable:
+        return [], False
+    found = set()
+    for entry in pathlib.Path('/proc').iterdir():
+        if time.monotonic() > DEADLINE:
+            return sorted(found), False
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in entry.joinpath('fd').iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                link = re.fullmatch(r'socket:\[(\d+)\]', target)
+                if link and int(link[1]) in inodes:
+                    found.add(int(entry.name))
+                    break
+        except OSError:
+            continue
+    return sorted(found), True
+
+def main_pid():
+    for line in run('systemctl', 'show', UNIT, '-p', 'MainPID').splitlines():
+        if line.startswith('MainPID=') and line[8:].isdigit():
+            return int(line[8:])
+    return 0
+
+pre, pre_complete = owners()
+kill_ok = start_ok = False
+try:
+    run('systemctl', 'kill', '--kill-whom=all', UNIT)
+    kill_ok = True
+except Exception:
+    pass
+# Bounded wait for the recorded holders to release. A survivor is not fatal
+# here -- the verification below is what refuses it.
+until = min(time.monotonic() + KILL_GRACE, DEADLINE)
+while time.monotonic() < until:
+    current, _ = owners()
+    if not (set(pre) & set(current)):
+        break
+    time.sleep(0.1)
+try:
+    run('systemctl', 'start', UNIT)
+    start_ok = True
+except Exception:
+    pass
+# Verify against the PRE-RESTART SET, not against the unit's own claim: a
+# listener that was already there before this restart is a survivor, however
+# healthy systemd says the unit is. Poll because a starting server binds late.
+post = []
+post_complete = True
+until = min(time.monotonic() + VERIFY, DEADLINE)
+while time.monotonic() < until:
+    post, post_complete = owners()
+    if post and not (set(pre) & set(post)):
+        break
+    time.sleep(0.1)
+try:
+    new_main = main_pid()
+except Exception:
+    new_main = 0
+try:
+    receipt = json.loads(RECEIPT.read_text())
+except Exception:
+    receipt = None
+print(json.dumps({
+    'schema_version': 1,
+    'unit': UNIT,
+    'pre_restart_pids': pre[:8],
+    'pre_restart_count': len(pre),
+    'pre_scan_complete': pre_complete,
+    'post_restart_pids': post[:8],
+    'post_restart_count': len(post),
+    'post_scan_complete': post_complete,
+    'new_main_pid': new_main,
+    'kill_ok': kill_ok,
+    'start_ok': start_ok,
+    'receipt': receipt,
+}))
 """
 
 #: Read-only process/unit topology behind a supervisor refusal. This exists
@@ -509,11 +749,21 @@ def install_command(password: str) -> Sequence[str]:
         "except Exception as error:\n"
         "    print(json.dumps({'installed': False, 'reason': type(error).__name__}))\n"
     )
-    return _privileged(wrapper, [CAPTURE_SOURCE], password)
+    return _privileged(wrapper, [CAPTURE_SOURCE, str(ACTION_SERVER_PORT)], password)
 
 
 def report_command(unit: str, password: str) -> Sequence[str]:
     return _privileged(REPORT_SOURCE, [unit], password)
+
+
+def restart_command(unit: str, password: str, port: int = ACTION_SERVER_PORT) -> Sequence[str]:
+    """One privileged, bounded, all-process restart of the supervised unit.
+
+    Explicit rather than a bare ``systemctl restart`` because ``KillMode=process``
+    leaves every non-MainPID holder alive; ``--kill-whom=all`` is the one
+    operation that reaches them, and freshness is verified after it.
+    """
+    return _privileged(RESTART_SOURCE, [unit, str(port)], password)
 
 
 def layout_command(password: str, port: int = ACTION_SERVER_PORT) -> Sequence[str]:
@@ -999,7 +1249,11 @@ def is_receipt_payload(value: object) -> bool:
 
 def receipt_records(output: str) -> list[dict[str, Any]]:
     """An empty initialized envelope proves absence; empty/malformed output does not."""
-    value = parse_output(output, is_receipt_payload)
+    return _receipt_records_value(parse_output(output, is_receipt_payload))
+
+
+def _receipt_records_value(value: object) -> list[dict[str, Any]]:
+    """Validate one decoded envelope; shared with the restart's nested receipt."""
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise ValueError("invalid supervisor receipt")
     records = value.get("records")
@@ -1034,6 +1288,144 @@ def receipt_records(output: str) -> list[dict[str, Any]]:
         ):
             raise ValueError("invalid supervisor record")
     return records
+
+
+#: Every status a restart verification can report. Fixed vocabulary only: no
+#: guest text reaches the evidence or an exception through this field.
+RESTART_STATUSES = frozenset(
+    {
+        "verified",
+        "stale_listener",
+        "verification_timeout",
+        "incomplete_scan",
+        "receipt_unavailable",
+        "command_failed",
+    }
+)
+
+#: Evidence is bounded like the layout record: the pre/post owner sets are
+#: capped, and a pre-cap count above the cap makes the scan incomplete. An
+#: incomplete set cannot prove a non-member is fresh, so it fails closed.
+RESTART_OWNER_CAP = 8
+
+
+def is_restart_payload(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("schema_version") == 1
+        and isinstance(value.get("unit"), str)
+        and isinstance(value.get("pre_restart_pids"), list)
+        and isinstance(value.get("post_restart_pids"), list)
+    )
+
+
+def listener_is_fresh(pre_restart_pids: Sequence[int], post_restart_pids: Sequence[int]) -> bool:
+    """True only when a listener exists and no holder predates the restart.
+
+    Set membership, not equality with the MainPID, because a service may fork
+    its listener: such a pid is acceptable when it did not hold the port before
+    the restart, while a pre-existing survivor is refused however healthy the
+    unit claims to be. Duplicate entries and an absent post set are benign and
+    explicit here rather than left to the caller.
+    """
+    previous = set(pre_restart_pids)
+    return bool(post_restart_pids) and not (previous & set(post_restart_pids))
+
+
+def empty_restart(status: str = "command_failed") -> dict[str, Any]:
+    """A verification that produced no usable guest payload."""
+    return {
+        "schema_version": 1,
+        "status": status if status in RESTART_STATUSES else "command_failed",
+        "unit": None,
+        "pre_restart_pids": [],
+        "post_restart_pids": [],
+        "post_restart_owner": None,
+        "new_main_pid": None,
+        "listener_is_new_main_pid": None,
+        "fresh": False,
+        "latest_restart": None,
+    }
+
+
+def _restart_pids(value: object) -> list[int]:
+    if not isinstance(value, list):
+        raise ValueError("invalid restart owner list")
+    pids: list[int] = []
+    for item in value:
+        if type(item) is not int or item <= 0:
+            raise ValueError("invalid restart owner pid")
+        if item not in pids:
+            pids.append(item)
+    return pids[:RESTART_OWNER_CAP]
+
+
+def restart_record(output: str) -> dict[str, Any]:
+    """Whitelist one restart document and DERIVE the freshness claim here.
+
+    The guest reports what it observed (numeric ids, the unit name and the
+    receipt envelope); it does not get to say whether the listener is fresh.
+    ``fresh`` and ``listener_is_new_main_pid`` are computed from those ids, and
+    the status is chosen from the fixed vocabulary. A receipt the host cannot
+    reconcile makes the restart unrecoverable even when the listener is fresh:
+    the generation could not be consumed, so the next poll would bounce again.
+    """
+    value = parse_output(output, is_restart_payload)
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("invalid restart record")
+    unit = value.get("unit")
+    if not isinstance(unit, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.service", unit):
+        raise ValueError("invalid restart unit")
+    pre = _restart_pids(value.get("pre_restart_pids"))
+    post = _restart_pids(value.get("post_restart_pids"))
+    pre_count = value.get("pre_restart_count")
+    post_count = value.get("post_restart_count")
+    if type(pre_count) is not int or pre_count < len(pre):
+        raise ValueError("invalid pre-restart count")
+    if type(post_count) is not int or post_count < len(post):
+        raise ValueError("invalid post-restart count")
+    if type(value.get("pre_scan_complete")) is not bool:
+        raise ValueError("invalid pre-restart scan flag")
+    if type(value.get("post_scan_complete")) is not bool:
+        raise ValueError("invalid post-restart scan flag")
+    new_main = value.get("new_main_pid")
+    if type(new_main) is not int or new_main < 0:
+        raise ValueError("invalid restart MainPID")
+    try:
+        records = _receipt_records_value(value.get("receipt"))
+        latest = records[-1]["restart"] if records else None
+    except (ValueError, GenerationMismatch):
+        records, latest = [], None
+    incomplete = (
+        value["pre_scan_complete"] is not True
+        or value["post_scan_complete"] is not True
+        or pre_count != len(pre)
+        or post_count != len(post)
+    )
+    fresh = False if incomplete else listener_is_fresh(pre, post)
+    if incomplete:
+        status = "incomplete_scan"
+    elif not post:
+        status = "verification_timeout"
+    elif not fresh:
+        status = "stale_listener"
+    elif latest is None:
+        status = "receipt_unavailable"
+    else:
+        status = "verified"
+    owner = post[0] if post else None
+    return {
+        "schema_version": 1,
+        "status": status,
+        "unit": unit,
+        "pre_restart_pids": pre,
+        "post_restart_pids": post,
+        "post_restart_owner": owner,
+        "new_main_pid": new_main or None,
+        "listener_is_new_main_pid": (owner == new_main) if owner and new_main else None,
+        "fresh": fresh,
+        "latest_restart": latest,
+    }
 
 
 def installed_unit(output: str) -> str:
