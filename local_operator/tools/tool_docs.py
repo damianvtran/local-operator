@@ -943,6 +943,50 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "rounds or freshness; `guide://code-requests` has the full rules."
         ),
     ),
+    # -- tags (V2-4 agent write path) ---------------------------------------
+    # The wire description keeps the one rule a model must know before calling
+    # (names only; a misspelling is refused). The vocabulary, the caps and the
+    # receipt contract are read-once reference, so they live here.
+    "tags": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                op="list",
+                blurb="Categories with ids, names, display order and conversation counts.",
+            ),
+            ToolDocOp(
+                op="create",
+                blurb="One category; blank, reserved, oversized or duplicate names are refused.",
+                fields=("name",),
+            ),
+            ToolDocOp(
+                op="rename",
+                blurb="Rename one category by id; assignments keep the id.",
+                fields=("id", "name"),
+            ),
+            ToolDocOp(
+                op="assign",
+                blurb="Replace one session's categories with the named set; empty clears.",
+                fields=("session_id", "tags", "primary"),
+            ),
+        ),
+        notes=(
+            "`assign` takes category NAMES only, exact case-insensitive — never "
+            "ids. Ids appear in `list` for display and for `rename`. A name the "
+            "store does not contain is refused with the known vocabulary; it is "
+            "never auto-created. Create the category first (`create` is the only "
+            "creation path), then assign it.\n"
+            "Caps: at most 32 categories; names 1-24 characters, unique "
+            "case-insensitively, with `Untagged` reserved; at most 8 categories "
+            "per session. `primary` must be one of the assigned names (or "
+            "omitted, which keeps the current primary, else the first). An empty "
+            "`tags` list clears the session's assignments.\n"
+            "Delegated and hidden sessions are taggable; a remote/mesh session is "
+            "refused with the route's `409 session_is_remote` and the device that "
+            "holds it. Every successful `assign` receipt names the categories and the "
+            "session, so the tool ledger is the audit trail. Deleting a category is a sidebar "
+            "action, not a tool op."
+        ),
+    ),
 }
 
 #: Tool-specific renderers for surfaces that must be BYTE-IDENTICAL to another

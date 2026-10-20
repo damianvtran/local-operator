@@ -569,6 +569,21 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``sessions`` itself: the directory the entries live IN",
     ),
+    # The session-tag store's reserved DISPLAY label (``RESERVED_NAME``,
+    # ``"Untagged"``): the pseudo-category the UI shows for conversations no tag
+    # claims, and the one name a user may not assign. It is a candidate only
+    # because it matches the guard's NAME-suffix heuristic (the Aida
+    # ``DEFAULT_NAME`` precedent) — a label in the registry's vocabulary, never
+    # a file or directory inside a session. The store itself is at
+    # ``<config>/tags/``, beside ``sessions/``: its ``"tags"``/``"revision"``/
+    # ``"categories.json"`` segments are spelled inline, so they are not
+    # constants this derivation sees, and a move carries none of the store.
+    "local_operator/session/session_tags.py": (
+        1,
+        "``RESERVED_NAME`` ('Untagged'): the reserved tag DISPLAY NAME for the "
+        "untagged pseudo-category — a label in the registry's vocabulary, never "
+        "a path or an entry of a session directory",
+    ),
     "local_operator/asks/store.py": (
         4,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
