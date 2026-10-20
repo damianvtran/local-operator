@@ -615,6 +615,11 @@ def _check_context_sidecar(
 # ---------------------------------------------------------------------------
 
 
+#: Sentinel for "the namespace is not carried at the base ref". Distinct
+#: from ``None``, which means "present but unreadable".
+ABSENT = "ABSENT"
+
+
 def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     """Every ``(locale, namespace, key)`` the allowance records as missing."""
     ids: set[tuple[str, str, str]] = set()
@@ -626,17 +631,26 @@ def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     return ids
 
 
-def _base_catalogue(ref: str, locale: str, namespace: str) -> dict[str, str] | None:
-    """One locale's catalogue for one namespace at ``ref``, or ``None``.
+def _base_catalogue(
+    ref: str, locale: str, namespace: str
+) -> dict[str, str] | str | None:
+    """One locale's catalogue for one namespace at ``ref``.
 
-    ``None`` means the file does not exist there (the namespace is uncarried,
-    so every key is missing) or could not be read. Callers treat both the
-    same way: the key is not present at the base.
+    Three outcomes, and the difference between the last two is load-bearing:
+
+    - a ``dict``: the file exists and parsed;
+    - ``ABSENT``: the file does not exist, so the namespace is uncarried and
+      every key is genuinely missing there;
+    - ``None``: the file exists but could not be read or parsed. That is an
+      ERROR, not an absence — treating it as absence would let a corrupt
+      base bless debt for a translation that was actually present, which is
+      the fail-open this function exists to avoid.
     """
-    shown = _git(
-        "show",
-        f"{ref}:local_operator/i18n/catalogues/{locale}/{namespace}.json",
-    )
+    path = f"local_operator/i18n/catalogues/{locale}/{namespace}.json"
+    exists = _git("cat-file", "-e", f"{ref}:{path}")
+    if exists.returncode != 0:
+        return ABSENT
+    shown = _git("show", f"{ref}:{path}")
     if shown.returncode != 0:
         return None
     try:
@@ -700,7 +714,14 @@ def allowance_growth(
             growth.add((locale, namespace, key))
             continue
         messages = _base_catalogue(ref, locale, namespace)
-        if messages is not None and key in messages:
+        if messages is None:
+            # Unreadable base catalogue: fail rather than assume absence.
+            growth.add((locale, namespace, key))
+            continue
+        if messages is ABSENT:
+            # Namespace uncarried at base: the key was already missing.
+            continue
+        if key in messages:
             # Present at base, missing at head: a translation was removed.
             growth.add((locale, namespace, key))
     return growth
@@ -865,11 +886,12 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     names the debt, so growth is a deliberate reviewed act rather than a
     silent escape. A base branch without the file is the introduction case.
 
-    The one legitimate addition is debt the tree already carried, recorded in
-    a change that adds NO English key (see ``allowance_growth``). If the
-    change adds English copy, every added entry stays red. When either
-    English key set cannot be read the check falls back to failing on every
-    addition and says so.
+    An addition is permitted in two cases only (see ``allowance_growth``):
+    the key was already missing at the base ref, so this change records debt
+    the tree already carried; or the locale carries no catalogue at the base
+    ref, so the key is untranslatable rather than untranslated. It is growth
+    when a translation was removed, when the key is new English in an active
+    locale, or when the base cannot be read well enough to tell.
     """
     ref = _resolve_allowance_base(base)
     # A supplied ref is operator input, not a best-effort default: inside git,
