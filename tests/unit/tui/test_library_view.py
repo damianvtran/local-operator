@@ -829,6 +829,24 @@ async def test_a_host_preload_is_not_overwritten_by_the_pages_own_load(calls, mo
 
 
 @pytest.mark.asyncio
+async def test_a_host_preload_cancels_a_pending_building_retry(calls) -> None:
+    """A preload outranks the page's own deferred retry, not only its worker.
+
+    A ``state: building`` answer schedules ``_reload`` a moment later. If the host
+    preloads before that timer fires, the retry would replace the supplied payload
+    with the service's answer — the same failure as the in-flight worker, one
+    message later (review round 1, F-3). ``load()`` stops the timer.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view._building_timer = view.set_timer(10.0, lambda: None)
+        view.load(_payload())
+        assert view._building_timer is None, "a pending building retry survived a preload"
+
+
+@pytest.mark.asyncio
 async def test_space_previews_a_real_image_and_falls_back_for_an_unsupported_one(
     calls, request
 ) -> None:

@@ -27,7 +27,7 @@ from local_operator.memory_capture import (
 )
 
 
-async def _await_capture_row(memory: MemoryStore, marker: str, *, timeout: float = 30.0) -> Any:
+async def _await_capture_row(memory: MemoryStore, marker: str, *, timeout: float = 10.0) -> Any:
     """The marker's capture row, waiting for a worker that has not landed yet.
 
     THE FAILURE THIS REPLACES was a bare ``assert all(watermark(...))``: a False

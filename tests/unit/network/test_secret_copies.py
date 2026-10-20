@@ -42,6 +42,10 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
     devices,
 )
 
+# The delivery cells run two REAL relays and copy over the real broker; the
+# suite's autouse gate is for ordinary store reads. Review round 1, F-2.
+pytestmark = pytest.mark.allow_secret_broker
+
 #: The secret both relay cells copy: a name that is not a provider's, so nothing
 #: else in the tree claims it.
 SECRET_NAME = "STORE_COPY_TOKEN"

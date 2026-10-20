@@ -433,7 +433,16 @@ class LibraryView(Vertical):
         vanished, and the key did nothing (runs 39375160299 and 39383034418, two
         heads, both shard 3). The worker drops a stale generation; a later
         ``_reload`` (a real query change) is still allowed to replace this.
+
+        A PENDING BUILDING RETRY IS CANCELLED, for the same authority: a worker
+        that answered ``state: building`` schedules ``_reload`` a moment later, and
+        that reload would replace the preload the host just supplied. Stopping the
+        timer is what makes the preload outrank the page's own deferred work, not
+        only its in-flight worker (review round 1, F-3).
         """
+        if self._building_timer is not None:
+            self._building_timer.stop()
+            self._building_timer = None
         self._payload_generation += 1
         self._apply_payload(dict(payload))
 
