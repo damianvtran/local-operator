@@ -1010,6 +1010,18 @@ def _live_model_updates(
     it divide by the same number. A SAME-model restore keeps the checkpoint's
     pair exactly as it did, because that is the reading the conversation was
     actually measured at; identity, not a window mismatch, is the gate.
+
+    THE PAIR'S OWN DERIVED FIELD MOVES WITH IT. ``effort_displacement`` (#2658)
+    is a fact ABOUT ``selected``/``effective`` — computed from them and the
+    conversation's ``chosen_effort`` — so re-stamping the pair without it
+    published a frame that contradicted itself: the pair named the level the
+    successor runs while the note still narrated the checkpoint's. Reproduced by
+    review round 4 (m1): a checkpoint written while ``minimal`` was clamped to
+    ``low``, a later ``/effort high``, and the successor's FIRST frame carried
+    ``high/high`` beside ``Effort: low on anthropic/claude-opus-5; you chose
+    minimal.`` until some unrelated refresh recomputed it. Same call and same
+    arguments as ``refresh_from_session``'s, deliberately: a second spelling of
+    the rule is how a derived field and its input drift apart.
     """
     selected = getattr(session, "model", None)
     if selected is None:
@@ -1018,6 +1030,9 @@ def _live_model_updates(
     updates: dict[str, Any] = {
         "selected_model": _restored_model_field(selected),
         "effective_model": _restored_model_field(effective),
+        "effort_displacement": effort_displacement(
+            selected, effective, getattr(session, "chosen_effort", None)
+        ),
     }
     if _reading_pair(effective, checkpoint_model) is None:
         updates.update(

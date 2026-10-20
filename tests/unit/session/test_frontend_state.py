@@ -48,6 +48,7 @@ from local_operator.session.frontend_state import (
     TodoPhaseState,
     WakeState,
     closing_state_overrides,
+    effort_displacement,
     sync_wire_payload,
 )
 from local_operator.session.session import Session
@@ -2251,6 +2252,134 @@ async def test_a_headless_restore_publishes_the_level_the_session_runs(tmp_path)
     assert first.selected_model is not None and first.effective_model is not None
     assert first.selected_model.reasoning_effort == resumed.model.reasoning_effort
     assert first.effective_model.reasoning_effort == resumed.model.reasoning_effort
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_restored_frame_recomputes_the_displacement_it_publishes(tmp_path) -> None:
+    """The pair's DERIVED field moves with the pair (review round 4, m1).
+
+    ``effort_displacement`` (#2658) is computed from ``selected``/``effective``
+    and the conversation's choice, and the row's copy is the one written by the
+    runtime that WROTE the checkpoint. Re-stamping the pair on restore while
+    carrying that copy published a frame that contradicted itself: the pair
+    named the level the successor runs and the note narrated the level the
+    previous runtime ran — the exact opposite of what this PR exists to fix.
+
+    The staging is the divergence #2658 leaves open: the checkpoint is written
+    while the chosen ``minimal`` is clamped to the boot ladder's floor (``low``),
+    so its displacement says "you chose minimal", and ``/effort high`` follows
+    before dispose. The successor runs ``high``, where there is nothing to
+    report — so the first frame must carry ``{}``, the same answer
+    ``refresh_from_session`` gives on the very next refresh.
+    """
+    owner = _headless_owner(tmp_path)
+    owner.set_model(
+        _BOOT_MODEL.model_copy(update={"reasoning_effort": "low"}), effort_choice="minimal"
+    )
+    await owner._persist_selected_model()
+    owner.refresh_frontend_state()
+    written = owner._frontend_state_store.state
+    # The row really does carry a displacement to be stale, or the assertions
+    # below would pass for the wrong reason.
+    assert written.effort_displacement.get("chosen") == "minimal"
+    assert written.effort_displacement.get("effective") == "low"
+    assert "you chose minimal" in written.effort_displacement.get("note", "")
+    await owner._transcript.append_custom(
+        "frontend_state_checkpoint_v1",
+        {"checkpoint_id": "cp-displacement", "state": written.model_dump(mode="json")},
+    )
+    # AFTER the checkpoint: the choice the successor restores, and the one the
+    # row's displacement does not know about.
+    owner.set_model(
+        _BOOT_MODEL.model_copy(update={"reasoning_effort": "high"}), effort_choice="high"
+    )
+    await owner.dispose()
+
+    resumed = _headless_owner(tmp_path)
+    first = resumed._frontend_state_store.state
+
+    # The LIVE computation, asked of the same helper ``refresh_from_session``
+    # uses on the same pair the frame publishes. The stale note cannot survive
+    # it.
+    live = effort_displacement(
+        resumed.model,
+        getattr(resumed, "effective_model", None) or resumed.model,
+        resumed.chosen_effort,
+    )
+    assert first.selected_model is not None and first.effective_model is not None
+    assert first.selected_model.reasoning_effort == "high"
+    assert first.effort_displacement == live
+    # And the refresh agrees with the first frame, which is the invariant the
+    # restore is supposed to establish rather than reach one frame later.
+    resumed.refresh_frontend_state()
+    assert resumed._frontend_state_store.state.effort_displacement == live
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_restored_frame_publishes_a_displacement_the_checkpoint_never_had(
+    tmp_path,
+) -> None:
+    """The mirror of the drift above, and the half that makes it discriminating.
+
+    The test above stages a checkpoint that HAS a displacement over a successor
+    that has none, so its ``first == live`` claim is an empty-vs-empty one and
+    cannot see a recompute that dropped an argument — every wrong way to call the
+    helper lands on the same ``{}`` there. This stages the mirror: the checkpoint
+    is written at ``high`` with nothing to report, and the successor restores a
+    conversation whose choice the ladder cannot express, so the live statement is
+    NON-empty.
+
+    ``minimal`` is the word that does it on this model: the ladder is
+    ``low``/``medium``/``high``, so the choice is clamped to ``low`` and the frame
+    owes the user the sentence. A recompute that read the serving level off the
+    checkpoint's spec, or that dropped the conversation's choice, answers
+    differently here — both were run as mutations and both fail this test, which
+    the empty-staging above cannot do.
+    """
+    owner = _headless_owner(tmp_path)
+    # The checkpoint: a plain ``/effort high``, so the row's displacement is the
+    # documented empty "nothing to report" — and the stale value this test's
+    # successor must NOT inherit.
+    owner.set_model(
+        _BOOT_MODEL.model_copy(update={"reasoning_effort": "high"}), effort_choice="high"
+    )
+    await owner._persist_selected_model()
+    owner.refresh_frontend_state()
+    written = owner._frontend_state_store.state
+    assert written.effort_displacement == {}
+    await owner._transcript.append_custom(
+        "frontend_state_checkpoint_v1",
+        {"checkpoint_id": "cp-displacement-none", "state": written.model_dump(mode="json")},
+    )
+    # AFTER the checkpoint: the level the user picks next, which this ladder
+    # clamps — the case #2658's field exists to narrate.
+    owner.set_model(
+        _BOOT_MODEL.model_copy(update={"reasoning_effort": "high"}), effort_choice="minimal"
+    )
+    await owner.dispose()
+
+    resumed = _headless_owner(tmp_path)
+    first = resumed._frontend_state_store.state
+
+    live = effort_displacement(
+        resumed.model,
+        getattr(resumed, "effective_model", None) or resumed.model,
+        resumed.chosen_effort,
+    )
+    # The premise first, or ``first == live`` would be satisfied by two empties:
+    # the live statement really is non-empty and really does name the clamp.
+    assert live.get("chosen") == "minimal"
+    assert live.get("effective") == "low"
+    assert "you chose minimal" in live.get("note", "")
+    # The first frame states the same thing in its own right — the sentence and
+    # the clamp, not merely "equal to whatever the helper returned".
+    assert first.effort_displacement.get("chosen") == "minimal"
+    assert first.effort_displacement.get("effective") == "low"
+    assert "you chose minimal" in first.effort_displacement.get("note", "")
+    # And it IS the live computation, not a second opinion.
+    assert first.effort_displacement == live
     await resumed.dispose()
 
 
