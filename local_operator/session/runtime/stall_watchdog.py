@@ -2543,8 +2543,11 @@ def _enable_fatal_report(armed: "_Armed") -> bool:
     ``_Py_DumpTracebackThreads`` walk python/cpython#116008 names; its thread list
     is head-inserted, so the faulting main thread can be dumped LAST and a second
     fault loses the very stack this path exists to keep. A fatal signal's handler
-    runs on the thread that faulted, so one thread is both the safe and the
-    sufficient dump — the witness cell asserts its frame.
+    runs on the thread the signal is DELIVERED to: the faulting thread for a
+    hardware fault, and the kernel's chosen thread for a kill-sent signal. For the
+    class this path exists for — a hardware fault — that is the thread that
+    faulted, so one thread is both the safe and the sufficient dump; the witness
+    cell asserts its frame.
 
     NEVER RAISES. A diagnostic that cannot install its leg leaves the runtime
     otherwise untouched; the caller's arm still succeeds.
@@ -3803,6 +3806,23 @@ def is_armed() -> bool:
     """Whether THIS process holds an armed stall bound through this module."""
     with _LOCK:
         return _ARMED is not None
+
+
+def evidence_signal() -> int | None:
+    """The signal this process's armed dump can be pulled with, or ``None``.
+
+    THE HANDLER, NOT THE BOUND, and review round 2 found the difference: ``arm``
+    can succeed while :func:`_register_evidence_signal` failed (it warns and leaves
+    ``registered_signal`` unset). A readiness line that said "installed" from
+    :func:`is_armed` alone was false in exactly that case — the signal still had
+    its default fatal disposition — and a later probe trusting it would kill the
+    child. This accessor is the fact such a line must read.
+
+    ``None`` also covers Windows (no SIGUSR1) and a process that never armed.
+    """
+    with _LOCK:
+        armed = _ARMED
+        return None if armed is None else armed.registered_signal
 
 
 def announce() -> None:

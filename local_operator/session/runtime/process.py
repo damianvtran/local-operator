@@ -5382,7 +5382,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
     logger.info(
         "signal handlers ready: clean stop on SIGTERM/SIGINT; SIGUSR1 evidence signal %s; "
         "task-dump callback %s",
-        "installed" if stall_watchdog.is_armed() else "not installed",
+        "installed" if stall_watchdog.evidence_signal() is not None else "not installed",
         "installed" if task_dump_installed else "disabled",
     )
     # The self-reaper: a phone session nobody watches and nothing runs is a

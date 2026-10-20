@@ -1644,6 +1644,32 @@ def test_a_disabled_bound_arms_nothing(tmp_path: Path, monkeypatch: pytest.Monke
     assert not list(tmp_path.glob(f"{stall_watchdog.DUMP_PREFIX}-*.log"))
 
 
+def test_the_readiness_fact_is_the_handler_not_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An armed bound whose signal registration failed is NOT a ready probe.
+
+    Review round 2 reproduced this shape: monkeypatching ``faulthandler.register``
+    to raise still left ``arm`` returning True, so a readiness line gated on
+    ``is_armed()`` said the evidence signal was installed while SIGUSR1 kept its
+    default fatal disposition. ``evidence_signal()`` reads the handler's own
+    record, and this cell pins the distinction.
+    """
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("register refused")
+
+    monkeypatch.setattr(stall_watchdog.faulthandler, "register", _boom)
+    assert stall_watchdog.arm(seconds=30.0, directory=tmp_path) is True
+    try:
+        assert stall_watchdog.is_armed() is True
+        assert (
+            stall_watchdog.evidence_signal() is None
+        ), "a failed signal registration read as an installed evidence signal"
+    finally:
+        stall_watchdog.disarm()
+
+
 def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
