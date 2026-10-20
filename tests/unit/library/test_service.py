@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
 from local_operator import resume
-from local_operator.library import identity, service
+from local_operator.library import identity
+from local_operator.library import index as library_index
+from local_operator.library import service
 from local_operator.library.metadata import MetadataStore
 from local_operator.session.attachments import cache_media
 
@@ -400,3 +403,33 @@ def test_occurrence_session_title_is_the_stored_name_not_the_opening_line(
     row = listing(root, service.Query())["rows"][0]
 
     assert row["occurrences"][0]["session_title"] == "Victor support triage"
+
+
+def test_a_rename_reaches_a_budgeted_poll_before_the_write_interval_ends(
+    tmp_path, monkeypatch
+) -> None:
+    """A request-path poll publishes a rename immediately, not 10 s later.
+
+    The index write is rate-limited for non-structural churn, and a rename moves
+    no journal signature — the transcript and the directory mtime are untouched.
+    Before a stored-title change counted as structural, the poll kept serving the
+    pre-rename aggregate until ``WRITE_INTERVAL_S`` expired (measured: converged
+    at 10 s). ``budget_s`` is the route's, and the freshness window is slept out
+    so this poll really sweeps.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    path = tmp_path / "brief.md"
+    path.write_text("# hi")
+    opening = "Please review Victor's message"
+    directory = session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, path)])
+    first = listing(root, service.Query())
+    assert first["rows"][0]["occurrences"][0]["session_title"] == opening
+
+    resume.write_session_title(
+        directory, "Victor support triage", user_set=True, past_names=[opening]
+    )
+    time.sleep(library_index.FRESH_WINDOW_S + 0.1)
+
+    polled = service.list_assets(root, service.Query(), budget_s=library_index.DEFAULT_BUDGET_S)
+
+    assert polled["rows"][0]["occurrences"][0]["session_title"] == "Victor support triage"

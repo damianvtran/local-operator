@@ -55,10 +55,13 @@ INDEX_DIRNAME: Final = "library"
 INDEX_FILENAME: Final = "index.json"
 #: Bumped to 4 when the occurrence title stopped taking the scan's
 #: opening-line capture over the stored session title (see ``_session_entry``).
-#: Index files are derived and discardable — a schema mismatch rebuilds them —
-#: so bumping costs one rescan and never an error; WITHOUT the bump every
-#: existing cache would keep serving the old, wrong title indefinitely, because
-#: a cache entry is otherwise trusted on the transcript's stat alone.
+#: The freshness comparison in ``_build_locked`` would heal a same-schema cache
+#: on its next build, so this is not the only repair; the bump makes the
+#: correction UNCONDITIONAL instead — a stored field changed meaning, and every
+#: existing cache should be rebuilt once rather than depend on a comparison
+#: that a future edit of this file could weaken. Index files are derived and
+#: discardable and a schema mismatch rebuilds them: it costs one rescan, never
+#: an error.
 INDEX_SCHEMA: Final = 4
 DEFAULT_BUDGET_S: Final = service.DEFAULT_BUDGET_S
 
@@ -394,12 +397,23 @@ def _merge_sessions(
 
 
 def _structural_change(disk: dict[str, Any], merged: dict[str, Any]) -> bool:
-    """A new session or a first completion: the events a poll must not miss."""
+    """A new session, a first completion, or a title change: what a poll must not miss.
+
+    A title differs here only when the build rescanned an entry whose stored
+    title moved, and ``/rename`` is the case that does it: it writes the sidecar
+    and leaves the transcript — and so the journal signature — untouched. The
+    write rate limit is keyed on this predicate, so leaving a title out would
+    keep a request-path poll serving the pre-rename name for up to
+    ``WRITE_INTERVAL_S`` (measured: converged at 10 s), which reads as a rename
+    that did not take.
+    """
     for session_id, entry in merged.items():
         held = disk.get(session_id)
         if not isinstance(held, dict):
             return True
         if entry.get("complete") and not held.get("complete"):
+            return True
+        if str(entry.get("title") or "") != str(held.get("title") or ""):
             return True
     return any(session_id not in merged for session_id in disk)
 
@@ -425,10 +439,10 @@ def _persist(
     another process holds the lock — the caller then serves its last aggregate
     rather than waiting. ``stat`` is the index identity observed UNDER the lock
     (after any write), which is the identity of the payload ``merged`` came
-    from. The rate limit applies only to non-structural churn: a new session or
-    a first completion always lands. The top-level ``complete`` flag lets a
-    reader tell a finished index from a budget-limited one that has only
-    complete rows so far.
+    from. The rate limit applies only to non-structural churn: a new session, a
+    first completion or a stored-title change always lands. The top-level
+    ``complete`` flag lets a reader tell a finished index from a budget-limited
+    one that has only complete rows so far.
     """
     with _index_lock(path.with_name("index.lock")) as locked:
         if not locked:

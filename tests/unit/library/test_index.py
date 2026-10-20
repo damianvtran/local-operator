@@ -708,3 +708,33 @@ def test_a_rename_refreshes_a_cached_entry_without_a_transcript_change(
     second = index.build_catalog(root, budget_s=None)
 
     assert second.assets[0].occurrences[0].title == "Victor support triage"
+
+
+def test_an_index_written_under_the_old_schema_is_rebuilt_with_the_stored_title(
+    tmp_path, monkeypatch
+) -> None:
+    """The schema bump, exercised the way a real store meets it.
+
+    A pre-fix ``index.json`` carries the opening-line capture under the old
+    version; the persisted payload must be discarded rather than served, and the
+    rebuild must land the stored title.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    opening = "Please review Victor's message"
+    directory = session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, saved)])
+    resume.write_session_title(directory, "Victor support triage", user_set=False, past_names=[])
+    index.build_catalog(root, budget_s=None)
+
+    path = index.index_path(root)
+    payload = index._load(path)
+    payload["version"] = index.INDEX_SCHEMA - 1
+    payload["sessions"][SESSION]["title"] = opening
+    index._write(path, payload)
+    index._CACHE.clear()
+    assert index._load(path) == {}, "an older schema must be discarded, not read"
+
+    rebuilt = index.build_catalog(root, budget_s=None)
+
+    assert rebuilt.assets[0].occurrences[0].title == "Victor support triage"
