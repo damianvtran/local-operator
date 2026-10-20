@@ -35045,17 +35045,14 @@ class OperatorApp(App[None]):
         session = self._session
         return str(getattr(session, "session_id", "") or "")
 
-    def _tag_argument_choices(self, query: str = "") -> tuple[list[ArgumentChoice], str]:
+    def _tag_argument_choices(self) -> tuple[list[ArgumentChoice], str]:
         """The `/tag` rows and the helper line, for the CURRENT conversation.
 
         Applied rows come first, registry order within each partition, because
         this list's primary job is "what is this conversation labelled" and the
         catalogue can be much longer than the applied set. Each row carries a
         fixed-width non-colour membership marker, and the primary row says so
-        in WORDS rather than a dot. A valid novel query appends ONE create row
-        named after the typed text, so an exact new name is one activation; an
-        existing exact name never grows that row (the store's uniqueness rule,
-        not a client normalizer).
+        in WORDS rather than a dot.
         """
         from local_operator.paths import config_dir
         from local_operator.session.session_tags import (
@@ -35111,7 +35108,7 @@ class OperatorApp(App[None]):
         the key is pressed. An existing exact name suppresses the row entirely
         — uniqueness is the store's rule, not a client guess.
         """
-        rows, notice = self._tag_argument_choices(query)
+        rows, notice = self._tag_argument_choices()
         cleaned = query.strip()
         if cleaned and (len(cleaned) > 24 or cleaned.casefold() == "untagged"):
             return rows, _t_tags(_tag_keys.invalid())
