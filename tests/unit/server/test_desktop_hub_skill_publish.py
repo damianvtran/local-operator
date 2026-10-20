@@ -259,7 +259,8 @@ async def test_confirm_publishes_then_materializes_the_real_inventory_row(api) -
     holder["client"] = hub
 
     previewed = await preview(client)
-    response = await client.post("/v1/desktop/hub/skills/publish", json=confirm_body(previewed))
+    confirm = confirm_body(previewed)
+    response = await client.post("/v1/desktop/hub/skills/publish", json=confirm)
     assert response.status_code == 200, response.text
     result = response.json()["result"]
 
@@ -313,10 +314,19 @@ async def test_confirm_publishes_then_materializes_the_real_inventory_row(api) -
     assert policy.policy.subscribe is True and policy.policy.auto_push is False
     assert row["policy"]["subscribe"] is True
 
-    # Repeating the same confirm is idempotent: no second publication, same link.
-    again = await client.post("/v1/desktop/hub/skills/publish", json=confirm_body(previewed))
+    # The completed receipt is consumed with the reconcile (retention rule), so
+    # the same REQUEST ID is the idempotent path: it replays the recorded answer
+    # without a second publication.
+    again = await client.post("/v1/desktop/hub/skills/publish", json=confirm)
     assert again.status_code == 200, again.text
+    assert again.json()["result"].get("replayed") is True
     assert again.json()["result"]["link"]["link_id"] == row["link_id"]
+    assert len(hub.calls) == 1
+
+    # A NEW request id cannot start a second act from the consumed receipt.
+    fresh = await client.post("/v1/desktop/hub/skills/publish", json=confirm_body(previewed))
+    assert fresh.status_code == 409, fresh.text
+    assert fresh.json()["detail"]["code"] == "preview_expired"
     assert len(hub.calls) == 1
 
 
@@ -451,6 +461,8 @@ async def test_a_renaming_copy_rewrites_the_managed_draft_and_keeps_the_source(a
     assert "name: beta" in (source / "SKILL.md").read_text()
     assert result["link"]["name"] == "gamma"
     assert hub.calls[0]["document"]["name"] == "gamma"
+    token = previewed["preview"]["preview_receipt"]
+    assert not (root / "hub" / "publication-previews" / f"{token}.json").exists()
 
 
 async def test_a_local_failure_after_acceptance_is_pending_and_retry_reconciles(
@@ -493,7 +505,7 @@ async def test_a_local_failure_after_acceptance_is_pending_and_retry_reconciles(
     # reconciliation without republishing.
     retry = await client.post("/v1/desktop/hub/skills/publish", json=body)
     assert retry.status_code == 200, retry.text
-    assert retry.json().get("replayed") is not True
+    assert retry.json()["result"].get("replayed") is not True
     retried = retry.json()["result"]
     assert retried["local_link_receipt"]["state"] == "complete"
     assert retried["link"]["hub_id"] == "sk-published"
@@ -644,6 +656,8 @@ async def test_a_pending_outcome_survives_the_preview_ttl(api, monkeypatch) -> N
     assert retried["local_link_receipt"]["state"] == "complete"
     assert retried["link"]["hub_id"] == "sk-published"
     assert len(hub.calls) == 1
+    # Reconciled: the durable receipt is removed with the link now materialized.
+    assert not path.exists()
 
 
 async def test_a_linked_skill_cannot_be_republished_from_the_managed_root(api) -> None:
