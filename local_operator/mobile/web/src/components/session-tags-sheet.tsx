@@ -283,47 +283,47 @@ export function SessionTagsSheet({
 								);
 							})}
 						</ul>
-						<div className="flex items-center gap-2 px-2 pt-2">
-							{current.tags.length > 0 ? (
-								confirmClear ? (
-									<>
-										<button
-											type="button"
-											onClick={clearAll}
-											disabled={pending !== null}
-											className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-danger active:bg-accent-wash disabled:opacity-50"
-										>
-											{messageRuntime.t("relay.session.tags.remove_all_confirm")}
-										</button>
-										<button
-											type="button"
-											onClick={() => setConfirmClear(false)}
-											className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface"
-										>
-											{messageRuntime.t("relay.session.tags.cancel")}
-										</button>
-									</>
-								) : (
-									<button
-										type="button"
-										onClick={() => setConfirmClear(true)}
-										disabled={pending !== null}
-										className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface disabled:opacity-50"
-									>
-										{messageRuntime.t("relay.session.tags.remove_all")}
-									</button>
-								)
-							) : null}
-							<button
-								type="button"
-								onClick={onClose}
-								className="ml-auto min-h-11 rounded-sm border border-control bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
-							>
-								{messageRuntime.t("relay.session.tags.done")}
-							</button>
-						</div>
 					</>
 				)}
+				<div className="flex items-center gap-2 px-2 pt-2">
+					{current.tags.length > 0 ? (
+						confirmClear ? (
+							<>
+								<button
+									type="button"
+									onClick={clearAll}
+									disabled={pending !== null}
+									className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-danger active:bg-accent-wash disabled:opacity-50"
+								>
+									{messageRuntime.t("relay.session.tags.remove_all_confirm")}
+								</button>
+								<button
+									type="button"
+									onClick={() => setConfirmClear(false)}
+									className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface"
+								>
+									{messageRuntime.t("relay.session.tags.cancel")}
+								</button>
+							</>
+						) : (
+							<button
+								type="button"
+								onClick={() => setConfirmClear(true)}
+								disabled={pending !== null}
+								className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface disabled:opacity-50"
+							>
+								{messageRuntime.t("relay.session.tags.remove_all")}
+							</button>
+						)
+					) : null}
+					<button
+						type="button"
+						onClick={onClose}
+						className="ml-auto min-h-11 rounded-sm border border-control bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
+					>
+						{messageRuntime.t("relay.session.tags.done")}
+					</button>
+				</div>
 				{/* THE SHEET'S LIVE REGION, mounted empty and filled on the commit
 				    after a refusal — a container that arrives populated is not
 				    announced. The lead is ours; the rest is the relay's own sentence
