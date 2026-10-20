@@ -42,6 +42,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         remove_empty=None,
         delegated_max_age_hours=None,
         scratchpads_only=False,
+        report_non_git_copies=False,
+        reference_repo=None,
         json=False,
     )
     base.update(overrides)
@@ -708,3 +710,182 @@ def test_the_ordinary_dry_run_points_at_the_size_view_before_the_kept_list(
     kept = out.index("  kept ")
     assert pointer < kept
     assert "Scratchpads section below" in out
+
+
+# --------------------------------------------------------------------------
+# ``--report-non-git-copies``: the read-only class report
+# --------------------------------------------------------------------------
+
+_GIT_ENV = {
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _git(path: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT_ENV},
+    )
+
+
+def _copy_session(
+    root: Path, *, size_mb: int = 55, age_hours: float = 40 * 24
+) -> tuple[Path, Path]:
+    """A published reference repo plus one delegated session holding a copy."""
+    import shutil
+    import subprocess
+
+    reference = root / "copy-reference"
+    reference.mkdir()
+    _git(reference, "init", "-q", "-b", "main")
+    with open(reference / "payload", "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(b"\0")
+    origin = root / "copy-origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT_ENV},
+    )
+    _git(reference, "remote", "add", "origin", str(origin))
+    _git(reference, "add", "-A")
+    _git(reference, "commit", "-qm", "content")
+    _git(reference, "push", "-q", "origin", "HEAD:main")
+    _git(reference, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    session = root / "sessions" / "copycat"
+    session.mkdir()
+    (session / "origin.json").write_text('{"origin": "subagent"}')
+    transcript = session / "transcript.jsonl"
+    transcript.write_text('{"type": "message"}\n')
+    old = time.time() - age_hours * 3600
+    os.utime(transcript, (old, old))
+    copy = session / "scratchpad" / "qa" / "base-repo"
+    copy.mkdir(parents=True)
+    shutil.copyfile(reference / "payload", copy / "payload")
+    return reference, copy
+
+
+def test_the_copy_report_lists_the_class_and_removes_nothing(store: Path, capsys: Any) -> None:
+    reference, copy = _copy_session(store)
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "== Non-git copies (read-only) ==" in out
+    assert "1 candidate(s)" in out
+    assert "would reclaim now 1 pad(s)" in out
+    assert "would reclaim  copycat" in out and "base-repo" in out
+    assert (copy / "payload").exists(), "the report removes nothing"
+
+
+def test_the_copy_report_json_carries_every_row(store: Path, capsys: Any) -> None:
+    reference, _copy = _copy_session(store)
+
+    assert (
+        sessions_cleanup_command(
+            _args(
+                dry_run=True,
+                report_non_git_copies=True,
+                reference_repo=[str(reference)],
+                json=True,
+            )
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    report = payload["non_git_copies"]
+    assert report["count"] == 1 and report["would_reclaim_now"] == 1
+    assert report["candidates"][-1]["proved_by"] == [os.path.realpath(reference)]
+    assert payload["outcome"] == "report"
+
+
+def test_the_copy_report_without_a_dry_run_is_refused(store: Path, capsys: Any) -> None:
+    assert sessions_cleanup_command(_args(report_non_git_copies=True)) == 2
+    assert "--report-non-git-copies only reports" in capsys.readouterr().err
+    assert _count(store) == 18
+
+
+def test_the_normal_dry_run_says_the_copy_arm_is_off(store: Path, capsys: Any) -> None:
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert (
+        "non-git copies: off (session.cleanup.delegated.non_git_copies.enabled is off; "
+        "--report-non-git-copies previews the class)" in out
+    )
+
+
+def test_the_copy_report_exits_3_when_a_candidate_could_not_be_scanned(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One broken candidate is loud, but the rest of the report still prints."""
+    report = dr.NonGitCopyReport(errors=1)
+    report.candidates.append(
+        dr.NonGitCopyCandidate(
+            session="broken",
+            path="broken/scratchpad/copy",
+            error=True,
+            reason="walk produced zero files from a non-empty tree (4096 bytes)",
+        )
+    )
+    monkeypatch.setattr(dr, "scan_non_git_copies", lambda *args, **kwargs: report)
+
+    assert sessions_cleanup_command(_args(dry_run=True, report_non_git_copies=True)) == 3
+
+    captured = capsys.readouterr()
+    assert "1 candidate(s) could not be scanned" in captured.err
+    assert "  error" in captured.out and "zero files" in captured.out
+
+
+def test_the_copy_report_honours_the_delegated_window_override(store: Path, capsys: Any) -> None:
+    """A 10 h pad is inside 48 h and past 2 h: the override IS the preview."""
+    reference, _copy = _copy_session(store, age_hours=10)
+
+    assert (
+        sessions_cleanup_command(
+            _args(
+                dry_run=True,
+                report_non_git_copies=True,
+                reference_repo=[str(reference)],
+                json=True,
+            )
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)["non_git_copies"]
+    assert payload["window_hours"] == 48
+    assert payload["would_reclaim_now"] == 0
+    assert payload["proof_ok_within_window"] == 1
+
+    assert (
+        sessions_cleanup_command(
+            _args(
+                dry_run=True,
+                report_non_git_copies=True,
+                reference_repo=[str(reference)],
+                delegated_max_age_hours=2,
+                json=True,
+            )
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)["non_git_copies"]
+    assert payload["window_hours"] == 2
+    assert payload["would_reclaim_now"] == 1
+    assert payload["proof_ok_within_window"] == 0
