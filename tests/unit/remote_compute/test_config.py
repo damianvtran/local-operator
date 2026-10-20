@@ -14,6 +14,7 @@ prints.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from local_operator.i18n.keys import wire_remote_compute as _wr
@@ -45,6 +46,8 @@ def test_unset_is_production(monkeypatch: pytest.MonkeyPatch) -> None:
         ("https://staging.example.invalid/", "https://staging.example.invalid"),
         # A path is the operator's gateway, so it survives byte-identical.
         ("https://staging.example.invalid:8443/api", "https://staging.example.invalid:8443/api"),
+        # Kept as written by the resolver; httpx is what collapses `..` later.
+        ("https://staging.example.invalid/gw/../api", "https://staging.example.invalid/gw/../api"),
         ("https://127.0.0.1", "https://127.0.0.1"),
         ("http://127.0.0.1:8123", "http://127.0.0.1:8123"),
         ("http://[::1]:8123/", "http://[::1]:8123"),
@@ -65,10 +68,30 @@ def test_accepted_values(monkeypatch: pytest.MonkeyPatch, value: str, expected: 
         ("https://user@staging.example.invalid", "userinfo without a password"),
         ("https://staging.example.invalid/?tenant=1", "a query has no place in a base"),
         ("https://staging.example.invalid/#frag", "nor a fragment"),
+        ("https://staging.example.invalid#", "nor an empty fragment"),
+        ("https://staging.example.invalid?", "nor an empty query"),
         ("ftp://staging.example.invalid", "not an HTTP scheme"),
         ("staging.example.invalid", "no scheme at all"),
         ("https:///no-host", "no host"),
         ("", "empty is a mistake, not a decision"),
+        ("https://staging.example.invalid\n", "a newline is not invisible to a parser"),
+        ("https://staging.example.invalid\t", "nor is a tab"),
+        ("https://sta ging.example.invalid", "an interior space is not an escape"),
+        ("https://staging.example.invalid/x y", "nor is one in the path"),
+        ("https://host%41.example.invalid", "a percent-escape rewrites the authority"),
+        ("https://staging.example.invalid/%2f", "and has no place in the path"),
+        (
+            "https://\u0445\u043e\u0441\u0442.example.invalid",
+            "non-ASCII is not this base's vocabulary",
+        ),
+        ("https://staging.example.invalid.", "a trailing dot is not the host that was meant"),
+        ("https://staging..example.invalid", "an empty label is not a hostname"),
+        ("https://.staging.example.invalid", "nor is a leading dot"),
+        ("https://staging.example.invalid:0", "port 0 asks for an ephemeral port"),
+        ("https://staging.example.invalid:65536", "and 65536 is not a port"),
+        ("https://staging.example.invalid:", "a port separator with no port"),
+        ("https://[::1", "an unbalanced IPv6 bracket"),
+        ("https://[ff02::1%eth0]", "an IPv6 zone is percent-encoded"),
         ("   ", "and so is whitespace"),
     ],
 )
@@ -92,6 +115,49 @@ def test_the_warning_is_one_line_on_stderr_and_names_the_host(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == _t(_wr.api_override(host="staging.example.invalid")) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "address"),
+    [
+        # E4-3 — the line names EXACTLY the host:port that will be contacted.
+        ("https://staging.example.invalid", "staging.example.invalid"),
+        ("https://STAGING.Example.Invalid/", "staging.example.invalid"),
+        ("https://staging.example.invalid:8443/api", "staging.example.invalid:8443"),
+        ("http://localhost:8123", "localhost:8123"),
+        ("http://[::1]:8123/", "[::1]:8123"),
+    ],
+)
+def test_the_warning_names_exactly_the_address_contacted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str, address: str
+) -> None:
+    """Uppercase input announces the lowercased host; IPv6 is bracketed."""
+    monkeypatch.setenv(ENV_VAR, value)
+    resolve_api_url()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _t(_wr.api_override(host=address)) + "\n"
+
+
+def test_an_httpx_refusal_never_escapes_as_anything_but_the_typed_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """E4-1 backstop: httpx.URL is constructed inside the resolver.
+
+    Pinned by making it raise: a value this module accepted but httpx refuses
+    must still leave as InvalidApiOverride, because the CLI maps that type and
+    treats anything else as a generic failure.
+    """
+
+    def refuse(url: str) -> object:
+        raise httpx.InvalidURL(f"Invalid URL {url!r}")
+
+    monkeypatch.setattr(config_module.httpx, "URL", refuse)
+    monkeypatch.setenv(ENV_VAR, "https://staging.example.invalid")
+    with pytest.raises(InvalidApiOverride):
+        resolve_api_url()
+    # And nothing was announced for a base the client will not use.
+    assert capsys.readouterr().err == ""
 
 
 def test_the_warning_is_printed_once_per_process(

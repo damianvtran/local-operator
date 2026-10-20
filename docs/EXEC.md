@@ -121,13 +121,25 @@ reported as this network's run.
 **Testing against a non-production Radient.** `LOP_REMOTE_COMPUTE_API_URL` moves
 the remote-compute API base off production, and only remote compute: the tunnel
 client stays pinned to the production host, because that is where a tunnel's
-credential is expected. The value must be an `https://` URL; `http://` is
-accepted only for `127.0.0.1`, `::1` or `localhost`, where the connection never
-leaves this machine. Userinfo, a query string and a fragment are refused, and a
-trailing slash is dropped. While the variable is set, one line on stderr names
-the host the request will go to, so a login sent somewhere other than production
-is never silent; stdout is unchanged. An unusable value is refused with one
-sentence and exit 1 — it never falls back to production.
+credential is expected. **The override sends your Radient login to that host, so
+point it only at a host you control.** The value must be an `https://` URL;
+`http://` is accepted only for `127.0.0.1`, `::1` or `localhost`, where the
+connection never leaves this machine. Userinfo, a query string and a fragment are
+refused, even empty (`…/?`, `…/#`); so are whitespace, control and non-ASCII
+characters and any `%`, anywhere in the value — a tab or a percent-escape can
+change which host is contacted after parsing. The authority must be exactly one
+hostname (ASCII letters, digits, `-` and `.`, no leading or trailing dot, no
+empty label) or one bracketed IPv6 literal, with an optional port in 1-65535. A
+trailing slash is dropped; any path is kept and prepended to every request under
+the API base, which is how a gateway is addressed. This module does not normalise
+those segments — but httpx collapses `.` and `..` when it builds the request, so a
+gateway path must not depend on them (`/a/../b` is sent as `/b`; duplicate
+slashes and letter case are preserved). While the variable is
+set, one line on stderr names the exact `host:port` the request will go to,
+before the first request — on `--remote`, `--remote-status` and `--remote-cancel`
+alike, since all three send the same login — so a login sent somewhere other
+than production is never silent; stdout is unchanged. An unusable value is
+refused with one sentence and exit 1 — it never falls back to production.
 
 **403 means the preview does not cover this account.** Remote compute is
 admitted per Radient account, so a login outside the preview allowlist is

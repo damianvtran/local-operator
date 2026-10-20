@@ -201,13 +201,13 @@
   },
   "wire.remote_compute.api_override": {
     "role": "CLI warning printed to STDERR when the remote-compute API base is overridden",
-    "tone": "plain, one sentence; the variable name and the host stay verbatim",
-    "note": "{host} is the host the bearer is being sent to, WITHOUT any credential and without a path — it is the whole point of the line and must be preserved. Printed once per invocation, to stderr, so stdout stays the run id alone. It exists because the destination is otherwise invisible: a login going to a staging server must never look like one going to production."
+    "tone": "plain, two sentences; the variable name and the host stay verbatim; it states the consequence rather than only the fact",
+    "note": "{host} is the exact host and port the bearer is being sent to, WITHOUT any credential and without a path — it is the whole point of the line and must be preserved exactly once. Printed once per invocation, to stderr, before the first request, so stdout stays the run id alone, and on --remote-status and --remote-cancel as well. The second sentence is the operative fact: the Radient LOGIN leaves for that host, and the variable should be unset unless the reader controls it. A login going to a staging server must never look like one going to production, and the reader must be able to act on the sentence without knowing what a bearer is."
   },
   "wire.remote_compute.api_override_invalid": {
     "role": "CLI refusal for an unusable LOP_REMOTE_COMPUTE_API_URL",
-    "tone": "plain, one sentence; the variable, the schemes and the literal loopback hosts stay verbatim",
-    "note": "No placeholders. The value itself is never echoed. It states the whole rule (https, or http only on 127.0.0.1, ::1 or localhost, no userinfo/query/fragment) because the command exits rather than falling back to production; the last clause says that the remote-compute command did not start."
+    "tone": "plain, ONE sentence; the variable, the schemes and the literal loopback hosts stay verbatim",
+    "note": "No placeholders. The value itself is never echoed. It states the whole rule (https, or http only on 127.0.0.1, ::1 or localhost; no userinfo, query or fragment; no whitespace, control or non-ASCII characters; no percent-encoding) because the command exits rather than falling back to production; the last clause says that the remote-compute command did not start. The character rules are one of them refused by the parser before it splits the value, so they belong in the same sentence rather than a second one."
   },
   "wire.remote_compute.preview_not_enabled": {
     "role": "CLI error for HTTP 403 from the remote-compute API",
