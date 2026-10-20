@@ -16813,6 +16813,46 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     return extras
 
 
+def _sessions_peer_status(row: Mapping[str, Any]) -> str:
+    """Render the peer's claim without promoting a cached claim to observation.
+
+    The mesh may retain rows when a link goes down. Their identity and holder
+    remain useful, but busy/gate/wait fields are not current observations. On
+    reachable peers use the catalogue's shared status ladder, not a second
+    hand-written precedence for the sessions tool.
+    """
+    block = row.get("peer") or {}
+    if block.get("reachable") is False:
+        return "link down; status unknown"
+    from local_operator.network.projection import PeerRow
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import status_of
+    from local_operator.session.peer_rows import _live_state
+
+    claim = PeerRow.from_json(dict(row), device_id=str(block.get("device_id") or ""))
+    projected = SessionRow(
+        claim.session_id,
+        claim.started,
+        claim.conversation_name,
+        live_state=_live_state(claim),
+        pending=claim.pending,
+        waiting_on=claim.waiting_on,
+        jobs_running=claim.jobs_running,
+        subagents_running=claim.subagents_running,
+        subagents_queued=claim.subagents_queued,
+    )
+    _code, label = status_of(projected, None)
+    return label
+
+
+def _sessions_wait_phrase(row: Mapping[str, Any]) -> str:
+    """A presence addend, not a claim that every background job is awaited."""
+    from local_operator.network.types import peer_whole_int
+
+    count = peer_whole_int(row.get("waiting_on"), default=0)
+    return f"waiting on {count} {'job' if count == 1 else 'jobs'}" if count > 0 else ""
+
+
 def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = None) -> str:
     """One lean listing line: the fields a caller acts on. The full published
     row rides in ``details``, which costs no prompt tokens.
@@ -16820,7 +16860,13 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
     Identifier fields: the conversation title and session id are marked as
     spans so redaction leaves them readable; neither is a credential.
     """
-    state = str(row.get("state") or "?")
+    block = row.get("peer") or {}
+    unreachable = block.get("reachable") is False
+    state = (
+        _sessions_peer_status(row)
+        if row.get("locality") == "remote"
+        else str(row.get("state") or "?")
+    )
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     bits = [f"[{state}] {name}"]
     if row.get("session_id"):
@@ -16829,7 +16875,7 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
         bits.append(str(row["model_label"]))
-    if row.get("busy"):
+    if row.get("busy") and not unreachable:
         bits.append("busy")
     # THE ROW-LEVEL RULE, not the raw field: a STORED row carries no needs
     # claim, whatever its producer said (``network.types.row_needs_claim``) —
@@ -16838,7 +16884,7 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and not unreachable:
         bits.append(f"pending {needs}")
     # ``uptime_s`` is meaningful only for a row with a PROCESS: a stored row
     # carries the empty default (0.0, not None), and rendering it as ``up 0ms``
@@ -17149,21 +17195,29 @@ def _sessions_info_body(
     Identifier fields: the conversation title and session id are marked spans;
     both are names the caller quotes back, not credentials.
     """
-    state = str(row.get("state") or "?")
+    state = (
+        _sessions_peer_status(row)
+        if row.get("locality") == "remote"
+        else str(row.get("state") or "?")
+    )
+    unreachable = (row.get("peer") or {}).get("reachable") is False
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     parts = [f'"{name}" — {state}']
     if row.get("session_id"):
         parts.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         parts.append(f"pid {row['pid']}")
-    if row.get("busy"):
+    if row.get("busy") and not unreachable:
         parts.append("busy")
     # No needs claim on a stored row (``network.types.row_needs_claim``).
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and not unreachable:
         parts.append(f"pending {needs}")
+    waiting = _sessions_wait_phrase(row)
+    if waiting and not unreachable:
+        parts.append(waiting)
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
     return ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
@@ -17230,7 +17284,7 @@ async def _sessions_info_mesh(
     row = next(item for item in rows if str(item.get("session_id")) == found.id)
     block = row.get("peer") or {}
     device = str(block.get("name") or block.get("device_id") or peer)
-    state = str(row.get("state") or "?")
+    state = _sessions_peer_status(row)
     # Identifier fields: the row's title and session id are names the caller
     # acts on; both are marked spans, never credentials.
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
@@ -17243,8 +17297,11 @@ async def _sessions_info_mesh(
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and block.get("reachable") is not False:
         bits.append(f"pending {needs}")
+    waiting = _sessions_wait_phrase(row)
+    if waiting and block.get("reachable") is not False:
+        bits.append(waiting)
     text = (
         ", ".join(bits) + f"\nheld by {device} — the session, its directory and its "
         "transcript live on that device; peek reads its live tail there, resume warms "
@@ -28086,200 +28143,234 @@ async def execute_wait(
     if missing:
         return _error(tool_call_id, "wait", f"unknown job {', '.join(missing)}")
 
-    def _settled() -> Any:
-        """The first of the awaited jobs that is no longer running, or None."""
+    def _note_waiting(count: int) -> None:
+        # The callback only changes session-owned memory: a tool must not write
+        # discovery files or know its serving host. on_update is the existing
+        # serving event path, so publishing the snapshot there makes a parked
+        # wait visible now, not only after the next heartbeat. Both carry the
+        # canonical deduplicated id count, never the caller's aliases.
+        # Presence is advisory: neither observer may replace a settled result,
+        # timeout or cancellation while finally clears the parked count. Isolate
+        # them independently so a broken host callback still permits the update
+        # observer to see the transition. BaseException (notably CancelledError)
+        # deliberately remains outside these ordinary observer-failure guards.
+        if context is not None and context.note_waiting is not None:
+            try:
+                context.note_waiting(count)
+            except Exception:  # noqa: BLE001 — presence must not change wait semantics
+                logger.debug("could not record wait presence", exc_info=True)
+        if on_update is not None:
+            try:
+                on_update(AgentToolUpdate(details={"waiting_on": count}))
+            except Exception:  # noqa: BLE001 — a failed observer must not mask cancellation
+                logger.debug("could not emit wait presence", exc_info=True)
 
-        for job_id in job_ids:
-            job = jobs.get(job_id)
-            if job is not None and job.status != "running":
-                return job
-        return None
+    async def _park() -> ToolResult:
+        def _settled() -> Any:
+            """The first of the awaited jobs that is no longer running, or None."""
 
-    def _still_running() -> list[str]:
-        """The awaited ids that are still running, in the order given.
+            for job_id in job_ids:
+                job = jobs.get(job_id)
+                if job is not None and job.status != "running":
+                    return job
+            return None
 
-        The unsettled branches report THIS rather than ``job_ids[0]``: on the
-        multi-id path the first id is simply the first the caller passed and
-        may itself have settled, so pinning it in ``details`` tells a caller
-        that reads the payload (rather than parsing the text) about the wrong
-        job.
-        """
+        def _still_running() -> list[str]:
+            """The awaited ids that are still running, in the order given.
 
-        return [
-            job_id
-            for job_id in job_ids
-            if (row := jobs.get(job_id)) is not None and row.status == "running"
-        ]
+            The unsettled branches report THIS rather than ``job_ids[0]``: on the
+            multi-id path the first id is simply the first the caller passed and
+            may itself have settled, so pinning it in ``details`` tells a caller
+            that reads the payload (rather than parsing the text) about the wrong
+            job.
+            """
 
-    deadline = time.monotonic() + params.wait_ms / 1000.0
-    # Snapshot the peer count and RE-ARM the event before parking.
-    #
-    # Two halves, both load-bearing. The COUNT is what the wake decision reads
-    # (not `is_set()`), so a message that landed between two waits, or before
-    # this wait began, is still seen exactly once. The CLEAR is what stops a
-    # stale set event from making `asyncio.wait` return instantly on every
-    # iteration, which would spin this `while` loop at full speed until the
-    # deadline — the same event-loop burn `_await_any_settled` documents for
-    # evicted job rows, and worse than the poll it replaced.
-    #
-    # The producer only ever sets and increments; re-arming is the consumer's
-    # job. No `await` separates the snapshot from the clear, so the sequence is
-    # atomic with respect to the loop, and the producer runs on that same loop
-    # (see PeerArrivalProtocol), so a message cannot slip between them and be
-    # lost: it either lands before the snapshot and is counted, or after the
-    # clear and re-sets the event. Do NOT "tidy" this by moving the count and
-    # the clear adjacent to each other or by reordering them — what matters is
-    # only that nothing awaits in between.
-    peer = context.peer_arrival if context is not None else None
-    peer_event = peer.event() if peer is not None else None
-    peer_seen = peer.count() if peer is not None else 0
-    # The per-kind snapshot rides the same atomic window as the count: it is
-    # only ever DIFFED against the live tally after a wake, so the model can
-    # be told which producer woke it (peer message, scheduled wake, hub note)
-    # rather than blaming every wake on a peer.
-    peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
-    if peer_event is not None:
-        peer_event.clear()
+            return [
+                job_id
+                for job_id in job_ids
+                if (row := jobs.get(job_id)) is not None and row.status == "running"
+            ]
 
-    def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
-        """The still-running payload for a wait cut short by a message/steer.
+        deadline = time.monotonic() + params.wait_ms / 1000.0
+        # Snapshot the peer count and RE-ARM the event before parking.
+        #
+        # Two halves, both load-bearing. The COUNT is what the wake decision reads
+        # (not `is_set()`), so a message that landed between two waits, or before
+        # this wait began, is still seen exactly once. The CLEAR is what stops a
+        # stale set event from making `asyncio.wait` return instantly on every
+        # iteration, which would spin this `while` loop at full speed until the
+        # deadline — the same event-loop burn `_await_any_settled` documents for
+        # evicted job rows, and worse than the poll it replaced.
+        #
+        # The producer only ever sets and increments; re-arming is the consumer's
+        # job. No `await` separates the snapshot from the clear, so the sequence is
+        # atomic with respect to the loop, and the producer runs on that same loop
+        # (see PeerArrivalProtocol), so a message cannot slip between them and be
+        # lost: it either lands before the snapshot and is counted, or after the
+        # clear and re-sets the event. Do NOT "tidy" this by moving the count and
+        # the clear adjacent to each other or by reordering them — what matters is
+        # only that nothing awaits in between.
+        peer = context.peer_arrival if context is not None else None
+        peer_event = peer.event() if peer is not None else None
+        peer_seen = peer.count() if peer is not None else 0
+        # The per-kind snapshot rides the same atomic window as the count: it is
+        # only ever DIFFED against the live tally after a wake, so the model can
+        # be told which producer woke it (peer message, scheduled wake, hub note)
+        # rather than blaming every wake on a peer.
+        peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
+        if peer_event is not None:
+            peer_event.clear()
 
-        Deliberately the SAME shape the deadline branch returns, so the model
-        gets the job id and status back and can simply re-issue the wait. The
-        jobs are untouched: nothing is cancelled and, critically, nothing is
-        consumed, so auto-delivery still hands over the result later.
+        def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
+            """The still-running payload for a wait cut short by a message/steer.
 
-        ``arrivals`` is the per-kind count of what landed during the park
-        (``reason == "inbound"``). The kinds are the producers' message
-        types, so the note can say "a scheduled wake fired" for the user's
-        reminder and "a subagent/parent hub message" for a child speaking up,
-        and the model knows what to read before re-issuing the wait.
-        """
+            Deliberately the SAME shape the deadline branch returns, so the model
+            gets the job id and status back and can simply re-issue the wait. The
+            jobs are untouched: nothing is cancelled and, critically, nothing is
+            consumed, so auto-delivery still hands over the result later.
 
-        running = _still_running()
-        # The note must agree with details["interrupted_by"]: the text is what
-        # the model actually reads, so rendering "steering" for a cancel we
-        # cannot attribute would keep the mislabelled claim alive in the one
-        # place it matters (review finding N1).
-        details: dict[str, Any] = {
-            "job_id": (running or job_ids)[0],
-            "status": "running",
-            "interrupted_by": reason,
-        }
-        if reason == "inbound":
-            kinds = arrivals or {}
-            notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
-            note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
-            # One kind is the common case, and naming it keeps the existing
-            # machine contract (``interrupted_by == "peer_message"``) intact
-            # for peer-only wakes; several at once stay "inbound" and the
-            # breakdown rides ``arrivals``.
-            if len(kinds) == 1:
-                details["interrupted_by"] = next(iter(kinds))
-            details["arrivals"] = dict(kinds)
-        else:
-            note = "the wait was cancelled"
+            ``arrivals`` is the per-kind count of what landed during the park
+            (``reason == "inbound"``). The kinds are the producers' message
+            types, so the note can say "a scheduled wake fired" for the user's
+            reminder and "a subagent/parent hub message" for a child speaking up,
+            and the model knows what to read before re-issuing the wait.
+            """
+
+            running = _still_running()
+            # The note must agree with details["interrupted_by"]: the text is what
+            # the model actually reads, so rendering "steering" for a cancel we
+            # cannot attribute would keep the mislabelled claim alive in the one
+            # place it matters (review finding N1).
+            details: dict[str, Any] = {
+                "job_id": (running or job_ids)[0],
+                "status": "running",
+                "interrupted_by": reason,
+            }
+            if reason == "inbound":
+                kinds = arrivals or {}
+                notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
+                note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
+                # One kind is the common case, and naming it keeps the existing
+                # machine contract (``interrupted_by == "peer_message"``) intact
+                # for peer-only wakes; several at once stay "inbound" and the
+                # breakdown rides ``arrivals``.
+                if len(kinds) == 1:
+                    details["interrupted_by"] = next(iter(kinds))
+                details["arrivals"] = dict(kinds)
+            else:
+                note = "the wait was cancelled"
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {', '.join(running or job_ids)} still running ({note})",
+                details=details,
+            )
+
+        job = _settled()
+        while job is None:
+            if signal is not None and signal.aborted:
+                running = _still_running()
+                return _text(
+                    tool_call_id,
+                    "wait",
+                    f"job {', '.join(running or job_ids)} still running (wait aborted)",
+                    details={"job_id": (running or job_ids)[0], "status": "running"},
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                running = _still_running()
+                return _text(
+                    tool_call_id,
+                    "wait",
+                    f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
+                    details={"job_id": (running or job_ids)[0], "status": "running"},
+                )
+            try:
+                await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
+            except asyncio.CancelledError:
+                # `lop send --now` steers, which makes interruptible_runner cancel
+                # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
+                # the job id and telling it the wait never happened. Reporting the
+                # still-running payload ourselves makes --now and the mailbox path
+                # return the same shape.
+                #
+                # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
+                # and expects the tool to stop; a tool that swallows
+                # CancelledError unconditionally defeats that contract outright
+                # (see the abort/steer split in harness/loop.py). So re-raise when
+                # the signal is aborted, and only absorb the plain steer cancel.
+                if signal is not None and signal.aborted:
+                    raise
+                # A cancel with NO signal at all cannot be a steer: steering rides
+                # interruptible_runner, which always passes one. Absorbing it here
+                # would invent a steering event on a host that has no steering, so
+                # let it propagate as the plain cancellation it is.
+                if signal is None:
+                    raise
+                # Steering is not the only remaining cancel source - a batch
+                # teardown (`GeneratorExit` in _execute_batch's finally) cancels
+                # the task with a live, non-aborted signal too, and the tool
+                # cannot tell the two apart from here: ToolContext deliberately
+                # exposes no steering capability, and adding one just to label a
+                # string would put loop state in a tool for no behavioural gain.
+                # `interrupted_by` is machine-readable and "steering" is the one
+                # value implying a human or peer acted, so report the neutral,
+                # always-true cause instead of guessing. The still-running payload
+                # (the point of this branch) is unchanged either way.
+                return _peer_interrupt("cancelled")
+            # Settle BEFORE peer: when a job settles on the same loop iteration as
+            # a message arrives, the finished result is strictly more valuable than
+            # "a message arrived", and reporting the peer branch would describe a
+            # completed job as running (and, via _still_running() == [], pin the
+            # WRONG job id in details - the exact failure _still_running's
+            # docstring exists to prevent). The message is not lost either way: it
+            # is already parked in the session journal and lands at the next
+            # turn-safe boundary.
+            job = _settled()
+            if job is None and peer is not None and peer.count() > peer_seen:
+                arrivals = {
+                    kind: total - peer_kinds_seen.get(kind, 0)
+                    for kind, total in peer.arrivals().items()
+                    if total > peer_kinds_seen.get(kind, 0)
+                }
+                return _peer_interrupt("inbound", arrivals)
+            if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
+                return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
+        # Handing the result to the model HERE means auto-delivery must not
+        # repeat it when the session next goes idle (see Session._on_job_completed
+        # and AsyncJob.consumed).
+        cast(Any, jobs).mark_consumed(job.id)
+        text, spill_details = _job_summary(job, context)
+        if len(job_ids) > 1:
+            still = [
+                job_id
+                for job_id in job_ids
+                if job_id != job.id
+                and (other := jobs.get(job_id)) is not None
+                and other.status == "running"
+            ]
+            if still:
+                text += f"\n({len(still)} still running: {', '.join(still)})"
+        details = {"job_id": job.id, "status": job.status}
+        if spill_details:
+            details.update(spill_details)
         return _text(
             tool_call_id,
             "wait",
-            f"job {', '.join(running or job_ids)} still running ({note})",
+            text,
             details=details,
         )
 
-    job = _settled()
-    while job is None:
-        if signal is not None and signal.aborted:
-            running = _still_running()
-            return _text(
-                tool_call_id,
-                "wait",
-                f"job {', '.join(running or job_ids)} still running (wait aborted)",
-                details={"job_id": (running or job_ids)[0], "status": "running"},
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            running = _still_running()
-            return _text(
-                tool_call_id,
-                "wait",
-                f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
-                details={"job_id": (running or job_ids)[0], "status": "running"},
-            )
-        try:
-            await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
-        except asyncio.CancelledError:
-            # `lop send --now` steers, which makes interruptible_runner cancel
-            # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
-            # the job id and telling it the wait never happened. Reporting the
-            # still-running payload ourselves makes --now and the mailbox path
-            # return the same shape.
-            #
-            # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
-            # and expects the tool to stop; a tool that swallows
-            # CancelledError unconditionally defeats that contract outright
-            # (see the abort/steer split in harness/loop.py). So re-raise when
-            # the signal is aborted, and only absorb the plain steer cancel.
-            if signal is not None and signal.aborted:
-                raise
-            # A cancel with NO signal at all cannot be a steer: steering rides
-            # interruptible_runner, which always passes one. Absorbing it here
-            # would invent a steering event on a host that has no steering, so
-            # let it propagate as the plain cancellation it is.
-            if signal is None:
-                raise
-            # Steering is not the only remaining cancel source - a batch
-            # teardown (`GeneratorExit` in _execute_batch's finally) cancels
-            # the task with a live, non-aborted signal too, and the tool
-            # cannot tell the two apart from here: ToolContext deliberately
-            # exposes no steering capability, and adding one just to label a
-            # string would put loop state in a tool for no behavioural gain.
-            # `interrupted_by` is machine-readable and "steering" is the one
-            # value implying a human or peer acted, so report the neutral,
-            # always-true cause instead of guessing. The still-running payload
-            # (the point of this branch) is unchanged either way.
-            return _peer_interrupt("cancelled")
-        # Settle BEFORE peer: when a job settles on the same loop iteration as
-        # a message arrives, the finished result is strictly more valuable than
-        # "a message arrived", and reporting the peer branch would describe a
-        # completed job as running (and, via _still_running() == [], pin the
-        # WRONG job id in details - the exact failure _still_running's
-        # docstring exists to prevent). The message is not lost either way: it
-        # is already parked in the session journal and lands at the next
-        # turn-safe boundary.
-        job = _settled()
-        if job is None and peer is not None and peer.count() > peer_seen:
-            arrivals = {
-                kind: total - peer_kinds_seen.get(kind, 0)
-                for kind, total in peer.arrivals().items()
-                if total > peer_kinds_seen.get(kind, 0)
-            }
-            return _peer_interrupt("inbound", arrivals)
-        if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
-            return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
-    # Handing the result to the model HERE means auto-delivery must not
-    # repeat it when the session next goes idle (see Session._on_job_completed
-    # and AsyncJob.consumed).
-    cast(Any, jobs).mark_consumed(job.id)
-    text, spill_details = _job_summary(job, context)
-    if len(job_ids) > 1:
-        still = [
-            job_id
-            for job_id in job_ids
-            if job_id != job.id
-            and (other := jobs.get(job_id)) is not None
-            and other.status == "running"
-        ]
-        if still:
-            text += f"\n({len(still)} still running: {', '.join(still)})"
-    details = {"job_id": job.id, "status": job.status}
-    if spill_details:
-        details.update(spill_details)
-    return _text(
-        tool_call_id,
-        "wait",
-        text,
-        details=details,
-    )
+    try:
+        _note_waiting(len(job_ids))
+        return await _park()
+    finally:
+        # A parked count is meaningful only while this invocation owns the
+        # wait. Clear even if cancellation unwinds the coroutine, a row vanishes,
+        # or a producer/update callback fails: otherwise idle heartbeats would
+        # faithfully republish a wait that no longer exists. Do not intercept
+        # CancelledError here; _park preserves the existing abort/steer split.
+        _note_waiting(0)
 
 
 async def _await_any_settled(

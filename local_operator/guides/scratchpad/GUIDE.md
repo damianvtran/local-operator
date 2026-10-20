@@ -57,7 +57,10 @@ Left in their tree, this is litter they cannot tell apart from output.
   INSIDE the session's directory, so it **survives runtime restarts and
   rollovers**, and it is cleared only when the session is deleted or expires —
   deleting the session (or the cleanup pass, when its policy is on) takes the
-  whole folder. A long-running loop or a multi-turn state file has no reason to
+  whole folder. The cleanup pass may additionally reclaim build shapes, stale
+  output and merged-clean git clones (never notes or transcripts) from a
+  session past the retention window, recording every path in a manifest under
+  `sessions/.cleanup-manifests/`. A long-running loop or a multi-turn state file has no reason to
   keep a second copy anywhere else.
 - **Do not put these here: build trees, dependency trees, compiled artefacts,
   archives, anything the shell built.** `write`/`edit` refuse them by NAME — a
@@ -230,7 +233,8 @@ and no viewer. One file per subject; subdirectories are free
   cannot flood the transcript; a very large file comes back truncated, with the
   `read` call that continues it.
 - A pad is capped THREE times, because it is disk shared with every other
-  session on the machine and is reclaimed only when its session ends: a SINGLE
+  session on the machine and is reclaimed when its session ends (and, for
+  build/cache shapes only, once the session is past the retention window): a SINGLE
   write at 32 MiB (33,554,432 bytes); the whole pad at the configured cap —
   `session.scratchpad.max_bytes`, default 256 MiB (268,435,456 bytes), 16 MiB
   to 8 GiB — past which every write that ADDS bytes is refused whatever filled
@@ -242,7 +246,9 @@ and no viewer. One file per subject; subdirectories are free
   way back under. Reading is deliberately NOT gated, so a pad written before
   these rules can still be listed, read and cleaned up. Nothing removes the
   folder later either — only the session going away does that, by the cleanup
-  pass (when its policy is switched on) or by the session being deleted.
+  pass (when its policy is switched on) or by the session being deleted; the
+  content pass can take build/cache shapes from a session past the retention
+  window, but never the transcript or the pad root.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.
 - Any other URL scheme in a path argument is refused: a scheme the tools do not

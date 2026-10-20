@@ -69,6 +69,7 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
@@ -97,6 +98,10 @@ def _entry_owners() -> dict[str, str]:
         ORIGIN_NAME: "resume",
         ORIGIN_CACHE_NAME: "resume",
         CREATED_AT_NAME: "session.creation",
+        # A desktop fork's pending auto-tag intent: per-device tag state that
+        # must not travel (see sync.EXCLUDED_ENTRIES). Listed here so the
+        # round-trip test builds it and proves it does NOT arrive.
+        AUTO_TAG_FILENAME: "session.auto_tag",
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
@@ -537,13 +542,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "that gates removal: none of them is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
-        4,
+        5,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
         "sweep lock): the former sits at the sessions root, the latter at the config root; "
         "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
         "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
         "to a tree's name; the result is written beside that tree inside the pad and is never "
-        "a bare session entry. "
+        "a bare session entry. ``CONTENT_MANIFEST_DIRNAME`` is the cleanup-manifest directory "
+        "name at the sessions root: the per-session manifest FILES sit under it, and the name "
+        "itself can never name a session directory. "
         "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
@@ -918,8 +925,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``recommend_`` prefixes a generated question id",
     ),
     "local_operator/compaction/cutpoint.py": (
-        1,
-        "``compaction-elision`` prefixes an elision id inside the transcript payload",
+        2,
+        "``compaction-elision`` prefixes an elision id inside the transcript payload; "
+        "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
+        "the live/replay context, never a filename or session entry",
     ),
     "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),

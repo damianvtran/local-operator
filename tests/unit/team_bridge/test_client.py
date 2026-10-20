@@ -776,3 +776,130 @@ async def test_unread_sends_the_scope_wire_name():
     assert len(seen) == 1
     assert seen[0].path == "/v1/messaging/unread"
     assert dict(seen[0].params) == {"scope": "account"}
+
+
+# ---------------------------------------------------------------------------
+# agent actors, discovery and notification policy (contract §10.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_conversation_sends_the_agent_actor_wire_names():
+    """The actor fields are the server PR's names; a rename would act human."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"id": "conv_1", "kind": "channel", "members": []})
+
+    client = _make_client(handler)
+    await client.create_conversation(
+        {
+            "tenant_id": "tnt_1",
+            "kind": "channel",
+            "name": "build",
+            "visibility": "tenant",
+            "members": [
+                {"account_id": "acc_1", "kind": "agent", "endpoint_id": "bep_1"},
+            ],
+        },
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+    )
+
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/v1/messaging/conversations"
+    assert json.loads(seen[0].content) == {
+        "tenant_id": "tnt_1",
+        "kind": "channel",
+        "name": "build",
+        "visibility": "tenant",
+        "members": [{"account_id": "acc_1", "kind": "agent", "endpoint_id": "bep_1"}],
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+    }
+
+
+async def test_conversation_send_sends_the_agent_actor_and_never_agent_label():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"message": {"id": "cmsg_1", "seq": 4}})
+
+    client = _make_client(handler)
+    await client.conversation_send(
+        "conv_1",
+        client_ref="ref-1",
+        text="hello",
+        tenant_id="tnt_1",
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+    )
+
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/messages"
+    payload = json.loads(seen[0].content)
+    assert payload == {
+        "client_ref": "ref-1",
+        "body": "hello",
+        "tenant_id": "tnt_1",
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+    }
+    assert "agent_label" not in payload
+
+
+async def test_the_human_conversation_calls_are_unchanged_without_an_actor():
+    """No actor means no actor field — the pre-agent wire shape, exactly."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"message": {"id": "cmsg_1"}})
+
+    client = _make_client(handler)
+    await client.conversation_send("conv_1", client_ref="ref-1", text="hello")
+    assert json.loads(seen[0].content) == {"client_ref": "ref-1", "body": "hello"}
+
+    await client.create_conversation({"kind": "dm", "members": []})
+    assert json.loads(seen[1].content) == {"kind": "dm", "members": []}
+
+
+async def test_conversation_notify_posts_the_policy_on_the_read_route():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"muted": False})
+
+    client = _make_client(handler)
+    await client.conversation_notify("conv_1", tenant_id="tnt_1", notify="mention")
+
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/read"
+    assert json.loads(seen[0].content) == {"notify": "mention", "tenant_id": "tnt_1"}
+
+    with pytest.raises(ValueError):
+        await client.conversation_notify("conv_1", notify="loud")  # type: ignore[arg-type]
+
+
+async def test_conversations_passes_discoverable_rows_through_untouched():
+    """Discovery is the server's authorization answer, not the client's to edit."""
+
+    row = {
+        "id": "conv_2",
+        "kind": "channel",
+        "visibility": "tenant",
+        "discoverable": True,
+        "member": False,
+        "member_count": 4,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"conversations": [row], "next_cursor": "bcur_2"})
+
+    client = _make_client(handler)
+    result = await client.conversations(tenant_id="tnt_1", limit=10)
+
+    assert result["conversations"] == [row]
+    assert result["next_cursor"] == "bcur_2"

@@ -251,7 +251,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # and ack clauses tightened) while this entry kept its H5d value. Measured
     # by this test's own printed table (the ``count_text_tokens`` ledger path)
     # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
-    "bridge": 559,
+    # RE-MEASURED (#2665 round 1): 559 -> 729. The channel lane publishes four
+    # op literals, eleven parameters and the nested ``ChannelMemberParams``
+    # model; its prose was trimmed first (761 -> 729 measured: wire description
+    # 376 -> 240 chars, both model docstrings to one line each). 729 is the
+    # structural floor for a capability the model must be able to call. The
+    # paired start-context raise is stated in scripts/bench_context_budget.py.
+    "bridge": 729,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -355,7 +361,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # entry that moved: every other count above is byte-identical.
     "no_reply": 109,
     "patience": 330,
-    "project": 1098,
+    # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
+    # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
+    # names its occasion (frame/chart/log) and the copy-and-limit contract;
+    # re-measured through this test's own printed table, not pasted.
+    "project": 1143,
     "project_delete": 91,
     "read": 345,
     "read_variable": 67,
