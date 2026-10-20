@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "文件查看器",
+  "tui.viewer.description": "查看本地文本文件",
+  "tui.viewer.usage": "用法：/view <path>",
+  "tui.viewer.loading": "读取中……",
+  "tui.viewer.legend": "↑↓←→ · PgUp/PgDn · Home/End\nw 自动换行 · r 重新加载 · y 复制路径 · o 用外部应用打开 · esc 关闭",
+  "tui.viewer.truncated": "预览已截断——上限：1 MiB / 20,000行",
+  "tui.viewer.unreadable": "无法读取此文件——文件不存在、不可读，或不在允许的根目录内",
+  "tui.viewer.unsupported": "此文件类型没有内嵌预览——用外部应用打开",
+  "tui.viewer.binary": "无法预览二进制文件",
+  "tui.viewer.changed": "此文件在列出后已发生变化——刷新列表后再打开",
+  "tui.viewer.copied": "路径已复制",
+  "tui.viewer.copy_failed": "剪贴板不可用——路径：{path}",
+  "tui.viewer.open_failed": "无法用外部应用打开此文件",
+  "tui.viewer.kind_code": "代码",
+  "tui.viewer.kind_markdown": "Markdown",
+  "tui.viewer.kind_text": "文本",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "自动换行已开启",
+  "tui.viewer.wrap_off": "自动换行已关闭"
+}
