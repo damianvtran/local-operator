@@ -16,7 +16,7 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.binding import Binding
-from textual.geometry import Region
+from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import Reactive
 from textual.strip import Strip
@@ -2436,29 +2436,41 @@ class SessionSidebar(Widget, can_focus=True):
         self._sync_animation()
         self.refresh()
 
+    def _size_updated(
+        self, size: Size, virtual_size: Size, container_size: Size, layout: bool = True
+    ) -> bool:
+        """Land a deferred reveal in the reflow that first gives a viewport.
+
+        Textual calls this synchronously while reflowing the compositor, BEFORE
+        it paints that frame; the `Resize` message is dispatched on a later
+        event-loop turn. So a reveal armed while `size.height` was 0 has to land
+        here, or the first real-height frame presents the stale page and the
+        next one corrects it — a visible jump, measured on a 101-row catalog as
+        frame 1 at offset 0 and frame 2 at offset 76. `_reveal`'s repaint is
+        harmless: the paint this reflow is about to compose already reads the
+        new offset, and the follow-up refresh produces the identical frame.
+
+        `Widget._size_updated` has assigned `self._size` before returning, so
+        the reveal prices the real page here. This is also the seam
+        `TranscriptView` uses for its tail anchor, for the same reason
+        (`_size_updated` is early enough to change the frame being composed).
+        """
+        changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if changed and size.height > 0 and self._reveal_deferred:
+            self._reveal_deferred = False
+            self._reveal()
+        return changed
+
     def on_resize(self, event: events.Resize) -> None:
         """Re-derive the window against the new geometry.
 
-        THE ONE PLACE A DEFERRED REVEAL LANDS. Before the first layout
-        (`size.height == 0`), `page_size` describes the whole remaining order
-        rather than a fake one-row viewport (`_page_size_at`), and `_reveal`
-        cannot scroll; it arms `_reveal_deferred` instead. This method is the
-        only consumer of that flag. Keep it the class's only `on_resize`: a
-        second definition elsewhere in the body would silently win (the later
-        one binds), and the flag would never land. `size` is already the new
-        geometry when the event is dispatched (`Widget._size_updated` assigns
-        before posting `Resize`).
-
-        The ordinary clamp below stays for every other resize: the page size is
-        a function of height, so a taller frame can make the old offset name
-        rows past the end. A deferred reveal runs first and returns (it clamps
-        its own landing and repaints); there is nothing for the plain clamp to
-        do on top of a reveal that just priced this exact height.
+        THE ORDINARY RESIZE PATH. A deferred reveal does NOT land here:
+        `Resize` is a message and arrives after the frame has been presented,
+        which is exactly the one-frame jump `_size_updated` exists to remove.
+        `_size_updated` clears that flag before the first height-bearing paint;
+        this handler only re-clamps an offset that the new, taller page size has
+        made out of range.
         """
-        if self._reveal_deferred and self.size.height > 0:
-            self._reveal_deferred = False
-            self._reveal()
-            return
         self._offset = min(self._offset, max(0, len(self.entries) - self.page_size))
         self._sync_animation()
 

@@ -30,14 +30,22 @@ from contextlib import asynccontextmanager
 import pytest
 
 from local_operator.harness.types import Message, TextContent
+from local_operator.resume import SessionRow
 from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import RESUME_RENDER_MESSAGES, OperatorApp
+from local_operator.tui.session_catalog import CatalogEntry
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
-from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
+from tests.e2e.harness import (
+    ScriptedStream,
+    build_session,
+    seed_transcript,
+    text_turn,
+    wait_for_adoption,
+)
 from tests.unit.session.test_remote import _never_take_over
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -897,3 +905,70 @@ async def test_a_gate_the_app_already_holds_is_in_the_reveal_frame(tmp_path) -> 
     # measurable gain from the in-turn mount helper, which is why that helper is
     # gone from this branch — a mechanism that does not move the number is not kept
     # for its name.
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_sidebar_reveal_lands_in_the_first_height_bearing_frame() -> None:
+    """The first real-height frame carries the revealed page, not page one.
+
+    The sidebar's catalog worker can land `set_current`/`set_entries` between
+    `display = True` and the first layout. With no viewport the reveal defers
+    (see `SessionSidebar._reveal`), and the offset has to be resolved in the
+    reflow that first produces a real height: a `Resize` message is processed
+    after that frame has been displayed, so an `on_resize`-only landing paints
+    page 1 and then corrects it — a visible jump. This is the assertion whose
+    absence let that through: not "the settled offset is right", but "every
+    displayed height-bearing frame is the revealed one".
+
+    The 101-row catalog with the current row LAST makes the two positions
+    different pages (offset 0 vs the bottom page); with six rows both fit and
+    the frames are identical, which is why the small fixture could not see it.
+    """
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        sidebar.current_id = "current"
+        entries = [CatalogEntry(SessionRow("current", 1, "Current conversation"))]
+        entries.extend(
+            CatalogEntry(SessionRow(str(i), i + 2, f"long name {i}")) for i in range(100)
+        )
+        frames: list[tuple[int, int, bool]] = []
+
+        real_hook = app.post_display_hook
+
+        def hook() -> None:
+            if sidebar.display and sidebar.size.height > 0:
+                frames.append(
+                    (
+                        sidebar._offset,
+                        sidebar.page_size,
+                        sidebar.cursor_id in {entry.id for entry in sidebar.visible_entries},
+                    )
+                )
+            real_hook()
+
+        app.post_display_hook = hook  # type: ignore[method-assign]
+        # The app refresh body's own order, landed before the first layout.
+        sidebar.set_open(True)
+        sidebar.set_current("current")
+        sidebar.set_entries(entries)
+        await pilot.pause()
+        await pilot.pause()
+        # The independently-derived target: the bottom page the wheel and
+        # PageDown settle on (`_bottom_start`), not a number this test picks.
+        bottom = sidebar._bottom_start()
+        bottom_page = sidebar._page_size_at(bottom)
+
+    assert frames, "no height-bearing frame was displayed"
+    first = frames[0]
+    assert first == (bottom, bottom_page, True), (
+        "the first displayed height-bearing frame is not the revealed bottom "
+        f"page: got offset={first[0]} page_size={first[1]} "
+        f"cursor_visible={first[2]}, expected offset={bottom} "
+        f"page_size={bottom_page} cursor_visible=True"
+    )
+    assert all(
+        frame == first for frame in frames
+    ), f"the sidebar jumped between displayed frames: {frames}"
