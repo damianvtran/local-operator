@@ -26,12 +26,40 @@ Then bump `PRELUDE_VERSION` in `supplements/document.py` and update the pinned d
 | theme-flip ground: the ROOT element paints `--lo-canvas`, dark fallback `#121212` | 2,056 | 8,047 | 10,103 | 4,573 |
 | numeric cells: finite-only bar/line scales and labelled bar gaps | 2,056 | 8,170 | 10,226 | 4,602 |
 | v5 remediation: silent nulls, centred series gaps, labelled line gaps + shared-code trims | 2,056 | 8,077 | 10,133 | 4,607 |
+| v6 horizontal-bar shape: height from bar count, measured gutter, width-aware ticks, dark-fallback ink | 1,878 | 8,114 | 9,992 | 4,602 |
 
 Caps (memo §2.6): ≤ 11 KB raw (11,264 B) / ≤ 4.5 KB gzip (4,608 B). The current pair leaves
-1,131 B raw / **1 B gzip**. Relative to v3: +30 B raw / +34 B gzip; relative to the
-reviewed v4: −93 B raw / +5 B gzip. `PRELUDE_VERSION` **5** is what a served document
+1,272 B raw / **6 B gzip**. Relative to v3: −111 B raw / +29 B gzip; relative to the
+reviewed v5: −141 B raw / −5 B gzip. `PRELUDE_VERSION` **6** is what a served document
 re-derives under. The theme-flip ground and its wait for `[data-ready]` are documented in
 `prelude.src.css`; they are unchanged by this repair.
+
+The v6 shape pass was measured the same way, and it is **net smaller** than v5 despite
+adding three behaviours. Probe builds (one feature removed at a time, current source
+otherwise unchanged) put the adds at roughly +24 B gzip for the bar-count height, +22 B for
+the measured gutter and +18 B for width-aware tick density; the dark FALLBACK ink cost
++11 B. Those are paid for by rules that the memo's own contract makes unreachable:
+
+* `h1,h2,h3` — §2.8/operator directive 2026-10-10 says a component is body-only and its
+  title is never drawn; no helper or fixture emits a heading. -15 B gzip measured.
+* `@media (prefers-reduced-motion:reduce)` — the generation contract says "no animation,
+  transitions"; the prelude's own CSS declares neither, so the rule can never match a
+  moving element. -42 B gzip measured.
+* `.dim` — no helper emits it and the prompt teaches `var(--lo-ink-dim)` instead. The
+  `--lo-ink-dim` token stays in the root palette. -8 B gzip measured.
+* `:root[data-mode=light]{color-scheme:light}` — the root already declares
+  `light dark`; the only UA chrome in the frame is a scrollbar, and v6's content-sized
+  height removes the chart's overflow. -9 B gzip measured.
+
+`_e = LO.el` was also tried as a size trim and measured **worse** under gzip (a repeated
+`LO.el(` compresses better than a two-letter alias plus its definition); it is not in the
+build. The gutter minimum dropped from an arbitrary 56 px to the measured label width, and
+the horizontal label slot is the gutter less the same 8 px inset the text is anchored at, so
+a measured label is never refit 4 px smaller than its own slot. The merged value label was
+already drawn OUTSIDE the bar (`max(a,z)+4`); the unreadable pixels in the operator's
+screenshot came from the dark fallback leaving light-theme ink on `#121212`, not from a
+label inside the fill. The fallback now owns a light ink pair, which is what the rendered
+evidence shows.
 
 The v5 additions were measured before accepting them. A generic shared gap helper was
 4,661 B gzip. The direct string-only/null-safe bar branch was 4,609 B; sharing `fmt`'s
@@ -53,14 +81,14 @@ destructuring the message event, one `"use strict"` instead of two, and a space 
 fallback media query). Stripping the nonce from `LO.theme` measured 4,611 B and was NOT taken
 (it would also hide nothing: any component script can add its own `message` listener).
 
-**The cap still binds.** 1 B gzip is the whole headroom: any further addition must trim, and
+**The cap still binds.** 6 B gzip is the whole headroom: any further addition must trim, and
 it cannot pay for itself with a feature the memo only allows a surface to add (see the native
 paragraph below).
 
 **The cap is not final for native (lane N).** The memo's §4.1 Native row needs the prelude to
 post through `window.ReactNativeWebView.postMessage` when present, listen on `document` as
 well as `window`, and accept the iOS host push whose `event.source` is `null` (the
-`e.source!==parent` check drops it today). None of that fits in the 1 B gzip headroom this pair
+`e.source!==parent` check drops it today). None of that fits in the 6 B gzip headroom this pair
 has left. Lane N either injects a native-only shim at assembly time without touching this shared
 pair, or revisits the cap in its own PR with measured numbers.
 

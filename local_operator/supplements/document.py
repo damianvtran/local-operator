@@ -70,7 +70,12 @@ from typing import Any, Final, Mapping
 #: 4 — numeric-only chart scales: legacy formatted cells are normalised at assembly,
 #: while unknown values remain labelled gaps instead of poisoning every SVG coordinate.
 #: 5 — preserve silent null gaps; centre explicit string gaps within each series band.
-PRELUDE_VERSION: Final = 5
+#: 6 — horizontal-bar shape: the SVG height follows the bar count (a band per bar, capped),
+#: the left gutter is the measured widest category label (clamped, then ellipsised), tick
+#: density follows the plot width, and the dark FALLBACK declares its own ink so a frame
+#: that never receives a host push is readable on #121212. Paid for by dead CSS (no drawn
+#: headings, no motion) and the unused `.dim` rule: 9,992 B raw / 4,602 B gzip.
+PRELUDE_VERSION: Final = 6
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (
