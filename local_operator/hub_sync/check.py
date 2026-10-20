@@ -618,7 +618,13 @@ def check_hub_skills(
                 # that settles the record to absent this is a normal absent check;
                 # when it does not, the missing directory IS the error it has
                 # always been (an unknown loss is never re-labelled as absence).
-                storage.recover_unpull(local_id=record.local_id)
+                try:
+                    storage.recover_unpull(local_id=record.local_id)
+                except Exception:  # noqa: BLE001 - one item's recovery never ends the tick
+                    # A config-lock timeout or an unreadable marker is THIS
+                    # item's failure: keep the original error and let the rest
+                    # of the checks proceed.
+                    logger.warning("could not settle unpull for %s", record.local_id, exc_info=True)
                 settled = prov.read_baseline(config_dir, "skill", record.local_id)
                 if settled is None or settled.content_state != "absent":
                     checks.append(

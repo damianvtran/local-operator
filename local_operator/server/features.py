@@ -96,7 +96,11 @@ def feature_flags() -> dict[str, Any]:
         # `hub_updates`: a renderer gated on `hub_updates` keeps its existing
         # pending-only sidebar and never polls this, while a renderer that sees
         # `hub_links` may show the healthy inventory with a direct source-scoped
-        # toggle. The legacy `/hub/updates` projection stays compatible.
+        # toggle. The legacy `/hub/updates` projection keeps its SHAPE, but it
+        # now also lists rows with `kind: "skill"` (the operator's brief: a
+        # skill failure must be visible and retryable on the same channel as
+        # agents and teams). A consumer of that projection must tolerate the
+        # third kind; it was a deliberate contract change, not a silent one.
         "hub_links": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.

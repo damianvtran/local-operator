@@ -75,6 +75,11 @@ TEAM_ROSTER_MAX = 64
 
 Prefer = Literal["none", "local", "remote"]
 
+#: The one batch/listing order: agents first, then teams, then skills. Sorted by
+#: this rank instead of the kind string so a skill never lands between the two
+#: kinds it was added after (the TUI's ``section_order()`` is the same list).
+KIND_ORDER: dict[str, int] = {"agent": 0, "team": 1, "skill": 2}
+
 
 #: How long an interactive caller waits for another process's update run before
 #: refusing. Long enough to ride out a short tick, short enough that a click never
@@ -1241,7 +1246,13 @@ def _apply_skill(
     # shape ``install_skill`` writes for a fresh link -- and never reports
     # ``unchanged`` or computes a three-way merge against bytes that are not
     # there.
-    absent = record.content_state == "absent"
+    #
+    # The CHECK's fact is carried too: if a pull landed between the check and
+    # this apply, the record is present but this row still has no local side.
+    # Installing wholesale is safe there because the storage re-verifies under
+    # its lock (``expected_fingerprint`` is None, so existing bytes refuse with
+    # ``local-concurrent-edit``) -- never a bogus "invalid skill document".
+    absent = c.content_state == "absent" or record.content_state == "absent"
 
     try:
         remote_doc = SkillDocument.from_json(dict(c.remote or {}))
@@ -1252,6 +1263,15 @@ def _apply_skill(
 
     results: list[MergeResult] = []
     if absent:
+        if replace == "local":
+            # "Keep my side" has no side to keep: pretending otherwise would
+            # install the hub's bytes under a request that asked for the
+            # opposite. Refuse by name and write nothing.
+            return fail(
+                "merge-refused",
+                "there is no local copy to keep: this link is subscribed without content",
+                "refused",
+            )
         merged: SkillDocument | None = remote_doc
     elif replace == "remote":
         merged = remote_doc
@@ -1608,8 +1628,7 @@ def _apply_items_locked(
     todo = list(checks) if checks is not None else check_items(ctx, kinds=kinds, names=names)
     # Agents first, then teams, then skills: the frozen batch order, extended by
     # one rank rather than replaced, so a client's existing expectations hold.
-    order = {"agent": 0, "team": 1, "skill": 2}
-    todo.sort(key=lambda c: (order.get(c.kind, len(order)), c.name.casefold()))
+    todo.sort(key=lambda c: (KIND_ORDER.get(c.kind, len(KIND_ORDER)), c.name.casefold()))
     reports: list[ItemMergeReport] = []
     stopped: str | None = None
     for c in todo:
@@ -1716,7 +1735,9 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
                 "summary": item.get("summary") or {},
             }
         )
-    items.sort(key=lambda i: (i["kind"], str(i["name"]).casefold()))
+    items.sort(
+        key=lambda i: (KIND_ORDER.get(i["kind"], len(KIND_ORDER)), str(i["name"]).casefold())
+    )
     last = doc.get("last_tick") or {}
     return {
         "generated_at": prov.now_iso(),
@@ -1949,8 +1970,15 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "push": _direction_status(item, "push", policy, now, capability),
             }
         )
-    links.sort(key=lambda link: (link["kind"], str(link["name"]).casefold()))
-    unresolved.sort(key=lambda row: (row["kind"], str(row["name"]).casefold()))
+    links.sort(
+        key=lambda link: (
+            KIND_ORDER.get(link["kind"], len(KIND_ORDER)),
+            str(link["name"]).casefold(),
+        )
+    )
+    unresolved.sort(
+        key=lambda row: (KIND_ORDER.get(row["kind"], len(KIND_ORDER)), str(row["name"]).casefold())
+    )
     return {
         "generated_at": prov.now_iso(),
         "capability": "hub_links:1",
