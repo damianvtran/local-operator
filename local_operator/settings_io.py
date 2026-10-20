@@ -5588,10 +5588,13 @@ SETTINGS: tuple[Setting, ...] = (
         section="team_bridge",
         label=_t(_ws.team_bridge_enabled_label()),
         kind=Kind.BOOL,
-        # OFF by default during the consent hold: #2712 shipped the opt-out
+        # OFF by default through the consent hold: #2712 shipped the opt-out
         # default ON, but no consent version with opt-out copy was served, so an
         # absent key could lead to a consent write the member never saw. An
-        # explicit true is this machine's opt-in. The literal is pinned to
+        # explicit true is this machine's opt-in. The automatic enrollment is
+        # now v2-gated in ``team_bridge.client``; flipping this literal (with
+        # ``DEFAULT_TEAM_BRIDGE_ENABLED``) after bridge_consent_v2 approval is
+        # the single product change. The literal is pinned to
         # ``DEFAULT_TEAM_BRIDGE_ENABLED`` by ``_consumer_defaults()`` in
         # tests/unit/test_settings_io.py; the server half (eligibility, consent,
         # launch) still decides whether anything can run.

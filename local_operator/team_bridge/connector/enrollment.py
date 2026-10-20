@@ -10,10 +10,10 @@ generic ``{enabled, session}`` preference has NO path into that record
 * :func:`commit_consent_and_designation` — called ONLY after the real
   captured-owner consent flow succeeded, with the receipt that flow produced.
 * :func:`commit_settings_enrollment` — called ONLY by the client after a
-  USER's explicit ``PUT /messaging/settings`` answered 200 with an ACTIVE
-  endpoint and the consent echo that machine sent. That user action is the
-  source; served/cached text alone never reaches it, and a status read never
-  calls it (consent hold: #2712's auto-enrollment is disabled).
+  settings PUT answered 200 with an ACTIVE endpoint and the consent echo that
+  machine sent. That PUT is either the USER's explicit enable or the
+  bridge_consent_v2-gated automatic enrollment; served/cached text alone never
+  reaches it, and no other status-read path calls it (consent hold, #2712).
 
 Neither invents a consent: the first needs the captured-owner receipt, the
 second needs the server's successful write to the user's own enable. Neither
@@ -73,16 +73,18 @@ def commit_settings_enrollment(
     """Commit the NATIVE receipt for a user's explicit settings enable.
 
     WHY THIS IS A REAL CONSENT STEP, NOT A DERIVED ONE. The caller runs it only
-    after the USER's own authenticated settings PUT returned an ACTIVE endpoint
-    with the consent echo this machine sent. The served consent TEXT is never
-    the source and never reaches this function. The v1 server exposes no opaque
-    receipt id, so the endpoint resource id (the record the consent is attached
-    to) is the non-secret ``consent_ref``; the version is the server's.
+    after an authenticated settings PUT returned an ACTIVE endpoint with the
+    consent echo this machine sent. That PUT is the USER's explicit enable or
+    the bridge_consent_v2-gated automatic enrollment. The served consent TEXT is
+    never the source and never reaches this function. The v1 server exposes no
+    opaque receipt id, so the endpoint resource id (the record the consent is
+    attached to) is the non-secret ``consent_ref``; the version is the server's.
 
-    WHY NOT ON A STATUS READ. A fresh answer that says the endpoint is active is
-    not proof that THIS user chose it: another surface or an older build may
-    have enabled it. The consent hold (#2712) therefore forbids the status
-    discipline from reaching this function; only the explicit write may.
+    WHY NOT ON AN ORDINARY STATUS READ. A fresh answer that says the endpoint is
+    active is not proof that THIS user chose it: another surface or an older
+    build may have enabled it. The consent hold (#2712) therefore forbids a
+    status answer from enrolling, except through the explicit v2 gate: the
+    caller must have sent this machine's own settings PUT first.
 
     WHY THE REFUSALS. A machine already holding a committed owner returns
     ``False`` instead of replacing it: the store's one-owner model gives no safe
