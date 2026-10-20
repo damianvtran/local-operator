@@ -651,6 +651,7 @@ def test_the_two_index_row_composers_agree_on_the_key_set(tmp_path: Path) -> Non
         every_ms=MINUTE,
         created_at=1_700_000_000_000,
     )
+
     async def _run_check(monitor: Any) -> "CheckOutcome":
         return {"text": "", "error": None}
 
