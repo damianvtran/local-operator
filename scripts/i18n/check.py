@@ -631,9 +631,7 @@ def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     return ids
 
 
-def _base_catalogue(
-    ref: str, locale: str, namespace: str
-) -> dict[str, str] | str | None:
+def _base_catalogue(ref: str, locale: str, namespace: str) -> dict[str, str] | str | None:
     """One locale's catalogue for one namespace at ``ref``.
 
     Three outcomes, and the difference between the last two is load-bearing:
@@ -868,7 +866,11 @@ def _inactive_locales_at_ref(ref: str) -> set[str] | None:
         if code == "en":
             continue
         listing = _git(
-            "ls-tree", "-r", "--name-only", ref, "--",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            ref,
+            "--",
             f"local_operator/i18n/catalogues/{code}",
         )
         if listing.returncode != 0:
