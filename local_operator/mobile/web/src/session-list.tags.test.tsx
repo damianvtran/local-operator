@@ -202,6 +202,15 @@ describe("reaching the assignment sheet", () => {
 		expect(screen.queryByRole("button", { name: "Tags…" })).toBeNull();
 	});
 
+	it("offers none when the capability is present but FALSE", async () => {
+		capabilities = { session_tags: { available: false } };
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		longPress(cardByName("Alpha"));
+		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Tags…" })).toBeNull();
+	});
+
 	it("closes the action sheet and opens the tag sheet when the capability is present", async () => {
 		capabilities = { session_tags: { available: true } };
 		sessionList = [
