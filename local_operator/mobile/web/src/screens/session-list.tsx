@@ -1227,6 +1227,12 @@ export function SessionListScreen() {
 	const [groupEnabled, setGroupEnabled] = useState(getGroupTags);
 	const [catalogue, setCatalogue] = useState<TagCatalogueEntry[] | null>(null);
 	const [catalogueError, setCatalogueError] = useState(false);
+	/* PENDING IS PER ATTEMPT, NOT "NO CATALOGUE YET". A refocus or a retry after a
+	   failure runs while a cached catalogue keeps painting its (now stale)
+	   groups, and the reader still needs to know a read is in flight — QA round
+	   2, Q-r2-1, where the retry after a 500 showed no status at all because the
+	   cached list made the read invisible. */
+	const [cataloguePending, setCataloguePending] = useState(false);
 	const [catalogueAttempt, setCatalogueAttempt] = useState(0);
 	const groupingOn = tagsAvailable && groupEnabled;
 
@@ -1236,17 +1242,30 @@ export function SessionListScreen() {
 	   refresh catches categories created on another surface while the phone was
 	   away; rows are regrouped from the store in the same commit. */
 	useEffect(() => {
-		if (!groupingOn) return;
+		if (!groupingOn) {
+			/* A disable abandons whatever read was in flight and must not leave
+			   the flag set for the next enable. `catalogueBusy` is gated on
+			   `groupingOn` too, so this is bookkeeping rather than a visible
+			   state — but a flag that only ever flips true is how this defect
+			   came back the first time. */
+			setCataloguePending(false);
+			return;
+		}
+		/* EVERY ATTEMPT STARTS HERE — enable, retry, refocus — so the flag has one
+		   funnel and cannot describe an attempt that is not running. */
+		setCataloguePending(true);
 		let cancelled = false;
 		getTags()
 			.then((response) => {
 				if (cancelled) return;
 				setCatalogue(response.tags);
 				setCatalogueError(false);
+				setCataloguePending(false);
 			})
 			.catch(() => {
 				if (cancelled) return;
 				setCatalogueError(true);
+				setCataloguePending(false);
 			});
 		return () => {
 			cancelled = true;
@@ -1271,6 +1290,14 @@ export function SessionListScreen() {
 		   enable is refreshed in the background while it keeps painting. */
 		setCatalogueError(false);
 	};
+	const retryCatalogue = () => {
+		/* CLEARING THE ERROR IS PART OF THE RETRY, not just the success: the status
+		   line then reads `loading tags…` for the attempt instead of leaving the
+		   failure on screen until the answer lands. A second failure puts the
+		   error back through the same effect. */
+		setCatalogueError(false);
+		setCatalogueAttempt((attempt) => attempt + 1);
+	};
 	/* THE GROUPED VIEW REPLACES Active/Previous ONLY WHEN ALL FOUR HOLD: the
 	   capability, the preference, no search, and a usable catalogue. While the
 	   catalogue loads (or after a failed read) the ordinary sections stay on
@@ -1281,6 +1308,14 @@ export function SessionListScreen() {
 		groupingOn && query === "" && catalogue !== null && !catalogueError;
 	const groups = groupingApplied ? groupByPrimaryTag(rest, catalogue) : [];
 	const showGroups = hasGroupedRows(groups);
+	/* THE TWO HINTS THE TOGGLE CAN CARRY (round 1, D3/Q-1 and U2/Q-2). Both leave
+	   the list exactly as the reader found it and change only the status line: a
+	   read still outstanding (against the cached catalogue too, QA round 2
+	   Q-r2-1), and a non-empty search holding the grouping off while the
+	   preference stays on. Neither is a reason to disable the control or to paint
+	   a grouped shell with nothing in it. */
+	const catalogueBusy = groupingOn && cataloguePending;
+	const groupingPaused = groupingOn && query !== "";
 	/* Busy is about THIS row's action, not about any request: a press on one row
 	   never disables another row's sheet. */
 	const pinBusy = pinRow !== null && pinPending.has(pinRow.session_id);
@@ -1543,9 +1578,11 @@ export function SessionListScreen() {
 					{tagsAvailable ? (
 						<SessionGroupToggle
 							grouped={groupEnabled}
+							busy={catalogueBusy}
 							failed={groupingOn && catalogueError}
+							paused={groupingPaused}
 							onToggle={toggleGrouping}
-							onRetry={() => setCatalogueAttempt((attempt) => attempt + 1)}
+							onRetry={retryCatalogue}
 						/>
 					) : null}
 					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live

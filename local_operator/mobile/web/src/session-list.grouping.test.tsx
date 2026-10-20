@@ -8,6 +8,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionListScreen } from "./screens/session-list";
+import { SessionGroupToggle } from "./components/session-group-toggle";
 import type { Capabilities, SessionSummary, TagCatalogueEntry } from "./types";
 
 const KEY = "lo-mobile-group-tags";
@@ -97,7 +98,7 @@ function sectionRows(name: string): string[] {
 }
 
 function toggle(): HTMLElement {
-	return screen.getByRole("button", { name: "Group by primary tag" });
+	return screen.getByRole("button", { name: "Group by tags" });
 }
 
 async function flush(): Promise<void> {
@@ -116,6 +117,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	cleanup();
+	vi.restoreAllMocks();
 });
 
 describe("the capability gate", () => {
@@ -123,7 +125,7 @@ describe("the capability gate", () => {
 		capabilities = null;
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByRole("button", { name: "Group by primary tag" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Group by tags" })).toBeNull();
 		expect(headings()).not.toContain("Work");
 		expect(getTagsMock).not.toHaveBeenCalled();
 	});
@@ -132,7 +134,7 @@ describe("the capability gate", () => {
 		capabilities = { session_tags: { available: false } };
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByRole("button", { name: "Group by primary tag" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Group by tags" })).toBeNull();
 		expect(headings()).not.toContain("Work");
 	});
 
@@ -141,7 +143,7 @@ describe("the capability gate", () => {
 		capabilities = null;
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByRole("button", { name: "Group by primary tag" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Group by tags" })).toBeNull();
 		expect(headings()).not.toContain("Work");
 		expect(getTagsMock).not.toHaveBeenCalled();
 	});
@@ -153,17 +155,26 @@ describe("the preference", () => {
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
 		const button = toggle();
+		/* THE ONE STATIC LABEL, and the pressed treatment carries the state (round
+		   1, D1/U1): the words no longer change, so the class pair is what a reader
+		   actually sees. */
 		expect(button.getAttribute("aria-pressed")).toBe("false");
-		expect(button.textContent).toBe("group");
+		expect(button.textContent).toBe("group by tags");
+		expect(button.className).toContain("border-control");
+		expect(button.className).not.toContain("border-accent");
 
 		fireEvent.click(button);
 		expect(localStorage.getItem(KEY)).toBe("1");
 		expect(toggle().getAttribute("aria-pressed")).toBe("true");
-		expect(toggle().textContent).toBe("grouped");
+		expect(toggle().textContent).toBe("group by tags");
+		expect(toggle().className).toContain("border-accent");
+		expect(toggle().className).toContain("bg-accent-wash");
+		expect(toggle().className).toContain("text-accent");
 
 		fireEvent.click(toggle());
 		expect(localStorage.getItem(KEY)).toBeNull();
 		expect(toggle().getAttribute("aria-pressed")).toBe("false");
+		expect(toggle().className).not.toContain("border-accent");
 	});
 
 	it("restores a saved preference and groups on mount", async () => {
@@ -219,22 +230,32 @@ describe("grouped rendering", () => {
 		expect(sectionRows("Research")).toEqual(["a"]);
 	});
 
-	it("drops grouping while the search query is non-empty, then restores it", async () => {
+	it("pauses grouping while the search query is non-empty, then restores it", async () => {
 		sessionList = [
 			row("alpha", { primary: "research", conversation_name: "Alpha" }),
 			row("beta", { primary: "work", conversation_name: "Beta" }),
 		];
 		render(<SessionListScreen />);
 		await screen.findByRole("heading", { name: "Research" });
+		expect(screen.queryByText("grouping paused while searching")).toBeNull();
 		const input = screen.getByPlaceholderText("Search conversations…");
 
 		fireEvent.change(input, { target: { value: "alpha" } });
 		expect(headings()).toEqual(["Active Sessions"]);
 		expect(screen.queryByRole("heading", { name: "Research" })).toBeNull();
 		expect(screen.getByRole("button", { name: /Alpha/ })).toBeTruthy();
+		/* THE PREFERENCE SURVIVES THE SEARCH (round 1, U2/Q-2): a hint explains the
+		   flat list, and the toggle keeps saying it is on rather than flipping
+		   itself off behind the reader's back. It stays a working control. */
+		expect(screen.getByText("grouping paused while searching").getAttribute("role")).toBe(
+			"status",
+		);
+		expect(toggle().getAttribute("aria-pressed")).toBe("true");
+		expect((toggle() as HTMLButtonElement).disabled).toBe(false);
 
 		fireEvent.change(input, { target: { value: "" } });
 		expect(await screen.findByRole("heading", { name: "Research" })).toBeTruthy();
+		expect(screen.queryByText("grouping paused while searching")).toBeNull();
 	});
 
 	it("stays flat when no unpinned row has a resolvable primary", async () => {
@@ -280,28 +301,165 @@ describe("the catalogue", () => {
 		render(<SessionListScreen />);
 		expect(headings()).toEqual(["Active Sessions"]);
 		expect(screen.queryByRole("heading", { name: "Work" })).toBeNull();
+		/* THE FIRST READ IS VISIBLE WITHOUT BLOCKING (round 1, D3/Q-1): the list is
+		   the flat one it would be without the preference, plus one status line. */
+		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
 
 		await act(async () => {
 			resolveTags({ tags: CATALOGUE });
 		});
 		expect(await screen.findByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(screen.queryByText("loading tags…")).toBeNull();
 	});
 
 	it("keeps the flat view after a read error and offers a working retry", async () => {
 		getTagsMock.mockRejectedValueOnce(new Error("offline"));
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		const retry = await screen.findByRole("button", {
-			name: "Retry loading the tag catalogue",
-		});
+		const retry = await screen.findByRole("button", { name: "Retry tags" });
+		expect(retry.textContent).toBe("retry tags");
+		expect(headings()).toEqual(["Active Sessions"]);
+		/* THE FAILURE IS STATED IN PLACE (round 1, D2/Q-2), beside the control that
+		   acts on it, and never as the `loading tags…` line that preceded it. */
+		expect(screen.getByText("could not load tags").getAttribute("role")).toBe("status");
+		expect(screen.queryByText("loading tags…")).toBeNull();
+
+		/* THE RETRY TRANSITION, deferred so the in-flight state is observable:
+		   clicking retry drops the failure at once and names the new read, while
+		   the flat list stays exactly as it was. */
+		let resolveRetry: (value: { tags: TagCatalogueEntry[] }) => void = () => {};
+		getTagsMock.mockReturnValue(
+			new Promise((resolve) => {
+				resolveRetry = resolve;
+			}),
+		);
+		fireEvent.click(retry);
+		expect(screen.queryByText("could not load tags")).toBeNull();
+		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
 		expect(headings()).toEqual(["Active Sessions"]);
 
-		getTagsMock.mockResolvedValueOnce({ tags: CATALOGUE });
-		fireEvent.click(retry);
+		await act(async () => {
+			resolveRetry({ tags: CATALOGUE });
+		});
 		expect(await screen.findByRole("heading", { name: "Work" })).toBeTruthy();
-		expect(
-			screen.queryByRole("button", { name: "Retry loading the tag catalogue" }),
-		).toBeNull();
+		expect(screen.queryByRole("button", { name: "Retry tags" })).toBeNull();
+		/* Both states are gone: no failure text, and no status line at all. */
+		expect(screen.queryByText("could not load tags")).toBeNull();
+		expect(screen.queryByRole("status")).toBeNull();
+	});
+
+	it("shows loading tags… while a retry runs against a cached catalogue", async () => {
+		/* QA round 2, Q-r2-1: the cached catalogue keeps painting, so the read is
+		   invisible unless `busy` tracks the ATTEMPT rather than `catalogue ===
+		   null`. This is the case that regressed when busy was derived from the
+		   cache's absence. */
+		sessionList = [row("a", { primary: "work" })];
+		render(<SessionListScreen />);
+		await screen.findByRole("heading", { name: "Work" });
+
+		vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+		getTagsMock.mockRejectedValueOnce(new Error("500"));
+		await act(async () => {
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		const retry = await screen.findByRole("button", { name: "Retry tags" });
+		expect(screen.getByText("could not load tags")).toBeTruthy();
+		expect(screen.queryByRole("heading", { name: "Work" })).toBeNull();
+
+		let resolveRetry: (value: { tags: TagCatalogueEntry[] }) => void = () => {};
+		getTagsMock.mockReturnValue(
+			new Promise((resolve) => {
+				resolveRetry = resolve;
+			}),
+		);
+		fireEvent.click(retry);
+		/* The stale groups are back, and the new read is named beside them. */
+		expect(screen.queryByText("could not load tags")).toBeNull();
+		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
+		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+
+		await act(async () => {
+			resolveRetry({ tags: CATALOGUE });
+		});
+		expect(screen.queryByText("loading tags…")).toBeNull();
+		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+	});
+
+	it("shows loading tags… while a refocus read runs, keeping the cached groups", async () => {
+		/* Refocus truthfulness: the same attempt-based flag means a background
+		   refresh is visible too, without replacing what is already painted. */
+		sessionList = [row("a", { primary: "work" })];
+		render(<SessionListScreen />);
+		await screen.findByRole("heading", { name: "Work" });
+
+		let resolveRefresh: (value: { tags: TagCatalogueEntry[] }) => void = () => {};
+		getTagsMock.mockReturnValueOnce(
+			new Promise((resolve) => {
+				resolveRefresh = resolve;
+			}),
+		);
+		vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+		await act(async () => {
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
+
+		await act(async () => {
+			resolveRefresh({ tags: CATALOGUE });
+		});
+		expect(screen.queryByText("loading tags…")).toBeNull();
+		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+	});
+
+	it("refreshes the catalogue when the page becomes visible, not while hidden", async () => {
+		/* SAME PATTERN AS `session-view.seen.test.tsx`: the effect reads
+		   `document.visibilityState` when the event fires, so mocking the getter
+		   decides which branch runs. */
+		const visibility = vi
+			.spyOn(document, "visibilityState", "get")
+			.mockReturnValue("visible");
+		sessionList = [row("a", { primary: "work" })];
+		render(<SessionListScreen />);
+		await screen.findByRole("heading", { name: "Work" });
+		expect(getTagsMock).toHaveBeenCalledTimes(1);
+
+		visibility.mockReturnValue("hidden");
+		await act(async () => {
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		expect(getTagsMock).toHaveBeenCalledTimes(1);
+
+		visibility.mockReturnValue("visible");
+		await act(async () => {
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		await waitFor(() => expect(getTagsMock).toHaveBeenCalledTimes(2));
+	});
+});
+
+describe("the toggle's status precedence", () => {
+	/* The screen rarely holds two of these at once — a retry clears the error
+	   before the read starts — so the order itself is pinned here, where every
+	   combination is constructible. Error > paused > loading: each later state
+	   makes the one before it meaningless, and both adjacent pairs are asserted
+	   so an inverted branch fails without needing a contrived screen state. */
+	it.each([
+		{ failed: true, paused: true, busy: true, text: "could not load tags" },
+		{ failed: false, paused: true, busy: true, text: "grouping paused while searching" },
+		{ failed: false, paused: false, busy: true, text: "loading tags…" },
+	])("shows $text when failed=$failed paused=$paused busy=$busy", ({ failed, paused, busy, text }) => {
+		render(
+			<SessionGroupToggle
+				grouped
+				busy={busy}
+				failed={failed}
+				paused={paused}
+				onToggle={() => {}}
+				onRetry={() => {}}
+			/>,
+		);
+		expect(screen.getByRole("status").textContent).toBe(text);
 	});
 });
 
