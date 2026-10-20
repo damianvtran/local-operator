@@ -65,6 +65,12 @@ _BANNED: Final[tuple[str, ...]] = (
     "<form",
     "<frame",
     "<portal",
+    "<h1",
+    "<h2",
+    "<h3",
+    "<h4",
+    "<h5",
+    "<h6",
     "javascript:",
     "srcdoc",
     "http://",
@@ -92,6 +98,19 @@ _BANNED: Final[tuple[str, ...]] = (
     "SharedWorker",
     "BroadcastChannel",
     "new Worker",
+)
+
+#: The memo requires motion off (``docs/design/turn-supplements.md``: "Keep motion off,
+#: including under prefers-reduced-motion"). v5 enforced it with a universal reduced-motion
+#: rule in the prelude; that rule was removed in v6 to pay for the chart shape, and a
+#: component's own <style>/<script> is same-origin markup under ``style-src 'unsafe-inline'``.
+#: The rule now lives here, where it costs no prelude bytes and cannot be skipped by markup.
+#: Match declarations, not the bare word: a prose label "animation" is not motion.
+_MOTION_RE: Final = re.compile(
+    r"@(?:-[a-z]+-)?keyframes\b"
+    r"|(?:^|[;{.\s\"'])(?:-(?:webkit|moz|o|ms)-)?(?:animation|transition)"
+    r"(?:-[a-z-]+)?\s*[:=]",
+    re.IGNORECASE,
 )
 
 #: A numeric literal of three or more digits is a reject reason outside the STRUCTURAL
@@ -755,6 +774,12 @@ def _check_scan(blob: str, *, authored: bool = False) -> list[str]:
         for needle in _BANNED
         if (needle[1:] in nodes.tags if needle.startswith("<") else needle.lower() in lowered)
     ]
+    motion = _MOTION_RE.search(body)
+    if motion is not None:
+        errors.append(
+            f"rejected motion declaration {motion.group(0).strip()!r}: components must not "
+            "animate or transition"
+        )
     # CSP intentionally cannot fetch dependencies. Fail honestly before storing a
     # frame that could only render half a document; data images remain self-contained.
     resources = _Resources()

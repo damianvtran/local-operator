@@ -70,7 +70,26 @@ from typing import Any, Final, Mapping
 #: 4 — numeric-only chart scales: legacy formatted cells are normalised at assembly,
 #: while unknown values remain labelled gaps instead of poisoning every SVG coordinate.
 #: 5 — preserve silent null gaps; centre explicit string gaps within each series band.
-PRELUDE_VERSION: Final = 5
+#: 6 — horizontal-bar shape: the SVG height follows the bar count (a band per bar, capped),
+#: the left gutter is the measured widest category label (clamped, then ellipsised), tick
+#: density follows the plot width, and the dark FALLBACK declares its own ink so a frame
+#: that never receives a host push is readable on #121212.
+#: 7 — review round 1: the SVG carries its viewBox as width/height, so CSS `max-width:100%`
+#: only shrinks it on a narrow frame and never magnifies a bounded height past the host's
+#: clamp; the dark fallback's reference lines recede (`--lo-hairline:#333`), and the light
+#: push resets `color-scheme` for table scrollbars. The reduced-motion enforcement moved to
+#: the validator (0 prelude bytes), and dense bars drop value labels rather than overprint.
+#: The last tick ends on the scale maximum at two-tick widths. Paid for by the unused `.row`
+#: and `.muted` rules.
+#: 8 — the operator's "weird bar on the right": `html` clips overflow and the resize report
+#: is the BODY's natural height, not the root's current box, so a first layout 6 px taller
+#: than the host seed cannot lock a scrollbar by shrinking the chart and re-reporting the
+#: box. 10,019 B raw / 4,601 B gzip; the `offsetHeight` report paid for the CSS clip.
+#: 9 — tall content stays reachable: `body` clamps at `100vh` and scrolls itself, while the
+#: report is `body.scrollHeight` (natural height, padding included). The chart width is the
+#: viewport minus the 4 px body padding, so a body scrollbar cannot narrow the chart and
+#: re-trigger the 379/373 lock. 10,021 B raw / 4,602 B gzip.
+PRELUDE_VERSION: Final = 9
 
 #: The document CSP (memo §4.1), verbatim.
 CONTENT_SECURITY_POLICY: Final = (

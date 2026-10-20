@@ -53,13 +53,22 @@ GZIP_CAP = 4608
 #: PRELUDE_VERSION 4: finite-only scales and labelled bar gaps. JS 8,170 B, pair
 #: 10,226 B raw / 4,602 B gzip; 6 B gzip remained under the unchanged cap.
 #:
-#: PRELUDE_VERSION 5: silent null cells, centred per-series bar gaps and labelled line
-#: gaps. Measured equivalent-code trims yield 10,133 B raw / 4,607 B gzip, 1 B headroom.
-PINNED_CSS_BYTES = 2056
-PINNED_JS_BYTES = 8077
-PINNED_GZIP_BYTES = 4607
-PINNED_DIGEST = "2b590212ff10647304bd34de7da2e0eb057797503afaa39d105bc48f0478b5a8"
-PINNED_VERSION = 5
+#: PRELUDE_VERSION 6: horizontal bar height from the bar count, measured category gutter,
+#: width-aware tick density, and dark-fallback ink. CSS 2,056 -> 1,878 B (the `h1` rule,
+#: the reduced-motion block, `.dim` and the redundant light color-scheme rule were dead
+#: weight under the no-chrome/no-motion contract and paid for the change); JS 8,077 ->
+#: 8,124 B. Pair 10,002 B raw / 4,606 B gzip.
+#:
+#: PRELUDE_VERSION 7 (review round 1): the SVG carries its viewBox width/height so CSS
+#: cannot magnify a bounded height past the 480 px clamp; the dark fallback's hairline is
+#: #333; the light color-scheme reset returns; `.row` is removed as the measured trim. The
+#: reduced-motion enforcement moved to the validator. CSS 1,866 B, JS 8,145 B, pair
+#: 10,021 B raw / 4,602 B gzip, 6 B under the unchanged cap.
+PINNED_CSS_BYTES = 1860
+PINNED_JS_BYTES = 8161
+PINNED_GZIP_BYTES = 4602
+PINNED_DIGEST = "6b6e857fd60e733785900dca068f5a47ac40804dcf9cdfa0a82bddf324216875"
+PINNED_VERSION = 9
 
 
 @pytest.fixture
@@ -400,7 +409,9 @@ def test_the_known_top_tick_overprint_at_220_px_is_recorded_not_hidden(tmp_path:
         for b in texts[i + 1 :]
         if all(v > 0.5 for v in _overlap(a, b))
     )
-    assert colliding == [("1,000 USD/day", "910")]
+    # v9: the chart width is the viewport minus the body's 4 px padding (216 at a 220 frame),
+    # matching the browser; the narrower plot adds the `0`/`Search` pair to the recorded fixture.
+    assert colliding == [("0", "Search"), ("1,000 USD/day", "910")]
 
 
 @needs_node
@@ -582,3 +593,236 @@ def test_all_string_line_column_is_labelled_but_null_is_not(tmp_path: Path) -> N
     assert all(
         "NaN" not in str(n["attrs"]) and "Infinity" not in str(n["attrs"]) for n in out["nodes"]
     )
+
+
+#: The stored component's own plot call: a horizontal bar of three prices, body-only.
+_BAR = "LO.bar(document.getElementById('c'),'d1',{x:'name',y:'price',horizontal:true})"
+_BAR_DATA = {
+    "d1": {
+        "columns": ["name", "price"],
+        "rows": [["Input", 0.15], ["Output", 0.6], ["Cached input (prompt-cache read)", 0.015]],
+    }
+}
+
+
+def _bar_scenario(data: dict[str, Any], width: int = 620, draw: str = _BAR) -> dict[str, Any]:
+    return {"width": width, "data": data, "steps": [theme("n"), {"draw": draw}]}
+
+
+@needs_node
+def test_horizontal_bar_height_follows_the_bar_count_not_the_column_width(
+    tmp_path: Path,
+) -> None:
+    """Operator 2026-10-19: a three-bar price chart at a wide column grew to 460 px because
+    ``_frame`` derived the height from the width (``0.45 x W``), so the frame overflowed the
+    UI's 480 px clamp and painted a scrollbar. Height is now a band per bar plus margins."""
+    heights = {
+        width: _run(_bar_scenario(_BAR_DATA, width), tmp_path)["svgH"] for width in (360, 620, 900)
+    }
+    assert len(set(heights.values())) == 1, heights
+    assert heights[620] < 260, heights  # three bars, not a 0.45 aspect box
+
+    six = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [[f"row {i}", i / 6] for i in range(1, 7)],
+        }
+    }
+    assert _run(_bar_scenario(six), tmp_path)["svgH"] > heights[620]
+
+
+@needs_node
+def test_horizontal_bar_height_is_capped_for_many_bars(tmp_path: Path) -> None:
+    many = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [[f"row {i}", i / 40] for i in range(1, 41)],
+        }
+    }
+    out = _run(_bar_scenario(many, width=1024), tmp_path)
+    assert 100 < out["svgH"] <= 380, out["svgH"]
+
+
+@needs_node
+def test_horizontal_bar_gutter_fits_the_longest_category_label(tmp_path: Path) -> None:
+    """The fixed 120 px gutter truncated ``Cached input (prompt-cache read)`` (and a wider
+    measured label could overflow it); the gutter is now the measured widest label."""
+    out = _run(_bar_scenario(_BAR_DATA), tmp_path)
+    nodes = [n for n in out["nodes"] if n["tag"] == "text"]
+    assert [n["text"] for n in nodes if n["text"].startswith("Cached")] == [
+        "Cached input (prompt-cache read)"
+    ], "the label was truncated instead of fitting the measured gutter"
+    drawn = [t for t in out["texts"] if t["text"].startswith("Cached")]
+    assert drawn and all("…" not in t["text"] for t in drawn)
+    assert all(t["left"] >= 0 for t in out["texts"]), "a label paint box starts outside the frame"
+
+
+@needs_node
+def test_value_labels_stay_off_the_fill_for_a_full_bar_and_a_tiny_one(tmp_path: Path) -> None:
+    """Value labels are drawn OUTSIDE the bar end, in the canvas ink (`svg .lbl`), for the
+    full bar and the 1.5%-of-max bar alike: a value never sits on a series fill, so it cannot
+    become dark-on-blue. The operator's 2026-10-19 screenshot read dark-on-dark because the
+    frame had no host theme push; the dark fallback below owns that case."""
+    data = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [["tiny", 0.015], ["full", 0.6]],
+        }
+    }
+    out = _run(_bar_scenario(data), tmp_path)
+    bars = [n["attrs"] for n in out["nodes"] if n["tag"] == "rect"]
+    labels = {n["text"]: n["attrs"] for n in out["nodes"] if n["tag"] == "text"}
+    for text, bar in (("0.015", bars[0]), ("0.6", bars[1])):
+        assert labels[text].get("text-anchor", "start") == "start"
+        assert float(labels[text]["x"]) >= float(bar["width"]) + 4, text
+
+
+@needs_node
+@pytest.mark.parametrize("width", [360, 620])
+def test_the_narrow_axis_ends_on_the_bar_maximum(width: int, tmp_path: Path) -> None:
+    """Design QA D4: at 360/620 the two-tick reduction left the last tick at 0.5 while the
+    scale and the longest bar reached 0.6, so the bar looked past the axis. A two-tick axis
+    now ends on the scale maximum; wider plots keep their round-step ticks."""
+    out = _run(_bar_scenario(_BAR_DATA, width), tmp_path)
+    labels = [n["text"] for n in out["nodes"] if n["tag"] == "text"]
+    assert "0.6" in labels, labels
+    assert "0.5" not in labels, labels
+
+
+@needs_node
+def test_the_wide_horizontal_plot_fits_the_480_px_frame_the_ui_clamps(tmp_path: Path) -> None:
+    """The UI clamps a graphic's frame at 480 px. The document is the SVG scaled to the column
+    (``svgH x column / svgW``) plus body padding; at a 1200 px column the old width-derived
+    height overflowed, which is the scrollbar the operator reported."""
+    width = 1200
+    out = _run(_bar_scenario(_BAR_DATA, width), tmp_path)
+    rendered_width = min(width, out["svgAttrW"] or width)
+    rendered = out["svgH"] * rendered_width / out["svgW"] + 16
+    assert rendered <= 480, (rendered, out["svgH"], out["svgW"], out["svgAttrW"])
+    assert out["svgH"] < 250
+    assert out["svgAttrW"] == out["svgW"], "the SVG must not upscale past its viewBox"
+
+
+#: A vertical four-bar chart: the 810 px case the desktop UI reproduced. The host seeds the
+#: frame from `height_hint` (320), the prelude derives 0.45 x W (363 at 810), so the body is
+#: 379 and the first layout overflowed a 373 px box. The chart then narrowed by 15 px,
+#: shrank 7 px and reported 373 -- a scrollbar feedback lock.
+_VERTICAL = "LO.bar(document.getElementById('c'),'d1',{x:'name',y:'price'})"
+_VERTICAL_DATA = {
+    "d1": {
+        "columns": ["name", "price"],
+        "rows": [["alpha", 4], ["beta", 7], ["gamma", 2], ["delta", 9]],
+    }
+}
+
+
+@pytest.mark.parametrize("width", [620, 810, 1200])
+def test_a_vertical_chart_reports_the_body_height_including_its_padding(
+    width: int, tmp_path: Path
+) -> None:
+    """Operator 2026-10-20: the app seeds 320, the first layout is 379, Chromium adds a
+    scrollbar, the narrower chart reports 373, and the bar stays. The report must be the
+    body's natural height (SVG + 16 px padding), not the root's current box; the browser
+    frame in the evidence set proves the scrollbar is gone."""
+    out = _run(_bar_scenario(_VERTICAL_DATA, width, draw=_VERTICAL), tmp_path)
+    resizes = [p for p in out["posts"] if p.get("t") == "resize"]
+    assert resizes, out["posts"]
+    assert resizes[-1]["h"] == out["svgH"] + 16, (width, resizes[-1], out["svgH"])
+    assert out["svgH"] == (363 if width == 810 else 277 if width == 620 else 396), (
+        width,
+        out["svgH"],
+    )
+    assert out["svgW"] == (806 if width == 810 else 616 if width == 620 else 880), (
+        width,
+        out["svgW"],
+    )
+
+
+@pytest.mark.parametrize("bars", [3, 9, 10, 40])
+@pytest.mark.parametrize("width", [360, 620, 900, 1200, 1440])
+def test_the_rendered_height_is_bounded_across_the_matrix(
+    bars: int, width: int, tmp_path: Path
+) -> None:
+    """QA Q-1's matrix: 3, 9, 10 and 40 bars at every supported column. The model uses the
+    element's own width attribute, so an SVG that still stretched would compute the v6
+    height (9 bars @1440 = 581) and fail; the browser frames confirm the client box."""
+    data = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [[f"row {i}", round(i / bars, 3)] for i in range(1, bars + 1)],
+        }
+    }
+    out = _run(_bar_scenario(data, width), tmp_path)
+    assert out["svgAttrW"] == out["svgW"], (bars, width, out["svgAttrW"], out["svgW"])
+    rendered = out["svgH"] * min(width, out["svgAttrW"]) / out["svgW"] + 16
+    assert rendered <= 480, (bars, width, rendered, out["svgH"], out["svgW"])
+
+
+@pytest.mark.parametrize("bars", [9, 40])
+@pytest.mark.parametrize("width", [1200, 1440])
+def test_a_many_bar_chart_renders_under_the_480_px_frame(
+    bars: int, width: int, tmp_path: Path
+) -> None:
+    """Review round 1, M-1: the viewBox height was bounded but CSS stretched the SVG to the
+    column, so 9 bars at 1200 rendered 486 px and 40 bars 505 px. The width/height attributes
+    now pin the element to its viewBox; this test combines the cap with the wide columns the
+    earlier tests missed. The browser frame in docs/evidence additionally asserts
+    scrollHeight == clientHeight for these charts."""
+    data = {
+        "d1": {
+            "columns": ["name", "price"],
+            "rows": [[f"row {i}", i / bars] for i in range(1, bars + 1)],
+        }
+    }
+    out = _run(_bar_scenario(data, width), tmp_path)
+    assert out["svgAttrW"] == out["svgW"] == 880, out
+    rendered = out["svgH"] * min(width, out["svgAttrW"]) / out["svgW"] + 16
+    assert rendered <= 480, (rendered, out["svgH"], bars, width)
+    assert out["svgH"] <= 360
+    # A 14 px value label cannot occupy an 8 px band; dense charts keep the axis and the
+    # tooltip instead of painting 40 overlapping numbers.
+    values = [n for n in out["nodes"] if n["tag"] == "text" and n["cls"] == "lbl"]
+    assert bool(values) is (bars == 9), (bars, len(values))
+    boxes = out["texts"]
+    overlaps = [
+        (a["text"], b["text"])
+        for i, a in enumerate(boxes)
+        for b in boxes[i + 1 :]
+        if all(size > 0.5 for size in _overlap(a, b))
+    ]
+    assert not overlaps, overlaps
+
+
+def test_the_dark_fallback_declares_ink_that_is_readable_on_its_own_ground() -> None:
+    """A host that pushes no theme leaves `data-mode=dark` painting `--lo-canvas:#121212`.
+    The light-theme ink defaults (``#1f1f1f`` / ``#4e4e4e`` / ``#666``) are then unreadable —
+    the operator's 2026-10-19 screenshot showed the value and axis labels as dark-on-dark.
+    The fallback must carry its own light ink; a real host push overrides these inline."""
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    dark = _declarations(_DARK_RULE, css)
+    assert dark["--lo-canvas"] == "#121212"
+    assert dark["--lo-ink"] == "#e8e8e8"
+    assert dark["--lo-ink-muted"] == "#b8b8b8"
+    # Design round 1 D1: the reference lines must recede behind the bars; the light-theme
+    # --lo-hairline (#ddd) on #121212 measured 13.79:1 against the grid and was the
+    # loudest ink in the fallback chart.
+    assert dark["--lo-hairline"] == "#333333"
+
+
+def test_a_light_mode_push_resets_native_chrome() -> None:
+    """Review round 1 m-1: `.wrap{overflow-x:auto}` table scrollbars are UA chrome; a light
+    push on a dark-OS host must reset color-scheme so they are not painted dark."""
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    assert ":root[data-mode=light]{color-scheme:light}" in css
+    assert "html{visibility:hidden;overflow:hidden}" in css
+
+
+def test_oversized_content_keeps_a_body_scroller() -> None:
+    """QA round 3 Q-1: a 30-row table exceeds the 480 clamp; `html{overflow:hidden}` alone
+    clipped it with no affordance. The body is the scroller (overflow-y auto at 100vh) and
+    the resize report is its natural scrollHeight, so normal content never scrolls while a
+    tall table can be reached. The browser frames are the reachability proof."""
+    css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
+    js = (PRELUDE_DIR / "prelude.js").read_text(encoding="utf-8")
+    assert "overflow:hidden auto;max-height:100vh" in css
+    assert ".body.scrollHeight" in js
