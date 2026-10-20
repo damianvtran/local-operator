@@ -619,3 +619,87 @@ def test_allowance_growth_sees_a_translation_moved_to_a_parent_namespace(
         inactive_locales=set(),
     )
     assert got == {("fr", "demo", "demo.nested.one")}
+
+
+def _git_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """An environment that can commit without touching the operator's keychain.
+
+    The system gitconfig carries ``credential.helper = osxkeychain``; a test
+    rig that leaks a credential lookup opens a macOS prompt, so both config
+    layers are neutralised and an identity is supplied explicitly.
+    """
+    import os
+
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "i18n test",
+        "GIT_AUTHOR_EMAIL": "i18n@example.invalid",
+        "GIT_COMMITTER_NAME": "i18n test",
+        "GIT_COMMITTER_EMAIL": "i18n@example.invalid",
+    }
+    for key in ("TMPDIR", "LANG", "LC_ALL"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
+def test_locale_keys_at_ref_separates_absent_from_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """The detection layer itself is exercised, not stubbed.
+
+    Round 5's mutation proof: every other test here stubs the probe wholesale,
+    so re-collapsing "unreadable" into "absent" would leave the suite green.
+    This one reads real git objects: a readable catalogue, an uncarried
+    locale, and a corrupt file must produce three different answers.
+    """
+    import subprocess
+
+    env = _git_env(monkeypatch)
+    repo = tmp_path / "repo"
+    catalogue = repo / "local_operator" / "i18n" / "catalogues"
+    (catalogue / "fr").mkdir(parents=True)
+    (catalogue / "fr" / "demo.json").write_text('{"demo.one": "Un"}', encoding="utf-8")
+
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+
+    run("init", "-q")
+    run("add", "-A")
+    run("commit", "-q", "-m", "base")
+    good = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, env=env
+    ).stdout.strip()
+
+    monkeypatch.setattr(i18n_check, "REPO", repo)
+    assert i18n_check._locale_keys_at_ref(good, "fr") == {"demo.one"}
+    assert i18n_check._locale_keys_at_ref(good, "ur") == set()
+
+    (catalogue / "fr" / "broken.json").write_text("{not json", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "corrupt")
+    corrupt = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, env=env
+    ).stdout.strip()
+    assert i18n_check._locale_keys_at_ref(corrupt, "fr") is None
+
+
+def test_allowance_growth_skips_rather_than_fails_outside_a_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A repo-less fixture must skip even under a pull-request event.
+
+    CI exports ``GITHUB_EVENT_NAME=pull_request`` for the whole job, and every
+    checker test points ``REPO`` at a temp directory that is not a git
+    repository. The fail-closed branch is for a real tree whose base did not
+    resolve; reaching it from a fixture made nineteen planted-literal tests
+    red on a tree that was otherwise green.
+    """
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    monkeypatch.setattr(i18n_check, "REPO", plain)
+    assert i18n_check.check_allowance_growth(None) == []

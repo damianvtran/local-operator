@@ -911,10 +911,16 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
         if _git("rev-parse", "--is-inside-work-tree").returncode == 0:
             return [f"allowance growth: explicit base ref cannot be resolved: {base}"]
     if ref is None:
-        if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
-            # A pull request always has a base. If it did not resolve, the
-            # comparison is impossible and skipping would disable the gate
-            # exactly when someone could exploit it.
+        # Fail closed on a pull request ONLY where a base was supposed to
+        # resolve: a git work tree. A monkeypatched fixture, exported tarball
+        # or detached copy has no base ref by construction and must skip —
+        # which is the same carve-out the explicit-ref branch above already
+        # makes. Without the work-tree guard, every checker test running under
+        # CI's pull-request event fails on a repo-less temp directory.
+        if (
+            os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+            and _git("rev-parse", "--is-inside-work-tree").returncode == 0
+        ):
             return ["allowance growth: base ref cannot be resolved on a pull request"]
         print(
             # i18n: ignore checker diagnostic (operator tooling output, English-only)
