@@ -29,15 +29,17 @@ def page(width: int, document_html: str, seed: int) -> str:
 html,body{{margin:0;background:#121212;color:#e8e8e8;font:14px/1.5 system-ui,sans-serif}}
 body{{padding:16px}} .col{{width:{width}px}} p{{margin:0 0 14px}}
 iframe{{width:{width}px;height:{seed}px;border:1px solid #333;display:block;background:#121212}}
-#m{{margin-top:8px;font:11px/1.4 ui-monospace,monospace;color:#8a8a8a;white-space:pre}}
+#m{{margin-top:8px;font:11px/1.4 ui-monospace,monospace;color:#8a8a8a;white-space:pre-wrap;word-break:break-all}}
 </style></head><body><div class="col"><p>{html.escape(PARAGRAPH)}</p>
 <iframe id="f"></iframe><div id="m">waiting</div></div>
 <script>
 const doc = {payload};
 const f = document.getElementById("f");
+const reports = [];
 window.addEventListener("message", (e) => {{
   const d = e.data;
   if (d && d.lo === "supplement" && d.t === "resize" && typeof d.h === "number" && d.h > 0) {{
+    reports.push(d.h);
     f.style.height = Math.min(700, d.h) + "px";
   }}
 }});
@@ -46,7 +48,7 @@ f.onload = () => {{
     const d = f.contentDocument, svg = d.querySelector("svg");
     const s = svg ? svg.getBoundingClientRect() : {{}};
     const out = {{
-      width: {width}, seed: {seed},
+      width: {width}, seed: {seed}, reports,
       frameClient: [f.clientWidth, f.clientHeight],
       frameOffset: [f.offsetWidth, f.offsetHeight],
       frameScroll: [d.documentElement.scrollWidth, d.documentElement.scrollHeight],
