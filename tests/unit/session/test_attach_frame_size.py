@@ -653,6 +653,8 @@ _BOUNDED_COLLECTION_FIELDS = {
     # no-space role or team slug), not by what the user typed into the chat.
     "effective_identity": "one speaker/team/role triple, replaced every refresh",
     "child_costs": "one float per job; O(1) bytes each",
+    # At most four fixed basis keys, independent of conversation or child count.
+    "subagent_basis_micro": "one micro-USD integer per fixed payment basis",
     "queued_steering": "drains every turn",
     # Was "explicitly bounded by _fold_live_event", which stopped being true the
     # moment a `tool_execution_end` began RETAINING its row instead of erasing
@@ -1254,6 +1256,12 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             for index in range(5_000)
         ],
         "child_costs": {f"job{index}": 1.25 for index in range(2_000)},
+        "subagent_basis_micro": {
+            "billed": 790000,
+            "subscription_api_equivalent": 11620000,
+            "estimated": 10000,
+            "not_tracked": 10000,
+        },
         "context_breakdown": {f"tool_{index}": 1_000 for index in range(2_000)},
         # Issue #2014: the identity triple at its WIDEST honest shape. The keys
         # are fixed by the contract and the values are names, so this is three
@@ -1464,7 +1472,12 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # what must not grow. The field's own size-policy review is its entry in
         # ``_BOUNDED_COLLECTION_FIELDS``. Re-derive both figures before moving
         # either number.
-        conversation_title="a" * 323,
+        # Payment-basis buckets charge a further 127 B: bare sync 1,586 -
+        # 1,459 B, and released excess 2,304 - 2,177 B, measured with all four
+        # populated keys. Pay that same fixed charge from title filler
+        # (323 - 127 = 196), preserving the instrument's total and its existing
+        # excess allowance rather than increasing a wire cap to hide the cost.
+        conversation_title="a" * 196,
         goal="g" * 2_000,
         cwd="/" + "d" * 500,
         **populated,

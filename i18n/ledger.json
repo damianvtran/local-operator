@@ -2717,6 +2717,196 @@
       },
       "status": "passed",
       "note": "Independent delta recheck by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19, at e6684b09e0: I1 (récupérez meant retrieve, not delete) resolved with supprimez uniquement; verified build/cache, jamais les transcriptions, jamais vos conversations, --dry-run retained, French grammar/glossary and U+202F before the semicolon. Git diff 0b208b2159..e6684b09e0 is that one line; earlier compatible audit evidence applies. Zero unresolved blocker/major; no accepted MINOR. Certifies the requested delta composed with prior independent audits; earlier unsupported fallback claim corrected."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "independent translation subagent (task fd31363d4a28)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 c3358107c5f3c32427c32fb8f7e74c2942536c2337d9ceee5aa895d1fbc6b9e5."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "independent translation subagent (task fd31363d4a28)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 ae375ec632d100d2c4c1ddeee9d4c3474a2066e3621171d74996f06af271ed41."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "independent translation subagent (task fd31363d4a28)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 9f9f412e75864d2d23d9799a4fe9f5becb12ecb3f8657a2f1d0928a24aa4822d."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "independent translation subagent (task fd31363d4a28)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 84c92994710f6585bb1aa961b14247baa67177e2a6a84a5aeabad420274fcd12."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "independent translation subagent (task fd31363d4a28)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 beda64bf3d9d3877805e43a24e2d20502fca08d1164096e4fe7a0c8a7ed77700."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator (wm-ru)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Label-budget delta (20261019a): «Синхронизация памяти с пирами» 29c, «Области для синхронизации» 25c, «Исключённые пиры» 16c; other 14 byte-identical; check 0; passed; 1 MINOR (trusted dropped; help gates), 1 NIT. Record:."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator (wm-hi)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "17/17 independent audit: validator clean; no placeholders/ICU (verified), NFC/nukta/no bidi; मेमोरी/संपीडन/स्कोप/पीयर/अनुमतियाँ accepted; 1 MINOR commit किए गए→commit हो चुके, non-gating. Record:."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Delta: MAJORs fixed — sync.label 'Đồng bộ bộ nhớ ngang hàng' (25 cells), exclude.label 'Thiết bị loại khỏi bộ nhớ' (25) vs 29; 3 fixes verified; 12 keys identical; 1 MINOR: 'trusted' omitted (help keeps pairing). Record:."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PASS: overflow ES-1..ES-3 + ES-9 fixed; labels 'Localizadores como contexto' 27c, 'Sincronización de memoria' 25c, 'Ámbitos a sincronizar' 21c, all <=29 untruncated; only sync.label changed from audited d1d41b39. Record:."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "2nd indep pass fr19b: 1st 6 MAJOR fixed; 8/8 verified, 9 unchanged; no tu; validé=DB commit (not user confirm); token cap separate; sync.label 27c; check 0. MINOR: doubled space before ';' in 3 strings."
     }
   ]
 }

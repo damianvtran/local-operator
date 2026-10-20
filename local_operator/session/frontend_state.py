@@ -73,7 +73,7 @@ from local_operator.harness.types import (
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import (
     carry_floor,
-    cost_summary,
+    cost_summary_by_basis,
     job_subtree_cost,
     turn_cost,
 )
@@ -716,8 +716,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, str], Any] = {}
-    order: list[tuple[str, str, str]] = []
+    folded: dict[tuple[str, str, str, str | None], Any] = {}
+    order: list[tuple[str, str, str, str | None]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -768,7 +768,9 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
             if accepted is not None
             else "estimated" if estimated is not None else "unknown"
         )
-        key = (provider, model_id, mode)
+        # A retained job row must not relabel API-key cash as plan money (or
+        # vice versa) merely because both calls used the same serving model.
+        key = (provider, model_id, mode, getattr(component, "billing_basis", None))
         existing = folded.get(key)
         if existing is None:
             folded[key] = component.model_copy(deep=True)
@@ -976,6 +978,9 @@ _FRONTEND_LOCAL_SLASHES = {
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
+    # Preview reads the invoking machine's filesystem and paints this TUI.
+    # It must not bind or route to an authoritative runtime on another host.
+    "view",
     # The same three facts as `/copy` above, one step further out: the transcript
     # it reads is painted by this frontend, the picker is painted by this
     # frontend, and the BROWSER is on the machine the user is sitting at. Routed
@@ -1282,12 +1287,15 @@ class FrontendSpendChildren(BaseModel):
     #: say must not grow every frame by a key, the same shape ``asks_truncated``
     #: uses on the state model above.
     reason: str | None = None
+    by_basis: dict[str, int] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_reason(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         payload = handler(self)
         if self.reason is None:
             payload.pop("reason", None)
+        if self.by_basis is None:
+            payload.pop("by_basis", None)
         return payload
 
 
@@ -3404,6 +3412,8 @@ class FrontendSessionState(BaseModel):
     # Whole manager ledger, not a sum of visible rows: live descendants, folded
     # attempts and retained-away jobs all belong here exactly once. Optional
     # knowledge distinguishes legacy checkpoints from an explicitly empty ledger.
+    # Same ledger walk as subagent_cost; retain across parent-only refreshes.
+    subagent_basis_micro: dict[str, int] | None = None
     subagent_cost: float | None = None
     subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
@@ -3565,6 +3575,8 @@ class FrontendSessionState(BaseModel):
     def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         mutable = self.model_copy(update={"jobs": list(self.jobs)})
         payload = handler(mutable)
+        if mutable.subagent_basis_micro is None:
+            payload.pop("subagent_basis_micro", None)
         # N2: the ask fields are present on the frame ONLY while the feature is
         # live in this process. Popped here rather than left to the writer,
         # because every consumer of this state — the install snapshot, every
@@ -7114,6 +7126,7 @@ class FrontendStateStore:
         ledger = {
             "subagent_cost": state.subagent_cost,
             "subagent_cost_knowledge": state.subagent_cost_knowledge,
+            "subagent_basis_micro": state.subagent_basis_micro,
         }
         payload = _spend_channels_payload(
             session, ledger, state.child_costs, getattr(session, "spend", None)
@@ -7751,6 +7764,7 @@ class FrontendStateStore:
             ledger = {
                 "subagent_cost": state.subagent_cost,
                 "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                "subagent_basis_micro": state.subagent_basis_micro,
             }
         if child_costs is None:
             child_costs = state.child_costs
@@ -7780,6 +7794,7 @@ class FrontendStateStore:
                 else {
                     "subagent_cost": state.subagent_cost,
                     "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                    "subagent_basis_micro": state.subagent_basis_micro,
                 }
             ),
             state.child_costs,
@@ -8971,9 +8986,10 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
     if not callable(accounting):
         return {}
     components = accounting()
-    cost, unknown = cost_summary(components)
+    cost, unknown, bases = cost_summary_by_basis(components)
     return {
         "subagent_cost": cost,
+        "subagent_basis_micro": bases,
         # An empty ledger has no missing bills; an unknown-only nonempty ledger
         # does. PARTIAL keeps that distinction when parent spend is known.
         "subagent_cost_knowledge": (CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT),
@@ -9009,6 +9025,7 @@ def _children_snapshot(
         snapshot = ChildrenSnapshot(
             total_micro=_usd_to_micro(cost),
             knowledge=str(knowledge),
+            by_basis=ledger.get("subagent_basis_micro"),
         )
     elif child_costs:
         snapshot = ChildrenSnapshot(
@@ -9020,6 +9037,7 @@ def _children_snapshot(
     if predates_process and snapshot.knowledge in ("exact", "unknown"):
         return ChildrenSnapshot(
             total_micro=snapshot.total_micro,
+            by_basis=snapshot.by_basis,
             knowledge="partial",
             reason="subagent spend from earlier processes is not re-readable here",
         )
@@ -9052,8 +9070,12 @@ def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
     recorded basis.
     """
     try:
+        from local_operator.session.channel_spend import BASIS_VALUES
         from local_operator.session.spend import inference_billing_labels
 
+        basis = getattr(usage, "billing_basis", None)
+        if basis in BASIS_VALUES:
+            return basis
         provider = str(getattr(usage, "provider", "") or "")
         if not provider:
             provider = str(getattr(effective_model, "provider", "") or "")
@@ -9444,6 +9466,12 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
         reasoning_tokens=sum(u.reasoning_tokens for u in usages),
         context_tokens=last_context,
         cost_components=components,
+        billing_basis=(
+            components[0].billing_basis
+            if components
+            and all(c.billing_basis == components[0].billing_basis for c in components)
+            else None
+        ),
     )
 
 

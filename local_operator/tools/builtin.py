@@ -250,6 +250,14 @@ BASH_DEFAULT_TIMEOUT_SECONDS = 120.0
 #: Hard cap on the per-command timeout; longer runs are a session bug, not a
 #: tool feature.
 BASH_MAX_TIMEOUT_SECONDS = 3600.0
+#: How often the live scratchpad watchdog re-walks the pad while a command runs.
+#: One walk is bounded (it stops at the cap or 20k entries), but the interval is
+#: the overshoot window: a command writing at R bytes/s can put R * PAD_TICK_S
+#: extra bytes on disk between the sample that would have caught it and the kill.
+#: A slower tick costs less loop time in aggregate but overshoots further; 1 s
+#: keeps a fast build's overshoot in the same order as the cap itself rather than
+#: letting one command reach multiple GB, which is the incident this bounds.
+PAD_TICK_S = 1.0
 #: Where ``bash.shell`` lives under ``values``, spelled ONCE and shared with
 #: the ``settings_io`` row so the reader and the writer cannot disagree about
 #: the path (the flat-vs-nested mismatch that silenced the #576 opt-out).
@@ -4032,6 +4040,49 @@ async def execute_bash(
     pad_refusal = _bash_pad_precheck(params.command, context)
     if pad_refusal is not None:
         return _error(tool_call_id, "bash", pad_refusal)
+    # The LIVE half of the same cap, measured once at spawn. The precheck above
+    # only refuses a command when the pad is ALREADY over cap; a command that
+    # starts under it can still grow the pad past the cap in one run (measured: a
+    # 4.5 GiB subagent build), and the after-the-fact ``[scratch]`` line reports
+    # only once the bytes are on disk. So an UNDER-CAP command is watched: its
+    # first sample over the cap is the breach. One bounded walk here, before the
+    # child exists; a missing pad walks as zero. It runs in a thread like the
+    # per-tick samples: a pad just under the cap with many entries can take
+    # hundreds of ms to walk, and that is a TUI frame this start-up measurement
+    # must not stall.
+    #
+    # ARMED ONLY WHEN THE COMMAND CAN REACH THE PAD (the same naming gate the
+    # post-hoc audit uses, or a cwd inside it). A long pytest/git run that never
+    # touches the pad must not pay a walk at spawn and per tick. KNOWN BLIND
+    # SPOT: a child that only reads ``LOCAL_OPERATOR_SCRATCHPAD`` from its
+    # ENVIRONMENT, without naming the pad and with a cwd outside it, is not
+    # armed — and the post-hoc audit shares that gate, so it gets neither the
+    # live watch nor the after-the-fact line.
+    #
+    # DISARMED WHEN THE PAD IS ALREADY OVER CAP. The footprint walk is
+    # cap-truncated, so two samples are LOWER BOUNDS and cannot order a shrink:
+    # files 60/60/200 under a cap of 100 read 120 at spawn, then 60+200=260 after
+    # a 60 is removed — higher than the start although the pad shrank from 320.
+    # A comparison there kills the very recovery command the guidance points at.
+    # So recovery runs; the precheck already refuses a creating command that
+    # NAMES the pad, a cwd-relative grower still gets the after-the-fact line,
+    # and an env-reading child is the documented blind spot.
+    pad_root = _scratchpad_root(context)
+    pad_watch_root: Path | None = None
+    pad_cap = 0
+    pad_start_held = 0
+    if pad_root is not None and _pad_watch_armed(params.command, _safe_cwd(context), pad_root):
+        pad_cap = scratchpad_budget_bytes()
+        try:
+            pad_start_held, start_over, _ = await asyncio.to_thread(
+                scratchpad_footprint, pad_root, pad_cap
+            )
+        except Exception:  # noqa: BLE001 — an unreadable pad must not fail the call
+            # Start-up is also "unknown, never kills": if the pad cannot be
+            # walked now, disarm rather than make every command fail on it.
+            pad_watch_root = None
+        else:
+            pad_watch_root = None if start_over else pad_root
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment (see the helper for
     # the full three-arm reasoning — it is shared with the ``sessions`` tool's
@@ -4462,6 +4513,13 @@ async def execute_bash(
     # never reported as "continues in the background" (§10).
     memory_exceeded = False
     memory_sample: memory_guard.Sample | None = None
+    # The pad watchdog's state, beside the memory guard's and for the same shape
+    # of reason: a THIRD stop condition, checked on both loops, rendered as its
+    # own head line. ``pad_held`` keeps the LAST sample so the result can name
+    # the measured figure even though the walk that produced it is gone.
+    pad_exceeded = False
+    pad_held = pad_start_held
+    next_pad_sample = loop.time() + PAD_TICK_S
     # The query budget's state, beside the memory guard's and for the same shape
     # of reason. ``query_started`` is the SPAWN time, so the advisory and the stop
     # measure the COMMAND — and a run that detaches into a background job keeps
@@ -4499,6 +4557,55 @@ async def execute_bash(
         notice = guard.soft_notice(sample)
         if notice:
             memory_advisory = notice
+        return False
+
+    async def _pad_sample() -> tuple[int, bool] | None:
+        """``(held, over)`` when this tick is due, else ``None``; never raises.
+
+        Shared by the foreground and detached loops so the two cannot disagree
+        about the cadence or the walk. The walk itself runs in a thread: it
+        touches the filesystem, and a synchronous multi-entry scan on the loop
+        thread is the frame stall every other probe here avoids. An exception
+        (an unreadable pad, a vanished root) is "unknown", which is never a kill
+        — the same rule the memory guard applies to a missing ps reading.
+
+        The cap is re-read every tick: ``session.scratchpad.max_bytes`` is LIVE
+        (the settings row promises an edit takes effect without a relaunch), so a
+        running command must obey the value in the config now, not the one
+        snapshotted at spawn. The read is a small config parse, not a pad walk.
+        """
+        nonlocal next_pad_sample, pad_cap
+        if pad_watch_root is None:
+            return None
+        now = loop.time()
+        if now < next_pad_sample:
+            return None
+        next_pad_sample = now + PAD_TICK_S
+        pad_cap = scratchpad_budget_bytes()
+        try:
+            # ``scratchpad_footprint`` stops the walk at the cap, so a huge pad
+            # costs the same as the first crossing rather than a full scan.
+            held, over, _ = await asyncio.to_thread(scratchpad_footprint, pad_watch_root, pad_cap)
+        except Exception:  # noqa: BLE001 — unknown never kills
+            return None
+        return held, over
+
+    async def _pad_tick() -> bool:
+        """Sample the pad's footprint; kill and return True on a governed breach.
+
+        Returns True the moment the kill is issued so the wait loop breaks in the
+        same tick, exactly like ``_memory_tick``.
+        """
+        nonlocal pad_exceeded, pad_held
+        sample = await _pad_sample()
+        if sample is None:
+            return False
+        held, over = sample
+        pad_held = held
+        if over:
+            pad_exceeded = True
+            _kill()
+            return True
         return False
 
     def _query_tick() -> bool:
@@ -4562,10 +4669,30 @@ async def execute_bash(
             timed_out_bg = False
             cancelled_bg = False
             memory_exceeded_bg = False
+            pad_exceeded_bg = False
+            pad_held_bg = pad_start_held
             query_stopped_bg = False
             query_elapsed_bg = 0.0
             query_advisory_bg: str | None = None
             bg_sample: memory_guard.Sample | None = None
+
+            async def _pad_tick_bg() -> bool:
+                """The detached loop's tick: same probe, same growth rule, and
+                the flag lives HERE rather than in ``pad_exceeded`` so the job
+                row reports the stop it actually took.
+                """
+                nonlocal pad_exceeded_bg, pad_held_bg
+                sample = await _pad_sample()
+                if sample is None:
+                    return False
+                held, over = sample
+                pad_held_bg = held
+                if over:
+                    pad_exceeded_bg = True
+                    _kill()
+                    return True
+                return False
+
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
 
@@ -4625,6 +4752,11 @@ async def execute_bash(
                             memory_exceeded_bg = True
                             _kill()
                             break
+                    # The pad watchdog rides the same wait. It has its own
+                    # cadence (PAD_TICK_S) because a walk is costlier than the
+                    # ps sample, and it samples in a thread for the same reason.
+                    if await _pad_tick_bg():
+                        break
                     # The query budget rides the same wait, from the SPAWN time
                     # (``query_started``), so a command that detached via steering
                     # or background=True keeps the elapsed time it already spent —
@@ -4649,7 +4781,11 @@ async def execute_bash(
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
                 await cleanup(
-                    kill=cancelled_bg or timed_out_bg or memory_exceeded_bg or query_stopped_bg
+                    kill=cancelled_bg
+                    or timed_out_bg
+                    or memory_exceeded_bg
+                    or pad_exceeded_bg
+                    or query_stopped_bg
                 )
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
@@ -4663,6 +4799,18 @@ async def execute_bash(
             )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            # Pad before memory: both can fire in the same tick, and the pad
+            # line names the remedy the operator has to take on disk. Same head
+            # position and structured keys as the foreground result.
+            if pad_exceeded_bg:
+                head = _scratchpad_cap_exceeded_message(pad_held_bg, pad_cap)
+                report_progress(
+                    {
+                        "scratchpad_cap_exceeded": True,
+                        "scratchpad_held_bytes": pad_held_bg,
+                        "scratchpad_cap_bytes": pad_cap,
+                    }
+                )
             if memory_exceeded_bg:
                 head = (
                     guard.over_budget_message(bg_sample)
@@ -4834,6 +4982,11 @@ async def execute_bash(
                 next_mem_sample = loop.time() + mem_tick
                 if await _memory_tick():
                     break
+            # The pad watchdog keeps its own cadence; ``_pad_tick`` returns False
+            # until one is due, so calling it on every 250 ms pass costs a clock
+            # read and no walk. A probe failure is "unknown", never a kill.
+            if await _pad_tick():
+                break
             # The query budget rides the same iteration. It is checked every
             # tick (not on the memory cadence) because it needs no probe at all —
             # it is a clock read, and a stop that waited a 250 ms tick to be
@@ -4877,6 +5030,25 @@ async def execute_bash(
             # No job manager to own a detached child: kill rather than leak.
             _kill()
             raise
+        if pad_exceeded:
+            # The same §10 rule for the pad watchdog: a pad-killed command must
+            # never be reported as "continues in the background". Checked BEFORE
+            # the memory branch because the pad line is the actionable one when
+            # both fired in the same tick.
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            return _error(
+                tool_call_id,
+                "bash",
+                f"{_scratchpad_cap_exceeded_message(pad_held, pad_cap)}\n"
+                f"{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+                details={
+                    "scratchpad_cap_exceeded": True,
+                    "scratchpad_held_bytes": pad_held,
+                    "scratchpad_cap_bytes": pad_cap,
+                },
+            )
         if memory_exceeded:
             # §10: a memory-killed command must NEVER be reported as "continues
             # in the background". The guard set the flag before its _kill(), so if
@@ -5019,6 +5191,16 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    if pad_exceeded:
+        # Same head position and ordinary-_error choice as the memory line: the
+        # command was satisfiable, the machine said no, and the head is what a
+        # tool card keeps. Pad wins if the memory guard fired in the same tick.
+        parts.insert(0, _scratchpad_cap_exceeded_message(pad_held, pad_cap))
+        details = dict(spill_details or {})
+        details["scratchpad_cap_exceeded"] = True
+        details["scratchpad_held_bytes"] = pad_held
+        details["scratchpad_cap_bytes"] = pad_cap
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     if memory_exceeded:
         # The MEMORY LIMIT EXCEEDED line goes FIRST, exactly where TIMEOUT goes,
         # because the tool card keeps the HEAD of at most 40 lines — a line at the
@@ -7691,17 +7873,19 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
 
     Contract, all of it load-bearing:
 
-    * THE MENTION GATE is the no-latency guarantee. This runs on every bash
-      result, so a command that does not NAME the pad returns ``""`` after
-      pure string work — ZERO filesystem calls. ``_command_names_pad`` owns the
-      spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
+    * THE MENTION GATE keeps the common case cheap. This runs on every bash
+      result: a command that does not NAME the pad (and is not running under
+      it) returns ``""`` after string compares plus, for an outside cwd, the
+      resolve pair that rules out a symlink alias. ``_command_names_pad`` owns
+      the spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
       path, and the home spellings (``~/…``/``$HOME/…``/``${HOME}/…``) the
       scan has always resolved but the gate could not reach — review round 1,
-      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. A
-      command that reaches the pad through an alias spelling of the store
-      (``/tmp`` against ``/private/tmp``) is a MISS, deliberately: resolving
-      the alias here would cost a syscall on every command to serve a spelling
-      nothing writes.
+      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. The
+      cwd arm is ``_pad_watch_armed``: a relative write under the pad must get
+      the same line even though it names nothing. A command that reaches the
+      pad only through an alias spelling of the store (``/tmp`` against
+      ``/private/tmp``) is still a MISS for the NAMING arm — the guard exists
+      for the shape, not for every spelling.
     * SHAPE arm first, and NO WALK: a CREATED target under the pad whose parent
       parts are a refused segment or whose leaf carries a refused suffix gets
       the sentence the write tools raise, ``[scratch]``-tagged (see
@@ -7752,7 +7936,12 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
     pad = _scratchpad_root(context)
     if pad is None:
         return ""
-    if not _command_names_pad(command, pad):
+    # The MENTION gate is widened to the watchdog's arming rule: a command whose
+    # cwd is inside the pad can grow it through a relative path without naming
+    # it, and that shape must still get the post-hoc budget line. The naming
+    # arm stays string-only; the cwd arm costs at most two resolves when the
+    # path is not textually inside.
+    if not _pad_watch_armed(command, _safe_cwd(context), pad):
         return ""
     # The pad walk, not the plain one: a relative operand after
     # ``cd "<pad>"`` is pad-relative (review round 1 M1), and the two known
@@ -7861,6 +8050,55 @@ def _pad_size_text(value: int, *, attributive: bool = False) -> str:
     if value >= _PAD_MIB:
         return f"{value // _PAD_MIB:,} MiB"
     return f"{value:,}-byte" if attributive else f"{value:,} bytes"
+
+
+def _pad_watch_armed(command: str, cwd: str, pad: Path) -> bool:
+    """Whether the live pad watchdog is armed for this command.
+
+    The watchdog costs one bounded recursive walk at spawn and one per tick, so
+    only a command that can plausibly reach the pad pays it: one that NAMES the
+    pad (the post-hoc audit's own string gate — the two env forms, the absolute
+    path and the home spellings) or one whose working directory is inside it (a
+    relative write then lands in the pad). Everything else — a long pytest or
+    git run — is not watched at all.
+
+    KNOWN BLIND SPOT: a child that reads ``LOCAL_OPERATOR_SCRATCHPAD`` from its
+    ENVIRONMENT without naming the pad in the command and without a cwd inside
+    it (``cd /tmp && python build.py``, where the script itself reads the
+    variable) is not armed. The post-hoc audit shares this gate, so that shape
+    gets NO live watch and NO after-the-fact line either — the honest gap, and
+    arming every command was the cost this gate exists to avoid. An
+    unresolvable cwd is not evidence the command is inside the pad, so it does
+    not arm either; the command still runs. ``scratchpad_contains`` compares
+    textually first and resolves only when that fails, so a cwd textually
+    inside the pad costs no filesystem call; an outside cwd pays the resolve
+    pair that rules out a symlink alias.
+    """
+    if _command_names_pad(command, pad):
+        return True
+    try:
+        return scratchpad_contains(Path(cwd), pad)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _scratchpad_cap_exceeded_message(held: int, cap: int) -> str:
+    """The head line for a command the pad watchdog stopped.
+
+    Plain text, no backticks (the tool card paints Text, so they would land
+    literally), and it leads with the CAUSE before the numbers for the same
+    reason the pre-execution refusal does: a card's head is the only part of a
+    long result guaranteed to survive truncation. ``held`` is the watchdog's
+    last sample and a LOWER BOUND when the pad is over — the walk stops at the
+    first crossing — so the sentence says ``>=`` rather than claiming a total.
+    """
+    return (
+        "SCRATCHPAD CAP EXCEEDED: this command's process group was stopped "
+        f"because the session scratchpad crossed its {cap:,}-byte cap "
+        f"(held ≥{held:,} bytes). Build output belongs in a git worktree outside "
+        "the session store; remove or move the output, or raise "
+        "session.scratchpad.max_bytes in /settings → Scratchpad, then retry."
+    )
 
 
 def _pad_budget_line(pad: Path) -> str:
