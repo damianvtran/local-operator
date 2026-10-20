@@ -856,7 +856,15 @@ jobs:
     # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
     # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
     # unchanged; this is scheduling headroom, not a test-failure waiver.
-    timeout-minutes: 31
+    # Raised to 32 by the composed main-recovery change: the heaviest unit
+    # shard measures 7239s serial / 1810s on 4 workers, and the P4a and P4b
+    # test growth since the 31-minute calculation moved the projection to
+    # 1811.3s, past the 1800s budget. 32 gives 1920s and covers the measured
+    # tree with margin. This is the same one-line raise #2682 carries; it
+    # rides here only because #2694 inherits the red and #2682 inherits the
+    # i18n red, so neither can land alone. Weights, workers, partition and
+    # watchdogs remain unchanged.
+    timeout-minutes: 32
     strategy:
       fail-fast: false
       matrix:
