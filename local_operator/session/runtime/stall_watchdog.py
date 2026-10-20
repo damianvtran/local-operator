@@ -2536,9 +2536,15 @@ def _enable_fatal_report(armed: "_Armed") -> bool:
 
     The report goes to the SAME handle the stall dump uses, under the module's
     existing file policy, so the stack survives the process and is found by the
-    reader that already looks there. ``all_threads=True`` on the fatal path is
-    deliberate: the process is dying, so the cost of walking every thread is
-    paid once and the reward is the thread that faulted.
+    reader that already looks there.
+
+    ``all_threads=False`` IS A REVIEW CORRECTION, not a cost choice. An earlier
+    revision asked for every thread, which is the without-GIL
+    ``_Py_DumpTracebackThreads`` walk python/cpython#116008 names; its thread list
+    is head-inserted, so the faulting main thread can be dumped LAST and a second
+    fault loses the very stack this path exists to keep. A fatal signal's handler
+    runs on the thread that faulted, so one thread is both the safe and the
+    sufficient dump — the witness cell asserts its frame.
 
     NEVER RAISES. A diagnostic that cannot install its leg leaves the runtime
     otherwise untouched; the caller's arm still succeeds.
@@ -2550,8 +2556,15 @@ def _enable_fatal_report(armed: "_Armed") -> bool:
         )
         return False
     try:
-        faulthandler.enable(file=armed.handle, all_threads=True)
+        faulthandler.enable(file=armed.handle, all_threads=False)
     except (OSError, RuntimeError, ValueError):
+        # A partial enable can leave fatal handlers installed on the handle this
+        # arm is about to close. The arm did not agree to own them, so clear them
+        # here rather than leave a stale descriptor behind the failure.
+        try:
+            faulthandler.disable()
+        except (OSError, RuntimeError, ValueError):  # pragma: no cover — best effort
+            pass
         logger.warning(
             "stall watchdog could not install the fatal-signal report on %s",
             armed.path,

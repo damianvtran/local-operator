@@ -2800,18 +2800,16 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         ), "a healthy runtime reported a fired bound"
         assert stall_watchdog.fired_pids(config_dir / "logs") == set()
 
-        # HANDLER READINESS, by the child's own hand: the runtime logs when the
-        # SIGUSR1 task-dump block is installed, so the probe waits for that fact
+        # HANDLER READINESS, by the child's own hand: the runtime states whether the
+        # SIGUSR1 task-dump block is installed, so the probe waits for that FACT
         # instead of manufacturing it. THIS REPLACES A SIGNAL STORM: the cell used to
-        # send SIGUSR1 every 0.2 s from spawn until the line appeared below, through
-        # the boot window in which threads start and stop. CPython's faulthandler walks
-        # thread state without the GIL (python/cpython#116008), and on 2026-10-20 an
-        # armed child died rc=-11 in exactly that window with an empty stderr (run
-        # 39411075050, job 118592852441). The probe is now ONE signal, sent after the
-        # child says it is listening — the same proof, without the race the proof used
-        # to create.
-        readiness = _await_log(config_dir, "signal handlers armed", child, timeout=60.0)
-        assert "signal handlers armed" in readiness, (
+        # send SIGUSR1 every 0.2 s from spawn until this block took effect — a storm
+        # through boot's thread-churn window, and never a fact the child had stated.
+        # Whether that storm produced the 2026-10-20 rc=-11 (run 39411075050, job
+        # 118592852441) is NOT claimed: that death left no stack. The probe is now ONE
+        # signal after the child says it is listening — the same proof, no storm.
+        readiness = _await_log(config_dir, "signal handlers ready", child, timeout=60.0)
+        assert "signal handlers ready" in readiness, (
             "the runtime never armed its signal handlers:\n"
             f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
         )
