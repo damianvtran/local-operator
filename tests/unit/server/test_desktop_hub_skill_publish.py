@@ -33,7 +33,7 @@ from local_operator.hub_sync import policies as pol
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync.identity import LinkIdentity
 from local_operator.server import features as svc_features
-from local_operator.server.routes import desktop_hub, desktop_radient, desktop_sessions
+from local_operator.server.routes import desktop_hub, desktop_sessions
 
 pytestmark = pytest.mark.asyncio
 
@@ -464,15 +464,22 @@ async def test_a_local_failure_after_acceptance_is_pending_and_retry_reconciles(
 
     real_apply = skill_storage.ManagedSkillStorage.apply
 
-    def failing_apply(self, *args, **kwargs):
-        raise OSError("synthetic local write failure")
+    attempts: list[int] = []
 
-    monkeypatch.setattr(skill_storage.ManagedSkillStorage, "apply", failing_apply)
+    def failing_once(self, *args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("synthetic local write failure")
+        return real_apply(self, *args, **kwargs)
+
+    monkeypatch.setattr(skill_storage.ManagedSkillStorage, "apply", failing_once)
     previewed = await preview(client, source_skill="beta", local_alias="beta")
-    response = await client.post(
-        "/v1/desktop/hub/skills/publish",
-        json=confirm_body(previewed, source_skill="beta", local_alias="beta"),
-    )
+    body = confirm_body(previewed, source_skill="beta", local_alias="beta")
+    # THE CLIENT'S OWN RETRY SHAPE: the same preview, draft tuple and request id.
+    # A recorded pending answer would replay forever and never reconcile, so the
+    # route must leave this id unclaimed.
+    body["request_id"] = "00000000-0000-4000-8000-000000000001"
+    response = await client.post("/v1/desktop/hub/skills/publish", json=body)
     assert response.status_code == 200, response.text
     result = response.json()["result"]
     assert result["publication"]["skill"]["id"] == "sk-published"
@@ -480,17 +487,17 @@ async def test_a_local_failure_after_acceptance_is_pending_and_retry_reconciles(
     assert result["local_link_receipt"]["state"] == "pending-reconciliation"
     assert list(prov.iter_baselines(root)) == []
     assert not (root / "skills" / "beta").exists()
+    assert len(attempts) == 1
 
-    # The SAME receipt resumes local reconciliation without republishing.
-    monkeypatch.setattr(skill_storage.ManagedSkillStorage, "apply", real_apply)
-    retry = await client.post(
-        "/v1/desktop/hub/skills/publish",
-        json=confirm_body(previewed, source_skill="beta", local_alias="beta"),
-    )
+    # The SAME request id re-enters the service and resumes local
+    # reconciliation without republishing.
+    retry = await client.post("/v1/desktop/hub/skills/publish", json=body)
     assert retry.status_code == 200, retry.text
+    assert retry.json().get("replayed") is not True
     retried = retry.json()["result"]
     assert retried["local_link_receipt"]["state"] == "complete"
     assert retried["link"]["hub_id"] == "sk-published"
+    assert len(attempts) == 2
     assert len(hub.calls) == 1
     record = prov.read_baseline(root, "skill", retried["link"]["local_id"])
     assert record is not None and record.recorded_by == "publish"
@@ -505,8 +512,6 @@ def test_hub_skills_advertises_the_whole_adapter_and_every_promised_route_exists
     one-line claim.
     """
 
-    from typing import get_args
-
     flags = svc_features.feature_flags()
     assert flags.get("hub_skills") == 1
 
@@ -519,9 +524,18 @@ def test_hub_skills_advertises_the_whole_adapter_and_every_promised_route_exists
     assert ("/v1/desktop/hub/skills/publish", "POST") in routes
     assert ("/v1/desktop/hub/links", "GET") in routes
 
-    operations = get_args(desktop_radient.RadientRequest.model_fields["operation"].annotation)
-    assert "org_skills.list" in operations
-    assert "org_skill.get" in operations
+    # The DISPATCHER, not the declared literal: a literal left behind after its
+    # handler is removed would still satisfy an annotation check while the
+    # advertised operation answers an unknown-operation refusal.
+    from local_operator.server.routes.desktop_radient import RadientRequest, endpoint
+
+    assert endpoint(RadientRequest(operation="org_skills.list", tenant_id="t-1")) == (
+        "GET",
+        "/tenants/t-1/skills",
+    )
+    assert endpoint(
+        RadientRequest(operation="org_skill.get", tenant_id="t-1", skill_id="sk-1")
+    ) == ("GET", "/tenants/t-1/skills/sk-1")
 
 
 async def test_an_unconfirmable_preview_cannot_be_confirmed_by_its_receipt(api) -> None:
@@ -548,5 +562,175 @@ async def test_an_unconfirmable_preview_cannot_be_confirmed_by_its_receipt(api) 
     )
     assert response.status_code == 422, response.text
     assert response.json()["detail"]["code"] == "unsupported-precondition"
+    assert hub.calls == []
+    assert list(prov.iter_baselines(root)) == []
+
+
+def attest_skill_capability(root: Path) -> None:
+    """Credit the configured base with the skill capability as a real check does."""
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.check import ItemCheck
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    base = configured_radient_base_url(ConfigManager(root))
+    ctx = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=lambda tenant: None,
+    )
+    svc.record_checks(
+        ctx,
+        [
+            ItemCheck(
+                kind="skill",
+                local_id="attest",
+                name="attest",
+                hub_id="attest",
+                tenant_id=None,
+                verdict="up-to-date",
+                remote_revision='"attest"',
+                sync_contract={"revision_cas": 1, "skills": 1},
+                served_by=base,
+            )
+        ],
+    )
+
+
+async def test_a_pending_outcome_survives_the_preview_ttl(api, monkeypatch) -> None:
+    """The accepted row outlives the reviewed draft; only the draft expires.
+
+    The hub id exists nowhere else until a baseline lands, so pruning or
+    expiring the receipt would silently orphan the publication.
+    """
+
+    client, root, holder = api
+    write_authored_skill(Path(os.environ["HOME"]) / ".claude" / "skills", "beta")
+    hub = PublishClient(base_url(root))
+    holder["client"] = hub
+    from local_operator.hub_sync import skill_storage
+
+    real_apply = skill_storage.ManagedSkillStorage.apply
+    failing = {"now": True}
+
+    def maybe_failing(self, *args, **kwargs):
+        if failing["now"]:
+            raise OSError("synthetic local write failure")
+        return real_apply(self, *args, **kwargs)
+
+    monkeypatch.setattr(skill_storage.ManagedSkillStorage, "apply", maybe_failing)
+    previewed = await preview(client, source_skill="beta", local_alias="beta")
+    body = confirm_body(previewed, source_skill="beta", local_alias="beta")
+    body["request_id"] = "00000000-0000-4000-8000-000000000002"
+    first = await client.post("/v1/desktop/hub/skills/publish", json=body)
+    assert first.json()["result"]["local_link_receipt"]["state"] == "pending-reconciliation"
+
+    token = previewed["preview"]["preview_receipt"]
+    path = root / "hub" / "publication-previews" / f"{token}.json"
+    record = json.loads(path.read_text())
+    record["expires_at"] = "2020-01-01T00:00:00Z"
+    path.write_text(json.dumps(record))
+
+    # A later preview prunes expired receipts; this one must survive because its
+    # hub row is still unreconciled.
+    write_authored_skill(Path(os.environ["HOME"]) / ".claude" / "skills", "delta")
+    await preview(client, source_skill="delta", local_alias="delta")
+    assert path.exists()
+
+    failing["now"] = False
+    retry = await client.post("/v1/desktop/hub/skills/publish", json=body)
+    assert retry.status_code == 200, retry.text
+    retried = retry.json()["result"]
+    assert retried["local_link_receipt"]["state"] == "complete"
+    assert retried["link"]["hub_id"] == "sk-published"
+    assert len(hub.calls) == 1
+
+
+async def test_a_linked_skill_cannot_be_republished_from_the_managed_root(api) -> None:
+    """A pulled private-org skill must not leave through a public rename."""
+
+    client, root, holder = api
+    write_authored_skill(root / "skills", "gamma")
+    from dataclasses import replace
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    base = configured_radient_base_url(ConfigManager(root))
+    identity = LinkIdentity("skill", "skl-gamma", base, "org", "tenant-private", "sk-g")
+    fields = manifest("gamma")
+    record = replace(
+        prov.make_record("skill", "skl-gamma", "sk-g", "tenant-private", fields, "pull"),
+        identity=identity,
+        local_alias="gamma",
+        recorded_by="pull",
+        lineage="clean",
+    )
+    prov.write_baseline(root, record)
+    hub = PublishClient(base_url(root))
+    holder["client"] = hub
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/publish",
+        json=publish_body(source_skill="gamma", local_alias="gamma-public"),
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "origin-conflict"
+    assert hub.calls == []
+    assert [row.local_alias for row in prov.iter_baselines(root)] == ["gamma"]
+
+
+async def test_an_unprojectable_2xx_is_pending_and_reprojects_the_raw_result(api) -> None:
+    """A 2xx the client cannot read still names a row; answer pending, then recover."""
+
+    client, root, holder = api
+    write_authored_skill(Path(os.environ["HOME"]) / ".claude" / "skills", "beta")
+    hub = PublishClient(base_url(root))
+    hub.result = {"accepted_document": manifest("beta")}
+    holder["client"] = hub
+    previewed = await preview(client, source_skill="beta", local_alias="beta")
+    body = confirm_body(previewed, source_skill="beta", local_alias="beta")
+    body["request_id"] = "00000000-0000-4000-8000-000000000003"
+
+    first = await client.post("/v1/desktop/hub/skills/publish", json=body)
+    assert first.status_code == 200, first.text
+    pending = first.json()["result"]
+    assert pending["publication"] is None
+    assert pending["local_link_receipt"]["state"] == "pending-reconciliation"
+    assert "could not be read" in pending["local_link_receipt"]["safe_message"]
+
+    # The raw accepted result was persisted; a retry re-projects it instead of
+    # paying for a second publication.
+    token = previewed["preview"]["preview_receipt"]
+    path = root / "hub" / "publication-previews" / f"{token}.json"
+    record = json.loads(path.read_text())
+    record["remote_result"]["skill"] = {"id": "sk-raw", "name": "beta"}
+    record["remote_result"]["revision"] = '"r-raw"'
+    path.write_text(json.dumps(record))
+
+    retry = await client.post("/v1/desktop/hub/skills/publish", json=body)
+    assert retry.status_code == 200, retry.text
+    retried = retry.json()["result"]
+    assert retried["local_link_receipt"]["state"] == "complete"
+    assert retried["link"]["hub_id"] == "sk-raw"
+    assert len(hub.calls) == 1
+
+
+async def test_public_auto_push_without_consent_is_unsafe_publication(api) -> None:
+    client, root, holder = api
+    write_authored_skill(root / "skills", SOURCE)
+    hub = PublishClient(base_url(root))
+    holder["client"] = hub
+    attest_skill_capability(root)
+
+    previewed = await preview(client, auto_push=True, confirm_public_egress=False)
+    assert previewed["preview"]["can_confirm"] is False
+    assert previewed["preview"]["reason"] == "unsafe-publication"
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/publish",
+        json=confirm_body(previewed, auto_push=True, confirm_public_egress=False),
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "unsafe-publication"
     assert hub.calls == []
     assert list(prov.iter_baselines(root)) == []

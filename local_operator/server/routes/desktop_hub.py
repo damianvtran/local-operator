@@ -23,7 +23,7 @@ weight until someone asks (the server-shape guard in ``tests/unit/test_import_gr
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Literal, NoReturn, TypeVar
+from typing import Any, Callable, Literal, Mapping, NoReturn, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictBool, model_validator
@@ -883,7 +883,20 @@ async def skill_publish(
             raise _refusal(422, str(error), code=code or None) from None
 
     async def mutate() -> dict[str, Any]:
-        return await _run(request, config_manager, provider_auth_store, work)
+        result = await _run(request, config_manager, provider_auth_store, work)
+        receipt = result.get("local_link_receipt")
+        if isinstance(receipt, Mapping) and receipt.get("state") == "pending-reconciliation":
+            # A PENDING PUBLICATION IS NOT AN OUTCOME FOR THIS REQUEST ID. The
+            # remote row exists, but local reconciliation has not landed; recording
+            # the pending answer would make the UI's same-id retry (its Confirm
+            # shape) replay that answer forever instead of re-entering the
+            # service, which is the only reconciler. Unclaimed withdraws the
+            # claim inside the receipt journal's critical section and still
+            # renders this answer, so the next attempt runs for real.
+            from local_operator.server.utils.desktop_receipts import Unclaimed
+
+            raise Unclaimed(result)
+        return result
 
     async with errors(request):
         return reply(
