@@ -35182,11 +35182,11 @@ class OperatorApp(App[None]):
             notice(_t_tags(_tag_keys.failed(error=str(error))), "warning")
             return
         if result["created"]:
-            notice(_t_tags(_tag_keys.created_applied(name=cleaned)), "info")
+            notice(_t_tags(_tag_keys.created_applied(name=result["name"])), "info")
         elif result["applied"]:
-            notice(_t_tags(_tag_keys.added(name=cleaned)), "info")
+            notice(_t_tags(_tag_keys.added(name=result["name"])), "info")
         else:
-            notice(_t_tags(_tag_keys.removed(name=cleaned)), "info")
+            notice(_t_tags(_tag_keys.removed(name=result["name"])), "info")
         self._refresh_tag_views()
 
     def _refresh_tag_views(self) -> None:

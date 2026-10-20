@@ -421,6 +421,7 @@ def test_toggle_uses_existing_name_case_insensitively(tmp_path: Path) -> None:
         "revision": 1,
         "created": False,
         "applied": True,
+        "name": "Review",
     }
     assert read_categories(tmp_path) == [{"id": tag, "name": "Review"}]
 

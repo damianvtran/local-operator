@@ -90,6 +90,10 @@ class TagToggle(TypedDict):
     revision: int
     created: bool
     applied: bool
+    #: The registry's canonical spelling, which may differ in case from the
+    #: name the caller typed. Receipts quote THIS, so the sentence names the
+    #: row the list paints rather than the user's casing.
+    name: str
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -480,7 +484,7 @@ def toggle_entity_tag(
             if created:
                 raise TagCreateApplyError(str(exc), created=True) from exc
             raise
-        return {**state, "created": created, "applied": applied}
+        return {**state, "created": created, "applied": applied, "name": match["name"]}
 
 
 def usage_counts(root: Path, entity_type: str = "session") -> dict[str, int]:
