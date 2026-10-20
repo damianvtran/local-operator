@@ -1533,6 +1533,24 @@ class Store:
         finally:
             conn.close()
 
+    def committed_owner_count(self) -> int:
+        """How many committed enrollment rows exist (0 or 1 in a healthy store).
+
+        WHY THIS EXISTS. ``active_owner()`` answers ``None`` for BOTH zero rows
+        and an ambiguous store (two or more), and a writer cannot tell a fresh
+        machine from a corrupted one from that answer. The opt-out default's
+        local commit must refuse to ADD a row to an ambiguous store rather than
+        guessing — a write path is exactly where "None means fresh" would turn
+        ambiguity into a second owner.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM enrollments WHERE state = 'committed'"
+            ).fetchone()
+            return int(row["n"]) if row is not None else 0
+
     def active_owner_readonly(self) -> OwnerSnapshot | None:
         """The committed owner WITHOUT creating or migrating the store (R-1).
 

@@ -828,6 +828,8 @@ async def test_directory_requires_a_tenant_and_refuses_a_bad_grammar(api):
     calls_before = FakeClient.calls
     missing = await client.get(DIRECTORY)
     assert missing.status_code == 422
+    # The closed read-table answer, not FastAPI's echoing validation body.
+    assert missing.json()["detail"]["code"] == "invalid_request"
 
     malformed = await client.get(f"{DIRECTORY}?tenant_id=../tnt_1")
     assert malformed.status_code == 422

@@ -2331,6 +2331,29 @@ class StatusDiscipline:
             check = replace(check, state_note=STATE_NOTE_NEUTRAL)
         return check
 
+    def _local_settings(self) -> TeamBridgeSettings | None:
+        """The directory-scoped watcher's last-good local settings, or None.
+
+        The watcher (not a ``ConfigManager``) because constructing one on a
+        malformed hand edit would move the user's file aside from a read path —
+        the thing ``config_watch`` exists to avoid. It also reads the same
+        snapshot the status route renders, so this decision cannot disagree
+        with the opt-out the surface is showing.
+        """
+
+        try:
+            watcher = process_watcher(self._config_dir)
+            watcher.poll_now()
+            return TeamBridgeSettings.from_values(watcher.values)
+        except Exception:  # noqa: BLE001 - bookkeeping must not fail a status read
+            return None
+
+    def _enrolled_by_default(self, local: TeamBridgeSettings, check: StatusCheck) -> bool:
+        account_id = check.account_id
+        return bool(account_id) and (
+            local.default_enrollment.get(account_id) == DEFAULT_ENROLLMENT_DONE
+        )
+
     async def _default_enroll(
         self,
         check: StatusCheck,
@@ -2339,48 +2362,57 @@ class StatusDiscipline:
         access: OAuthAccess,
         texts: AcceptedTexts,
     ) -> StatusCheck:
-        """Consent this machine ONCE under the opt-out default (§5.2).
+        """Consent this account ONCE under the opt-out default, then enroll it.
 
-        WHY. The product default is ON for an eligible Team plan, and "on"
-        is a SERVER fact (an active endpoint), not just a local bool. The
-        opt-out default therefore has to perform the consented enable itself
-        when a fresh status answer says the account is eligible with no
-        endpoint (surface state B).
+        WHY. The product default is ON for an eligible Team plan, and "on" is
+        TWO facts: the SERVER endpoint is active (state C, ``can_receive``), and
+        the NATIVE owner + consent receipt the runtime, reads and connector gate
+        on exist locally. The opt-out default therefore performs the consented
+        enable on a fresh B answer and then commits the native receipt from the
+        server answer that proves the consent — otherwise the surface advertises
+        receiving while ``bridge_runtime_for_session`` and every read stay
+        closed (round-1 review, S1).
 
-        WHEN IT DOES NOTHING. Only B qualifies, which excludes ineligible /
-        signed-out / dark-launch (A, none, G) and disabled-membership (F)
-        accounts by construction; a disabled endpoint is E and is never
-        re-enabled. Locally, an explicit ``enabled: false`` is the opt-out and
-        a recorded ``default_enrollment`` marker means the one write already
-        happened — the endpoint is that marker's usual memory, but a server-side
-        reset can remove it, and re-reading B must not consent again on the
-        user's behalf. Consent is sent only when the served text was ACCEPTED
-        (the display contract's accession rules) and its source is the live
-        answer, never an embedded or cached fallback.
+        WHEN IT DOES NOTHING. Only B triggers the PUT, which excludes
+        ineligible / signed-out / dark-launch (A, none, G) and disabled
+        membership (F) by construction; a disabled endpoint is E and is never
+        re-enabled. Locally, an explicit ``enabled: false`` is the opt-out. The
+        marker is PER ACCOUNT: account A enrolling must not suppress account B.
+        Consent is sent only when the served text was ACCEPTED (the display
+        contract's accession rules) and its source is the live answer.
 
         FAILURE. A refusal or transport failure leaves the answer exactly as
-        read and records NO marker, so the next fresh read may try again; this
-        is a status read and must never turn an enrollment problem into a
-        status error. The captured-account guard rides along (the account this
-        answer was filed under), so a sign-in switch mid-read refuses instead
-        of consenting for somebody else.
+        read and records NO marker, so the next fresh read may try again. The
+        native commit is best-effort here: if it fails after a successful PUT,
+        the next FRESH answer is C and ``_ensure_local_enrollment`` repairs the
+        missing receipt from that answer, so a transient store problem cannot
+        leave a permanently half-enrolled machine. The captured-account guard
+        rides the PUT, so a sign-in switch mid-read refuses instead of
+        consenting for somebody else.
         """
 
-        if self._config_dir is None or _surface_state(check) != "B":
+        if self._config_dir is None:
             return check
-        try:
-            # The DIRECTORY-scoped watcher's last-good snapshot, not a
-            # ConfigManager: constructing one on a malformed hand edit would move
-            # the user's file aside from a read path, which is exactly what the
-            # watcher exists to avoid (config_watch's module docstring). It also
-            # reads the same snapshot the status route renders, so this decision
-            # cannot disagree with the opt-out the surface is showing.
-            watcher = process_watcher(self._config_dir)
-            watcher.poll_now()
-            local = TeamBridgeSettings.from_values(watcher.values)
-        except Exception:  # noqa: BLE001 - bookkeeping must not fail a status read
+        local = self._local_settings()
+        if local is None or not local.enabled:
             return check
-        if not local.enabled or local.default_enrollment == DEFAULT_ENROLLMENT_DONE:
+        if _surface_state(check) == "B" and not self._enrolled_by_default(local, check):
+            check = await self._consent_default(
+                check, boundary=boundary, access=access, texts=texts
+            )
+        return self._ensure_local_enrollment(check, access=access, local=local)
+
+    async def _consent_default(
+        self,
+        check: StatusCheck,
+        *,
+        boundary: Boundary,
+        access: OAuthAccess,
+        texts: AcceptedTexts,
+    ) -> StatusCheck:
+        """The one B-time settings PUT, its marker, and the adopted answer."""
+
+        if self._config_dir is None:
             return check
         consent = consent_for_display(check)
         tenant_id = selected_tenant_id(check.payload)
@@ -2394,6 +2426,12 @@ class StatusDiscipline:
                 state="active",
                 tenant_id=tenant_id,
                 consent_version=version,
+                # PROVENANCE CAVEAT. The server's v1 enum is ("dialog",
+                # "settings") and its audit reads this as "which surface
+                # collected the consent"; a status read is neither. No honest
+                # value exists in v1, so this writes the closest accepted one
+                # rather than lying with "dialog"; a distinct provenance value
+                # is a cross-repo dependency on the server's enum.
                 consented_via="settings",
                 endpoint=None,
                 expected_account_id=check.account_id,
@@ -2404,7 +2442,7 @@ class StatusDiscipline:
             # marker is recorded so the next FRESH read may try again.
             return check
         try:
-            record_default_enrollment(self._config_dir)
+            record_default_enrollment(self._config_dir, check.account_id)
         except Exception:  # noqa: BLE001 - the enrollment already succeeded
             pass
         # ADOPT THE POST-ENROLLMENT ANSWER when the server already reflects
@@ -2419,6 +2457,65 @@ class StatusDiscipline:
         if not isinstance(payload, dict):
             return check
         return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+
+    def _ensure_local_enrollment(
+        self,
+        check: StatusCheck,
+        *,
+        access: OAuthAccess,
+        local: TeamBridgeSettings,
+    ) -> StatusCheck:
+        """Commit the native receipt for an ACTIVE endpoint that lacks one.
+
+        This is the repair half of the default-on path, and it is deliberately
+        driven by a FRESH status answer rather than by a stored flag: an account
+        enabled on another machine, or a first PUT whose local commit failed,
+        lands here on the next read. It never touches a committed owner (a
+        different namespace needs explicit re-enrollment), never re-sends
+        consent, and never guesses a wake designation — ``team_bridge.session``
+        is the user's choice; empty stays badge-only per RFC §13.6.
+        """
+
+        if self._config_dir is None or check.state != STATE_READY:
+            return check
+        tenant = select_tenant(check.payload)
+        if tenant is None or not bool(tenant.get("eligible")):
+            return check
+        endpoint = tenant.get("endpoint")
+        if not isinstance(endpoint, Mapping) or endpoint.get("state") != "active":
+            return check
+        endpoint_id = endpoint.get("id")
+        tenant_id = selected_tenant_id(check.payload)
+        consent = consent_for_display(check)
+        credential_id = getattr(access, "credential_id", None)
+        if (
+            not isinstance(endpoint_id, str)
+            or not endpoint_id
+            or tenant_id is None
+            or consent is None
+            or not isinstance(credential_id, int)
+            or isinstance(credential_id, bool)
+            or not check.account_id
+        ):
+            return check
+        try:
+            from local_operator.team_bridge.connector.enrollment import (
+                commit_default_enrollment,
+            )
+
+            commit_default_enrollment(
+                config_dir=self._config_dir,
+                credential_id=credential_id,
+                account_id=check.account_id,
+                tenant_id=tenant_id,
+                endpoint_id=endpoint_id,
+                consent_version=consent[0],
+                canonical_base_url=self._client.base_url,
+                cos_session_id=local.session or None,
+            )
+        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
+            return check
+        return check
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.
