@@ -3103,6 +3103,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears this call's own same-directory .transaction-*.tmp on the error path only",
     ),
+    # The initial-publication preview receipts: one JSON file per opaque token
+    # under <config_dir>/hub/publication-previews/ (a sibling of sessions/).
+    # `_publication_preview_path` refuses any token that is not
+    # [A-Za-z0-9_-]{16,128}, and both the target and the mkstemp temp are formed
+    # from that fixed directory + token; no session id or caller path reaches
+    # either. Pruning globs *.json in that same fixed directory only.
+    (
+        "local_operator/hub_sync/service.py::_write_publication_preview",
+        "os.replace",
+        "Atomic replace of a <config_dir>/hub/publication-previews receipt from a sibling temp",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_write_publication_preview",
+        "os.unlink",
+        "Clears this call's own same-directory preview temp on the error path only",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_prune_publication_previews",
+        "<path>.unlink",
+        "Removes EXPIRED *.json receipts in <config_dir>/hub/publication-previews/ only",
+    ),
     # -- speech-to-text temp scratch (mobile STT) ---------------------------
     # The Radient leg writes the uploaded clip into a directory THIS call
     # minted one line above via ``tempfile.mkdtemp(prefix="lop-stt-")`` — a
