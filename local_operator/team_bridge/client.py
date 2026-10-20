@@ -69,6 +69,7 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 
 import httpx
 
+from local_operator.config_watch import process_watcher
 from local_operator.env import (
     DEFAULT_RADIENT_API_BASE_URL,
     resolve_radient_api_base_url,
@@ -79,6 +80,11 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
+from local_operator.team_bridge.settings import (
+    DEFAULT_ENROLLMENT_DONE,
+    TeamBridgeSettings,
+    record_default_enrollment,
+)
 
 # ---------------------------------------------------------------------------
 # Embedded served texts (fallbacks; the server is each text's canonical home)
@@ -1009,6 +1015,24 @@ class TeamBridgeClient:
 
         params = {"tenant_id": tenant_id} if tenant_id else None
         return await self._send("GET", "/messaging/settings", params=params)
+
+    async def directory(
+        self, tenant_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """The organization's member directory (§6.1): who an agent may address.
+
+        ``tenant_id`` is REQUIRED and is a QUERY parameter, not a path segment:
+        the directory is one organization's answer, resolved through the
+        caller's membership, and the server refuses a tenant the account cannot
+        see (§6.5). The payload is the frozen desktop shape
+        ``{members:[{account_id, display_label, role, bridge_enabled,
+        bridge_state}]}`` and is passed through untouched — this client never
+        re-orders, trims or renames a member row.
+        """
+
+        return await self._send(
+            "GET", "/messaging/directory", params={"tenant_id": tenant_id}, access=access
+        )
 
     async def tenant_state(
         self, tenant_id: str, *, access: OAuthAccess | None = None
@@ -2249,6 +2273,26 @@ class StatusDiscipline:
                 last_attempt=time.monotonic(), check=check, texts=texts
             )
             return check
+        check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+        check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
+        self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
+        return check
+
+    def _payload_check(
+        self,
+        payload: dict[str, Any],
+        *,
+        boundary: Boundary,
+        access: OAuthAccess,
+        texts: AcceptedTexts,
+    ) -> StatusCheck:
+        """Build one answer from a served payload, accepting its texts first.
+
+        ONE builder serves the first read and the post-enrollment refresh: a
+        second copy of the acceptance loop is how a refreshed answer would
+        silently skip the screening selector rule (R4).
+        """
+
         texts.rejected = []
         for slot, field in (("guidance", "text"), ("screening", "template"), ("consent", "text")):
             section = payload.get(slot)
@@ -2285,8 +2329,96 @@ class StatusDiscipline:
             # path. "Plan ended — reading only" is reserved for a future
             # positively-evidenced lapse.
             check = replace(check, state_note=STATE_NOTE_NEUTRAL)
-        self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
         return check
+
+    async def _default_enroll(
+        self,
+        check: StatusCheck,
+        *,
+        boundary: Boundary,
+        access: OAuthAccess,
+        texts: AcceptedTexts,
+    ) -> StatusCheck:
+        """Consent this machine ONCE under the opt-out default (§5.2).
+
+        WHY. The product default is ON for an eligible Team plan, and "on"
+        is a SERVER fact (an active endpoint), not just a local bool. The
+        opt-out default therefore has to perform the consented enable itself
+        when a fresh status answer says the account is eligible with no
+        endpoint (surface state B).
+
+        WHEN IT DOES NOTHING. Only B qualifies, which excludes ineligible /
+        signed-out / dark-launch (A, none, G) and disabled-membership (F)
+        accounts by construction; a disabled endpoint is E and is never
+        re-enabled. Locally, an explicit ``enabled: false`` is the opt-out and
+        a recorded ``default_enrollment`` marker means the one write already
+        happened — the endpoint is that marker's usual memory, but a server-side
+        reset can remove it, and re-reading B must not consent again on the
+        user's behalf. Consent is sent only when the served text was ACCEPTED
+        (the display contract's accession rules) and its source is the live
+        answer, never an embedded or cached fallback.
+
+        FAILURE. A refusal or transport failure leaves the answer exactly as
+        read and records NO marker, so the next fresh read may try again; this
+        is a status read and must never turn an enrollment problem into a
+        status error. The captured-account guard rides along (the account this
+        answer was filed under), so a sign-in switch mid-read refuses instead
+        of consenting for somebody else.
+        """
+
+        if self._config_dir is None or _surface_state(check) != "B":
+            return check
+        try:
+            # The DIRECTORY-scoped watcher's last-good snapshot, not a
+            # ConfigManager: constructing one on a malformed hand edit would move
+            # the user's file aside from a read path, which is exactly what the
+            # watcher exists to avoid (config_watch's module docstring). It also
+            # reads the same snapshot the status route renders, so this decision
+            # cannot disagree with the opt-out the surface is showing.
+            watcher = process_watcher(self._config_dir)
+            watcher.poll_now()
+            local = TeamBridgeSettings.from_values(watcher.values)
+        except Exception:  # noqa: BLE001 - bookkeeping must not fail a status read
+            return check
+        if not local.enabled or local.default_enrollment == DEFAULT_ENROLLMENT_DONE:
+            return check
+        consent = consent_for_display(check)
+        tenant_id = selected_tenant_id(check.payload)
+        if consent is None or tenant_id is None or not check.account_id:
+            return check
+        version, _text, source = consent
+        if source != "served":
+            return check
+        try:
+            await self._client.put_settings(
+                state="active",
+                tenant_id=tenant_id,
+                consent_version=version,
+                consented_via="settings",
+                endpoint=None,
+                expected_account_id=check.account_id,
+            )
+        except (BridgeRefusal, ValueError):
+            # A refusal, a transport failure, or a §5.2 precondition this build
+            # refuses is an enrollment problem: the status answer stands, and no
+            # marker is recorded so the next FRESH read may try again.
+            return check
+        try:
+            record_default_enrollment(self._config_dir)
+        except Exception:  # noqa: BLE001 - the enrollment already succeeded
+            pass
+        # ADOPT THE POST-ENROLLMENT ANSWER when the server already reflects
+        # it: returning B after consenting would tell the surface this machine
+        # is still un-enrolled (and offer a second consent) for the whole cache
+        # TTL. A stale or failed refresh keeps the original answer — the marker
+        # above is what prevents a repeat, not this read.
+        try:
+            payload = await self._client.status(access=access)
+        except (BridgeRefusal, BridgeSignInRequired):
+            return check
+        if not isinstance(payload, dict):
+            return check
+        return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.

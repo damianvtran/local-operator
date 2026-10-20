@@ -417,6 +417,10 @@ class FakeClient:
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("settings")
 
+    async def directory(self, tenant_id: str) -> dict[str, Any]:
+        FakeClient.behavior["last_directory_tenant"] = tenant_id
+        return self._answer("directory")
+
     async def put_settings(self, **kwargs: Any) -> dict[str, Any]:
         FakeClient.behavior["last_put_kwargs"] = kwargs
         return self._answer("put_settings")
@@ -727,7 +731,8 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["state_note"] is None
     assert result["texts_rejected"] == []
     # The local keys the renderer composes its gate from.
-    assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    # The opt-out default: an absent local key reads as ON.
+    assert result["local"] == {"enabled": True, "onboarding": "", "session": ""}
     # The consent renders exactly as served, with its source named.
     assert result["consent"] == {
         "version": "bridge_consent_v1",
@@ -772,6 +777,90 @@ async def test_settings_get_passes_the_payload_through(api):
     response = await client.get("/v1/desktop/team-bridge/settings?tenant_id=tnt_1")
     assert response.status_code == 200
     assert response.json()["result"] == payload
+
+
+# -- the directory read (pair backend: GET /v1/messaging/directory) ----------
+
+DIRECTORY = "/v1/desktop/team-bridge/directory"
+
+
+def _directory_payload() -> dict[str, Any]:
+    return {
+        "members": [
+            {
+                "account_id": "acc_2",
+                "display_label": "Ada Lovelace",
+                "role": "admin",
+                "bridge_enabled": True,
+                "bridge_state": "active",
+            },
+            {
+                "account_id": "acc_3",
+                "display_label": "Grace Hopper",
+                "role": "member",
+                "bridge_enabled": False,
+                "bridge_state": "disabled",
+            },
+        ]
+    }
+
+
+async def test_directory_passes_the_frozen_member_shape_through(api):
+    """The frozen shape is the pair's; this route adds and drops nothing."""
+
+    client, _root, _discipline = api
+    FakeClient.behavior["directory"] = _directory_payload()
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 200
+    assert response.json()["result"] == _directory_payload()
+    assert FakeClient.behavior["last_directory_tenant"] == "tnt_1"
+
+
+async def test_directory_requires_a_tenant_and_refuses_a_bad_grammar(api):
+    """``tenant_id`` is the one required input; a malformed one is 422.
+
+    The closed read-table answer carries no echo of the caller's value (S-RSA-7),
+    and neither refusal reaches the upstream client.
+    """
+
+    client, _root, _discipline = api
+    calls_before = FakeClient.calls
+    missing = await client.get(DIRECTORY)
+    assert missing.status_code == 422
+
+    malformed = await client.get(f"{DIRECTORY}?tenant_id=../tnt_1")
+    assert malformed.status_code == 422
+    assert malformed.json()["detail"]["code"] == "invalid_request"
+    assert "../tnt_1" not in malformed.text
+    assert FakeClient.calls == calls_before, "a refused query reached the transport"
+
+
+async def test_directory_carries_an_upstream_refusal_verbatim(api):
+    """§6.5 status + code pass through, as the settings read already does."""
+
+    client, _root, _discipline = api
+    FakeClient.behavior["directory"] = BridgeRefusal(
+        "bridge_not_available", "agent messages are not available", http_status=403
+    )
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == {
+        "code": "bridge_not_available",
+        "message": "agent messages are not available",
+    }
+
+
+async def test_directory_maps_the_sign_in_state_to_a_401(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["directory"] = BridgeSignInRequired(
+        "Sign in to Radient to use agent messages."
+    )
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "bridge_signin_required"
 
 
 async def test_sign_in_required_maps_to_a_401_with_its_own_code(api):
@@ -973,6 +1062,7 @@ async def test_every_route_requires_the_desktop_bearer(tmp_path: Path, monkeypat
             ("GET", "/v1/desktop/team-bridge/status"),
             ("GET", "/v1/desktop/team-bridge/settings"),
             ("PUT", "/v1/desktop/team-bridge/settings"),
+            ("GET", "/v1/desktop/team-bridge/directory?tenant_id=tnt_1"),
             ("GET", "/v1/desktop/team-bridge/allowlist"),
             ("PUT", "/v1/desktop/team-bridge/allowlist"),
         ]:
@@ -1057,7 +1147,7 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     assert first.status_code == 200
     first_body = first.json()["result"]
     assert first_body["state"] == STATE_SIGNED_OUT
-    assert first_body["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    assert first_body["local"] == {"enabled": True, "onboarding": "", "session": ""}
 
     # A real separate process writes the registered keys through settings_io.
     _external(

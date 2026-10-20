@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ from typing import Any
 import httpx
 import pytest
 
+from local_operator import settings_io
+from local_operator.config import ConfigManager
 from local_operator.team_bridge import availability
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
@@ -41,6 +44,10 @@ from local_operator.team_bridge.client import (
     consent_for_display,
     selected_tenant_id,
     surface_projection,
+)
+from local_operator.team_bridge.settings import (
+    DEFAULT_ENROLLMENT_DONE,
+    TeamBridgeSettings,
 )
 from tests.unit.team_bridge.test_client import FakeRow, FakeStore
 
@@ -332,6 +339,7 @@ async def test_served_texts_are_accepted_and_rejected_through_a_real_check(
     counter = _Counter(
         lambda request: httpx.Response(200, json={"msg": "ok", "result": payloads.pop(0)})
     )
+    _set_local(tmp_path, enabled=False)  # this cell pins texts, not enrollment
     discipline = _discipline(counter, tmp_path)
 
     first = await discipline.check(Boundary.APP_START)
@@ -674,6 +682,7 @@ async def test_a_refused_served_consent_never_reaches_the_display_contract(
     counter = _Counter(
         lambda request: httpx.Response(200, json={"msg": "ok", "result": payloads.pop(0)})
     )
+    _set_local(tmp_path, enabled=False)  # this cell pins display, not enrollment
     discipline = _discipline(counter, tmp_path)
 
     first = await discipline.check(Boundary.APP_START)
@@ -912,3 +921,268 @@ def test_surface_projection_matches_the_5_6_matrix():
     assert surface_projection(_check(state=STATE_SIGNED_OUT))["surface_state"] is None
     # H1 exposes no decide surface; the field stays False for every state.
     assert all(proj["can_decide"] is False for proj in (a, b, c, d, e, f, g))
+
+
+# ---------------------------------------------------------------------------
+# the opt-out default's ONE consent write (§5.2 / product default-on)
+# ---------------------------------------------------------------------------
+
+
+def _ok(result: Any) -> httpx.Response:
+    return httpx.Response(200, json={"msg": "ok", "result": result})
+
+
+def _set_local(root: Path, **values: Any) -> None:
+    """Write real ``team_bridge.*`` values through the real settings writer."""
+
+    manager = ConfigManager(root)
+    for name, value in values.items():
+        settings_io.write_setting(manager, settings_io.BY_KEY[f"team_bridge.{name}"], value)
+
+
+def _local(root: Path) -> TeamBridgeSettings:
+    return TeamBridgeSettings.from_config(ConfigManager(root))
+
+
+def _endpoint_payload(state: str = "active", *, eligible: bool = True) -> dict[str, Any]:
+    return _ready_payload(
+        consent=SERVED_CONSENT,
+        tenants=[
+            {
+                "tenant_id": "tnt_1",
+                "tenant_name": "Org",
+                "eligible": eligible,
+                "endpoint": {"id": "bep_1", "label": "My agent", "state": state},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_eligible_account_is_consented_once_by_the_default(tmp_path: Path):
+    """State B (eligible, no endpoint) performs the consented enable ONCE.
+
+    The body is the settings route's own: ``state=active``, the tenant, the
+    SERVED consent version and ``consented_via=settings`` — a fresh endpoint
+    with no consent echo is a client-side refusal, so the version is not
+    optional here. The second status read is the post-enrollment adoption
+    (the answer moves B -> C), and the local marker records the write.
+    """
+
+    payloads = [
+        _ready_payload(consent=SERVED_CONSENT),  # B
+        _endpoint_payload("active"),  # C, after the consent write
+    ]
+    puts: list[dict[str, Any]] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(payloads.pop(0))
+
+    counter = _Counter(responder)
+    check = await _discipline(counter, tmp_path).check(Boundary.SURFACE_OPEN)
+
+    assert [request.method for request in counter.requests] == ["GET", "PUT", "GET"]
+    assert puts == [
+        {
+            "state": "active",
+            "tenant_id": "tnt_1",
+            "consent_version": "bridge_consent_v1",
+            "consented_via": "settings",
+        }
+    ]
+    # The answer the caller receives is the POST-enrollment one, not the stale B
+    # that would offer a second consent for the whole cache TTL.
+    assert surface_projection(check)["surface_state"] == "C"
+    assert _local(tmp_path).default_enrollment == DEFAULT_ENROLLMENT_DONE
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_default_enrollment_is_never_repeated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Even if the server forgets the endpoint, the marker stops a second consent.
+
+    The endpoint is normally the memory; a server-side reset can remove it, and
+    the same B answer must NOT consent again on the user's behalf.
+    """
+
+    puts: list[dict[str, Any]] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return _ok({"endpoint": None, "settings": {}})
+        return _ok(_ready_payload(consent=SERVED_CONSENT))
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    second = await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert len(puts) == 1
+    assert surface_projection(second)["surface_state"] == "B"
+    assert _local(tmp_path).default_enrollment == DEFAULT_ENROLLMENT_DONE
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_local_opt_out_wins_over_the_default(tmp_path: Path):
+    """``team_bridge.enabled: false`` is the machine's opt-out: zero writes."""
+
+    _set_local(tmp_path, enabled=False)
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT)))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_endpoint_is_never_reenabled(tmp_path: Path):
+    """State E is the user's server-side opt-out: the default must not undo it."""
+
+    counter = _Counter(lambda request: _ok(_endpoint_payload("disabled")))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "E"
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_an_ineligible_account_does_nothing(tmp_path: Path):
+    """State A (no eligible tenant, no endpoint) is not an enrollment state."""
+
+    counter = _Counter(
+        lambda request: _ok(
+            _ready_payload(
+                consent=SERVED_CONSENT,
+                tenants=[
+                    {
+                        "tenant_id": "tnt_1",
+                        "tenant_name": "Org",
+                        "eligible": False,
+                        "endpoint": None,
+                        "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+                    }
+                ],
+            )
+        )
+    )
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "A"
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_membership_does_nothing(tmp_path: Path):
+    """State F (an endpoint whose membership is no longer eligible) is read-only."""
+
+    counter = _Counter(lambda request: _ok(_endpoint_payload("active", eligible=False)))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "F"
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_a_signed_out_account_does_nothing(tmp_path: Path):
+    """No credential row: the status read itself never happens (§5.1)."""
+
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT)))
+    discipline = _discipline(counter, tmp_path, store=FakeStore(rows=[]))
+
+    check = await discipline.check(Boundary.APP_START)
+
+    assert counter.requests == []
+    assert check.state == STATE_SIGNED_OUT
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_a_dark_launch_does_nothing(tmp_path: Path):
+    """G: the server's ``messaging_unavailable`` is a refusal, never an enable."""
+
+    counter = _Counter(
+        lambda request: httpx.Response(
+            503, json={"error": "refused", "code": "messaging_unavailable"}
+        )
+    )
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "G"
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_the_default_enrollment_keeps_the_captured_account_guard(tmp_path: Path):
+    """A sign-in switch between the status read and the consent write refuses.
+
+    The guard is the RFC §5.2 receipt that already protects every desktop
+    settings write: the account the answer was filed under must still be the
+    pinned snapshot's account, and a mismatch is a local refusal with ZERO
+    writes — the consent must never be sent as somebody else.
+    """
+
+    store = FakeStore(rows=[FakeRow(1, data={"access": "token-1", "account_id": "acc_1"})])
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        # The sign-in switch lands AFTER the status read resolved its account
+        # and BEFORE the consent write resolves its guard: the window the
+        # captured-account receipt exists to close.
+        store.rows = [FakeRow(9, data={"access": "token-9", "account_id": "acc_9"})]
+        return _ok(_ready_payload(consent=SERVED_CONSENT))
+
+    counter = _Counter(responder)
+
+    check = await _discipline(counter, tmp_path, store=store).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    assert _local(tmp_path).default_enrollment == ""
+
+
+@pytest.mark.asyncio
+async def test_a_failed_consent_write_is_retried_and_only_then_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A refusal records NOTHING; the next fresh read performs the one write."""
+
+    puts = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal puts
+        if request.method == "PUT":
+            puts += 1
+            if puts == 1:
+                return httpx.Response(
+                    503, json={"error": "refused", "code": "messaging_unavailable"}
+                )
+            return _ok({"endpoint": None, "settings": {}})
+        return _ok(_ready_payload(consent=SERVED_CONSENT))
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    assert puts == 1
+    assert _local(tmp_path).default_enrollment == ""
+
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert puts == 2
+    assert _local(tmp_path).default_enrollment == DEFAULT_ENROLLMENT_DONE
