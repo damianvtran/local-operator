@@ -95,11 +95,13 @@ async def test_f_shows_the_state_sentence_and_refuses_every_editing_key() -> Non
         before = settings_io.read_setting(view._manager, setting)
         await pilot.press("space")
         after = settings_io.read_setting(view._manager, setting)
-        assert before is False and after is False
+        # The shipped default is ON (opt-out); the point is that `space` still
+        # writes nothing at all.
+        assert before is True and after is True
         assert view._error == NEUTRAL
 
         await pilot.press("r")
-        assert settings_io.read_setting(view._manager, setting) is False
+        assert settings_io.read_setting(view._manager, setting) is True
         assert view._error == NEUTRAL
 
 
@@ -147,8 +149,8 @@ async def test_the_configured_cos_row_keeps_the_wake_explanation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_default_off_helper_wraps_instead_of_losing_its_tail() -> None:
-    """D4 at 60x20: the 74-cell helper must survive whole (two band rows)."""
+async def test_the_enabled_helper_wraps_instead_of_losing_its_tail() -> None:
+    """D4 at 60x20: the opt-out helper must survive whole (two band rows)."""
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(60, 20)) as pilot:
