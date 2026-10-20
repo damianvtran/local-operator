@@ -1309,7 +1309,7 @@ def test_a_folded_subtree_keeps_a_moment_only_while_every_call_agrees_on_it() ->
     from local_operator.harness.jobs import _merge_accounting_component
 
     peak_ms, off_ms = 1_700_000_000_000, 1_700_003_600_000
-    grouped: dict[tuple[str | None, str | None, str], Any] = {}
+    grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
 
     def _component(at_ms: int | None) -> Any:
         from local_operator.harness.types import Usage

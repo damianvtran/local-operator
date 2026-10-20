@@ -2285,7 +2285,7 @@ async def test_list_is_a_union_of_local_and_remote_rows_with_the_device_on_each(
     )
     assert not result.is_error, result.text
     assert "[stored] local-stored" in result.text
-    assert "[live] shared-one" in result.text and "on cloud-node-1" in result.text
+    assert "[Open] shared-one" in result.text and "on cloud-node-1" in result.text
     # The document's own-locality row is this device's catalogue, already in
     # hand — merging it would list local sessions twice.
     assert "fed-local" not in result.text
@@ -3057,3 +3057,30 @@ async def test_spawn_receipt_uses_prelaunch_category_names(
     assert (result.details or {})["tags"] == ["Review"]
     assert "tags: Review" in result.text
     assert "Renamed" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reachable", [False, True])
+async def test_mesh_presence_info_and_list_do_not_promote_cached_live_claims(
+    root: Path, monkeypatch: pytest.MonkeyPatch, reachable: bool
+) -> None:
+    """The relay may retain row identity after a link drops, not live authority."""
+    payload = _fed_doc()
+    row = payload["sessions"][1]
+    row.update(waiting_on=2, busy=True, subagents_running=1)
+    row["peer"]["reachable"] = reachable
+    _fake_mesh(monkeypatch, payload)
+    for args in (
+        {"op": "info", "peer": "synthetic-peer", "session": row["session_id"]},
+        {"op": "list", "scope": "remote"},
+    ):
+        result = await execute_sessions("synthetic", args, None, None, _context(root))
+        assert not result.is_error, result.text
+        if reachable:
+            assert "Waiting on 2 jobs · 1 subagent running" in result.text
+            if args["op"] == "info":
+                assert "waiting on 2 jobs" in result.text
+        else:
+            assert "link down; status unknown" in result.text
+            assert "[live]" not in result.text
+            assert "waiting on 2 jobs" not in result.text

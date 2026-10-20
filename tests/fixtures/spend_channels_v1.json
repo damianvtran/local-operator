@@ -4,10 +4,10 @@
   "total_micro": 1536000,
   "knowledge": "partial",
   "by_basis": {
-    "billed": 53000,
+    "billed": 73000,
     "subscription_api_equivalent": 53000,
     "estimated": 10000,
-    "not_tracked_micro": 1420000,
+    "not_tracked_micro": 1400000,
     "not_tracked_calls": 1
   },
   "rows": [
@@ -94,6 +94,12 @@
   ],
   "children": {
     "total_micro": 520000,
+    "by_basis": {
+      "billed": 20000,
+      "subscription_api_equivalent": 0,
+      "estimated": 0,
+      "not_tracked_micro": 500000
+    },
     "knowledge": "exact"
   },
   "breakdown": {
@@ -189,10 +195,10 @@
         "marker": "billed"
       },
       "subscription_api_equivalent": {
-        "label": "API-equivalent",
+        "label": "included",
         "source_class": "subscription",
-        "marker": "API-equivalent \u00b7 subscription",
-        "note": "You're on a subscription, so API-equivalent amounts are list-price equivalents \u2014 not what you are charged."
+        "marker": "included \u00b7 API-equivalent",
+        "note": "Covered by your plan \u2014 the amount is the API list-price equivalent, not money charged."
       },
       "estimated": {
         "label": "estimated",

@@ -156,6 +156,8 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # `tui.authoring` only after its independent 40-key audit passed. P3b adds
     # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
     # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
+    # The wire.memory slice adds the independently audited `wire.memory`
+    # namespace, whose ledger row is what un-ships it.
     locale = "hi"
     namespaces = (
         "tui.authoring",
@@ -171,6 +173,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
+        "wire.memory",
         "wire.notices",
         "wire.settings",
         "wire.slash",

@@ -137,7 +137,9 @@ class FakeSession:
     def effective_model_label(self) -> str:
         return "test/model"
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         pass
 
     @property

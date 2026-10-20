@@ -533,7 +533,7 @@ export type ChannelChip = {
 	/** The row's money cell: the ladder, or `$—` for an unstated amount. */
 	text: string;
 	/** The row's basis is subscription quota with no billed claim beside it —
-	    the chip carries the `sub-equiv` marker so the money cannot be read as
+	    the chip carries the `included` marker so the money cannot be read as
 	    billed (design §5.1's collapse rule). */
 	subEquivalent: boolean;
 };

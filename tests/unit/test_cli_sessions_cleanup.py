@@ -42,6 +42,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         remove_empty=None,
         delegated_max_age_hours=None,
         scratchpads_only=False,
+        report_non_git_copies=False,
+        reference_repo=None,
         json=False,
     )
     base.update(overrides)
@@ -439,6 +441,7 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
 ) -> None:
     pad = _content_pad(store, "content-kid-03")
     big = _big_log(pad / "desktop-suite.log")
+    big_size = big.stat().st_size
     monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     assert sessions_cleanup_command(_args()) == 0
@@ -458,6 +461,30 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
     ]
     assert len(rows) == 1 and rows[0]["policy"] == "delegated_scratchpad"
     assert rows[0]["session"] == "content-kid-03" and rows[0]["actor"] == "cli"
+    # The CLI is a MANUAL trigger, and its row points at a path-level manifest.
+    assert rows[0]["trigger"] == "manual" and rows[0]["paths"] == 1
+    manifest = json.loads(Path(rows[0]["manifest"]).read_text())
+    assert manifest["actor"] == "cli" and manifest["trigger"] == "manual"
+    assert manifest["session"] == "content-kid-03"
+    assert manifest["completed"] == [
+        {"path": str(big), "bytes": big_size, "class": "stale output", "method": "remove"}
+    ]
+
+
+def test_a_recently_touched_pad_is_kept_by_the_content_phase(store: Path, capsys: Any) -> None:
+    """The restored age gate, through the CLI: a live-adjacent pad is not ours."""
+    pad = _content_pad(store, "content-kid-08")
+    big = _big_log(pad / "desktop-suite.log")
+    transcript = store / "sessions" / "content-kid-08" / "transcript.jsonl"
+    stamp = time.time() - 3600
+    os.utime(transcript, (stamp, stamp))
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: would reclaim 0 pad(s)" in out
+    assert "content kept content-kid-08  (inside the retention window)" in out
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    assert big.exists(), "a pad touched inside the window keeps its content"
+    assert "Reclaimed scratchpad content" not in capsys.readouterr().out
 
 
 def test_the_scratchpad_switch_off_reclaims_nothing_and_says_so(store: Path, capsys: Any) -> None:
@@ -683,3 +710,279 @@ def test_the_ordinary_dry_run_points_at_the_size_view_before_the_kept_list(
     kept = out.index("  kept ")
     assert pointer < kept
     assert "Scratchpads section below" in out
+
+
+# --------------------------------------------------------------------------
+# ``--report-non-git-copies``: the read-only class report
+# --------------------------------------------------------------------------
+
+_GIT_ENV = {
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _git(path: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT_ENV},
+    )
+
+
+def _copy_session(
+    root: Path, *, size_mb: int = 55, age_hours: float = 40 * 24
+) -> tuple[Path, Path]:
+    """A published reference repo plus one delegated session holding a copy."""
+    import shutil
+    import subprocess
+
+    reference = root / "copy-reference"
+    reference.mkdir()
+    _git(reference, "init", "-q", "-b", "main")
+    with open(reference / "payload", "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(b"\0")
+    origin = root / "copy-origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT_ENV},
+    )
+    _git(reference, "remote", "add", "origin", str(origin))
+    _git(reference, "add", "-A")
+    _git(reference, "commit", "-qm", "content")
+    _git(reference, "push", "-q", "origin", "HEAD:main")
+    _git(reference, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    session = root / "sessions" / "copycat"
+    session.mkdir()
+    (session / "origin.json").write_text('{"origin": "subagent"}')
+    transcript = session / "transcript.jsonl"
+    transcript.write_text('{"type": "message"}\n')
+    old = time.time() - age_hours * 3600
+    os.utime(transcript, (old, old))
+    copy = session / "scratchpad" / "qa" / "base-repo"
+    copy.mkdir(parents=True)
+    shutil.copyfile(reference / "payload", copy / "payload")
+    return reference, copy
+
+
+def test_the_copy_report_lists_the_class_and_removes_nothing(store: Path, capsys: Any) -> None:
+    reference, copy = _copy_session(store)
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "== Non-git copies (read-only) ==" in out
+    assert "1 candidate(s) (top-level directories)" in out
+    assert "would reclaim now: 1 session(s) (1 candidate(s))" in out
+    assert "waiting for the 48h window: 0 session(s) (0 candidate(s))" in out
+    assert "kept: 0 candidate(s)" in out
+    assert "proof: a file is recoverable" in out
+    assert "operator holds: none configured (add session ids to" in out
+    # The nested candidate prints its parent path, so ``base-repo`` cannot be
+    # mistaken for the refused ``qa`` row above it (design C5).
+    assert "would reclaim  copycat" in out and "qa/base-repo" in out
+    assert (copy / "payload").exists(), "the report removes nothing"
+
+
+def test_the_copy_report_on_a_fresh_install_is_an_honest_empty_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """No sessions/ yet is a fresh install, not a broken scan (review 2)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert sessions_cleanup_command(_args(dry_run=True, report_non_git_copies=True)) == 0
+
+    out = capsys.readouterr().out
+    assert "no session store yet: nothing to reclaim" in out
+    assert "0 candidate(s)" in out
+
+
+def test_the_copy_report_prints_an_unreadable_hold_list_once(store: Path, capsys: Any) -> None:
+    """The hold line says it; the old second warning line is gone (nit)."""
+    reference, _copy = _copy_session(store)
+    _config(store, delegated={"non_git_copies": {"hold_sessions": 42}})
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert out.count("operator holds: unreadable") == 1
+    assert "holds unreadable: fix" not in out
+
+
+def test_a_capped_copy_report_says_how_many_rows_are_shown(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail names the cap, not a claim about nested refusals (nit)."""
+    import local_operator.cli as cli
+
+    reference, copy = _copy_session(store)
+    extra = copy.parent.parent / "second"
+    extra.mkdir()
+    os.link(copy / "payload", extra / "payload")
+    monkeypatch.setattr(cli, "_COPY_REPORT_TEXT_ROWS", 1)
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    assert "1 of 3 rows shown" in capsys.readouterr().out
+
+
+def test_the_copy_report_shows_a_configured_operator_hold(store: Path, capsys: Any) -> None:
+    """A configured hold is visible as a hold, and the summary names it (C1)."""
+    reference, copy = _copy_session(store)
+    _config(store, delegated={"non_git_copies": {"hold_sessions": "copycat"}})
+
+    assert (
+        sessions_cleanup_command(
+            _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "operator holds: 1 session(s) (copycat)" in out
+    assert "would reclaim now: 0 session(s)" in out
+    assert "hold" in out and "operator hold" in out
+    assert (copy / "payload").exists()
+
+
+def test_the_copy_report_json_carries_every_row(store: Path, capsys: Any) -> None:
+    reference, _copy = _copy_session(store)
+
+    assert (
+        sessions_cleanup_command(
+            _args(
+                dry_run=True,
+                report_non_git_copies=True,
+                reference_repo=[str(reference)],
+                json=True,
+            )
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    report = payload["non_git_copies"]
+    assert report["count"] == 1 and report["would_reclaim_now"] == 1
+    assert report["candidates"][-1]["proved_by"] == [os.path.realpath(reference)]
+    assert payload["outcome"] == "report"
+
+
+def test_the_copy_report_without_a_dry_run_is_refused(store: Path, capsys: Any) -> None:
+    assert sessions_cleanup_command(_args(report_non_git_copies=True)) == 2
+    assert "--report-non-git-copies only reports" in capsys.readouterr().err
+    assert _count(store) == 18
+
+
+def test_the_normal_dry_run_says_the_copy_arm_is_off(store: Path, capsys: Any) -> None:
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert (
+        "non-git copies: off (session.cleanup.delegated.non_git_copies.enabled is off; "
+        "--report-non-git-copies --dry-run previews the class; hold sessions with "
+        "session.cleanup.delegated.non_git_copies.hold_sessions)" in out
+    )
+
+
+def test_the_copy_report_exits_3_on_an_unreadable_pad(store: Path, capsys: Any) -> None:
+    """A pad the scan cannot list is an error, not a silent empty row (review 3)."""
+    reference, _copy = _copy_session(store)
+    pad = store / "sessions" / "copycat" / "scratchpad"
+    os.chmod(pad, 0o000)
+    try:
+        assert (
+            sessions_cleanup_command(
+                _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
+            )
+            == 3
+        )
+    finally:
+        os.chmod(pad, 0o755)
+
+    out = capsys.readouterr().out
+    assert "scratchpad cannot be read" in out
+
+
+def test_the_copy_report_exits_3_when_a_candidate_could_not_be_scanned(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One broken candidate is loud, but the rest of the report still prints."""
+    report = dr.NonGitCopyReport(errors=1)
+    report.candidates.append(
+        dr.NonGitCopyCandidate(
+            session="broken",
+            path="broken/scratchpad/copy",
+            error=True,
+            reason="walk produced zero files from a non-empty tree (4096 bytes)",
+        )
+    )
+    monkeypatch.setattr(dr, "scan_non_git_copies", lambda *args, **kwargs: report)
+
+    assert sessions_cleanup_command(_args(dry_run=True, report_non_git_copies=True)) == 3
+
+    captured = capsys.readouterr()
+    assert "1 candidate(s) could not be scanned" in captured.err
+    assert "  error" in captured.out and "zero files" in captured.out
+
+
+def test_the_copy_report_honours_the_delegated_window_override(store: Path, capsys: Any) -> None:
+    """A 10 h pad is inside 48 h and past 2 h: the override IS the preview."""
+    reference, _copy = _copy_session(store, age_hours=10)
+
+    assert (
+        sessions_cleanup_command(
+            _args(
+                dry_run=True,
+                report_non_git_copies=True,
+                reference_repo=[str(reference)],
+                json=True,
+            )
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)["non_git_copies"]
+    assert payload["window_hours"] == 48
+    assert payload["would_reclaim_now"] == 0
+    assert payload["proof_ok_within_window"] == 1
+
+    assert (
+        sessions_cleanup_command(
+            _args(
+                dry_run=True,
+                report_non_git_copies=True,
+                reference_repo=[str(reference)],
+                delegated_max_age_hours=2,
+                json=True,
+            )
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)["non_git_copies"]
+    assert payload["window_hours"] == 2
+    assert payload["would_reclaim_now"] == 1
+    assert payload["proof_ok_within_window"] == 0

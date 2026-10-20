@@ -32,8 +32,22 @@ import {
 	useState,
 	type Ref,
 } from "react";
-import { getAttentionUnread, getDirectories, markAllSeen, setSessionPin, startSession } from "../api";
+import {
+	getAttentionUnread,
+	getDirectories,
+	getTags,
+	markAllSeen,
+	setSessionPin,
+	startSession,
+} from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
+import { SessionTagLine } from "../components/session-tag-line";
+import { SessionGroupToggle } from "../components/session-group-toggle";
+import {
+	PIN_AND_TAGS_HINT_TEXT,
+	SessionTagsSheet,
+	TAGS_ACTION_LABEL,
+} from "../components/session-tags-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { markPendingFocus } from "../lib/pending-focus";
@@ -55,7 +69,9 @@ import { shortenHome } from "../lib/format";
 import { LIBRARY_LABEL } from "../lib/library-copy";
 import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
-import type { SessionSummary } from "../types";
+import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
+import { groupByPrimaryTag, hasGroupedRows } from "../lib/session-grouping";
+import type { SessionSummary, TagCatalogueEntry } from "../types";
 import { cn } from "../lib/cn";
 
 /** What a successful bulk clear says it did — naming every bucket it missed.
@@ -328,7 +344,28 @@ function SessionCard({
 			onPointerUp={cancelPress}
 			onPointerLeave={cancelPress}
 			onPointerCancel={cancelPress}
-			onContextMenu={(event) => event.preventDefault()}
+			/* THE SAME REQUEST, WITHOUT A POINTER. A right-click and the platform's
+			   long-press context menu both mean "actions for this row", so they open
+			   the sheet instead of being swallowed. */
+			onContextMenu={(event) => {
+				event.preventDefault();
+				onLongPress?.();
+			}}
+			/* Shift+F10 and the dedicated ContextMenu key are the keyboard's version
+			   of that request. Enter and Space are deliberately NOT here: on this
+			   control they activate the row and open the conversation, and making them
+			   also open a sheet would leave one key with two meanings. */
+			onKeyDown={(event) => {
+				if (
+					(event.key === "F10" && event.shiftKey) ||
+					event.key === "ContextMenu"
+				) {
+					event.preventDefault();
+					onLongPress?.();
+				}
+			}}
+			aria-haspopup="dialog"
+			aria-keyshortcuts="Shift+F10"
 			onClick={() => {
 				if (suppressClick.current) {
 					suppressClick.current = false;
@@ -561,6 +598,17 @@ function SessionCard({
 					</span>
 				) : null}
 			</div>
+			{/* THE CONVERSATION'S TAGS, as a LABEL under the title row.
+
+			    Static by construction: the whole card is one button, so an
+			    interactive chip here would nest a control in a button. Assignment is
+			    the long-press sheet; this line only says what the row carries.
+
+			    NO LINE WHEN UNTAGGED — not an empty one. A placeholder would add a
+			    line box to every untagged row and make the list's density depend on
+			    which conversations happen to be tagged, the same defect class the
+			    blank second line had. A tagged row grows by exactly one line. */}
+			<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} />
 			<div className="flex items-baseline gap-2">
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
 					{cwdText}
@@ -835,7 +883,7 @@ function usePaintedRows(
 }
 
 export function SessionListScreen() {
-	const { sessions, connected } = useSessions();
+	const { sessions, connected, revision } = useSessions();
 	const capabilities = useCapabilities();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and
 	   its top in LAYOUT space (see `layoutTop`). The element is part of the
@@ -905,6 +953,16 @@ export function SessionListScreen() {
 	   sheet describing a stale object — the row it names is re-read from
 	   `sessions` on every render, so the toggle always acts on current state. */
 	const [pinTarget, setPinTarget] = useState<string | null>(null);
+	/* The row whose TAG sheet is open, held as the id for the same reason as
+	   `pinTarget`: a repaint must not leave the sheet describing a stale object,
+	   so the row is re-read from live `sessions` on every render. */
+	const [tagsTarget, setTagsTarget] = useState<string | null>(null);
+	/* The row that OPENED the tag sheet, so Done/Escape returns focus there. The
+	   opener is the row, not the pin sheet's `Tags…` button: that button is
+	   unmounted in the same commit the tag sheet opens, and focused elements
+	   removed from the DOM drop focus to `<body>`. Captured before the close so
+	   the ref is already pointing at a live element when `Sheet` reads it. */
+	const tagsReturnFocusRef = useRef<HTMLElement | null>(null);
 	/* THE REFUSAL TO RENDER INSIDE THAT SHEET, and the row it answers for.
 
 	   Held as a pair rather than as one sentence because the answer can land
@@ -1153,6 +1211,111 @@ export function SessionListScreen() {
 	const pinRow = pinTarget
 		? sessions.find((session) => session.session_id === pinTarget) ?? null
 		: null;
+	/* LIVE row, and `null` when it is gone: the sheet is open only while the row
+	   exists, the same rule the pin sheet follows. */
+	const tagsRow = tagsTarget
+		? sessions.find((session) => session.session_id === tagsTarget) ?? null
+		: null;
+	/* A RELAY capability, and the only gate: `features.session_tags` is core's
+	   build fact and is `1` on released relays whose routes would 404 here. */
+	const tagsAvailable = capabilities?.session_tags?.available === true;
+
+	/* S2b GROUPING IS A LOCAL VIEW PREFERENCE, READ ONCE AT MOUNT. It defaults
+	   off and survives reloads/sign-out like the theme and wide-view preferences
+	   (see `session-group-pref`); the capability remains the gate, so a saved
+	   preference on a relay without tags leaves no control and no grouping. */
+	const [groupEnabled, setGroupEnabled] = useState(getGroupTags);
+	const [catalogue, setCatalogue] = useState<TagCatalogueEntry[] | null>(null);
+	const [catalogueError, setCatalogueError] = useState(false);
+	/* PENDING IS PER ATTEMPT, NOT "NO CATALOGUE YET". A refocus or a retry after a
+	   failure runs while a cached catalogue keeps painting its (now stale)
+	   groups, and the reader still needs to know a read is in flight — QA round
+	   2, Q-r2-1, where the retry after a 500 showed no status at all because the
+	   cached list made the read invisible. */
+	const [cataloguePending, setCataloguePending] = useState(false);
+	const [catalogueAttempt, setCatalogueAttempt] = useState(0);
+	const groupingOn = tagsAvailable && groupEnabled;
+
+	/* THE CATALOGUE IS READ ON ENABLE AND ON REFOCUS, never per SSE frame. Group
+	   membership comes from each row's own `primary`, which the list stream keeps
+	   current, so a tag edit regroups live without a request. The visibility
+	   refresh catches categories created on another surface while the phone was
+	   away; rows are regrouped from the store in the same commit. */
+	useEffect(() => {
+		if (!groupingOn) {
+			/* A disable abandons whatever read was in flight and must not leave
+			   the flag set for the next enable. `catalogueBusy` is gated on
+			   `groupingOn` too, so this is bookkeeping rather than a visible
+			   state — but a flag that only ever flips true is how this defect
+			   came back the first time. */
+			setCataloguePending(false);
+			return;
+		}
+		/* EVERY ATTEMPT STARTS HERE — enable, retry, refocus — so the flag has one
+		   funnel and cannot describe an attempt that is not running. */
+		setCataloguePending(true);
+		let cancelled = false;
+		getTags()
+			.then((response) => {
+				if (cancelled) return;
+				setCatalogue(response.tags);
+				setCatalogueError(false);
+				setCataloguePending(false);
+			})
+			.catch(() => {
+				if (cancelled) return;
+				setCatalogueError(true);
+				setCataloguePending(false);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [groupingOn, catalogueAttempt]);
+	useEffect(() => {
+		if (!groupingOn) return;
+		const refresh = () => {
+			if (document.visibilityState === "visible") {
+				setCatalogueAttempt((attempt) => attempt + 1);
+			}
+		};
+		document.addEventListener("visibilitychange", refresh);
+		return () => document.removeEventListener("visibilitychange", refresh);
+	}, [groupingOn]);
+	const toggleGrouping = () => {
+		const next = !groupEnabled;
+		setGroupEnabled(next);
+		setGroupTags(next);
+		/* A fresh enable starts from the flat view until the catalogue answers; an
+		   error belongs to the attempt before. A cached catalogue from an earlier
+		   enable is refreshed in the background while it keeps painting. */
+		setCatalogueError(false);
+	};
+	const retryCatalogue = () => {
+		/* CLEARING THE ERROR IS PART OF THE RETRY, not just the success: the status
+		   line then reads `loading tags…` for the attempt instead of leaving the
+		   failure on screen until the answer lands. A second failure puts the
+		   error back through the same effect. */
+		setCatalogueError(false);
+		setCatalogueAttempt((attempt) => attempt + 1);
+	};
+	/* THE GROUPED VIEW REPLACES Active/Previous ONLY WHEN ALL FOUR HOLD: the
+	   capability, the preference, no search, and a usable catalogue. While the
+	   catalogue loads (or after a failed read) the ordinary sections stay on
+	   screen rather than an empty grouped shell; a list where no unpinned row has
+	   a resolvable primary stays flat too (`hasGroupedRows`). A non-empty query
+	   is always the normal filtered view — grouping returns when it clears. */
+	const groupingApplied =
+		groupingOn && query === "" && catalogue !== null && !catalogueError;
+	const groups = groupingApplied ? groupByPrimaryTag(rest, catalogue) : [];
+	const showGroups = hasGroupedRows(groups);
+	/* THE TWO HINTS THE TOGGLE CAN CARRY (round 1, D3/Q-1 and U2/Q-2). Both leave
+	   the list exactly as the reader found it and change only the status line: a
+	   read still outstanding (against the cached catalogue too, QA round 2
+	   Q-r2-1), and a non-empty search holding the grouping off while the
+	   preference stays on. Neither is a reason to disable the control or to paint
+	   a grouped shell with nothing in it. */
+	const catalogueBusy = groupingOn && cataloguePending;
+	const groupingPaused = groupingOn && query !== "";
 	/* Busy is about THIS row's action, not about any request: a press on one row
 	   never disables another row's sheet. */
 	const pinBusy = pinRow !== null && pinPending.has(pinRow.session_id);
@@ -1407,6 +1570,21 @@ export function SessionListScreen() {
 						placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
+					{/* THE GROUP TOGGLE, on its own line under the search field: at 390px
+					    the field's row has no width to spare for a 44px target without
+					    shrinking a destination name. Capability-gated, so a relay without
+					    tags leaves NO control behind. `aria-pressed` carries the state and
+					    the static accessible name says what the control groups by. */}
+					{tagsAvailable ? (
+						<SessionGroupToggle
+							grouped={groupEnabled}
+							busy={catalogueBusy}
+							failed={groupingOn && catalogueError}
+							paused={groupingPaused}
+							onToggle={toggleGrouping}
+							onRetry={retryCatalogue}
+						/>
+					) : null}
 					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live
 					    further down the scroller, and a control left inside the scrolling
 					    content is reachable only at the top of the list — measured at y=-179,
@@ -1556,9 +1734,28 @@ export function SessionListScreen() {
 						aria-hidden={showPinHint ? undefined : true}
 					>
 						<div className="overflow-hidden">
-							<p className="mx-2 mb-2 text-meta text-ink-dim">
+							{/* TWO SENTENCES, ONE SLOT. When the relay serves tags the caption
+							    must name BOTH gestures a long-press offers; on a relay without
+							    the capability the old sentence stays exactly as it was, because
+							    promising "or tag it" there would advertise a sheet whose
+							    requests 404. Each variant is its own paragraph so the one that
+							    does not apply is `display: none` (out of the accessibility tree
+							    and out of the collapse's measured height), and the first keeps
+							    the original paragraph as its text element — the shape both the
+							    copy baseline and the caption's own geometry tests read. */}
+							<p
+								className={cn(
+									"mx-2 mb-2 text-meta text-ink-dim",
+									tagsAvailable && "hidden",
+								)}
+							>
 								touch and hold a row to pin it
 							</p>
+							{tagsAvailable ? (
+								<p className="mx-2 mb-2 text-meta text-ink-dim">
+									{PIN_AND_TAGS_HINT_TEXT}
+								</p>
+							) : null}
 						</div>
 					</div>
 					{rows.length === 0 ? (
@@ -1587,18 +1784,31 @@ export function SessionListScreen() {
 									{pinned.map(renderCard)}
 								</section>
 							) : null}
-							{active.length > 0 ? (
-								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.active")}</h2>
-									{active.map(renderCard)}
-								</section>
-							) : null}
-							{previous.length > 0 ? (
-								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.previous")}</h2>
-									{previous.map(renderCard)}
-								</section>
-							) : null}
+							{showGroups
+								? groups.map((group) => (
+										<section key={group.key}>
+											<h2 className="truncate px-2 py-1 text-meta font-medium text-ink-muted">
+												{group.label}
+											</h2>
+											{group.rows.map(renderCard)}
+										</section>
+									))
+								: (
+										<>
+											{active.length > 0 ? (
+												<section>
+													<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.active")}</h2>
+													{active.map(renderCard)}
+												</section>
+											) : null}
+											{previous.length > 0 ? (
+												<section>
+													<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.previous")}</h2>
+													{previous.map(renderCard)}
+												</section>
+											) : null}
+										</>
+									)}
 							{/* The case where EVERY section is empty: a query that matched none, or
 							    every row pinned away — pinned rows are not empty, so this arm is the
 							    one where the screen would otherwise be a wordless void. */}
@@ -1717,6 +1927,35 @@ export function SessionListScreen() {
 						    for THIS row is outstanding the verb claims nothing at all. */}
 						{pinActionLabel}
 					</button>
+					{/* THE SECOND ACTION, and only when the RELAY serves the routes. A
+					    long-press is already the row's "what can I do with this" gesture, so
+					    tags belong in this sheet rather than on the card: one gesture, two
+					    verbs, and nothing added to a row whose width is its scarcest
+					    resource. It CLOSES this sheet before opening the other one — the
+					    system draws one panel, and a second scrim would make Back mean two
+					    things. HIDDEN, never disabled, on a relay without the capability:
+					    a dead control promises a screen this build cannot serve. */}
+					{tagsAvailable ? (
+						<button
+							type="button"
+							onClick={() => {
+								if (!pinRow) return;
+								/* Captured while the row is still on screen: `Sheet` reads
+								   `returnFocusRef` when it opens, and the pin sheet's own
+								   button is unmounted in that same commit. */
+								tagsReturnFocusRef.current =
+									cardRefs.current.get(pinRow.session_id) ?? null;
+								setPinTarget(null);
+								setTagsTarget(pinRow.session_id);
+							}}
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
+						>
+							<span className="w-4 shrink-0 text-accent" aria-hidden>
+								#
+							</span>
+							{TAGS_ACTION_LABEL}
+						</button>
+					) : null}
 					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own
 					    column, not an overlay: it takes layout space, so it cannot cover
 					    another control, and nothing on the list scrolls or reorders to
@@ -1745,6 +1984,15 @@ export function SessionListScreen() {
 					</p>
 				</div>
 			</Sheet>
+			<SessionTagsSheet
+				open={tagsRow !== null}
+				onClose={() => setTagsTarget(null)}
+				sessionId={tagsRow?.session_id ?? ""}
+				assigned={tagsRow?.tags ?? []}
+				primary={tagsRow?.primary ?? null}
+				revision={revision}
+				returnFocusRef={tagsReturnFocusRef}
+			/>
 		</div>
 	);
 }

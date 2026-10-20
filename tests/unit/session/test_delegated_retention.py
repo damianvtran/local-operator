@@ -1565,6 +1565,114 @@ def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
     assert row["bytes"] == size and row["entries"] == 1
     assert row["title"] == "" and row["actor"] == "startup"
     assert row["classes"] == ["stale output"]
+    # Provenance: the aggregate row points at a manifest that names the path.
+    assert row["trigger"] == "startup"
+    assert row["paths"] == 1
+    assert 99.0 < row["activity_age_hours"] < 101.0
+    manifest = Path(row["manifest"])
+    assert manifest.parent == root / "sessions" / dr.CONTENT_MANIFEST_DIRNAME
+    assert manifest.is_file() and manifest.name.endswith("-rowy.json")
+    body = json.loads(manifest.read_text())
+    assert body["schema"] == dr.CONTENT_MANIFEST_SCHEMA
+    assert body["session"] == "rowy" and body["origin"] == "subagent"
+    assert body["actor"] == "startup" and body["trigger"] == "startup"
+    assert body["policy"] == "delegated_scratchpad"
+    assert body["planned"] == [
+        {"path": str(big), "bytes": size, "class": "stale output", "method": "remove"}
+    ]
+    assert body["completed"] == body["planned"]
+    assert body["bytes"] == size and body["entries"] == 1
+
+
+def test_a_manifest_write_failure_never_fails_the_removal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest is best-effort: the removal the operator asked for proceeds,
+    and the log row records ``manifest_error`` instead of a path."""
+    pad = _kept_pad(root, "nomanifest")
+    big = _stale_file(pad / "desktop-suite.log")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("manifest store is read-only")
+
+    monkeypatch.setattr(dr, "_write_cleanup_manifest", boom)
+    _pass(root)
+    assert not big.exists(), "a manifest failure must not keep the content"
+    row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
+    assert row["manifest"] == ""
+    assert row["manifest_error"].startswith("planned: OSError")
+    # No manifest to point at: the row carries path-level provenance itself.
+    assert row["paths"] == [str(big)]
+    assert row["paths_total"] == 1
+    assert row["trigger"] == "startup"
+
+
+def test_a_failed_completed_rewrite_still_names_the_taken_paths(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m1: planned write OK, completed rewrite fails.
+
+    The manifest exists, but its ``completed`` list is empty while the files are
+    gone. Pointing the log row at it alone would lose path-level provenance, so
+    the row must carry the taken paths itself.
+    """
+    pad = _kept_pad(root, "halfmanifest")
+    big = _stale_file(pad / "desktop-suite.log")
+    real = dr._write_cleanup_manifest
+    calls: list[int] = []
+
+    def flaky(path: Path, payload: dict[str, Any]) -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real(path, payload)
+
+    monkeypatch.setattr(dr, "_write_cleanup_manifest", flaky)
+    _pass(root)
+    assert not big.exists(), "the completed-rewrite failure must not undo the removal"
+    row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
+    assert row["manifest"] != "" and row["manifest_error"].startswith("completed: OSError")
+    assert row["paths"] == [str(big)] and row["paths_total"] == 1
+    body = json.loads(Path(row["manifest"]).read_text())
+    assert body["planned"] and body["completed"] == []
+
+
+def test_an_unreadable_ask_log_keeps_the_record_and_the_content(root: Path) -> None:
+    """QA Q-1: ``chmod 000`` on asks.jsonl must fail closed, not read as no asks.
+
+    ``asks.store.read_events`` deliberately swallows an unreadable log into
+    ``[]``; without the explicit readability probe, both passes would treat this
+    as "no asks" and delete an ask the user can still answer.
+    """
+    from local_operator.asks import store as ask_store
+
+    directory = _mk(root, "asklocked", age_h=100)  # no roster: the RECORD is at risk
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    stamp = ask_store.now_ms()
+    assert ask_store.append_event(
+        directory,
+        {
+            "ask_id": "ask-locked",
+            "kind": ask_store.EVENT_QUEUED,
+            "at": stamp,
+            "expires_at": stamp + 600_000,
+            "timeout_s": 600,
+        },
+    )
+    asks = directory / "asks.jsonl"
+    asks.chmod(0o000)
+    try:
+        result = _pass(root)
+    finally:
+        asks.chmod(0o600)
+    assert result.removed == [], "the unreadable ask must keep the RECORD"
+    assert result.content == []
+    assert ("asklocked", "has open asks") in result.content_kept
+    assert shaped.exists() and directory.exists()
 
 
 def test_content_totals_land_in_the_state_file_without_touching_the_notice_keys(
@@ -1604,6 +1712,10 @@ def test_a_dry_run_lists_the_content_it_would_take_and_writes_nothing(root: Path
     row = result.content[0]
     assert row.classes == ("merged-clean clone", "stale output")
     assert row.rescue_bundle.endswith("reap-rescue-clone.bundle")
+    assert row.paths_total == 2
+    assert set(row.paths) == {str(tree), str(pad / "desktop-suite.log")}
+    assert row.manifest == "", "a dry run writes no manifest"
+    assert not (root / "sessions" / dr.CONTENT_MANIFEST_DIRNAME).exists()
     assert tree.exists() and (pad / "desktop-suite.log").exists()
     assert not (pad / "reap-rescue-clone.bundle").exists(), "a dry run writes no bundle"
     assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
@@ -2074,22 +2186,22 @@ def test_the_content_guard_re_stat_mirrors_rule_six(root: Path) -> None:
     transcript = directory / "transcript.jsonl"
     os.utime(transcript, (NOW, NOW))
     cand = dr._Cand(directory, clock=NOW - 100 * HOUR, has_transcript=True)
-    reason = dr._content_guard(
+    guard = dr._content_guard(
         cand, config_dir=root, now=NOW, cutoff=NOW - 48 * HOUR, live_resolved=None
     )
-    assert reason == "active since the scan"
+    assert guard.reason == "active since the scan"
+    assert guard.age_hours(NOW) == 0.0
 
 
-def test_content_of_a_young_dead_session_reclaims_shapes_but_keeps_notes(root: Path) -> None:
-    """The policy change of 2026-10-19: AGE IS NOT A CONTENT GUARD.
+def test_content_of_a_young_session_is_kept_whole_inside_the_retention_window(
+    root: Path,
+) -> None:
+    """The age gate is back (2026-10-19): live-adjacent content is not ours.
 
-    This test used to pin the opposite — a pad inside the record window was
-    never evaluated, so a dead 1-hour-old subagent held its build tree for the
-    full 48 hours. Cache-shaped data (a build directory, a stale log) has no
-    reading as scratch, and the desk's authority is merged+clean+stale, not
-    old transcript; the LIVENESS guards are what keep live work safe. So the
-    shape goes while the notes beside it, which are the session's own work,
-    stay — and the RECORD stays too, because it is inside the window.
+    The reversed policy reclaimed a build shape from a transcript touched an
+    hour ago as long as no claim/lease/wake was visible. A pad whose activity is
+    inside the record window is being worked in; its build shape survives, the
+    guard's kept reason says why, and the RECORD stays too.
     """
     young = _mk(root, "young", age_h=1)
     pad = young / "scratchpad"
@@ -2100,11 +2212,26 @@ def test_content_of_a_young_dead_session_reclaims_shapes_but_keeps_notes(root: P
     notes = pad / "notes.md"
     notes.write_text("keep me\n")
     result = _pass(root)
-    assert [row.session for row in result.content] == ["young"]
-    assert not shaped.exists()
+    assert result.content == []
+    assert ("young", "inside the retention window") in result.content_kept
+    assert shaped.exists(), "a build shape inside the window is NOT reclaimed"
     assert notes.read_text() == "keep me\n"
-    assert young.exists(), "the RECORD stays: the age window still governs it"
+    assert young.exists(), "the RECORD stays: the age window governs it"
     assert result.removed == []
+
+
+def test_content_of_a_pad_with_no_activity_clock_is_kept(root: Path) -> None:
+    """No clock is not old: the content guard fails closed like rule 1."""
+    directory = _mk(root, "clockless", age_h=None)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    result = _pass(root)
+    assert result.content == []
+    assert ("clockless", "no activity clock") in result.content_kept
+    assert shaped.exists()
 
 
 def test_content_of_a_live_claimed_session_is_untouched(root: Path) -> None:
@@ -2139,6 +2266,44 @@ def test_content_of_a_monitored_session_is_untouched(root: Path) -> None:
     result = _pass(root)
     assert result.content == []
     assert result.content_kept == [("watched", "armed monitor for this session")]
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_pad_with_unread_spooled_mail_is_untouched(root: Path) -> None:
+    """A question the user has not seen outranks reclaiming cache bytes."""
+    pad = _kept_pad(root, "mailed")
+    _stale_file(pad / "big.log")
+    (pad.parent / "inbox.jsonl").write_text('{"x":1}\n')
+    # Backdate the spool: a mailbox touched NOW is "active since the scan"
+    # (mail is part of the activity clock), which would keep the pad before the
+    # dedicated mail guard is consulted.
+    os.utime(pad.parent / "inbox.jsonl", (NOW - 100 * HOUR, NOW - 100 * HOUR))
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("mailed", "has unread spooled mail")]
+    assert (pad / "big.log").exists()
+
+
+def test_content_of_a_pad_with_an_open_ask_is_untouched(root: Path) -> None:
+    """An answerable ask is live conversation, whatever the transcript age."""
+    from local_operator.asks import store as ask_store
+
+    pad = _kept_pad(root, "asking")
+    _stale_file(pad / "big.log")
+    stamp = ask_store.now_ms()
+    assert ask_store.append_event(
+        pad.parent,
+        {
+            "ask_id": "ask-1",
+            "kind": ask_store.EVENT_QUEUED,
+            "at": stamp,
+            "expires_at": stamp + 600_000,
+            "timeout_s": 600,
+        },
+    )
+    result = _pass(root)
+    assert result.content == []
+    assert result.content_kept == [("asking", "has open asks")]
     assert (pad / "big.log").exists()
 
 
@@ -2202,10 +2367,28 @@ def test_a_parent_users_pad_is_never_content_reclaimed(root: Path) -> None:
     assert user.exists()
 
 
+def test_an_agent_workstream_pad_is_never_in_the_content_pool(root: Path) -> None:
+    """Visible parent-class work is audit-only, however shaped and however old.
+
+    ``agent-workstream`` is the user-facing parent class; the content pool is
+    built from ``_is_deletable_dir`` candidates only, so its build tree is not
+    even a content candidate.
+    """
+    directory = _mk(root, "flowpad", origin="agent-workstream", age_h=100)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    shaped = pad / "build"
+    shaped.mkdir()
+    (shaped / "out.o").write_bytes(b"x" * 4096)
+    result = _pass(root)
+    assert result.content == []
+    assert shaped.exists()
+
+
 def test_a_live_subagents_scratchpad_and_record_survive_the_full_pass(root: Path) -> None:
-    """Liveness, not age, is the content gate now — so the full pass (record
-    AND content) must leave a live child's pad and its transcript exactly
-    where they were, even though the record is well past the window."""
+    """Liveness and the age window are the content gates — so the full pass
+    (record AND content) must leave a live child's pad and its transcript
+    exactly where they were, even though the record is well past the window."""
     directory = _mk(root, "livemod", age_h=100)
     (directory / ".session.pid").write_text(str(os.getpid()))
     pad = directory / "scratchpad"
@@ -2238,3 +2421,759 @@ def test_a_spent_budget_stops_even_when_no_pad_has_reclaimable_content(root: Pat
     assert result.content == []
     assert result.content_budget_exhausted is True
     assert result.content_remaining == 2
+
+
+# --------------------------------------------------------------------------
+# The non-git COPY arm (content rule (d))
+# --------------------------------------------------------------------------
+
+#: The candidate floor is 50 MiB and the proof hash-reads every byte, so these
+#: tests build a real 55 MiB file rather than patching the constant: the module
+#: binds ``min_bytes`` as a default argument, and a patched global would prove
+#: nothing about the shipped floor.
+COPY_MB = 55
+
+
+def _big_file(path: Path, *, fill: bytes = b"\0", size_mb: int = COPY_MB) -> Path:
+    """A real file of ``size_mb``; ``fill`` changes the last byte (and the blob)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(fill[-1:])
+    return path
+
+
+def _copy_reference(root: Path, name: str = "source") -> Path:
+    """A reference repo with a bare origin, kept OUTSIDE every pad."""
+    origin = root / "copy-origins" / f"{name}.git"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "--bare", "-b", "main", os.fspath(origin))
+    repo = root / "copy-refs" / name
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "remote", "add", "origin", os.fspath(origin))
+    return repo
+
+
+def _publish(repo: Path) -> None:
+    """Commit everything and publish ``main`` as the merged trunk."""
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "content")
+    _git(repo, "push", "-q", "origin", "HEAD:main")
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+
+def _copy_tree(source: Path, dest: Path) -> Path:
+    """Copy every working-tree file of ``source`` to ``dest`` (never ``.git``)."""
+    dest.mkdir(parents=True)
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if ".git" in relative.parts:
+            continue
+        if path.is_dir():
+            (dest / relative).mkdir(parents=True, exist_ok=True)
+        else:
+            (dest / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dest / relative)
+    return dest
+
+
+def _copy_policy(references: tuple[Path, ...] = (), **kwargs: Any) -> CleanupPolicy:
+    return CleanupPolicy(
+        delegated_enabled=True,
+        delegated_scratchpad_enabled=True,
+        delegated_non_git_copies_enabled=True,
+        delegated_non_git_copy_references=tuple(os.fspath(path) for path in references),
+        **kwargs,
+    )
+
+
+def _copy_provider(*references: Path, **kwargs: Any):
+    """``run_delegated_pass`` takes a provider, not a policy instance."""
+    policy = _copy_policy(references, **kwargs)
+    return lambda: policy
+
+
+def _published_source(root: Path) -> Path:
+    source = _copy_reference(root)
+    _big_file(source / "payload")
+    (source / "sub").mkdir()
+    (source / "sub" / "a.txt").write_text("alpha\n")
+    _publish(source)
+    return source
+
+
+def test_a_fully_reproducible_copy_is_reclaimed_file_by_file(root: Path) -> None:
+    """Every byte exists at the same path in a merged tree: the files go."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "copied")
+    copy = _copy_tree(source, pad / "copy")
+    total = sum(path.stat().st_size for path in copy.rglob("*") if path.is_file())
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert not (copy / "payload").exists()
+    assert not (copy / "sub" / "a.txt").exists()
+    assert copy.exists(), "only matched FILES are removed; the directory stays"
+    assert [(row.session, row.classes, row.entries) for row in result.content] == [
+        ("copied", ("non-git copy",), 2)
+    ]
+    assert result.content[0].bytes == total
+    assert result.copy_candidates == 1
+    assert result.copy_candidate_bytes == total
+    assert result.copy_reclaimed_bytes == total
+    assert result.copy_skipped is None
+    assert result.errors == 0
+
+
+def test_a_copy_with_unique_files_keeps_only_them(root: Path) -> None:
+    """Path+blob mismatch is a keep: session artifacts are never proof."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "partial")
+    copy = _copy_tree(source, pad / "copy")
+    artifact = copy / "artifact.log"
+    artifact.write_text("only this run produced it\n")
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert artifact.exists()
+    assert not (copy / "payload").exists() and not (copy / "sub" / "a.txt").exists()
+    assert [(name, "unmatched file(s)" in reason) for name, reason in result.content_kept] == [
+        ("partial", True)
+    ]
+    assert "artifact.log" in result.content_kept[0][1]
+
+
+def test_a_copy_below_the_share_threshold_keeps_everything(root: Path) -> None:
+    """0% matched is a refusal of the WHOLE candidate, with the share named."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "foreign")
+    copy = pad / "copy"
+    _big_file(copy / "payload", fill=b"x")  # same name, different bytes
+    (copy / "sub").mkdir()
+    (copy / "sub" / "a.txt").write_text("alpha\n")
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert (copy / "payload").exists() and (copy / "sub" / "a.txt").exists()
+    assert result.content == []
+    assert result.copy_reclaimed_bytes == 0
+    reason = dict(result.content_kept)["foreign"]
+    # A nonzero share that truncates to zero reads as "<1%", never "0%" beside
+    # 6 bytes (design C4): the earlier spelling made the instrument look broken.
+    assert "only <1% of its bytes" in reason and "match a merged tree" in reason
+
+
+def test_a_copy_with_no_reference_repository_is_kept(root: Path) -> None:
+    """No configured reference and none in the pad: nothing can be proved."""
+    pad = _kept_pad(root, "unprovable")
+    copy = pad / "copy"
+    _big_file(copy / "payload")
+
+    result = _pass(root, policy=lambda: _copy_policy())
+
+    assert (copy / "payload").exists()
+    assert result.content == []
+    assert result.copy_candidates == 0
+    assert result.copy_skipped == "no reference repository"
+
+
+def test_a_nested_git_refuses_the_copy_and_the_git_arm_still_sees_it(root: Path) -> None:
+    """The copy arm must never delete a repository arm (c) would keep."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "nested")
+    copy = _copy_tree(source, pad / "code")
+    nested = copy / "project"
+    nested.mkdir()
+    _git(nested, "init", "-q", "-b", "main")
+    (nested / "f").write_text("x")
+    _git(nested, "add", "f")
+    _git(nested, "commit", "-qm", "c")  # no remote: unmerged
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert (copy / "payload").exists(), "a nested repository blocks this arm below it"
+    reasons = [reason for name, reason in result.content_kept if name == "nested"]
+    assert any("contains a git repository" in reason for reason in reasons)
+    assert any("project:" in reason for reason in reasons), reasons
+    assert result.copy_reclaimed_bytes == 0
+
+
+def test_an_unmerged_reference_does_not_qualify(root: Path) -> None:
+    """A repo with no remote trunk proves nothing, however matching it looks."""
+    source = _published_source(root)
+    unmerged = root / "copy-refs" / "unmerged"
+    unmerged.mkdir(parents=True)
+    _git(unmerged, "init", "-q", "-b", "main")
+    _big_file(unmerged / "payload")
+    _git(unmerged, "add", "payload")
+    _git(unmerged, "commit", "-qm", "c")
+    pad = _kept_pad(root, "nostrunk")
+    copy = _copy_tree(source, pad / "copy")
+
+    result = _pass(root, policy=_copy_provider(unmerged))
+
+    assert (copy / "payload").exists()
+    assert result.copy_candidates == 0
+    reasons = [reason for name, reason in result.content_kept if name == "nostrunk"]
+    assert any("no qualifying reference repository" in reason for reason in reasons), reasons
+
+
+def test_an_empty_directory_scaffold_is_not_an_error(root: Path) -> None:
+    """Measured: a scratch HOME's empty ``Library`` has entries and zero bytes."""
+    pad = _kept_pad(root, "scaffold")
+    (pad / "review-home" / "Library" / "Caches").mkdir(parents=True)
+
+    report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+
+    assert report.errors == 0 and report.candidates == []
+
+    result = _pass(root, policy=_copy_provider(_published_source(root)))
+    assert result.errors == 0
+    assert not any("zero files" in reason for _, reason in result.content_kept)
+
+
+def test_zero_files_with_real_bytes_is_still_an_impossible_result(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard needs a SECOND source; its contradiction is what it reports."""
+    pad = _kept_pad(root, "vacuouscopy")
+    scaffold = pad / "link-only"
+    scaffold.mkdir()
+    os.symlink("/nonexistent", scaffold / "link")
+    # The walk sees one entry and no regular files; the independent measure
+    # reports bytes, which is the measured "0 files in a 1.0 GB copy" shape.
+    monkeypatch.setattr(dr, "_bounded_dir_stats", lambda *a, **k: (4096, 1))
+
+    with pytest.raises(dr.NonGitCopyScanError, match="zero files from a non-empty tree"):
+        dr._prove_copy(scaffold, trees=())
+
+    report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    assert report.errors == 1
+    assert report.candidates[0].error is True
+    assert "zero files" in report.candidates[0].reason
+
+    result = _pass(root, policy=_copy_provider(_published_source(root)))
+    assert result.errors == 1
+    assert any("zero files" in reason for _, reason in result.content_kept)
+
+
+def test_the_store_guard_means_could_not_see_the_store(root: Path) -> None:
+    """Both directions of the vacuous guard, measured (review B3b).
+
+    A store whose PADS WERE SCANNED and hold no plain copies is an honest
+    empty report; only a store with no reachable scratchpad directory over the
+    floor is the instrument failing.
+    """
+    session = root / "sessions" / "fileonly"
+    (session / "scratchpad").mkdir(parents=True)
+    (session / "scratchpad" / "notes.txt").write_text("x")
+    honest = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    assert honest.candidates == [] and honest.count == 0
+
+    # No scratchpad directory at all, over a store that holds bytes: the scan
+    # could not see the class, so it must not read as "nothing to reclaim".
+    blind = root / "blind-store" / "sessions"
+    (blind / "transcript-only").mkdir(parents=True)
+    (blind / "transcript-only" / "transcript.jsonl").write_text("x" * 64)
+    with pytest.raises(dr.NonGitCopyScanError, match="could not see any scratchpad"):
+        dr.scan_non_git_copies(blind, min_store_bytes=1)
+
+    empty = root / "empty-store" / "sessions"
+    empty.mkdir(parents=True)
+    assert dr.scan_non_git_copies(empty, min_store_bytes=1).candidates == []
+
+
+def test_an_unreadable_store_raises_instead_of_reporting_empty(root: Path) -> None:
+    """An unlistable store is never "nothing to reclaim" (review B3a)."""
+    not_a_store = root / "sessions-is-a-file"
+    not_a_store.write_text("not a directory")
+    with pytest.raises(dr.NonGitCopyScanError, match="store cannot be read"):
+        dr.scan_non_git_copies(not_a_store)
+
+
+def test_an_unreadable_file_refuses_the_candidate_without_aborting_the_pad(
+    root: Path,
+) -> None:
+    """Measured: a mode-000 fixture inside a real candidate must not raise."""
+    source = _published_source(root)
+    # The reference must hold the SAME path, or the proof would never open the
+    # file (a path no tree has is unmatched without a read) and the test would
+    # prove nothing about the unreadable case.
+    (source / "sub" / "private.txt").write_text("published\n")
+    _publish(source)
+    pad = _kept_pad(root, "private")
+    copy = _copy_tree(source, pad / "copy")
+    private = copy / "sub" / "private.txt"
+    private.write_text("secret\n")
+    os.chmod(private, 0o000)
+    other = _stale_file(pad / "big.log")  # the pad's other arms must still run
+
+    try:
+        result = _pass(root, policy=_copy_provider(source))
+    finally:
+        os.chmod(private, 0o600)
+
+    assert (copy / "payload").exists(), "the whole candidate is kept"
+    reasons = [reason for name, reason in result.content_kept if name == "private"]
+    assert any("cannot read" in reason for reason in reasons), reasons
+    assert not other.exists(), "the stale-output arm on the rest of the pad still ran"
+    assert result.errors == 0
+
+
+def test_a_report_lists_both_provable_and_withheld_copies(root: Path) -> None:
+    """``would reclaim now`` and ``proof ok, inside the window`` are separate."""
+    source = _published_source(root)
+    old_pad = _kept_pad(root, "oldcopy")
+    _copy_tree(source, old_pad / "copy")
+    # A KEPT record that is nevertheless young: the parent's roster keeps the
+    # session, while its own 1 h transcript clock puts it inside the window.
+    _mk(root, "parent-youngcopy", None, age_h=10, roster=["youngcopy"])
+    young_pad = _mk(root, "youngcopy", age_h=1) / "scratchpad"
+    young_pad.mkdir()
+    _copy_tree(source, young_pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+
+    rows = {row.session: row for row in report.candidates}
+    assert rows["oldcopy"].proof_ok and rows["oldcopy"].would_reclaim
+    assert rows["youngcopy"].proof_ok and not rows["youngcopy"].would_reclaim
+    assert "inside the 48h window" in rows["youngcopy"].reason
+    assert report.reclaimable_sessions == 1 and report.within_window_sessions == 1
+    assert rows["youngcopy"].waiting is True and rows["oldcopy"].waiting is False
+    assert report.reclaimable_bytes == rows["oldcopy"].matched_bytes
+    assert rows["oldcopy"].proved_by == (os.path.realpath(source),)
+
+
+def test_the_report_counts_sessions_not_provable_subtrees(root: Path) -> None:
+    """One session with two provable siblings is ONE session (design D2)."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "twocopies")
+    _copy_tree(source, pad / "a")
+    _copy_tree(source, pad / "b")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+
+    assert report.count == 2, "both top-level directories are candidates"
+    assert report.reclaimable_sessions == 1
+    assert report.reclaimable_bytes == sum(
+        row.matched_bytes for row in report.candidates if row.would_reclaim
+    )
+
+
+def test_a_dry_run_lists_the_copy_and_removes_nothing(root: Path) -> None:
+    source = _published_source(root)
+    pad = _kept_pad(root, "drycopy")
+    copy = _copy_tree(source, pad / "copy")
+    total = sum(path.stat().st_size for path in copy.rglob("*") if path.is_file())
+
+    result = _pass(root, policy=_copy_provider(source), dry_run=True)
+
+    assert (copy / "payload").exists()
+    assert [(row.classes, row.bytes) for row in result.content] == [(("non-git copy",), total)]
+    assert result.copy_reclaimed_bytes == total
+
+
+def test_the_hash_budget_defers_a_candidate(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _published_source(root)
+    pad = _kept_pad(root, "budgeted")
+    copy = _copy_tree(source, pad / "copy")
+    monkeypatch.setattr(dr, "NON_GIT_COPY_HASH_BUDGET_BYTES", 1)
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert (copy / "payload").exists()
+    assert result.copy_budget_exhausted is True
+    assert result.copy_candidates == 1 and result.copy_reclaimed_bytes == 0
+    assert "hash budget" in dict(result.content_kept)["budgeted"]
+
+
+def test_the_copy_arm_off_leaves_the_copy_alone(root: Path) -> None:
+    """The switch is the gate: no proof runs and nothing under the copy moves."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "offcopy")
+    copy = _copy_tree(source, pad / "copy")
+
+    result = _pass(
+        root,
+        policy=lambda: CleanupPolicy(delegated_enabled=True, delegated_scratchpad_enabled=True),
+    )
+
+    assert (copy / "payload").exists()
+    assert result.content == []
+    assert result.copy_candidates == 0
+    assert result.copy_skipped == "disabled"
+
+
+def test_a_refused_removal_keeps_the_file_and_counts_an_error(root: Path) -> None:
+    source = _published_source(root)
+    pad = _kept_pad(root, "stuckcopy")
+    copy = _copy_tree(source, pad / "copy")
+    os.chmod(copy, 0o555)  # readable, not writable: the unlink fails
+    try:
+        result = _pass(root, policy=_copy_provider(source))
+    finally:
+        os.chmod(copy, 0o755)
+
+    assert (copy / "payload").exists(), "the refused file is kept"
+    assert result.errors == 1
+    assert all(row.bytes == 6 for row in result.content), "only sub/a.txt was removable"
+    # THE PASS COUNTER IS WHAT WAS TAKEN, NOT WHAT WAS PLANNED (review B2):
+    # the planned 55 MB payload never left, so only its sibling's 6 bytes count.
+    assert result.copy_reclaimed_bytes == 6
+    assert any("cannot be removed" in reason for _, reason in result.content_kept)
+
+
+def test_a_polluted_git_dir_cannot_redirect_the_proof(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduced: ``GIT_DIR=<repoB>/.git`` made ``_merged_tree(repoA)`` list B."""
+    first = _published_source(root)
+    second = _copy_reference(root, "other")
+    (second / "payload").write_text("a different payload\n")
+    _publish(second)
+
+    monkeypatch.setenv("GIT_DIR", os.fspath(second / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", os.fspath(second))
+    merged = dr._merged_tree(os.fspath(first))
+
+    assert merged is not None
+    payload = first / "payload"
+    assert merged[1]["payload"] == dr._blob_sha1(payload, payload.stat().st_size)
+    assert merged[1]["payload"] != dr._blob_sha1(
+        second / "payload", (second / "payload").stat().st_size
+    )
+
+
+def test_in_pad_references_are_capped_and_sorted(root: Path) -> None:
+    """A pad with many repos contributes at most CONTENT_MAX_REPOS, in name order."""
+    pad = _kept_pad(root, "manyrepos")
+    for index in range(10):
+        repo = pad / f"repo-{index}"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+
+    repos = dr._repos_in(pad)
+
+    assert len(repos) == dr.CONTENT_MAX_REPOS
+    assert [path.name for path in repos] == sorted(path.name for path in repos)
+
+
+def test_a_pad_with_no_copy_shaped_directory_resolves_no_references(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm must not walk for repos in a pad it could never prove anything in."""
+    pad = _kept_pad(root, "nothingtoprove")
+    (pad / "notes.txt").write_text("not a copy\n")
+    source = _published_source(root)
+    calls: list[Path] = []
+
+    def counted(path: Path) -> list[Path]:
+        calls.append(path)
+        return []
+
+    monkeypatch.setattr(dr, "_repos_in", counted)
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert calls == []
+    assert result.content == [] and result.copy_candidates == 0
+
+
+def test_a_hash_cache_hit_is_not_charged_to_the_budget(root: Path) -> None:
+    """A refused parent re-offers files its child will hash; only reads cost."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "cached")
+    copy = _copy_tree(source, pad / "copy")
+    merged = dr._merged_tree(os.fspath(source))
+    assert merged is not None
+    trees = ((os.path.realpath(source), merged[1]),)
+    cache = dr._HashCache()
+
+    first = dr._prove_copy(copy, trees=trees, cache=cache)
+    second = dr._prove_copy(copy, trees=trees, cache=cache)
+
+    assert first.ok and second.ok
+    assert first.hashed_bytes > 0
+    assert second.hashed_bytes == 0
+
+
+def test_the_report_keeps_a_copy_the_pass_would_refuse(root: Path) -> None:
+    """Both pad-root guards the pass applies must reach the report (review B1)."""
+    source = _published_source(root)
+    root_git = _kept_pad(root, "rootgit")
+    _copy_tree(source, root_git / "copy")
+    (root_git / ".git").write_text("gitdir: elsewhere\n")
+    session_git = _kept_pad(root, "sessiongit")
+    _copy_tree(source, session_git / "copy")
+    (session_git.parent / ".git").write_text("gitdir: elsewhere\n")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions",
+        references=(os.fspath(source),),
+        now=NOW,
+        window_hours=48,
+    )
+
+    rows = {row.session: row for row in report.candidates}
+    assert rows["rootgit"].would_reclaim is False
+    assert rows["rootgit"].reason == "the scratchpad root is itself a git tree"
+    assert rows["sessiongit"].would_reclaim is False
+    assert rows["sessiongit"].reason == "the session directory is itself a git tree"
+    assert report.reclaimable_sessions == 0
+    assert report.kept_candidates == 2
+
+
+def test_a_sha256_reference_is_refused_with_its_object_format(root: Path) -> None:
+    """A SHA-256 repo silently matches nothing; say WHY it is unusable (D4)."""
+    source = _published_source(root)
+    sha = root / "copy-refs" / "sha256"
+    sha.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-q", "--object-format=sha256", "-b", "main", str(sha)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT},
+    )
+    _big_file(sha / "payload")
+    origin = root / "copy-origins" / "sha256.git"
+    subprocess.run(
+        [
+            "git",
+            "init",
+            "-q",
+            "--bare",
+            "--object-format=sha256",
+            "-b",
+            "main",
+            str(origin),
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, **_GIT},
+    )
+    _git(sha, "remote", "add", "origin", str(origin))
+    _git(sha, "add", "-A")
+    _git(sha, "commit", "-qm", "content")
+    _git(sha, "push", "-q", "origin", "HEAD:main")
+    _git(sha, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    pad = _kept_pad(root, "sha256ref")
+    copy = _copy_tree(source, pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(sha),), now=NOW, window_hours=48
+    )
+
+    rows = [row for row in report.candidates if row.session == "sha256ref"]
+    assert rows, "the candidate must still be reported"
+    assert all("reference object format is sha256" in row.reason for row in rows)
+    assert not any(row.would_reclaim for row in rows)
+    assert (copy / "payload").exists()
+
+
+def test_the_early_refusal_uses_the_one_merged_tree_phrase(root: Path) -> None:
+    """One refusal phrase in both bounds; no "at a merged-tree path" variant."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "earlybound")
+    copy = _copy_tree(source, pad / "copy")
+    _big_file(copy / "run-only.bin", fill=b"y")  # a path no merged tree has
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    reason = dict(result.content_kept)["earlybound"]
+    assert "at most" in reason and "match a merged tree" in reason
+    assert "merged-tree path" not in reason
+    assert (copy / "payload").exists(), "the whole candidate is kept"
+
+
+def test_candidates_are_recursive_and_the_largest_provable_subtree_wins(root: Path) -> None:
+    """``qa-1232/`` matches nothing; its ``base-repo/`` child matches nearly all."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "qacopy")
+    run = pad / "qa-1232"
+    run.mkdir()
+    (run / "notes.md").write_text("session artifacts\n")
+    copy = _copy_tree(source, run / "base-repo")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+    rows = {row.path: row for row in report.candidates}
+    parent = rows["qacopy/scratchpad/qa-1232"]
+    child = rows["qacopy/scratchpad/qa-1232/base-repo"]
+    assert parent.top_level and not parent.proof_ok
+    assert not child.top_level and child.proof_ok
+    assert report.count == 1, "the summary counts the top-most attempt only"
+
+    result = _pass(root, policy=_copy_provider(source))
+    assert not (copy / "payload").exists()
+    assert result.copy_candidates == 1
+    assert result.copy_reclaimed_bytes > 0
+
+
+def test_an_evidence_named_refused_segment_is_reached_by_the_arm(root: Path) -> None:
+    """The gate matches the walk: ``evidence-build`` is kept but DESCENDED into."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "evidencecopy")
+    copy = _copy_tree(source, pad / "evidence-build" / "base-repo")
+    from local_operator.scratchpad import _is_refused_segment
+
+    assert _is_refused_segment("evidence-build"), "the fixture must be a refused name"
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+    rows = {row.path: row for row in report.candidates}
+    row = rows["evidencecopy/scratchpad/evidence-build/base-repo"]
+    assert row.proof_ok and row.would_reclaim
+    assert report.count == 1, "the copy under the evidence name is a top-level attempt"
+
+    result = _pass(root, policy=_copy_provider(source))
+    assert not (copy / "payload").exists()
+    assert result.copy_candidates == 1 and result.copy_reclaimed_bytes > 0
+
+
+def test_a_missing_store_is_an_honest_empty_report(root: Path) -> None:
+    """A fresh install has no ``sessions/``: empty report, not exit 3 (review 2)."""
+    missing = root / "fresh-install" / "sessions"
+
+    report = dr.scan_non_git_copies(missing, min_store_bytes=1)
+
+    assert report.candidates == [] and report.errors == 0
+    assert report.skipped == "no store"
+
+
+def test_an_unreadable_pad_is_counted_as_an_error(root: Path) -> None:
+    """A pad the scan cannot list must be loud, not a silent zero (review 3)."""
+    pad = _kept_pad(root, "unreadablepad")
+    (pad / "copy").mkdir()
+    (pad / "copy" / "payload").write_bytes(b"x" * 64)
+    os.chmod(pad, 0o000)
+    try:
+        report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    finally:
+        os.chmod(pad, 0o755)
+
+    assert report.errors == 1
+    assert any(row.error and "scratchpad cannot be read" in row.reason for row in report.candidates)
+
+
+def test_a_non_delegated_proof_is_not_reported_as_waiting(root: Path) -> None:
+    """Waiting means the PASS would act once the window passes (review 4)."""
+    source = _published_source(root)
+    session = root / "sessions" / "usercopy"
+    session.mkdir()
+    (session / "transcript.jsonl").write_text('{"type": "message"}\n')
+    os.utime(session / "transcript.jsonl", (NOW - 1 * 3600, NOW - 1 * 3600))
+    pad = session / "scratchpad"
+    pad.mkdir()
+    _copy_tree(source, pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+
+    row = next(row for row in report.candidates if row.session == "usercopy")
+    assert row.proof_ok is True
+    assert row.waiting is False
+    assert row.reason == "not a delegated session"
+    assert report.within_window_sessions == 0
+
+
+def test_the_proof_is_a_union_across_reference_repositories(root: Path) -> None:
+    """A file proves when ANY reference has it: one repo per half is enough."""
+    first = _copy_reference(root, "first")
+    _big_file(first / "payload")
+    _publish(first)
+    second = _copy_reference(root, "second")
+    (second / "sub").mkdir()
+    (second / "sub" / "a.txt").write_text("alpha\n")
+    _publish(second)
+    pad = _kept_pad(root, "unioned")
+    copy = _copy_tree(first, pad / "copy")
+    (copy / "sub").mkdir()
+    (copy / "sub" / "a.txt").write_text("alpha\n")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions",
+        references=(os.fspath(first), os.fspath(second)),
+        now=NOW,
+        window_hours=48,
+    )
+    row = report.candidates[0]
+    assert row.proof_ok and row.matched_bytes >= COPY_MB * 1024 * 1024
+    assert set(row.proved_by) == {
+        os.path.realpath(first),
+        os.path.realpath(second),
+    }
+
+
+def test_an_operator_hold_refuses_a_provable_copy_in_both_surfaces(root: Path) -> None:
+    """A hold outranks proof: the held pad takes nothing, its sibling still goes."""
+    source = _published_source(root)
+    held_pad = _kept_pad(root, "heldcopy")
+    held_copy = _copy_tree(source, held_pad / "copy")
+    free_pad = _kept_pad(root, "freecopy")
+    free_copy = _copy_tree(source, free_pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions",
+        references=(os.fspath(source),),
+        holds=("heldcopy",),
+        now=NOW,
+        window_hours=48,
+    )
+    rows = {row.session: row for row in report.candidates}
+    assert rows["heldcopy"].would_reclaim is False
+    assert rows["heldcopy"].reason == "operator hold"
+    assert rows["freecopy"].would_reclaim is True and rows["freecopy"].reason == ""
+
+    result = _pass(
+        root,
+        policy=_copy_provider(source, delegated_non_git_copy_holds=("heldcopy",)),
+    )
+
+    assert (held_copy / "payload").exists(), "the held copy is untouched"
+    assert not (free_copy / "payload").exists(), "its unheld sibling is reclaimed"
+    assert any(
+        name == "heldcopy" and "operator hold" in reason for name, reason in result.content_kept
+    )
+    assert result.copy_candidates == 1, "only the unheld sibling was attempted"
+
+
+def test_unreadable_holds_skip_the_arm_entirely(root: Path) -> None:
+    """An unparseable hold list is "I cannot tell", never "nothing is held"."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "unreadableholds")
+    copy = _copy_tree(source, pad / "copy")
+    policy = _copy_policy((source,), delegated_non_git_copy_holds_unreadable=True)
+
+    result = _pass(root, policy=lambda: policy)
+
+    assert (copy / "payload").exists(), "a skipped arm takes nothing"
+    assert result.copy_skipped == "holds unreadable"
+    assert result.copy_candidates == 0
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), holds=None, now=NOW
+    )
+    assert report.skipped == "holds unreadable" and report.candidates == []
+
+
+def test_a_sub_threshold_parent_is_descended_into(root: Path) -> None:
+    """The measured shape: the copy sits under a small run dir (``r3/normal-prev``)."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "nestedrun")
+    run = pad / "r3"  # a few bytes of artifacts, far below the 50 MiB floor
+    run.mkdir()
+    (run / "notes.md").write_text("run artifacts\n")
+    copy = _copy_tree(source, run / "normal-prev")
+
+    result = _pass(root, policy=_copy_provider(source))
+
+    assert not (copy / "payload").exists()
+    assert result.copy_reclaimed_bytes > 0

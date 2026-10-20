@@ -35,7 +35,6 @@ from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     TeamEditFields,
     TeamMember,
-    TeamRegistry,
     TeamRegistryLockTimeout,
     TeamRegistryRecoveryError,
     display_form,
@@ -283,9 +282,18 @@ def _overrides_refusal() -> str:
     )
 
 
-def _registry(context: ToolContext | None) -> TeamRegistry | None:
+def _registry(context: ToolContext | None) -> Any | None:
+    """The session's team authority, duck-typed.
+
+    A session holds a COMPOSITE over its scoped store and the global one
+    (LOH-9), so an ``isinstance(TeamRegistry)`` gate would answer "no registry"
+    in every session while the tool was still advertised. The two methods this
+    module calls on it are the contract; anything answering them is a registry.
+    """
     raw = getattr(context, "team_registry", None) if context else None
-    return raw if isinstance(raw, TeamRegistry) else None
+    if raw is None or not hasattr(raw, "list_teams") or not hasattr(raw, "get_team_by_name"):
+        return None
+    return raw
 
 
 def _row(team: Any, *, context: ToolContext | None = None) -> str:

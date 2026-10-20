@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
 
 __all__ = [
+    "CONVERSATION_ID_PATTERN",
     "SCREENING_CATEGORIES",
     "ACK_TARGETS",
     "AckTarget",
@@ -39,6 +40,14 @@ __all__ = [
     "project_inbox_page",
     "project_message_ref",
 ]
+
+#: The minted conversation-id family: ``bcv_`` + 8..64 lowercase base36 chars.
+#: ONE definition shared by the desktop route guard (S-RSA-5) and the agent
+#: tool: both interpolate a caller-supplied id into an upstream path, so a
+#: second copy is a drift risk, not a style choice. Kept here (not in the
+#: route module) because this module has no httpx/server imports.
+CONVERSATION_ID_PATTERN = r"^bcv_[0-9a-z]{8,64}$"
+
 
 #: §6.2's closed ack states for ONE recipient advancing their own delivery:
 #: unread→read (with an allow verdict) or unread/held→blocked (with a reject
