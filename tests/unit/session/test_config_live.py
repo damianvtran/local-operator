@@ -793,8 +793,9 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # ``TeamBridgeSettings.from_config`` (the normalising reader IS what makes
     # a stored value consumable, so the reader is what must move), never the
     # raw document. The CI honesty test failed by name without these:
-    # "LIVE sections with no live-apply probe: ['team_bridge']".
-    "team_bridge.enabled": (False, lambda s, w: _bridge_settings().enabled),
+    # "LIVE sections with no live-apply probe: ['team_bridge']". The shipped
+    # default is OFF (consent hold), hence the probe value is True.
+    "team_bridge.enabled": (True, lambda s, w: _bridge_settings().enabled),
     "team_bridge.session": (
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,

@@ -7,9 +7,10 @@ from local_operator.team_bridge import settings as tb
 
 def test_defaults_when_the_section_is_absent():
     values = tb.TeamBridgeSettings.from_values({})
-    # The opt-out default: an absent key means ON. Everything that actually
-    # gates a run (eligibility, consent, launch) is server-side.
-    assert values.enabled is True
+    # The consent hold: an absent key means OFF until a consent version with
+    # opt-out copy is served and accepted. Everything that actually gates a run
+    # (eligibility, consent, launch) is server-side too.
+    assert values.enabled is False
     assert values.onboarding == ""
     assert values.session == ""
     assert values.default_enrollment == {}
@@ -35,15 +36,14 @@ def test_reads_from_a_nested_config_document():
 def test_untrusted_values_normalise_fail_closed():
     """A hand-edited value must read as the shipped default, never crash.
 
-    ``enabled``: a non-bool in a PRESENT value reads as OFF — the ON default
-    writes consent upstream, so an unreadable value must not consent. Absence
-    is the shipped default (ON); the key that turns it off is a real ``false``.
-    ``onboarding``: anything but ``seen`` reads as "not dismissed", which
-    allows the one-time notice to show again rather than suppressing it.
-    ``session``: a non-string (including a list from the key's earlier draft
-    shape) reads as "none designated" — wrongly naming a wake destination is
-    worse than naming none. ``default_enrollment``: only ``done`` counts, so a
-    typo cannot suppress the one default consent write.
+    ``enabled``: a non-bool in a PRESENT value reads as OFF; absence is the
+    shipped default (also OFF during the consent hold), and only a real ``true``
+    opts this machine in. ``onboarding``: anything but ``seen`` reads as "not
+    dismissed", which allows the one-time notice to show again rather than
+    suppressing it. ``session``: a non-string (including a list from the key's
+    earlier draft shape) reads as "none designated" — wrongly naming a wake
+    destination is worse than naming none. ``default_enrollment``: only
+    ``done`` counts, so a typo cannot turn a stored marker into authority.
     """
 
     values = tb.TeamBridgeSettings.from_values(
@@ -61,12 +61,11 @@ def test_untrusted_values_normalise_fail_closed():
     assert values.session == ""
     assert values.default_enrollment == {}
 
-    # A present-but-unreadable value FAILS CLOSED: the ON default performs a
-    # consent write, so a value the reader cannot parse must not be the thing
-    # that consents. Absence is the shipped default (ON).
+    # A present-but-unreadable value never reads as a coerced ON; only an
+    # explicit real bool does. Absence is the shipped default (OFF).
     assert tb.TeamBridgeSettings.from_values({"team_bridge": {"enabled": "false"}}).enabled is False
     assert tb.TeamBridgeSettings.from_values({"team_bridge": {"enabled": None}}).enabled is False
-    assert tb.TeamBridgeSettings.from_values({}).enabled is True
+    assert tb.TeamBridgeSettings.from_values({}).enabled is False
 
 
 def test_the_default_enrollment_marker_is_per_account(tmp_path):
