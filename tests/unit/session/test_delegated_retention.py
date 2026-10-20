@@ -3015,6 +3015,75 @@ def test_candidates_are_recursive_and_the_largest_provable_subtree_wins(root: Pa
     assert result.copy_reclaimed_bytes > 0
 
 
+def test_an_evidence_named_refused_segment_is_reached_by_the_arm(root: Path) -> None:
+    """The gate matches the walk: ``evidence-build`` is kept but DESCENDED into."""
+    source = _published_source(root)
+    pad = _kept_pad(root, "evidencecopy")
+    copy = _copy_tree(source, pad / "evidence-build" / "base-repo")
+    from local_operator.scratchpad import _is_refused_segment
+
+    assert _is_refused_segment("evidence-build"), "the fixture must be a refused name"
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+    rows = {row.path: row for row in report.candidates}
+    row = rows["evidencecopy/scratchpad/evidence-build/base-repo"]
+    assert row.proof_ok and row.would_reclaim
+    assert report.count == 1, "the copy under the evidence name is a top-level attempt"
+
+    result = _pass(root, policy=_copy_provider(source))
+    assert not (copy / "payload").exists()
+    assert result.copy_candidates == 1 and result.copy_reclaimed_bytes > 0
+
+
+def test_a_missing_store_is_an_honest_empty_report(root: Path) -> None:
+    """A fresh install has no ``sessions/``: empty report, not exit 3 (review 2)."""
+    missing = root / "fresh-install" / "sessions"
+
+    report = dr.scan_non_git_copies(missing, min_store_bytes=1)
+
+    assert report.candidates == [] and report.errors == 0
+    assert report.skipped == "no store"
+
+
+def test_an_unreadable_pad_is_counted_as_an_error(root: Path) -> None:
+    """A pad the scan cannot list must be loud, not a silent zero (review 3)."""
+    pad = _kept_pad(root, "unreadablepad")
+    (pad / "copy").mkdir()
+    (pad / "copy" / "payload").write_bytes(b"x" * 64)
+    os.chmod(pad, 0o000)
+    try:
+        report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    finally:
+        os.chmod(pad, 0o755)
+
+    assert report.errors == 1
+    assert any(row.error and "scratchpad cannot be read" in row.reason for row in report.candidates)
+
+
+def test_a_non_delegated_proof_is_not_reported_as_waiting(root: Path) -> None:
+    """Waiting means the PASS would act once the window passes (review 4)."""
+    source = _published_source(root)
+    session = root / "sessions" / "usercopy"
+    session.mkdir()
+    (session / "transcript.jsonl").write_text('{"type": "message"}\n')
+    os.utime(session / "transcript.jsonl", (NOW - 1 * 3600, NOW - 1 * 3600))
+    pad = session / "scratchpad"
+    pad.mkdir()
+    _copy_tree(source, pad / "copy")
+
+    report = dr.scan_non_git_copies(
+        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
+    )
+
+    row = next(row for row in report.candidates if row.session == "usercopy")
+    assert row.proof_ok is True
+    assert row.waiting is False
+    assert row.reason == "not a delegated session"
+    assert report.within_window_sessions == 0
+
+
 def test_the_proof_is_a_union_across_reference_repositories(root: Path) -> None:
     """A file proves when ANY reference has it: one repo per half is enough."""
     first = _copy_reference(root, "first")

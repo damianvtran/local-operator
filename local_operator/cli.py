@@ -5059,12 +5059,14 @@ def _print_non_git_copy_report(root: Path, policy: Any, *, json_mode: bool) -> i
         f"~{_format_bytes(report.candidate_bytes)}"
     )
     print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
-        f"    would reclaim now: {report.reclaimable_sessions} session(s), "
+        f"    would reclaim now: {report.reclaimable_sessions} session(s) "
+        f"({sum(1 for row in report.candidates if row.would_reclaim)} candidate(s)), "
         f"~{_format_bytes(report.reclaimable_bytes)}"
     )
     print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         f"    waiting for the {report.window_hours:g}h window: "
-        f"{report.within_window_sessions} session(s), "
+        f"{report.within_window_sessions} session(s) "
+        f"({sum(1 for row in report.candidates if row.waiting)} candidate(s)), "
         f"~{_format_bytes(report.within_window_bytes)}"
     )
     print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
@@ -5090,19 +5092,17 @@ def _print_non_git_copy_report(root: Path, policy: Any, *, json_mode: bool) -> i
         )
     else:
         print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
-            "  operator holds: none configured "
-            "(session.cleanup.delegated.non_git_copies.hold_sessions)"
+            "  operator holds: none configured (add session ids to "
+            "session.cleanup.delegated.non_git_copies.hold_sessions before enabling)"
         )
-    if report.skipped == "no reference repository":
+    if report.skipped == "no store":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  no session store yet: nothing to reclaim"
+        )
+    elif report.skipped == "no reference repository":
         print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
             "  no reference repository: name one with --reference-repo or "
             "session.cleanup.delegated.non_git_copies.reference_repos"
-        )
-    elif report.skipped == "holds unreadable":
-        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
-            "  holds unreadable: fix "
-            "session.cleanup.delegated.non_git_copies.hold_sessions before trusting "
-            "this report"
         )
     # The rows an operator acts on come first: the provable ones (reclaimable
     # now, waiting for the window, or held), the scan errors, then the largest
@@ -5152,11 +5152,9 @@ def _print_non_git_copy_report(root: Path, policy: Any, *, json_mode: bool) -> i
         print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
             f"  {verb:<14} {row.session:<12} {name:<{name_width}} {size:>8} ({tail})"
         )
-    hidden = len(report.candidates) - min(len(shown), _COPY_REPORT_TEXT_ROWS)
-    if hidden:
+    if len(shown) > _COPY_REPORT_TEXT_ROWS:
         print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
-            f"  ... and {hidden} more row(s) (--json lists every row; "
-            "nested refusals are not shown here)"
+            f"  {_COPY_REPORT_TEXT_ROWS} of {len(shown)} rows shown " "(--json lists every row)"
         )
     return 3 if report.errors else 0
 
