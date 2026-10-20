@@ -3323,6 +3323,101 @@ def effective_identity_for(
     return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
 
 
+def effort_displacement(selected: Any, effective: Any, chosen: str | None = None) -> dict[str, str]:
+    """The chosen reasoning level that is NOT in force on the serving model.
+
+    A fallback may serve at a level other than the one the conversation chose,
+    for two different reasons that read identically on a status band and must
+    not be silent either way: the chain entry pins a level of its own (the
+    operator's config says the rescue route runs at ``high``), or the target's
+    ladder cannot express the choice and ``spec_for_target`` clamps it. In both
+    cases the band's effort segment correctly names the level IN FORCE — that
+    is its job — so the divergence has to be stated somewhere else or the user
+    watches ``max`` become ``high`` with no explanation.
+
+    ``chosen`` is the CONVERSATION's choice (``Session.chosen_effort``), passed
+    separately because the selected spec may be a route that cannot express it
+    and then carries ``None``/a clamp itself. ``None`` means "read it off the
+    selected spec", which is the honest answer for an ownerless frame (a cold
+    catalogue row) that has no session to ask.
+
+    Returns ``{}`` when there is nothing to report: no level was chosen (a
+    model's seed is not a choice), or the serving spec is on exactly the chosen
+    level. Otherwise a five-key statement, all short strings:
+
+    * ``chosen`` — the level the conversation owns;
+    * ``effective`` — the level in force on the serving spec, ``""`` when that
+      spec exposes no level (the provider's own default, or no effort knob);
+    * ``selected`` / ``serving`` — ``provider/model_id`` labels for the two;
+    * ``note`` — the sentence a surface renders, composed HERE so the TUI, the
+      desktop strip and any other client cannot word one fact three ways.
+
+    The sentence names the level in force first and then the level that comes
+    back, which is the pair a user needs to decide whether to wait or re-pick:
+    ``Effort: high on anthropic/claude-sonnet-5-5; max resumes on
+    deepseek/deepseek-flash.`` Design review round 1 (D1) preferred this to the
+    first wording's ``returns with``, whose missing subject left the reader to
+    infer that the MODEL returns rather than the effort. A same-model route
+    (the quota walk can pin one model at a lower level) reads ``Effort: medium
+    on openai/gpt-6.1-sol; you chose high.``
+    """
+
+    def _level(spec: Any) -> str:
+        return str(getattr(spec, "reasoning_effort", "") or "").strip().lower()
+
+    def _label(spec: Any) -> str:
+        provider = str(getattr(spec, "provider", "") or "")
+        model_id = str(getattr(spec, "model_id", "") or "")
+        return f"{provider}/{model_id}" if provider and model_id else model_id
+
+    # ``in_force`` is the LEVEL; the ``effective`` SPEC stays the parameter —
+    # shadowing it with its own level was a real bug here (the first draft
+    # reassigned it before ``_label`` read the spec and composed an empty
+    # serving label, so every displacement answered "nothing to report").
+    in_force = _level(effective)
+    if chosen is None:
+        chosen_level = _level(selected)
+        # A SEED IS NOT A CHOICE. ``build_model_spec`` sets both fields to the
+        # same value and they diverge only when a level is picked (the
+        # documented contract ``_carried_effort`` reads as "a choice"). Without
+        # this guard a fallback would report the boot model's own seed as a
+        # preference the user never expressed — inventing a level and then
+        # mourning it.
+        chosen_default = (
+            str(getattr(selected, "reasoning_default_effort", "") or "").strip().lower()
+        )
+        if not chosen_level or chosen_level == chosen_default:
+            return {}
+    else:
+        # Callers that hold the session's own choice (the journal-backed
+        # ``Session.chosen_effort``) have already done that discrimination; an
+        # explicit empty value is "nothing chosen", never "read the spec".
+        chosen_level = str(chosen).strip().lower()
+        if not chosen_level:
+            return {}
+    if chosen_level == in_force:
+        return {}
+    selected_label = _label(selected)
+    serving_label = _label(effective)
+    if not serving_label:
+        return {}
+    level_in_force = in_force or "the model's own default"
+    if serving_label != selected_label:
+        note = (
+            f"Effort: {level_in_force} on {serving_label}; "
+            f"{chosen_level} resumes on {selected_label}."
+        )
+    else:
+        note = f"Effort: {level_in_force} on {serving_label}; you chose {chosen_level}."
+    return {
+        "chosen": chosen_level,
+        "effective": in_force,
+        "selected": selected_label,
+        "serving": serving_label,
+        "note": note,
+    }
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -3396,6 +3491,19 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: The chosen reasoning level a fallback is NOT honouring, or ``{}``.
+    #:
+    #: ADDITIVE, and the sibling of ``selected_model``/``effective_model``
+    #: rather than a fourth way to read them: the two specs already carry the
+    #: two levels, and this field exists because the DIFFERENCE is the fact a
+    #: user needs and no client could state it honestly without re-deriving
+    #: which of the two is a choice (see :func:`effort_displacement`). The
+    #: sentence is composed server-side so every surface says one thing.
+    #:
+    #: Bounded by its shape: five short strings, replaced (never appended) on
+    #: every refresh — the same classification ``effective_identity`` carries.
+    #: ``{}`` is the ordinary value and also what an older backend omits.
+    effort_displacement: dict[str, str] = Field(default_factory=dict)
     #: "Can the model this session is on actually run here" — see
     #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
     #: publish it, or one whose store could not be read); old clients ignore
@@ -7399,6 +7507,16 @@ class FrontendStateStore:
             ),
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
+            ),
+            # The DIFFERENCE between those two, stated once and in words.
+            # Both specs are already on the state, so this is not a second
+            # source of truth: it is the answer to "is the level the user
+            # chose the level now serving", which a client could only derive
+            # by knowing that ``reasoning_effort != reasoning_default_effort``
+            # is this codebase's test for a CHOICE (see ``_carried_effort``).
+            # That knowledge belongs here, not in three renderers.
+            effort_displacement=effort_displacement(
+                selected, effective, getattr(session, "chosen_effort", None)
             ),
             # A fallback delta must not carry the former primary's accusation.
             # The owner access publisher will replace it with the serving claim.
