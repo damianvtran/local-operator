@@ -39,6 +39,33 @@ _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: Suffix distinguishing the en-only context sidecar from a namespace file.
 CONTEXT_SUFFIX = ".context.json"
 
+#: Backend-owned namespaces a client is allowed to fetch. RFC §2.1: `wire.*`
+#: is core-owned and served; every client-owned namespace (`ui.*`, `tui.*`,
+#: `relay.*`, ...) bundles with its own client, so serving it here would create
+#: a second source of truth for strings that client already ships.
+WIRE_NAMESPACE_PREFIX = "wire."
+
+#: Wire namespaces excluded from the EAGER per-locale bundle and served on
+#: demand through the existing per-namespace route instead.
+#:
+#: The set is a deliberate, reviewed policy rather than a size heuristic for
+#: two reasons. (1) `wire.settings` is the settings registry's label/help copy
+#: (804 keys, 80,658 B in `en`, 133,641 B in `hi`); the desktop settings surface
+#: receives those as plain `label`/`help` strings from `/v1/settings`, not as
+#: `{code, params, text}` envelope identities, so no envelope renderer needs
+#: them at startup. (2) Re-splitting the file into child namespaces would move
+#: already-audited translated content into new namespaces and invalidate the
+#: translation ledger's per-namespace `source_sha256` records; deferral keeps
+#: that audit trail intact while removing the same bytes from the eager load.
+#: A per-namespace ceiling test (`tests/unit/i18n/test_catalogue_sizes.py`)
+#: asserts this set exactly, so a new large namespace cannot join it silently.
+DEFERRED_NAMESPACES: dict[str, str] = {
+    "wire.settings": (
+        "settings registry labels/help, consumed as plain strings by the "
+        "settings surface; no desktop envelope identity uses this namespace"
+    ),
+}
+
 
 class CatalogueNotFound(KeyError):
     """No catalogue file exists for the requested (locale, namespace)."""
@@ -143,6 +170,63 @@ def load_catalogue(locale: str, namespace: str) -> dict[str, str]:
                 f"{locale}/{namespace}: message {key!r} must map a string id to a string"
             )
     return data
+
+
+def wire_namespaces(locale: str) -> tuple[str, ...]:
+    """The ``wire.*`` namespaces a locale carries, sorted.
+
+    Deliberately scoped to :data:`WIRE_NAMESPACE_PREFIX`: the per-locale bundle
+    serves the backend-owned set only, and the client-owned namespaces that ship
+    alongside it in the same package are not this route's to serve.
+    """
+    return tuple(
+        namespace
+        for namespace in namespaces(locale)
+        if namespace.startswith(WIRE_NAMESPACE_PREFIX)
+    )
+
+
+def wire_bundle(locale: str) -> dict[str, Any]:
+    """Every ``wire.*`` namespace of one locale, ready for one client fetch.
+
+    The eager part is the flattened message map: keys already repeat their
+    namespace, so merging the files cannot collide (the checker guarantees the
+    prefixes). Namespaces in :data:`DEFERRED_NAMESPACES` are described in
+    ``deferred`` but their messages are omitted; a client fetches one later with
+    the per-namespace route when a surface actually needs it.
+
+    ``content_sha256`` is the bundle's cache identity: it covers the locale and
+    every wire namespace's committed-file hash, eager AND deferred, so a change
+    to either half changes the validator. It is a digest of the hashes, not of
+    a re-serialised map, keeping the same raw-bytes rule as the file hashes.
+    """
+    digest = hashlib.sha256()
+    digest.update(locale.encode("utf-8") + b"\n")
+    eager: dict[str, str] = {}
+    eager_hashes: dict[str, str] = {}
+    deferred: list[dict[str, Any]] = []
+    for namespace in wire_namespaces(locale):
+        sha = catalogue_sha256(locale, namespace)
+        digest.update(f"{namespace}\t{sha}\n".encode("utf-8"))
+        if namespace in DEFERRED_NAMESPACES:
+            deferred.append(
+                {
+                    "namespace": namespace,
+                    "content_sha256": sha,
+                    "bytes": len(catalogue_bytes(locale, namespace)),
+                    "keys": len(load_catalogue(locale, namespace)),
+                }
+            )
+            continue
+        eager_hashes[namespace] = sha
+        eager.update(load_catalogue(locale, namespace))
+    return {
+        "locale": locale,
+        "messages": eager,
+        "namespaces": eager_hashes,
+        "deferred": deferred,
+        "content_sha256": digest.hexdigest(),
+    }
 
 
 def context(locale: str, namespace: str) -> dict[str, dict[str, Any]]:
