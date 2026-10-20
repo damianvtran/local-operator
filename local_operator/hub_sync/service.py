@@ -48,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
+from local_operator.config_writer import config_write_lock
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
@@ -1898,6 +1899,48 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
 # -- links inventory (B5, new capability) ------------------------------------------------
 
 
+def _refresh_config(ctx: HubSyncContext) -> None:
+    """Re-read config.yml into ``ctx.config_manager``: best-effort, lock-ordered.
+
+    WHY IT IS NEEDED. ``ManagedSkillStorage._finalize`` materializes a link's
+    initial policy through a SHORT-LIVED ``ConfigManager`` it builds for itself,
+    so the manager this context carries -- the ONE ``app.state`` hands to every
+    route, including the inventory and the policy CAS -- keeps its pre-write
+    snapshot. Projecting a row from that answered a Download pull
+    (``subscribe: false``) with ``subscribe: true``, and served a policy revision
+    computed over the stale value, which no writer could ever match: the
+    operator's first edit 409'd ``policy-revision-changed`` on a link nothing had
+    touched. The install path and the published-skill path both commit a policy
+    this way, and both refresh through here.
+
+    BEST-EFFORT (review round 1, B1). This runs AFTER a transaction committed.
+    ``reload`` parses config.yml, so an OSError or a decode error can raise, and
+    letting that escape turns an install whose content and baseline are already
+    on disk into a 500 the client cannot read as "done". A failed refresh logs
+    and keeps the previous snapshot: the disk stays the authority, and the next
+    successful refresh (the replay arm calls this too, so a retry converges)
+    repairs the process view. This must never raise.
+
+    LOCK-ORDERED (review round 1, B2). ``set_config_value`` holds
+    ``config_write_lock`` across its read-merge-write AND its ``self.config =
+    candidate``. A refresh that read the file outside that lock and assigned
+    inside it could publish the older snapshot AFTER a concurrent writer
+    published the newer one, leaving memory behind disk for any config key --
+    the same class of bug this helper exists to remove. Taking the same lock
+    around read-and-assign orders them; the lock is re-entrant per thread, so a
+    caller that already holds it cannot deadlock.
+
+    NOT INSIDE ``links_snapshot``: that function is a pure projection of the
+    manager it is given and runs on every inventory read, so a reload there
+    would re-read the file for every caller to cover the two writers above.
+    """
+    try:
+        with config_write_lock(ctx.config_dir):
+            ctx.config_manager.reload()
+    except Exception:  # noqa: BLE001 - a refresh must never fail an answered write
+        logger.warning("could not refresh the process config view", exc_info=True)
+
+
 def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -> dict[str, Any]:
     """The ``GET /v1/desktop/hub/links`` payload: EVERY link, healthy or not.
 
@@ -2571,6 +2614,15 @@ def install_skill(
         #     not a completed install -- an explicit pull IS the install it was
         #     waiting for, so it falls through to the content transaction below
         #     and carries the existing identity, scope and policy into it.
+        #
+        #     Refreshed FIRST: 7a's recovery (and any earlier attempt that
+        #     committed content before dying) materializes its policy through the
+        #     storage's own manager, so a replay that projected from the stale
+        #     one would answer the creation default and an unreproducible
+        #     revision -- the reported defect reached through the replay path
+        #     (review round 1, B1/M1). A retry therefore converges to the policy
+        #     the crashed attempt persisted.
+        _refresh_config(ctx)
         resuming_absent: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
@@ -2835,8 +2887,9 @@ def install_skill(
         #     manager, so a reload in the reader would re-read the file on every
         #     inventory call to cover one writer. ``installed`` is only true on a
         #     committed transaction, so a refused install leaves the manager
-        #     alone (its staged grant was already reverted through it above).
-        ctx.config_manager.reload()
+        #     alone (its staged grant was already reverted through it above),
+        #     and a failed refresh can never fail the answered pull.
+        _refresh_config(ctx)
 
         # 8. The response the desktop contract expects: the directional report
         #    the UI reads (applied + link_id + direction) and the ordinary
@@ -3630,8 +3683,9 @@ def _materialize_published_skill(
     # The managed transaction writes policy through its OWN manager instance; the
     # request's manager still holds the pre-write snapshot, and reading the link
     # row from it would report a creation default instead of what was stored.
-    # Reload before projecting the row so the answer is the persisted policy.
-    ctx.config_manager.reload()
+    # Refresh (best-effort, lock-ordered) before projecting the row so the answer
+    # is the persisted policy.
+    _refresh_config(ctx)
     snapshot = links_snapshot(ctx)
     row = next((link for link in snapshot["links"] if link["link_id"] == identity.link_id), None)
     if row is None:

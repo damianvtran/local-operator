@@ -318,6 +318,103 @@ async def test_a_pull_serves_the_policy_revision_the_next_edit_expects(api) -> N
     assert patched.json()["result"]["policy"]["subscribe"] is True
 
 
+async def test_a_failed_refresh_never_fails_the_pull_and_the_retry_converges(
+    api, monkeypatch
+) -> None:
+    """The refresh is best-effort, and the replay arm converges (review B1).
+
+    ``reload`` parses config.yml, so it can raise (permissions, I/O, a decode
+    error). Letting that escape turns an install whose content and baseline are
+    already on disk into a 500 the client cannot read as "done" -- and the retry
+    then returned through the replay arm, which projected the pre-write snapshot:
+    the reported defect, reached through its own failure path. Both halves are
+    pinned here: the failed refresh does not fail the answer, and the retry's
+    replay row is refreshed.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    manager = holder["manager"]
+    real = manager.reload
+    calls: list[int] = []
+
+    def failing_once():
+        if not calls:
+            calls.append(1)
+            raise OSError("config.yml is momentarily unreadable")
+        return real()
+
+    monkeypatch.setattr(manager, "reload", failing_once)
+
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert first.status_code == 200, first.text
+    # The install's effects are on disk even though the process view could not be
+    # refreshed, and the failed refresh is the ONLY thing that failed.
+    assert (root / "skills" / ALIAS / "SKILL.md").exists()
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    assert prov.read_baseline(root, "skill", local_id) is not None
+    persisted = pol.read_policy(
+        read_config_values(root) or {}, linked_identity(first.json()["result"]["link"])
+    )
+    assert persisted.policy.subscribe is False
+
+    # A retry is a REPLAY (the baseline is present), and it must answer the policy
+    # the first attempt persisted rather than the creation default.
+    retry = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert retry.status_code == 200, retry.text
+    row = retry.json()["result"]["link"]
+    assert row["policy"]["subscribe"] is False
+    assert row["policy"]["revision"] == persisted.revision
+
+
+async def test_a_recovered_install_replays_the_policy_it_persisted(api, monkeypatch) -> None:
+    """Recovery finalizes a policy through its own manager; the replay refreshes (M1).
+
+    An install that commits content and dies before ``_finalize`` writes the
+    baseline is settled by the NEXT pull's ``storage.recover()``, which
+    materializes the policy through the storage's own ``ConfigManager``. The
+    request then leaves through the replay arm, so without a refresh there it
+    answered the creation default (``subscribe: true``) and a revision no writer
+    could match -- the same defect through the recovery path.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    from local_operator.hub_sync import skill_storage
+
+    real = skill_storage.write_baseline
+    calls: list[int] = []
+
+    def failing_once(config_dir, record):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("simulated finalize crash")
+        return real(config_dir, record)
+
+    monkeypatch.setattr(skill_storage, "write_baseline", failing_once)
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert first.status_code != 200, first.text
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    assert (root / "skills" / ALIAS / "SKILL.md").exists()
+    assert prov.read_baseline(root, "skill", local_id) is None
+
+    monkeypatch.setattr(skill_storage, "write_baseline", real)
+    retry = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert retry.status_code == 200, retry.text
+    result = retry.json()["result"]
+    assert result["reports"][0]["applied"] is False  # recovered, not re-installed
+    row = result["link"]
+
+    stored = pol.stored_link_policy(read_config_values(root) or {}, row["link_id"])
+    assert stored is not None and stored.subscribe is False
+    assert row["policy"]["subscribe"] is False
+    assert (
+        row["policy"]["revision"]
+        == pol.read_policy(read_config_values(root) or {}, linked_identity(row)).revision
+    )
+
+
 async def test_an_unversioned_renderer_source_is_completed_not_refused(api) -> None:
     """The UI sends VITE_RADIENT_SERVER_BASE_URL verbatim, without `/v1`.
 
