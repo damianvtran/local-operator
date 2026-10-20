@@ -28,7 +28,7 @@
   "wire.remote_compute.only_with": "{flag} применяется только вместе с --remote.",
   "wire.remote_compute.replayed": "Ключ идемпотентности совпал с более ранней отправкой, поэтому это удалённый запуск {run_id}, а новый запуск не создавался.",
   "wire.remote_compute.retrying": "Radient сообщил об ошибке этого запуска и повторит его, поэтому слежение продолжается.",
-  "wire.remote_compute.run_identity_mismatch": "Radient ответил за удалённый запуск {answered}, а не за запрошенный запуск {asked_for}, поэтому этот ответ нельзя выдать за состояние того запуска.",
+  "wire.remote_compute.run_identity_mismatch": "Radient вернул удалённый запуск {answered}, а не запрошенный запуск {asked_for}, поэтому этот ответ нельзя выдать за состояние того запуска.",
   "wire.remote_compute.status_line": "статус: {status}",
   "wire.remote_compute.status_network_matched": "сеть проверена: запуск относится к {network_id}, сети этого устройства.",
   "wire.remote_compute.status_network_mismatch": "сеть проверена: запуск относится к {network_id}, а это не сеть этого устройства.",

@@ -28,7 +28,7 @@
   "wire.remote_compute.only_with": "{flag} ne s’applique qu’avec --remote.",
   "wire.remote_compute.replayed": "La clé d’idempotence correspond à une soumission antérieure : il s’agit donc de l’exécution distante {run_id}, et aucune nouvelle exécution n’a été créée.",
   "wire.remote_compute.retrying": "Radient a signalé une erreur pour cette exécution et va la réessayer ; le suivi continue.",
-  "wire.remote_compute.run_identity_mismatch": "Radient a répondu pour l’exécution distante {answered}, et non pour l’exécution {asked_for} demandée : cette réponse ne peut donc pas être présentée comme l’état de cette exécution.",
+  "wire.remote_compute.run_identity_mismatch": "Radient a répondu avec l’exécution distante {answered}, et non avec l’exécution {asked_for} demandée : cette réponse ne peut donc pas être présentée comme l’état de cette exécution.",
   "wire.remote_compute.status_line": "statut : {status}",
   "wire.remote_compute.status_network_matched": "réseau vérifié : cette exécution appartient à {network_id}, le réseau de cet appareil.",
   "wire.remote_compute.status_network_mismatch": "réseau vérifié : cette exécution appartient à {network_id}, et non au réseau de cet appareil.",
