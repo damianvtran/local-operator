@@ -1,0 +1,16 @@
+# Real OperatorApp keyboard probe — source 956681f13e (source files identical at capture)
+# env -u NO_COLOR TERM=xterm-256color PYTHONPATH=. <venv>/bin/python scripts/run_bounded.py --timeout 300 -- <venv>/bin/python <scratch>/tag_keyboard_probe.py
+# The same assertions are pinned by tests/unit/tui/test_tag_command.py::test_tag_keyboard_arrows_enter_escape_and_inline_draft
+[run_bounded] memory budget 5307 MiB (inherited); sampled owned child group only
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+open: True text: '/tag '
+rows: ['Review', 'Ops']
+arrow: 'Review' -> 'Ops'
+store after arrow: {'tags': [], 'primary': None, 'revision': 0}
+escape open: False text: '/tag '
+store after escape: {'tags': [], 'primary': None, 'revision': 0}
+enter assignment: {'tags': ['03461bd8a5'], 'primary': '03461bd8a5', 'revision': 1}
+inline after enter text: 'keep this draft /tag ' open: True
+inline after escape text: 'keep this draft /tag ' open: False
+registry: ['Review', 'Ops']
+[run_bounded] python rc=0 wall=3.8s
