@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
@@ -36,17 +37,21 @@ from local_operator.remote_compute.client import (
     is_terminal,
     new_idempotency_key,
     run_id,
+    run_network,
     run_status,
 )
 from local_operator.remote_compute.errors import (
     CapacityUnavailable,
     IdempotencyConflict,
     InsufficientCredit,
+    InvalidIdempotencyKey,
     InvalidRequest,
+    NetworkMismatch,
     RemoteComputeError,
     RunNotFound,
     Unreachable,
 )
+from local_operator.remote_compute.request import is_commit_sha, is_repo_url
 from local_operator.tunnels.config import DEFAULT_API_URL
 from local_operator.tunnels.errors import LoginRequired
 
@@ -132,7 +137,7 @@ def request_for(mesh_root: Path) -> Any:
         fields: dict[str, Any] = {
             "prompt": "fix the flaky test",
             "repo_url": "https://example.invalid/repo.git",
-            "repo_sha": "deadbeef",
+            "repo_sha": SHA,
             "hosting": "openai",
             "model": "gpt-5",
         }
@@ -148,8 +153,22 @@ def _client(origin: _Origin, credential: int) -> tuple[RemoteComputeClient, http
     return RemoteComputeClient(http, credential_id=credential), http
 
 
-def _run(run_id_value: str = "run_1", status: str = "queued", **extra: Any) -> dict[str, Any]:
-    return {"id": run_id_value, "status": status, **extra}
+#: A full commit SHA: the contract's ``repo_sha`` is a commit, not a ref.
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _run(
+    run_id_value: str = "run_1",
+    status: str = "queued",
+    *,
+    network_id: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """A run as the server returns it; ``network_id`` is omitted unless given."""
+    payload: dict[str, Any] = {"id": run_id_value, "status": status, **extra}
+    if network_id is not None:
+        payload["network_id"] = network_id
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -161,11 +180,12 @@ def _run(run_id_value: str = "run_1", status: str = "queued", **extra: Any) -> d
 async def test_create_sends_the_contract_fields_and_the_tenant(
     credential: int, request_for: Any
 ) -> None:
-    origin = _Origin(httpx.Response(201, json={"result": _run()}))
+    expected = _run(network_id=request_for.record.network_id)
+    origin = _Origin(httpx.Response(201, json={"result": expected}))
     client, http = _client(origin, credential)
     async with http:
         created = await client.create_run(request_for(), idempotency_key="key-1")
-    assert created == _run()
+    assert created == expected
     (sent,) = origin.requests
     assert sent.method == "POST"
     assert str(sent.url) == DEFAULT_API_URL + RUNS_PATH
@@ -175,7 +195,7 @@ async def test_create_sends_the_contract_fields_and_the_tenant(
     assert body["network_id"] == request_for.record.network_id
     assert body["prompt"] == "fix the flaky test"
     assert body["repo_url"] == "https://example.invalid/repo.git"
-    assert body["repo_sha"] == "deadbeef"
+    assert body["repo_sha"] == SHA
     assert (body["hosting"], body["model"]) == ("openai", "gpt-5")
     assert (body["size"], body["max_hours"]) == ("m", 2.0)
     # Optional fields are OMITTED, not sent as null.
@@ -186,15 +206,16 @@ async def test_create_sends_the_contract_fields_and_the_tenant(
 async def test_a_bare_payload_is_accepted_as_well_as_the_envelope(
     credential: int, request_for: Any
 ) -> None:
-    origin = _Origin(httpx.Response(201, json=_run()))
+    bare = _run(network_id=request_for.record.network_id)
+    origin = _Origin(httpx.Response(201, json=bare))
     client, http = _client(origin, credential)
     async with http:
-        assert await client.create_run(request_for(), idempotency_key="k") == _run()
+        assert await client.create_run(request_for(), idempotency_key="k") == bare
 
 
 @pytest.mark.asyncio
 async def test_a_replay_returns_the_same_run(credential: int, request_for: Any) -> None:
-    replay = _run("run_7", "running")
+    replay = _run("run_7", "running", network_id=request_for.record.network_id)
     origin = _Origin(httpx.Response(201, json=replay), httpx.Response(201, json=replay))
     client, http = _client(origin, credential)
     async with http:
@@ -203,6 +224,69 @@ async def test_a_replay_returns_the_same_run(credential: int, request_for: Any) 
     assert first == second == replay
     assert origin.requests[0].headers["idempotency-key"] == "same"
     assert origin.requests[1].headers["idempotency-key"] == "same"
+
+
+@pytest.mark.asyncio
+async def test_a_run_from_another_network_is_refused(credential: int, request_for: Any) -> None:
+    """SE1 — the response's tenant is compared with the request's, not assumed."""
+    other = "n_" + "b" * 24
+    origin = _Origin(httpx.Response(201, json={"result": _run(network_id=other)}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(NetworkMismatch):
+            await client.create_run(request_for(), idempotency_key="k")
+
+
+@pytest.mark.asyncio
+async def test_a_run_without_a_network_id_is_a_mismatch(credential: int, request_for: Any) -> None:
+    """The field is in the contract, so its absence is a response we cannot verify."""
+    origin = _Origin(httpx.Response(201, json={"result": _run()}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(NetworkMismatch):
+            await client.create_run(request_for(), idempotency_key="k")
+
+
+@pytest.mark.asyncio
+async def test_a_poll_from_another_network_stops_a_watch(credential: int, request_for: Any) -> None:
+    """The watch names the network it follows, so a drifted poll is a failure."""
+    origin = _Origin(httpx.Response(200, json=_run("run_1", "running", network_id="n_" + "c" * 24)))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(NetworkMismatch):
+            await client.get_run("run_1", expected_network=request_for.record.network_id)
+
+
+@pytest.mark.asyncio
+async def test_a_poll_without_an_expected_network_is_not_checked(credential: int) -> None:
+    """``--remote-status`` names no network, so it takes the run as returned."""
+    origin = _Origin(httpx.Response(200, json=_run("run_1", "running")))
+    client, http = _client(origin, credential)
+    async with http:
+        assert await client.get_run("run_1") == _run("run_1", "running")
+
+
+@pytest.mark.asyncio
+async def test_a_run_carrying_its_own_result_field_is_not_unwrapped(
+    credential: int, request_for: Any
+) -> None:
+    """E1 — only an ENVELOPE is unwrapped, not any object with a ``result`` key."""
+    bare = _run(network_id=request_for.record.network_id, result="a run field of its own")
+    origin = _Origin(httpx.Response(201, json=bare))
+    client, http = _client(origin, credential)
+    async with http:
+        assert await client.create_run(request_for(), idempotency_key="k") == bare
+
+
+@pytest.mark.asyncio
+async def test_an_envelope_with_a_message_beside_the_result_still_unwraps(
+    credential: int, request_for: Any
+) -> None:
+    run = _run(network_id=request_for.record.network_id)
+    origin = _Origin(httpx.Response(201, json={"result": run, "message": "accepted"}))
+    client, http = _client(origin, credential)
+    async with http:
+        assert await client.create_run(request_for(), idempotency_key="k") == run
 
 
 @pytest.mark.asyncio
@@ -252,6 +336,18 @@ async def test_cancel_posts_to_the_cancel_path_and_is_idempotent(credential: int
         assert await client.cancel_run("run_3") == _run("run_3", "cancelled")
     assert str(origin.requests[0].url) == DEFAULT_API_URL + RUNS_PATH + "/run_3/cancel"
     assert origin.requests[0].method == "POST"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [httpx.Response(204), httpx.Response(200, content=b"")])
+async def test_a_bodiless_cancel_success_is_a_success(
+    credential: int, response: httpx.Response
+) -> None:
+    """E4 — the endpoint documents no body, so its absence is not malformed."""
+    origin = _Origin(response)
+    client, http = _client(origin, credential)
+    async with http:
+        assert await client.cancel_run("run_3") == {}
 
 
 @pytest.mark.asyncio
@@ -326,7 +422,9 @@ async def test_an_unparseable_success_body_is_a_typed_error(credential: int) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_transport_failure_is_unreachable_and_keeps_its_cause(credential: int) -> None:
+async def test_a_transport_failure_is_unreachable_without_a_chain(credential: int) -> None:
+    """SE2 — the httpx error is NOT chained: it carries the bearer header."""
+
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
@@ -334,7 +432,14 @@ async def test_a_transport_failure_is_unreachable_and_keeps_its_cause(credential
     async with http:
         with pytest.raises(Unreachable) as caught:
             await RemoteComputeClient(http, credential_id=credential).get_run("run_1")
-    assert isinstance(caught.value.__cause__, httpx.ConnectError)
+    assert caught.value.__cause__ is None
+    # The context is CUT, not merely unraised: a bare ``raise X`` would still
+    # print the httpx exception under `During handling of the above exception`.
+    assert caught.value.__suppress_context__ is True
+    rendered = "".join(
+        traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__)
+    )
+    assert "Bearer" not in rendered and "token-abc" not in rendered
 
 
 @pytest.mark.asyncio
@@ -405,8 +510,31 @@ async def test_create_refuses_anything_but_a_run_create_request(credential: int)
 def test_the_key_must_be_one_to_128_bytes() -> None:
     assert check_idempotency_key("a") == "a"
     assert check_idempotency_key("x" * MAX_IDEMPOTENCY_KEY_BYTES)
-    with pytest.raises(ValueError):
+
+
+def test_an_empty_key_is_refused_with_its_own_reason() -> None:
+    """E2 — refused, never silently replaced by a fresh key."""
+    with pytest.raises(InvalidIdempotencyKey) as caught:
         check_idempotency_key("")
+    assert caught.value.reason == "empty"
+
+
+def test_an_oversize_key_names_the_byte_bound() -> None:
+    with pytest.raises(InvalidIdempotencyKey) as caught:
+        check_idempotency_key("x" * (MAX_IDEMPOTENCY_KEY_BYTES + 1))
+    assert (caught.value.reason, caught.value.max_bytes) == ("too_long", MAX_IDEMPOTENCY_KEY_BYTES)
+
+
+@pytest.mark.parametrize("key", ["k\n", "k\t", "ké", "\x7f"])
+def test_a_key_outside_printable_ascii_is_refused(key: str) -> None:
+    """E3 — 0x20..0x7e only, and BYTES: the two rules are separate."""
+    with pytest.raises(InvalidIdempotencyKey) as caught:
+        check_idempotency_key(key)
+    assert caught.value.reason == "not_printable"
+
+
+def test_a_key_at_the_top_of_the_printable_range_is_accepted() -> None:
+    assert check_idempotency_key("~ !" + "a" * 10)
     with pytest.raises(ValueError):
         check_idempotency_key("x" * (MAX_IDEMPOTENCY_KEY_BYTES + 1))
     # BYTES, not characters: 100 non-ASCII characters are over the limit.
@@ -442,6 +570,9 @@ def test_a_key_is_refused_by_the_client_before_the_request(
 def test_run_status_and_terminality() -> None:
     assert run_status({"status": "running"}) == "running"
     assert run_id({"id": "run_1"}) == "run_1"
+    assert run_network({"network_id": "n_" + "a" * 24}) == "n_" + "a" * 24
+    with pytest.raises(NetworkMismatch):
+        run_network({"id": "run_1"})
     assert is_terminal({"status": "succeeded"})
     assert is_terminal({"status": "failed"})
     assert not is_terminal({"status": "running"})
@@ -464,7 +595,7 @@ def _fields(**overrides: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "prompt": "fix the flaky test",
         "repo_url": "https://example.invalid/repo.git",
-        "repo_sha": "deadbeef",
+        "repo_sha": SHA,
         "hosting": "openai",
         "model": "gpt-5",
     }
@@ -477,7 +608,7 @@ def test_a_spec_carries_the_contract_fields_and_omits_unset_optionals() -> None:
     assert body == {
         "prompt": "fix the flaky test",
         "repo_url": "https://example.invalid/repo.git",
-        "repo_sha": "deadbeef",
+        "repo_sha": SHA,
         "hosting": "openai",
         "model": "gpt-5",
         "size": "m",
@@ -519,6 +650,52 @@ def test_a_spec_cannot_name_its_own_tenant() -> None:
     # The tenant is a field of the REQUEST, and the spec has no way to spell it.
     with pytest.raises(TypeError):
         RunSpec(**_fields(), network_id="n_" + "a" * 24)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"max_hours": True}, {"max_hours": False}, {"budget_usd": True}, {"budget_usd": False}],
+)
+def test_a_spec_refuses_a_bool_where_a_number_belongs(overrides: dict[str, Any]) -> None:
+    """E7 — ``True`` is an ``int`` to ``isinstance`` and one hour to ``isfinite``."""
+    with pytest.raises(ValueError):
+        RunSpec(**_fields(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [
+        (SHA, True),
+        (SHA.upper(), True),
+        (SHA[:39], False),
+        (SHA + "a", False),
+        ("HEAD", False),
+        ("deadbeef", False),
+        ("z" * 40, False),
+        (None, False),
+    ],
+)
+def test_a_sha_is_a_full_forty_hex_commit(value: Any, accepted: bool) -> None:
+    """SE4 — the predicate the CLI refuses on."""
+    assert is_commit_sha(value) is accepted
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [
+        ("https://example.invalid/repo.git", True),
+        ("ssh://git@example.invalid/repo.git", True),
+        ("git@example.invalid:team/repo.git", True),
+        ("git://example.invalid/repo.git", False),
+        ("file:///srv/repo", False),
+        ("./repo", False),
+        ("../repo", False),
+        ("https://", False),
+        (None, False),
+    ],
+)
+def test_a_repo_url_is_one_the_far_end_can_clone(value: Any, accepted: bool) -> None:
+    assert is_repo_url(value) is accepted
 
 
 def test_bind_pairs_the_body_with_the_resolved_network(mesh_root: Path) -> None:

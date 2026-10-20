@@ -14,6 +14,14 @@ def alone() -> Msg:
     return Msg("wire.remote_compute.alone", {})
 
 
+def bad_repo() -> Msg:
+    return Msg("wire.remote_compute.bad_repo", {})
+
+
+def bad_sha() -> Msg:
+    return Msg("wire.remote_compute.bad_sha", {})
+
+
 def cancelled(*, run_id: str) -> Msg:
     return Msg("wire.remote_compute.cancelled", {"run_id": run_id})
 
@@ -49,6 +57,18 @@ def invalid_request() -> Msg:
     return Msg("wire.remote_compute.invalid_request", {})
 
 
+def key_empty() -> Msg:
+    return Msg("wire.remote_compute.key_empty", {})
+
+
+def key_not_printable() -> Msg:
+    return Msg("wire.remote_compute.key_not_printable", {})
+
+
+def key_too_long(*, max_bytes: str) -> Msg:
+    return Msg("wire.remote_compute.key_too_long", {"max_bytes": max_bytes})
+
+
 def local_only(*, flag: str) -> Msg:
     return Msg("wire.remote_compute.local_only", {"flag": flag})
 
@@ -59,6 +79,10 @@ def needs_prompt() -> Msg:
 
 def needs_repo() -> Msg:
     return Msg("wire.remote_compute.needs_repo", {})
+
+
+def network_mismatch() -> Msg:
+    return Msg("wire.remote_compute.network_mismatch", {})
 
 
 def no_capacity() -> Msg:
@@ -75,6 +99,18 @@ def only_with(*, flag: str) -> Msg:
 
 def status_line(*, status: str) -> Msg:
     return Msg("wire.remote_compute.status_line", {"status": status})
+
+
+def status_unknown(*, status: str) -> Msg:
+    return Msg("wire.remote_compute.status_unknown", {"status": status})
+
+
+def still_running(*, run_id: str, max_hours: str) -> Msg:
+    return Msg("wire.remote_compute.still_running", {"run_id": run_id, "max_hours": max_hours})
+
+
+def submitted(*, run_id: str, network_id: str) -> Msg:
+    return Msg("wire.remote_compute.submitted", {"run_id": run_id, "network_id": network_id})
 
 
 def unknown_run() -> Msg:
