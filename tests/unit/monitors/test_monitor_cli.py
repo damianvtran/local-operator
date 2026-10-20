@@ -607,7 +607,11 @@ def test_a_suppression_survives_a_narrow_terminal(
         assert monitor_command(_args()) == 0
         out = capsys.readouterr().out
         assert "suppressed" in out, (columns, out)
-        assert "changes suppressed as non-material" in " ".join(out.split()), (columns, out)
+        folded = " ".join(out.split())
+        assert "changes suppressed as non-material" in folded, (columns, out)
+        # The hint names the counters inside its news clause; the row must not
+        # say them again (review round 2, F2 — the D7 duplication).
+        assert folded.count("20 checks") == 1, (columns, out)
 
 
 def test_a_blind_reason_is_visible_at_sixty_columns(

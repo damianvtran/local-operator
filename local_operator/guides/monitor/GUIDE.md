@@ -135,12 +135,18 @@ default keep "difference" honest:
   changed line now shows a window around the first differing character, and if
   a preview still hides the difference the gate is skipped and the change is
   delivered (fail open, by design).
-- **Long results are compared in full.** A result over the tool-output limit is
-  spilled to disk and the model sees a head+tail projection; the monitor reads
-  the FULL stored body back for its comparison, so a change past the visible
-  head is still seen. If that body is gone (evicted) or was stored incompletely,
-  the monitor goes **blind** rather than comparing a truncated view — see
-  below.
+- **Long results are compared in full — up to a bound.** A result over the
+  tool-output limit is spilled to disk and the model sees a head+tail
+  projection; the monitor reads the FULL stored body back for its comparison,
+  so a change past the visible head is still seen. The comparison has its own
+  budget (1 MiB or 8,000 lines, whichever comes first): past it the monitor
+  does not diff at all and delivers a `change beyond the stored snapshot
+  window` delta instead — the materiality gate is skipped, so it cannot be
+  suppressed, but the delta does not show what changed. Narrow the watched call
+  (`grep -c`, `wc -l`, `tail -n 20`, a filtered `jq`) so its result stays inside
+  the window; a watch whose output is that large is usually watching too much.
+  If the full body is gone (evicted) or was stored incompletely, the monitor
+  goes **blind** rather than comparing a truncated view — see below.
 - A `read` of a file numbers its lines (`12| …`), truncates at ~8 KB and prints a
   `[truncated … N more lines]` footer. A log that grows past that window only
   shows its head, so the monitor cannot see appended lines: watch it with

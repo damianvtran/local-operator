@@ -933,17 +933,23 @@ class MonitorScheduler:
             diff_base = self._previous_result(spec, counters, old_hash)
             if diff_base is None and blob is not None and not truncated:
                 diff_base = blob_text
-            if diff_base is not None and (
-                len(diff_base) > MAX_DIFF_CHARS
-                or len(normalized) > MAX_DIFF_CHARS
-                or diff_base.count("\n") > MAX_DIFF_LINES
-                or normalized.count("\n") > MAX_DIFF_LINES
-            ):
-                logger.info(
-                    "monitor %s result is too large to diff; delivering a checksum delta",
-                    spec.id,
-                )
-                diff_base = None
+
+        # The bound applies to EVERY baseline source (review round 2, F1). It
+        # used to sit inside the ``old_hash`` branch, so the recovery path —
+        # counters lost with a large untruncated snapshot — fed the quadratic
+        # matcher unbounded (measured: an 8.13 s synchronous stall under the
+        # write lock). A bound that only covers one of two paths is not a bound.
+        if diff_base is not None and (
+            len(diff_base) > MAX_DIFF_CHARS
+            or len(normalized) > MAX_DIFF_CHARS
+            or diff_base.count("\n") > MAX_DIFF_LINES
+            or normalized.count("\n") > MAX_DIFF_LINES
+        ):
+            logger.info(
+                "monitor %s result is too large to diff; delivering a checksum delta",
+                spec.id,
+            )
+            diff_base = None
 
         if diff_base is None:
             # No usable diff baseline (handle evicted/incomplete, a truncated

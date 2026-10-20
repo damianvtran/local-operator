@@ -8824,10 +8824,12 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
         parts.append("once")
     if row.get("checks"):
         # The zero-deliveries hint OPENS with the same count ("12 checks, 0
-        # deliveries"), so the standalone counter would say it twice in one row
-        # — the D7 defect in its other form.
+        # deliveries"), and the suppression hint names it inside its news clause
+        # ("7 changes suppressed as non-material (12 checks, 0 deliveries) —
+        # …"). Either spelling means the standalone counter would say it twice
+        # in one row — the D7 defect in its other form (review round 2, F2).
         counter_clause = f"{int(row['checks'])} checks"
-        if not (hint and hint.startswith(counter_clause)):
+        if not (hint and (hint.startswith(counter_clause) or f"({counter_clause}" in hint)):
             parts.append(counter_clause)
     age = row.get("last_check_age_s")
     if age is not None:

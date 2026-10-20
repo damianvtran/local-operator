@@ -1430,3 +1430,38 @@ async def test_a_rate_capped_change_refreshes_the_index(tmp_path: Any) -> None:
         assert row["suppressed"]["rate_cap"] == 1
     finally:
         harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_diff_bound_also_covers_the_no_hash_recovery_path(tmp_path: Any) -> None:
+    """Review round 2, F1: the bound must apply to EVERY baseline source.
+
+    With the counters lost and a whole snapshot on disk, the recovery path sets
+    ``diff_base`` from the snapshot — and used to feed the quadratic matcher
+    unbounded, measured at 8.13 s synchronously under the write lock for a
+    600 KB / 60,000-line result. The checksum path is milliseconds and is
+    delivered without the gate.
+    """
+    import time
+
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "same line\n" * 1_000, "error": None})
+        await rill(harness, 60_000)  # baseline + snapshot
+        entry = harness.scheduler._entries["m1"]
+        # The counters are lost: no hash, no handle, but the snapshot is whole.
+        entry.counters["content_hash"] = ""
+        entry.counters["last_handle"] = ""
+
+        huge = ("x" * 9 + "\n") * 60_000
+        started = time.monotonic()
+        change = harness.scheduler._apply_success(entry, huge, harness.now_ms)
+        elapsed = time.monotonic() - started
+
+        assert change is not None
+        assert change.hidden is True
+        assert "beyond the stored snapshot window" in change.delta_text
+        assert elapsed < 5.0, f"the matcher ran unbounded: {elapsed:.2f}s"
+    finally:
+        harness.scheduler.dispose()
