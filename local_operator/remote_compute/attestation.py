@@ -259,10 +259,14 @@ def verify_attestation(
 
 
 def parse_attestation_keys(body: Any) -> dict[str, AttestationKey]:
-    """Turn a discovery response body into ``{key_id: AttestationKey}``.
+    """Turn a discovery ``result`` into ``{key_id: AttestationKey}``.
 
-    The shape is ``{"keys": [{"key_id", "alg": "Ed25519", "public_key",
-    "status"}]}``, and every part of it is validated rather than assumed: a key
+    The argument is the endpoint's ``result`` (what the remote-compute client's
+    envelope unwrap returns), NOT the raw HTTP body: the raw body is
+    ``{"msg": ..., "result": {"keys": [...]}}`` and is refused here as a
+    malformed key set. The ``result`` shape is ``{"keys": [{"key_id",
+    "alg": "Ed25519", "public_key", "status"}]}``, and every part of it is
+    validated rather than assumed: a key
     set is what decides which signatures are the server's, so a body this
     function accepted loosely would become the trust anchor. ``status`` is
     admitted for both ``current`` and ``previous`` because a rotation leaves
