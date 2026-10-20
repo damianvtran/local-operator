@@ -39,9 +39,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # history.
     # P3b adds its 35-key tui.team_authoring namespace after independent audit.
     # The remote_compute six-key wire.settings delta adds its independently
-    # audited row on top — TWENTY-FOUR. The pin still exists so a held
-    # namespace cannot ride in on an unrelated audited union.
-    assert len(hindi) == 24
+    # audited row on top — TWENTY-FOUR. The S3e remote-compute wave adds one
+    # row per carried namespace (`cli.exec_remote_help`, `wire.remote_compute`)
+    # — TWENTY-SIX. The pin still exists so a held namespace cannot ride in on
+    # an unrelated audited union.
+    assert len(hindi) == 26
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

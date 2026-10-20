@@ -32,7 +32,7 @@
   "wire.remote_compute.status_network_mismatch": "नेटवर्क जाँचा गया: यह रन {network_id} में है, जो इस डिवाइस का नेटवर्क नहीं है।",
   "wire.remote_compute.status_network_unconfirmed": "नेटवर्क की पुष्टि नहीं हुई: यह डिवाइस तय नहीं कर सकता कि यह रन किस नेटवर्क का है।",
   "wire.remote_compute.status_unknown": "स्थिति: {status} (यह स्थिति इस संस्करण को ज्ञात नहीं; निगरानी जारी है)",
-  "wire.remote_compute.still_running": "रन {run_id} Radient द्वारा बताई गई {max_hours} घंटे की सीमा के बाद भी चल रहा है, इसलिए यह कमांड निगरानी रोक रहा है। इसे यहाँ जाँचें: lop exec --remote-status {run_id}",
+  "wire.remote_compute.still_running": "रन {run_id} Radient द्वारा बताई गई {max_hours} घंटे की सीमा के बाद भी चल रहा है, इसलिए यह कमांड निगरानी रोक चुका है। जाँचने के लिए: lop exec --remote-status {run_id}",
   "wire.remote_compute.submitted": "रिमोट रन {run_id} सबमिट हो गया।\nनेटवर्क (Radient द्वारा पुष्टि किया गया): {network_id}",
   "wire.remote_compute.unknown_run": "चुने गए लॉगिन के लिए Radient के पास ऐसा कोई रिमोट रन नहीं है।",
   "wire.remote_compute.unreachable": "Radient तक पहुँचा नहीं जा सका; नेटवर्क जाँचें और फिर कोशिश करें।"
