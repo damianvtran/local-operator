@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from contextlib import contextmanager
@@ -43,6 +44,9 @@ from local_operator.hub_sync.transactions import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The exact tombstone suffix unpull mints: ``uuid.uuid4().hex``.
+_UNPULL_OPERATION = re.compile(r"^[a-f0-9]{32}$")
 
 
 @dataclass(frozen=True)
@@ -510,18 +514,37 @@ class ManagedSkillStorage:
             marker_id = marker.name[len("skill-") : -len(".json")]
             if not isinstance(attempted_id, str) or attempted_id != marker_id:
                 continue
+            # The id must be ONE safe path segment; ``baseline_path`` is the
+            # same validator every other hub path uses, and its basename is
+            # exactly this marker's expected name.
+            try:
+                expected_marker = baseline_path(self.config_dir, "skill", attempted_id)
+            except Exception:  # noqa: BLE001 - a tampered id names no marker of ours
+                logger.warning("ignoring malformed unpull marker %s", marker)
+                continue
+            if marker.name != expected_marker.name:
+                continue
             if local_id is not None and attempted_id != local_id:
                 continue
             operation = payload.get("operation")
             alias = payload.get("alias")
             tombstone_name = payload.get("tombstone")
+            expected_tombstone = f"skill-{attempted_id}-unpull-{operation}"
+            # THE TOMBSTONE MUST BE EXACTLY ONE NAME UNDER hub/backups. The
+            # operation is a uuid4 hex and the id is validated above, so the
+            # equality check alone confines it -- but the separator/traversal
+            # checks are stated explicitly because this is the ALLOW-LISTED
+            # ``rmtree``: on Windows a backslash is a separator too, and a
+            # crafted marker must never aim this call at another directory
+            # (``..\..\sessions\<id>``). No path is joined before this passes.
             if (
                 not isinstance(operation, str)
-                or not operation
+                or not _UNPULL_OPERATION.fullmatch(operation)
                 or not isinstance(alias, str)
                 or not isinstance(tombstone_name, str)
-                or "/" in tombstone_name
-                or not tombstone_name.startswith(f"skill-{attempted_id}-unpull-")
+                or tombstone_name != expected_tombstone
+                or any(separator in tombstone_name for separator in ("/", "\\"))
+                or ".." in tombstone_name
             ):
                 logger.warning("ignoring malformed unpull marker %s", marker)
                 continue

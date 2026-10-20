@@ -346,6 +346,66 @@ def test_unpull_settles_a_crashed_pull_journal_first(tmp_path: Path) -> None:
     assert not storage.journal.pending(kind="skill", local_id=identity.local_id)
 
 
+@pytest.mark.parametrize(
+    ("operation", "suffix"),
+    [
+        # Windows separators: on Windows this name escapes hub/backups entirely,
+        # so the allow-listed rmtree must never be aimed by it.
+        ("a" * 32, "..\\..\\sessions\\victim"),
+        # POSIX traversal and a bare parent.
+        ("a" * 32, "../sessions/victim"),
+        ("a" * 32, ".."),
+        # A well-shaped but WRONG operation (the name must be the one the marker
+        # itself names), and a non-hex spelling unpull never mints.
+        ("a" * 32, "b" * 32),
+        ("A" * 32, "A" * 32),
+    ],
+)
+def test_recovery_rejects_a_tombstone_name_that_is_not_one_safe_segment(
+    tmp_path: Path, operation: str, suffix: str
+) -> None:
+    """Review round 3: a crafted marker must not aim the allow-listed rmtree.
+
+    The genuine-loss shape is what reaches the tombstone branch (destination
+    gone). A hostile tombstone name used to pass the ``startswith`` check; on
+    Windows a backslash separator could point the removed tree at
+    ``config_dir/sessions/<id>``.
+    """
+
+    import json
+    import shutil
+
+    storage, _hub, _ctx, identity, document = _present_link(tmp_path)
+    shutil.rmtree(storage.config_dir / "skills" / document.name)
+    marker = storage.unpull_marker(identity.local_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    tombstone_name = f"skill-{identity.local_id}-unpull-{suffix}"
+    marker.write_text(
+        json.dumps(
+            {
+                "operation": operation,
+                "local_id": identity.local_id,
+                "alias": document.name,
+                "tombstone": tombstone_name,
+            }
+        )
+    )
+    # The literal path this name addresses: created so a following rmtree would
+    # visibly remove it. On POSIX the backslash spelling is one literal segment;
+    # on Windows the guard is what stops it leaving backups/.
+    addressed = storage.config_dir / "hub" / "backups" / tombstone_name
+    addressed.mkdir(parents=True, exist_ok=True)
+    sentinel = addressed / "keep.txt"
+    sentinel.write_text("must survive\n")
+
+    storage.recover_unpull(local_id=identity.local_id)
+
+    stored = prov.read_baseline(storage.config_dir, "skill", identity.local_id)
+    assert stored is not None and stored.content_state == "present"
+    assert sentinel.exists()
+    assert marker.exists()  # rejected as evidence we will not act on
+
+
 def test_a_stale_unpull_marker_cannot_mask_a_later_genuine_loss(tmp_path: Path) -> None:
     """Review round 1 MAJOR: the marker must be settled by the content write.
 
