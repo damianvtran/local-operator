@@ -512,3 +512,44 @@ def test_allowance_growth_rejects_a_removed_translation(
         inactive_locales=set(),
     )
     assert got == {("fr", "demo", "demo.one")}
+
+
+def test_allowance_growth_fails_closed_when_the_base_catalogue_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """A corrupt base catalogue must not be mistaken for an absent one.
+
+    ``ABSENT`` means the namespace was uncarried, so the key was genuinely
+    missing and recording it is lawful. ``None`` means the file exists but
+    could not be read — an unverifiable base. Treating that as absence would
+    let a dropped translation's debt be recorded with both gates green,
+    which is a fail-open in the one rule that exists to stop exactly that.
+    """
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: None)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.one"},
+        inactive_locales=set(),
+    )
+    assert got == {("fr", "demo", "demo.one")}
+
+
+def test_allowance_growth_permits_debt_when_the_namespace_was_uncarried(
+    monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """An uncarried namespace is a genuine absence, not an unreadable base."""
+    base = {"pairs": []}
+    head = {"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}
+    monkeypatch.setattr(i18n_check, "_base_catalogue", lambda *a, **k: i18n_check.ABSENT)
+    got = i18n_check.allowance_growth(
+        base,
+        head,
+        ref="BASE",
+        base_english={"demo.one"},
+        inactive_locales=set(),
+    )
+    assert got == set()
