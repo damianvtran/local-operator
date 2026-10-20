@@ -988,3 +988,52 @@ def test_delegated_retention_import_is_light(delegated_retention_modules: set[st
         "local_operator.session.delegated_retention",
         "local_operator.session.retention",
     ], ours
+
+
+# --- The remote-compute package and its lazy attestation surface -------------
+
+
+@pytest.fixture(scope="module")
+def remote_compute_modules() -> set[str]:
+    """Modules loaded by importing the remote-compute package."""
+    return _imported_modules("local_operator.remote_compute")
+
+
+def test_remote_compute_import_leaves_the_verifier_for_first_use(
+    remote_compute_modules: set[str],
+) -> None:
+    # ``local_operator.remote_compute`` is imported by
+    # ``server.features.feature_flags()`` on EVERY capability negotiation, so the
+    # crypto backend and the mesh refusal family must stay behind the package's
+    # PEP 562 table (``__getattr__``): only a caller that actually verifies a
+    # statement pays for them. An eager ``from ...attestation import ...`` here
+    # would put an Ed25519 dependency on the handshake path, which no test of the
+    # verifier itself would notice.
+    _assert_absent(
+        remote_compute_modules,
+        "cryptography",
+        "the crypto backend is imported inside the verifying function only",
+    )
+    _assert_absent(
+        remote_compute_modules,
+        "local_operator.remote_compute.attestation",
+        "the attestation module is resolved on first access, not on import",
+    )
+
+
+def test_the_remote_compute_attestation_reexports_resolve() -> None:
+    """The four names ``__getattr__`` serves must exist on the submodule.
+
+    A name missing from ``_ATTESTATION_NAMES``-driven resolution fails only at
+    the caller's use site, in a process where the failure reads as a typo.
+    """
+    import local_operator.remote_compute as package
+    from local_operator.remote_compute import attestation
+
+    for name in (
+        "AttestationRefusal",
+        "VerifiedAttestation",
+        "parse_attestation_keys",
+        "verify_attestation",
+    ):
+        assert getattr(package, name) is getattr(attestation, name), name

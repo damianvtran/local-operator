@@ -30,6 +30,7 @@ from local_operator.remote_compute.attestation import (
     CODE_BAD_SIGNATURE,
     CODE_DEVICE_MISMATCH,
     CODE_DUPLICATE_KEY_ID,
+    CODE_EMPTY_KEY_SET,
     CODE_EXPIRED,
     CODE_INVALID_KEY,
     CODE_ISSUED_IN_FUTURE,
@@ -42,9 +43,12 @@ from local_operator.remote_compute.attestation import (
     CODE_UNSUPPORTED_VERSION,
     CODE_WINDOW_INVERTED,
     CODE_WINDOW_TOO_LONG,
+    CODE_WORKLOAD_MISMATCH,
+    AttestationKey,
     AttestationRefusal,
     VerifiedAttestation,
     parse_attestation_keys,
+    public_keys,
     verify_attestation,
 )
 
@@ -94,6 +98,7 @@ def _verify(vector: dict[str, Any], keys: dict[str, bytes], **overrides: Any):
         "signature": vector["signature_b64"],
         "key_id": vector["signer_key_id"],
         "keys": keys,
+        "expect_workload_id": vector["payload"]["workload_id"],
         "expect_network_id": vector["payload"]["network_id"],
         "expect_device_key": _public_key(vector["device_seed_hex"]),
         "now": vector["payload"]["issued_at"] + 1,
@@ -275,9 +280,108 @@ def test_a_refusal_never_echoes_the_signature(
     assert vector["verifier_key_hex"] not in str(caught.value)
 
 
+def test_a_block_of_base64_longer_than_a_signature_is_refused(
+    vector: dict[str, Any], keys: dict[str, bytes]
+) -> None:
+    """The encoded length is checked BEFORE decoding: 64 KiB is not a signature."""
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, signature="A" * 64 * 1024)
+    assert caught.value.code == CODE_BAD_SIGNATURE
+    assert "86" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        _b64u(b"\x00" * 63),
+        _b64u(b"\x00" * 65),
+        _b64u(b"\x00" * 64) + "==",
+    ],
+)
+def test_a_signature_of_the_wrong_encoded_length_is_refused(
+    vector: dict[str, Any], keys: dict[str, bytes], signature: str
+) -> None:
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, signature=signature)
+    assert caught.value.code == CODE_BAD_SIGNATURE
+
+
+def test_a_payload_longer_than_the_bound_is_refused_before_decoding(
+    vector: dict[str, Any], keys: dict[str, bytes]
+) -> None:
+    """Refused while it is still a string, so the peer cannot size the decode."""
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, payload_b64="A" * 4097)
+    assert caught.value.code == CODE_MALFORMED_PAYLOAD
+    assert "4096" in str(caught.value)
+
+
+def test_a_non_canonical_base64_spelling_is_refused(
+    vector: dict[str, Any], keys: dict[str, bytes]
+) -> None:
+    """Trailing bits ``base64`` ignores: same 64 bytes, a different spelling.
+
+    The last character of an 86-character signature carries four bits that no
+    byte uses, so changing one of them decodes to the SAME signature and would
+    otherwise be accepted. Re-encoding and comparing is the only way to see it.
+    """
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    last = alphabet.index(vector["signature_b64"][-1])
+    other = alphabet[last | 1]
+    assert other != vector["signature_b64"][-1]
+    signature = vector["signature_b64"][:-1] + other
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, signature=signature)
+    assert caught.value.code == CODE_BAD_SIGNATURE
+    assert "canonical" in str(caught.value) or "base64" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# Every string field is printable ASCII, with no quote and no backslash
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_id", "acct_\x1b[31mEVIL"),
+        ("account_id", "acct_000\x00"),
+        ("network_id", "n_\u2028x"),
+        ("workload_id", "wl_caf\u00e9"),
+        ("device_key", "/etc\x7f"),
+        ("workload_id", 'wl_"quoted"'),
+        ("account_id", "acct_back\\\\slash"),
+    ],
+)
+def test_a_control_character_in_a_string_field_is_refused(
+    vector: dict[str, Any], keys: dict[str, bytes], field: str, value: str
+) -> None:
+    """V1: a validly signed statement is still refused for what it spells.
+
+    ``json`` round-trips every one of these escapes byte-identically, so the
+    canonical rule cannot see them and the signature is genuinely the
+    signer's. Each statement below is re-signed with the fixture's own seed for
+    that reason: the ONLY rule that may refuse it is the printable-ASCII one.
+    """
+    statement = dict(vector["payload"])
+    statement[field] = value
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, **_signed(vector, statement))
+    assert caught.value.code == CODE_MALFORMED_PAYLOAD
+    assert "printable ASCII" in str(caught.value)
+
+
 # ---------------------------------------------------------------------------
 # The statement must be about THIS network and THIS device
 # ---------------------------------------------------------------------------
+
+
+def test_a_statement_about_another_workload_is_refused(
+    vector: dict[str, Any], keys: dict[str, bytes]
+) -> None:
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, expect_workload_id="wl_ffffffffffffffffffffffff")
+    assert caught.value.code == CODE_WORKLOAD_MISMATCH
 
 
 def test_a_statement_about_another_network_is_refused(
@@ -298,19 +402,43 @@ def test_a_statement_about_another_device_key_is_refused(
 
 
 @pytest.mark.parametrize(
-    ("network_id", "device_key"),
-    [("", _public_key("02" * 32)), ("n_0123456789abcdef01234567", b"")],
+    "overrides",
+    [
+        {"expect_workload_id": ""},
+        {"expect_workload_id": "wl_0123456789abcdef01234567", "expect_network_id": ""},
+        {"expect_network_id": "n_0123456789abcdef01234567", "expect_device_key": b""},
+    ],
 )
 def test_an_empty_expectation_is_refused_before_the_statement_is_read(
-    vector: dict[str, Any],
-    keys: dict[str, bytes],
-    network_id: str,
-    device_key: bytes,
+    vector: dict[str, Any], keys: dict[str, bytes], overrides: dict[str, Any]
 ) -> None:
     """Refused even with a VALID signature, so the refusal cannot be the signature's."""
     with pytest.raises(AttestationRefusal) as caught:
-        _verify(vector, keys, expect_network_id=network_id, expect_device_key=device_key)
+        _verify(vector, keys, **overrides)
     assert caught.value.code == CODE_MISSING_EXPECTATION
+
+
+def test_a_re_signed_statement_for_another_workload_is_refused(
+    vector: dict[str, Any], keys: dict[str, bytes]
+) -> None:
+    """Re-signed with the vector's own seed: only the workload rule can refuse it."""
+    statement = dict(vector["payload"])
+    statement["workload_id"] = "wl_ffffffffffffffffffffffff"
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, **_signed(vector, statement))
+    assert caught.value.code == CODE_WORKLOAD_MISMATCH
+
+
+def test_the_network_is_checked_before_the_workload(
+    vector: dict[str, Any], keys: dict[str, bytes]
+) -> None:
+    """Both wrong is a TENANT refusal: the codes must not be interchangeable."""
+    statement = dict(vector["payload"])
+    statement["workload_id"] = "wl_ffffffffffffffffffffffff"
+    statement["network_id"] = "n_ffffffffffffffffffffffff"
+    with pytest.raises(AttestationRefusal) as caught:
+        _verify(vector, keys, **_signed(vector, statement))
+    assert caught.value.code == CODE_NETWORK_MISMATCH
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +559,15 @@ def _discovery_body(status: str = "current") -> dict[str, Any]:
 @pytest.mark.parametrize("status", ["current", "previous"])
 def test_discovery_parses_either_published_status(status: str) -> None:
     parsed = parse_attestation_keys(_discovery_body(status))
-    assert parsed == {"k1": b"\x11" * 32}
+    assert parsed == {"k1": AttestationKey(public_key=b"\x11" * 32, status=status)}
+    assert parsed["k1"].status == status
+
+
+def test_a_previous_only_key_set_is_accepted() -> None:
+    """SV2: rotation publishes the outgoing key as ``previous`` while its
+    statements are still inside their window, so this must not be refused."""
+    parsed = parse_attestation_keys(_discovery_body("previous"))
+    assert set(parsed) == {"k1"}
 
 
 def test_discovery_keeps_two_keys_apart() -> None:
@@ -444,14 +580,35 @@ def test_discovery_keeps_two_keys_apart() -> None:
             "status": "previous",
         }
     )
-    assert parse_attestation_keys(body) == {"k1": b"\x11" * 32, "k2": b"\x22" * 32}
+    assert public_keys(parse_attestation_keys(body)) == {
+        "k1": b"\x11" * 32,
+        "k2": b"\x22" * 32,
+    }
 
 
 def test_discovery_ignores_fields_it_does_not_read() -> None:
     body = _discovery_body()
     body["keys"][0]["added_at"] = 1760000000
     body["next_cursor"] = "page-2"
-    assert parse_attestation_keys(body) == {"k1": b"\x11" * 32}
+    assert public_keys(parse_attestation_keys(body)) == {"k1": b"\x11" * 32}
+
+
+def test_discovery_refuses_an_empty_key_set() -> None:
+    """A server that published no keys has not answered; it has not said "trust
+    nothing" in a way a verifier may act on."""
+    with pytest.raises(AttestationRefusal) as caught:
+        parse_attestation_keys({"keys": []})
+    assert caught.value.code == CODE_EMPTY_KEY_SET
+
+
+def test_discovery_refuses_two_ids_naming_one_key() -> None:
+    """SV3: the id is the selector, so two ids over one key make it select nothing."""
+    body = _discovery_body()
+    body["keys"].append(dict(body["keys"][0], key_id="k2"))
+    with pytest.raises(AttestationRefusal) as caught:
+        parse_attestation_keys(body)
+    assert caught.value.code == CODE_DUPLICATE_KEY_ID
+    assert "same public key" in str(caught.value)
 
 
 def test_discovery_refuses_another_algorithm() -> None:
@@ -496,16 +653,18 @@ def test_discovery_refuses_a_body_it_cannot_read(body: Any) -> None:
 
 def test_a_parsed_key_set_verifies_the_golden_vector(vector: dict[str, Any]) -> None:
     """The two halves fit: discovery's output is what verify_attestation takes."""
-    keys = parse_attestation_keys(
-        {
-            "keys": [
-                {
-                    "key_id": vector["signer_key_id"],
-                    "alg": "Ed25519",
-                    "public_key": _b64u(bytes.fromhex(vector["verifier_key_hex"])),
-                    "status": "current",
-                }
-            ]
-        }
+    keys = public_keys(
+        parse_attestation_keys(
+            {
+                "keys": [
+                    {
+                        "key_id": vector["signer_key_id"],
+                        "alg": "Ed25519",
+                        "public_key": _b64u(bytes.fromhex(vector["verifier_key_hex"])),
+                        "status": "current",
+                    }
+                ]
+            }
+        )
     )
     assert _verify(vector, keys).key_id == vector["signer_key_id"]
