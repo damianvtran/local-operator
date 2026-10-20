@@ -1325,6 +1325,10 @@ def _layout_payload(**overrides: Any) -> dict[str, Any]:
         ],
     }
     payload.update(overrides)
+    # Completeness defaults for the common shape; a test that exercises a
+    # truncated capture overrides them explicitly.
+    payload.setdefault("socket_scan_complete", True)
+    payload.setdefault("socket_owner_count", len(payload["socket_pids"]))
     return payload
 
 
@@ -1380,11 +1384,14 @@ def test_exclusive_ownership_refusal_records_the_guest_layout(
             "pid_source",
             "socket_pids",
             "socket_owners",
+            "socket_owner_count",
+            "socket_scan_complete",
             "server",
             "ancestry",
             "units",
             "socket_owned_by_unit",
             "other_socket_owners_share_unit_cgroup",
+            "supervisor_dropin_kill_mode",
         }
         assert layout["status"] == "ok"
         assert layout["units"] == _layout_payload()["units"]
@@ -1395,6 +1402,11 @@ def test_exclusive_ownership_refusal_records_the_guest_layout(
         # owning unit is identified by cgroup here because its MainPID (8001)
         # is not the server: no other owner means the vacuous ``true``.
         assert layout["other_socket_owners_share_unit_cgroup"] is True
+        # Completeness signals and the drop-in's KillMode are recorded beside
+        # it: membership is not survival under KillMode=process.
+        assert layout["socket_owner_count"] == 1
+        assert layout["socket_scan_complete"] is True
+        assert layout["supervisor_dropin_kill_mode"] == "process"
         # Derived host-side, never accepted from the guest.
         assert layout["port"] == guest_supervisor.ACTION_SERVER_PORT
         assert layout["pid_source"] == "socket"
@@ -1688,7 +1700,11 @@ def _owner(pid: int, cgroup: str | None, comm: str = "python3") -> dict[str, Any
 
 
 def test_every_other_socket_owner_in_the_unit_cgroup_is_true() -> None:
-    """The safe layout: a unit restart also reaps the second port holder."""
+    """Cgroup membership only: the second holder is inside the unit cgroup.
+
+    It still survives a ``KillMode=process`` restart; what the fact decides is
+    whether an explicit cgroup-wide kill can reach it.
+    """
     payload = _layout_payload(
         units=[{**_layout_payload()["units"][0], "main_pid": 9000}],
         socket_pids=[9000, 1887],
@@ -1703,11 +1719,12 @@ def test_every_other_socket_owner_in_the_unit_cgroup_is_true() -> None:
 
 
 def test_one_socket_owner_in_a_different_cgroup_is_false() -> None:
-    """The production question: a survivor holds the port past a restart.
+    """The production question: the second holder is outside the unit cgroup.
 
     Shaped like the first real capture (server 1637 = osworld.service MainPID,
-    an unexplained second holder 1887). If 1887 is outside the unit cgroup a
-    restart leaves it answering, so the answer must be ``false``.
+    an unexplained second holder 1887). Out-of-cgroup means a cgroup-wide kill
+    cannot reach it, so the answer must be ``false`` -- even though a
+    ``KillMode=process`` restart leaves an in-cgroup holder alive too.
     """
     unit = {
         "unit": "osworld.service",
@@ -1731,7 +1748,8 @@ def test_one_socket_owner_in_a_different_cgroup_is_false() -> None:
     assert record["socket_owned_by_unit"] is True
     assert record["other_socket_owners_share_unit_cgroup"] is False
 
-    # The same capture with the second owner in the unit cgroup is the safe one.
+    # The same capture with the second owner inside the unit cgroup flips the
+    # membership answer; survival is unchanged under KillMode=process.
     payload["socket_owners"][1]["cgroup"] = unit["control_group"]
     record = guest_supervisor.layout_record(json.dumps(payload))
     assert record["other_socket_owners_share_unit_cgroup"] is True
@@ -1791,7 +1809,7 @@ def test_no_unit_cgroup_is_undetermined() -> None:
 
 
 def test_a_single_socket_owner_is_vacuously_true() -> None:
-    """No other owner means no survivor: a restart leaves nothing holding :5000.
+    """No other owner means no sibling that could outlive a restart.
 
     The question quantifies over owners OTHER than the server, so an empty set
     is true -- provided the unit itself is identified. This is the only ``true``
@@ -1825,6 +1843,122 @@ def test_a_guest_claim_about_sharing_is_recomputed() -> None:
     assert record["other_socket_owners_share_unit_cgroup"] is False
 
 
+def test_the_recorded_kill_mode_matches_the_install_drop_in() -> None:
+    """Membership sits beside KillMode=process, not beside a survival claim."""
+    record = guest_supervisor.layout_record(json.dumps(_layout_payload()))
+    assert (
+        record["supervisor_dropin_kill_mode"] == guest_supervisor.SUPERVISOR_KILL_MODE == "process"
+    )
+    assert f"KillMode={guest_supervisor.SUPERVISOR_KILL_MODE}" in guest_supervisor.INSTALL_SOURCE
+
+
+def test_a_truncated_socket_owner_list_is_undetermined() -> None:
+    """Nine real holders, cap eight: the hidden one cannot be assumed away.
+
+    The ninth (highest pid, dropped by the cap) is the one in zombie.service;
+    the eight recorded entries all share the unit cgroup. Without the pre-cap
+    count the host would answer ``true`` for a list it never saw in full.
+    """
+    pids = [8992 + index for index in range(9)]
+    payload = _layout_payload(
+        units=[{**_layout_payload()["units"][0], "main_pid": 9000}],
+        socket_pids=pids,
+        socket_owners=[
+            _owner(
+                pid,
+                (
+                    "/system.slice/zombie.service"
+                    if pid == 9000
+                    else "/system.slice/action-server.service"
+                ),
+            )
+            for pid in pids
+        ],
+    )
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert len(record["socket_pids"]) == 8
+    assert record["socket_owner_count"] == 9
+    assert record["socket_scan_complete"] is True
+    assert record["other_socket_owners_share_unit_cgroup"] is None
+
+
+def test_an_incomplete_socket_scan_is_undetermined() -> None:
+    """A /proc scan that stopped early did not see every owner."""
+    payload = _layout_payload(
+        units=[{**_layout_payload()["units"][0], "main_pid": 9000}],
+        socket_pids=[9000, 1887],
+        socket_owners=[
+            _owner(9000, "/system.slice/action-server.service"),
+            _owner(1887, "/system.slice/action-server.service"),
+        ],
+        socket_scan_complete=False,
+    )
+    record = guest_supervisor.layout_record(json.dumps(payload))
+    assert record["socket_scan_complete"] is False
+    assert record["other_socket_owners_share_unit_cgroup"] is None
+
+
+def test_missing_completeness_signals_are_undetermined() -> None:
+    """A capture that did not report completeness cannot assert ``true``."""
+    payload = _layout_payload(
+        units=[{**_layout_payload()["units"][0], "main_pid": 9000}],
+        socket_pids=[9000, 1887],
+        socket_owners=[
+            _owner(9000, "/system.slice/action-server.service"),
+            _owner(1887, "/system.slice/action-server.service"),
+        ],
+    )
+    assert (
+        guest_supervisor.layout_record(json.dumps(payload))["other_socket_owners_share_unit_cgroup"]
+        is True
+    )
+    del payload["socket_scan_complete"]
+    assert (
+        guest_supervisor.layout_record(json.dumps(payload))["other_socket_owners_share_unit_cgroup"]
+        is None
+    )
+    payload["socket_scan_complete"] = True
+    del payload["socket_owner_count"]
+    assert (
+        guest_supervisor.layout_record(json.dumps(payload))["other_socket_owners_share_unit_cgroup"]
+        is None
+    )
+
+
+def test_a_pid_recorded_twice_with_different_cgroups_is_undetermined() -> None:
+    """List order must not decide which cgroup a repeated pid has."""
+    in_unit = "/system.slice/action-server.service"
+    outside = "/system.slice/zombie.service"
+    base = _layout_payload(
+        units=[{**_layout_payload()["units"][0], "main_pid": 9000}],
+        socket_pids=[9000, 1887],
+        socket_owners=[_owner(9000, in_unit), _owner(1887, outside), _owner(1887, in_unit)],
+    )
+    assert (
+        guest_supervisor.layout_record(json.dumps(base))["other_socket_owners_share_unit_cgroup"]
+        is None
+    )
+    base["socket_owners"] = [
+        _owner(9000, in_unit),
+        _owner(1887, in_unit),
+        _owner(1887, outside),
+    ]
+    assert (
+        guest_supervisor.layout_record(json.dumps(base))["other_socket_owners_share_unit_cgroup"]
+        is None
+    )
+    # Agreeing duplicates carry no contradiction.
+    base["socket_owners"] = [
+        _owner(9000, in_unit),
+        _owner(1887, in_unit),
+        _owner(1887, in_unit),
+    ]
+    assert (
+        guest_supervisor.layout_record(json.dumps(base))["other_socket_owners_share_unit_cgroup"]
+        is True
+    )
+
+
 def test_layout_record_caps_every_list() -> None:
     payload = _layout_payload(
         units=[
@@ -1841,6 +1975,10 @@ def test_layout_record_caps_every_list() -> None:
     assert len(record["ancestry"]) == 16
     assert len(record["socket_pids"]) == 8
     assert len(record["socket_owners"]) == 8
+    # The pre-cap count survives the cap, so the derived answer can see that
+    # the list it compared is incomplete.
+    assert record["socket_owner_count"] == 20
+    assert record["other_socket_owners_share_unit_cgroup"] is None
 
 
 def _write_listeners(proc: Path, inodes_by_pid: dict[int, int]) -> None:
@@ -1949,10 +2087,14 @@ def test_layout_script_reports_the_socket_owner_and_never_argv(tmp_path: Path) -
         "schema_version",
         "socket_pids",
         "socket_owners",
+        "socket_owner_count",
+        "socket_scan_complete",
         "server",
         "ancestry",
         "units",
     }
+    assert payload["socket_owner_count"] == 1
+    assert payload["socket_scan_complete"] is True
     assert "--do-not-emit" not in json.dumps(payload)
     record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
     assert record["status"] == "ok"
@@ -1978,6 +2120,8 @@ def test_layout_script_records_every_socket_owner(tmp_path: Path) -> None:
         8900: "/system.slice/action-server.service",
         9000: "/system.slice/zombie.service",
     }
+    assert payload["socket_owner_count"] == 2
+    assert payload["socket_scan_complete"] is True
     record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
     # The fake unit's MainPID (8001) is not the server, so the older claim stays
     # false; the cgroup comparison still identifies the unit by ControlGroup.
@@ -1995,6 +2139,43 @@ def test_layout_script_caps_socket_owner_detail(tmp_path: Path) -> None:
     assert len(payload["socket_pids"]) == 8
     assert len(payload["socket_owners"]) == 8
     assert [owner["pid"] for owner in payload["socket_owners"]] == payload["socket_pids"]
+    # The pre-cap count tells the host this list is incomplete.
+    assert payload["socket_owner_count"] == 12
+    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["other_socket_owners_share_unit_cgroup"] is None
+
+
+def test_a_hidden_ninth_socket_owner_is_undetermined(tmp_path: Path) -> None:
+    """R2: the ninth holder is outside the cap and outside the unit cgroup.
+
+    The eight recorded owners all share the unit cgroup, so comparing only the
+    printed list would say ``true``. The guest's pre-cap count is what keeps
+    the hidden holder from being invisible.
+    """
+    payload = _execute_layout_script(
+        tmp_path,
+        listening=True,
+        owner_cgroups={
+            9000
+            - index: (
+                "/system.slice/zombie.service"
+                if index == 0
+                else "/system.slice/action-server.service"
+            )
+            for index in range(9)
+        },
+    )
+    assert payload["socket_owner_count"] == 9
+    assert payload["socket_scan_complete"] is True
+    assert len(payload["socket_pids"]) == 8
+    # 9000 is the highest pid and is the one cut by the cap.
+    assert 9000 not in payload["socket_pids"]
+    assert all(
+        owner["cgroup"] == "/system.slice/action-server.service"
+        for owner in payload["socket_owners"]
+    )
+    record = guest_supervisor.layout_record("escalation=agentless\n" + json.dumps(payload))
+    assert record["other_socket_owners_share_unit_cgroup"] is None
 
 
 def test_layout_script_falls_back_to_ancestry_when_nothing_listens(tmp_path: Path) -> None:
