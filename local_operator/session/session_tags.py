@@ -21,6 +21,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 from threading import RLock
 from typing import Any, TypedDict
@@ -174,6 +175,24 @@ def _bump_revision(root: Path) -> None:
         return
 
 
+def _breaks_single_row(name: str) -> bool:
+    """True when ``name`` carries characters that cannot stay on one row.
+
+    A tag name is painted as ONE row in two surfaces (the `/tag` picker row and
+    the grouped sidebar heading), and both measure width with ``cell_len``,
+    which counts U+000A as zero columns: an embedded newline therefore turns
+    one row into two without a capacity row, and an escape sequence can move
+    the cursor. Refusing here, in the store, is what makes every client inherit
+    the rule instead of each renderer sanitising its own output.
+
+    Printable-only would be too strict — it rejects the emoji ZWJ sequences and
+    combining marks a human may reasonably type inside a 24-character label —
+    so this refuses the control and line/paragraph-separator classes (Cc, Cs,
+    Zl, Zp) and nothing else.
+    """
+    return any(unicodedata.category(char) in {"Cc", "Cs", "Zl", "Zp"} for char in name)
+
+
 def read_tags_revision(root: Path) -> str | None:
     """The store's current change token, or None for a store without one.
 
@@ -230,6 +249,8 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
     for key, raw_name in desired:
         name = raw_name.strip()
         folded = name.casefold()
+        if _breaks_single_row(name):
+            raise ValueError("Category names must not contain control characters")
         if (
             not 1 <= len(name) <= MAX_NAME_CHARS
             or folded == RESERVED_NAME.casefold()
@@ -433,6 +454,8 @@ def toggle_entity_tag(
     assignment write failed. Any other write failure propagates unchanged.
     """
     cleaned = name.strip()
+    if _breaks_single_row(cleaned):
+        raise ValueError("Tag names must not contain control characters")
     if not 1 <= len(cleaned) <= 24:
         raise ValueError("Tag names must be 1..24 characters")
     if cleaned.casefold() == "untagged":

@@ -1,13 +1,21 @@
 # TUI `/tag` and `/tags` frames
 
 Rendered from the **real styled `OperatorApp`** (production `local_operator.tcss`),
-not a bare test host and not Storybook. Source: `956681f13e`; the source files
-were unchanged between the implementation commit `b820be61c2` and these captures
-(only tests and the receipt's canonical spelling changed).
+not a bare test host and not Storybook. The sidebar frames are from `956681f13e`
+(its source files were unchanged between the implementation commit `b820be61c2`
+and those captures). The `/tag` surface frames were recaptured during remediation
+round 1 with `scripts/tag_surface_shot.py`, in ONE settled pass at the branch
+head that carries them.
 
 Every frame ships with its **source SVG and `.geometry.json`** beside the PNG.
 The geometry files carry the screen, widget tree, content boxes and scrollbar
-state; the PNGs are `rsvg-convert` rasterizations of the committed SVGs.
+state; the PNGs are `rsvg-convert` rasterizations of the committed SVGs, so
+every pair is checkable on the same host:
+
+```sh
+rsvg-convert -o /tmp/frame.png docs/evidence/tag-groups/<frame>.svg
+cmp /tmp/frame.png docs/evidence/tag-groups/<frame>.png
+```
 
 ## How these were captured
 
@@ -25,8 +33,13 @@ env -u NO_COLOR TERM=xterm-256color PYTHONPATH=. \
 # /tag surface: real store seeded with four categories, two applied
 env -u NO_COLOR TERM=xterm-256color PYTHONPATH=. \
   /Users/damian/local-operator/.venv/bin/python scripts/run_bounded.py --timeout 300 -- \
-  /Users/damian/local-operator/.venv/bin/python <scratch>/tag_surface_capture.py <out>
+  /Users/damian/local-operator/.venv/bin/python scripts/tag_surface_shot.py <out>
 ```
+
+`scripts/tag_surface_shot.py` captures all five `/tag` states in one launch and
+waits for the band to settle (no `connecting…`) before the first frame, because
+a capture taken mid-boot is a screen the operator never reads and is what made
+three of the first pairs unreproducible from their own SVGs.
 
 ## Sidebar grouping (`/tags`)
 
@@ -52,11 +65,13 @@ Observed:
   rows.
 - Rows keep the same left column and title budget in the off and on frames;
   only heading lines are added. The sidebar's content box is 34×30 in both.
-- The narrow frame keeps the adaptive 29-cell content width, ellipsizes long
-  titles and both tag headings, and shows the explicit `Untagged` bucket after
-  scrolling. No screen or sidebar scrollbar appears.
-- The light frame keeps the heading ink legible against the light surface
-  (same `muted` semantic role as the existing section headings).
+- The narrow frame keeps the adaptive 29-cell content width and ellipsizes long
+  titles (`Untagged incident foll…`, `Loose notes with no la…`); scrolled to the
+  end, it shows the explicit `Untagged` bucket, with the tag headings above the
+  page. No screen or sidebar scrollbar appears.
+- The light frame is scrolled to the end as well (`5–6/6`, `+1 more pinned —
+  scroll`); it keeps the heading ink legible against the light surface (same
+  `muted` semantic role as the existing section headings).
 
 `tags-off-wide-dark.svg` and `tags-off-wide-dark-again.svg` are byte-identical
 (`699f2132357b2a37346fd0edc191b7f9e35a8ed67831ea80e6c3f45a64ad8763`),
@@ -79,8 +94,11 @@ is assigned `Deep Work` as **primary** and `Review` as secondary.
 ## Keyboard contract (real app)
 
 `keyboard-contract.txt` is the captured stdout of a scratch probe driving the
-real `OperatorApp`; the same assertions are pinned by
-`tests/unit/tui/test_tag_command.py::test_tag_keyboard_arrows_enter_escape_and_inline_draft`.
+real `OperatorApp`. The shared half — arrows and Escape write nothing, one Enter
+is one assignment, an inline `/tag` leaves the draft intact — is pinned by
+`tests/unit/tui/test_tag_command.py::test_tag_keyboard_arrows_enter_escape_and_inline_draft`;
+the probe's starting store is empty while the test starts with an applied
+primary, so the two differ in the assignment they toggle and agree on the keys.
 
 ```
 open: True text: '/tag '

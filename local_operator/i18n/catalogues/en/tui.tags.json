@@ -12,7 +12,7 @@
   "tui.tags.grouping_off": "Sidebar tag groups off — sections are flat again.",
   "tui.tags.grouping_on": "Sidebar tag groups on — sections now split by primary tag.",
   "tui.tags.header": "Tags for this conversation · {count}/8 applied",
-  "tui.tags.invalid": "Tag names are 1–24 characters; Untagged is reserved.",
+  "tui.tags.invalid": "Tag names are 1–24 characters, with no control characters; Untagged is reserved.",
   "tui.tags.none_applied": "No tags applied to this conversation.",
   "tui.tags.not_applied": "not applied",
   "tui.tags.off": "off",

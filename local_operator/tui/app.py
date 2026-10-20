@@ -11232,7 +11232,10 @@ class OperatorApp(App[None]):
         """
 
         def collect() -> (
-            tuple[list[CatalogEntry], tuple[tuple[tuple[str, str], ...], dict[str, str]]]
+            tuple[
+                list[CatalogEntry],
+                tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
+            ]
         ):
             from local_operator.paths import config_dir
             from local_operator.tui.session_catalog import load_catalog
@@ -11251,7 +11254,14 @@ class OperatorApp(App[None]):
             # `/tags on` is persisted, so a shortcut pressed while the drawer
             # is shut must still traverse the grouped order the next open will
             # paint — the same "one notion of next" rule as the ranking above.
-            tag_groups = self._tag_group_snapshot(root, entries) if self._tag_groups else ((), {})
+            # The mode is carried WITH the map for the reason `_refresh_sidebar`
+            # states: adoption must never pair one mode's snapshot with a later
+            # flip of `self._tag_groups`.
+            if self._tag_groups:
+                categories, primaries = self._tag_group_snapshot(root, entries)
+            else:
+                categories, primaries = (), {}
+            tag_groups = (self._tag_groups, categories, primaries)
             return entries, tag_groups
 
         try:
@@ -11269,7 +11279,7 @@ class OperatorApp(App[None]):
         # Closed list: adopt the fresh read so the drawer, when it next opens,
         # shows the order the switch just traversed rather than the stale one.
         self._session_sidebar.set_current(str(getattr(self._session, "session_id", "")))
-        self._session_sidebar.set_tag_groups(self._tag_groups, tag_groups[0], tag_groups[1])
+        self._session_sidebar.set_tag_groups(*tag_groups)
         self._session_sidebar.set_entries(entries)
         self._switch_session_from(self._session_sidebar.entries, delta)
 
@@ -11548,7 +11558,7 @@ class OperatorApp(App[None]):
             tuple[SessionRow, ...],
             tuple[UnansweredPeer, ...],
             dict[str, int],
-            tuple[tuple[tuple[str, str], ...], dict[str, str]],
+            tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
         ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import read_listing
@@ -11623,7 +11633,16 @@ class OperatorApp(App[None]):
             # The bucket map is read only in grouping mode, and from the same
             # worker hop as the catalogue: a per-row assignment read on the UI
             # thread would be the one new cost this poll adds to the frame.
-            tag_groups = self._tag_group_snapshot(root, entries) if self._tag_groups else ((), {})
+            # The MODE travels with the map. Adoption must not re-read
+            # `self._tag_groups`: a flip while this poll is in flight would pair
+            # one mode's snapshot with the other mode's flag, and an old-off
+            # snapshot adopted as on paints every row under Untagged until the
+            # deferred refresh lands (agent review round 2, MINOR-1).
+            if self._tag_groups:
+                categories, primaries = self._tag_group_snapshot(root, entries)
+            else:
+                categories, primaries = (), {}
+            tag_groups = (self._tag_groups, categories, primaries)
             return entries, pins, total, peer_rows, unanswered, ask_marks, tag_groups
 
         async def refresh() -> None:
@@ -11647,8 +11666,9 @@ class OperatorApp(App[None]):
                 # BEFORE set_entries: the bucket map participates in the
                 # presentation order the rows are adopted in, so filling rows
                 # first would paint one frame in the old grouping and then
-                # reorder under the pointer on the next tick.
-                self._session_sidebar.set_tag_groups(self._tag_groups, tag_groups[0], tag_groups[1])
+                # reorder under the pointer on the next tick. The mode is the
+                # one this collect ran under, never a later flip.
+                self._session_sidebar.set_tag_groups(*tag_groups)
                 self._session_sidebar.set_entries(entries)
                 self._session_sidebar.set_pins(pins)
                 if total is not None:
@@ -35041,8 +35061,17 @@ class OperatorApp(App[None]):
         A tag write must never mint or attach a session: the operator's rule is
         that a remote/unsupported/no-current-conversation surface offers no
         write and no phantom conversation.
+
+        A mesh viewer of a conversation on ANOTHER device is refused for the
+        same reason grouping skips it: ``_tag_group_snapshot`` never reads a
+        remote row's assignment, so accepting the write here would receipt
+        "applied" while the sidebar painted the same conversation under
+        Untagged. One local assignment and one grouping rule must name the same
+        state, so the surface with no bucket to show is the one that declines.
         """
         session = self._session
+        if getattr(session, "runtime_locality", "") == "another-machine":
+            return ""
         return str(getattr(session, "session_id", "") or "")
 
     def _tag_argument_choices(self) -> tuple[list[ArgumentChoice], str]:
@@ -35171,7 +35200,7 @@ class OperatorApp(App[None]):
                 text = _t_tags(_tag_keys.cap_applied())
             elif "At most 32" in text:
                 text = _t_tags(_tag_keys.cap_registry())
-            elif "1..24" in text or "reserved" in text.casefold():
+            elif "1..24" in text or "reserved" in text.casefold() or "control" in text:
                 text = _t_tags(_tag_keys.invalid())
             notice(text, "warning")
             return
@@ -41218,21 +41247,22 @@ class OperatorApp(App[None]):
         # `test_every_authoritative_slash_routes_to_owner_with_supported_images`,
         # which is why they keep their own pullbacks below.
         #
-        # The four here are different: the store they write is
+        # The six here are different: the store they write is
         # `config_dir()/archived-sessions.json`, the directory they remove is in
-        # this `config_dir()/sessions/`, and the projects store `/project` reads
-        # and mutates is `config_dir()/projects` — all THIS machine's, with the
-        # sidebar, picker and full-page view that render the result also this
-        # terminal's. Routed to an owner — which is what happened for `/delete`
-        # in the state a user is actually in, and what the wrong-machine split
-        # would do to `/archive` on a cross-host attach — they would act on
-        # another machine's store, and `/delete` would be refused by the owner's
-        # own guard because the conversation a viewer is standing in always
-        # holds a live claim (review round 1, MAJOR-1). `/project` joins on the
-        # projects page's own argument: the page reads THIS machine's store and
-        # sessions, and an OLDER owner still advertises the command
-        # ``authoritative_session`` — this pullback is what keeps that stale
-        # advertisement from routing the command to another machine.
+        # this `config_dir()/sessions/`, the projects store `/project` reads and
+        # mutates is `config_dir()/projects`, and the tag registry `/tag` and
+        # `/tags` read and mutate is `config_dir()/tags` — all THIS machine's,
+        # with the sidebar, picker and full-page view that render the result
+        # also this terminal's. Routed to an owner — which is what happened for
+        # `/delete` in the state a user is actually in, and what the
+        # wrong-machine split would do to `/archive` on a cross-host attach —
+        # they would act on another machine's store, and `/delete` would be
+        # refused by the owner's own guard because the conversation a viewer is
+        # standing in always holds a live claim (review round 1, MAJOR-1).
+        # `/project` joins on the projects page's own argument: the page reads
+        # THIS machine's store and sessions, and an OLDER owner still advertises
+        # the command ``authoritative_session`` — this pullback is what keeps
+        # that stale advertisement from routing the command to another machine.
         _LOCAL_WORK_SLASHES = frozenset(
             {"/archive", "/unarchive", "/delete", "/project", "/tag", "/tags"}
         )

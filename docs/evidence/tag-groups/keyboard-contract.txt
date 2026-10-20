@@ -1,8 +1,9 @@
 # Real OperatorApp keyboard probe — source 956681f13e (source files identical at capture)
 # env -u NO_COLOR TERM=xterm-256color PYTHONPATH=. <venv>/bin/python scripts/run_bounded.py --timeout 300 -- <venv>/bin/python <scratch>/tag_keyboard_probe.py
-# The same assertions are pinned by tests/unit/tui/test_tag_command.py::test_tag_keyboard_arrows_enter_escape_and_inline_draft
+# Shared half (arrows/Escape write nothing, one Enter one assignment, inline draft kept) is
+# pinned by tests/unit/tui/test_tag_command.py::test_tag_keyboard_arrows_enter_escape_and_inline_draft;
+# the probe starts from an empty store, the test from an applied primary.
 [run_bounded] memory budget 5307 MiB (inherited); sampled owned child group only
-operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
 open: True text: '/tag '
 rows: ['Review', 'Ops']
 arrow: 'Review' -> 'Ops'

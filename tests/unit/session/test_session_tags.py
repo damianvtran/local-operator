@@ -497,3 +497,21 @@ def test_effective_primary_requires_registered_and_assigned(tmp_path: Path) -> N
     # removed from the registry: a dangling assignment falls to Untagged
     assert effective_primary([a], a, []) is None
     assert effective_primary([], None, categories) is None
+
+
+@pytest.mark.parametrize("name", ["Foo\nbar", "Foo\tbar", "Foo\x1bbar", "Foo\u2028bar"])
+def test_control_characters_are_refused_by_both_writers(tmp_path: Path, name: str) -> None:
+    """A name is painted as ONE row; the store is where that is enforced.
+
+    Both surfaces measure with ``cell_len``, which counts U+000A as zero
+    columns, so an embedded separator turns one row into two without a
+    capacity row. Refusing in the store is what makes every client inherit the
+    rule instead of each renderer sanitising its own output.
+    """
+    with pytest.raises(ValueError, match="control characters"):
+        write_categories(tmp_path, [(None, name)])
+    assert read_categories(tmp_path) == []
+    with pytest.raises(ValueError, match="control characters"):
+        toggle_entity_tag(tmp_path, "session", SID, name)
+    assert read_categories(tmp_path) == []
+    assert read_entity_tags(tmp_path, "session", SID)["tags"] == []
