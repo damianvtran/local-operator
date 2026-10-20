@@ -2907,6 +2907,196 @@
       },
       "status": "passed",
       "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MAJOR fixed: description and help said 'máy tính do Radient vận hành' (a computer), while the setting is compute and the title already says 'Tính toán'; now 'hạ tầng tính toán do Radient vận hành' / 'hạ tầng tính toán Radient'. enabled.help measured 86 cells, past the 74-cell 80x24 line; now 'Bản xem trước: gửi việc tới hạ tầng tính toán Radient trong mạng mesh.' (70). 'mạng mesh' matches the vi guide's recorded setting form; 'Bản xem trước' matches tui.viewer. No unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help): 'tính toán Radient' was not a usable destination noun, so the description's 'hạ tầng tính toán Radient' is restored; 'Bản xem trước' shortened to 'Xem trước' to stay in the line (73 cells), 'một' kept for the one-network claim; 'Radient' untranslated; no containment claim. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Every round-1 typography fix verified landed: U+202F before : ; ? ! across both namespaces (36 + 7 occurrences, no NBSP, no ASCII apostrophe), including status_line, detached and still_running. Tenant 'confirmé par Radient' in submitted and detached; no isolation/containment claim. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Every round-1 typography fix verified landed: U+202F before : ; ? ! across both namespaces (36 + 7 occurrences, no NBSP, no ASCII apostrophe), including status_line, detached and still_running. Tenant 'confirmé par Radient' in submitted and detached; no isolation/containment claim. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: 'Radient द्वारा पुष्टि किया गया' in submitted and detached, detach 'निगरानी करने के बजाय', network 'जिस नेटवर्क से रन सबमिट करना है'. 2 MINOR fixed in still_running (changed key): the watch is PAST tense ('निगरानी रोक चुका है', was present 'रोक रहा है'), and 'इसे यहाँ जाँचें' (check it here) became 'जाँचने के लिए', the file's own '<verb> के लिए: <command>' pattern as in interrupted. No isolation wording; placeholders and flags byte-identical. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 68/81 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: 'Radient द्वारा पुष्टि किया गया' in submitted and detached, detach 'निगरानी करने के बजाय', network 'जिस नेटवर्क से रन सबमिट करना है'. 2 MINOR fixed in still_running (changed key): the watch is PAST tense ('निगरानी रोक चुका है', was present 'रोक रहा है'), and 'इसे यहाँ जाँचें' (check it here) became 'जाँचने के लिए', the file's own '<verb> के लिए: <command>' pattern as in interrupted. No isolation wording; placeholders and flags byte-identical. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 68/81 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: network_mismatch 'отнести к запускам этой сети', still_running 'команда прекратила слежение' (past tense), retranslated for the new 'limit Radient reported' wording. Tenant 'подтверждена Radient' in submitted and detached; no isolation/containment claim; no typographic space before : ; as the ru guide requires. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: network_mismatch 'отнести к запускам этой сети', still_running 'команда прекратила слежение' (past tense), retranslated for the new 'limit Radient reported' wording. Tenant 'подтверждена Radient' in submitted and detached; no isolation/containment claim; no typographic space before : ; as the ru guide requires. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "af92abe1645a99e70c6f15f09a6e5ef572bbcbdde7ca042b72376a31f1a874bd",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract, 37 wire + 11 help keys re-read in full. Round-1 audit had 0 findings; re-checked against the rewritten status vocabulary: 'Radient xác nhận' in submitted and detached, verb-only address (no 'bạn' padding), NFC throughout, oa/uy tone placement correct (thoát, hoàn, khoản are closed syllables). No isolation/containment claim; placeholders, newlines and flags byte-identical. 0 findings. Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/98 cells against en's 77/98, every line inside the terminal."
     }
   ]
 }
