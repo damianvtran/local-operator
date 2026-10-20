@@ -336,6 +336,101 @@ def test_allowance_growth_reports_only_added_key_ids(i18n_check) -> None:
     assert i18n_check.allowance_growth(base, head) == {("fr", "demo", "demo.two")}
 
 
+def _allowance_growth_repo(
+    tmp_path: Path,
+    i18n_check,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    english: dict[str, str] | None,
+) -> tuple[Path, str]:
+    """A one-commit repo whose base allowance records ``fr/demo: demo.one``.
+
+    ``english`` writes the base English catalogue; ``None`` leaves the
+    directory absent so the base-English read cannot succeed. The module
+    under test is pointed at the fixture tree through ``monkeypatch`` so the
+    session-scoped import cannot leak into another test.
+    """
+    repo = tmp_path / "repo"
+    (repo / "i18n").mkdir(parents=True)
+    (repo / "i18n" / "coverage-allowance.json").write_text(
+        json.dumps({"pairs": [{"locale": "fr", "namespace": "demo", "missing": ["demo.one"]}]}),
+        encoding="utf-8",
+    )
+    if english is not None:
+        catalogue = repo / "local_operator" / "i18n" / "catalogues" / "en"
+        catalogue.mkdir(parents=True)
+        (catalogue / "demo.json").write_text(json.dumps(english), encoding="utf-8")
+    git = ["git", "-c", "user.name=i18n", "-c", "user.email=i18n@example.invalid"]
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    monkeypatch.setattr(i18n_check, "REPO", repo)
+    monkeypatch.setattr(i18n_check, "ALLOWANCE", repo / "i18n" / "coverage-allowance.json")
+    return repo, base_sha
+
+
+def _record_debt(repo: Path, missing: list[str]) -> None:
+    allowance = repo / "i18n" / "coverage-allowance.json"
+    allowance.write_text(
+        json.dumps({"pairs": [{"locale": "fr", "namespace": "demo", "missing": missing}]}),
+        encoding="utf-8",
+    )
+
+
+def test_allowance_growth_accepts_recorded_debt_when_english_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """Recording debt in a change that adds no English copy is permitted.
+
+    The base and head English key sets are identical, so nothing is being
+    landed untranslated; the added rows only record debt the tree already
+    carried (this branch's case).
+    """
+    repo, base_sha = _allowance_growth_repo(
+        tmp_path, i18n_check, monkeypatch, english={"demo.title": "Demo"}
+    )
+    _record_debt(repo, ["demo.one", "demo.title"])
+    assert i18n_check.check_allowance_growth(base_sha) == []
+
+
+def test_allowance_growth_rejects_debt_for_copy_new_since_the_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
+) -> None:
+    """New English copy plus an allowance row for it in one diff is growth.
+
+    This is the laundering vector: the change adds the English key and hides
+    it in the allowance in the same diff, so the entry must fail and name the
+    key.
+    """
+    repo, base_sha = _allowance_growth_repo(
+        tmp_path, i18n_check, monkeypatch, english={"demo.title": "Demo"}
+    )
+    # The head catalogue gains the new English key, as the introducing PR would.
+    head_catalogue = repo / "local_operator" / "i18n" / "catalogues" / "en" / "demo.json"
+    head_catalogue.write_text(
+        json.dumps({"demo.title": "Demo", "demo.added_after_base": "New"}), encoding="utf-8"
+    )
+    _record_debt(repo, ["demo.one", "demo.added_after_base"])
+    assert i18n_check.check_allowance_growth(base_sha) == [
+        "allowance growth: added fr/demo: demo.added_after_base"
+    ]
+
+
+def test_allowance_growth_fails_conservatively_without_base_english(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, i18n_check
+) -> None:
+    """An unreadable English key set keeps every addition red and says so."""
+    repo, base_sha = _allowance_growth_repo(tmp_path, i18n_check, monkeypatch, english=None)
+    _record_debt(repo, ["demo.one", "demo.unknown"])
+    assert i18n_check.check_allowance_growth(base_sha) == [
+        "allowance growth: added fr/demo: demo.unknown"
+    ]
+    assert "English catalogues unreadable" in capsys.readouterr().out
+
+
 def test_allowance_growth_skips_without_a_base_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check
 ) -> None:

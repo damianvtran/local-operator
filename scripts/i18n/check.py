@@ -626,9 +626,35 @@ def _allowance_ids(data: dict[str, Any]) -> set[tuple[str, str, str]]:
     return ids
 
 
-def allowance_growth(base: dict[str, Any], head: dict[str, Any]) -> set[tuple[str, str, str]]:
-    """Keys HEAD records as missing that the base allowance did not."""
-    return _allowance_ids(head) - _allowance_ids(base)
+def allowance_growth(
+    base: dict[str, Any],
+    head: dict[str, Any],
+    *,
+    new_english_keys: set[str] | None = None,
+) -> set[tuple[str, str, str]]:
+    """Added allowance entries that are growth in this change.
+
+    The shrink-only rule forbids landing new English copy and its allowance
+    debt in one change: that would launder untranslated copy. It does permit
+    recording debt the tree ALREADY had, but only in a change that adds no
+    English key at all. That asymmetry is the bypass-proof test: to launder,
+    an earlier PR would have had to land English copy with its debt
+    unrecorded — and that PR fails the manifest gate, so it cannot land. The
+    exemption is therefore unreachable from any state laundering could have
+    produced.
+
+    ``new_english_keys`` is ``english_keys(head) - english_keys(base)``.
+    Empty means this change adds no English copy, so every added entry is
+    debt being recorded and none is growth. Non-empty means the change grows
+    English copy, so every added entry is growth and is returned.
+    ``None`` means the key sets could not be read; every added entry then
+    counts as growth (the pre-refinement behaviour), because an unverifiable
+    comparison must not weaken the ratchet.
+    """
+    added = _allowance_ids(head) - _allowance_ids(base)
+    if new_english_keys is None or new_english_keys:
+        return added
+    return set()
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -677,6 +703,67 @@ def _resolve_allowance_base(base: str | None) -> str | None:
     return None
 
 
+def _english_keys_at_ref(ref: str) -> set[str] | None:
+    """Qualified key IDs in ``ref``'s English catalogues, or ``None``.
+
+    Read from the committed tree rather than the working copy: the question
+    is what English copy existed at the base, not what exists now. Any
+    unreadable piece (missing ref, unparsable file, interrupted listing)
+    returns ``None`` as a whole — a partial set would silently permit
+    entries the comparison could not verify.
+    """
+    listing = _git("ls-tree", "-r", "--name-only", ref, "--", "local_operator/i18n/catalogues/en")
+    if listing.returncode != 0:
+        return None
+    paths = [
+        path
+        for path in listing.stdout.splitlines()
+        if path.endswith(".json") and not path.endswith(catalogues.CONTEXT_SUFFIX)
+    ]
+    if not paths:
+        return None
+    keys: set[str] = set()
+    for path in paths:
+        shown = _git("show", f"{ref}:{path}")
+        if shown.returncode != 0:
+            return None
+        try:
+            messages = json.loads(shown.stdout)
+        except ValueError:
+            return None
+        if not isinstance(messages, dict):
+            return None
+        keys.update(messages)
+    return keys
+
+
+def _english_keys_in_tree() -> set[str] | None:
+    """Qualified key IDs in the working tree's English catalogues, or ``None``.
+
+    The head side of the comparison is the tree CI checks out, so a new key
+    counts as soon as the change adds it. Unreadable or empty means the
+    comparison cannot run and the caller must fail conservatively.
+    """
+    directory = REPO / "local_operator" / "i18n" / "catalogues" / "en"
+    paths = [
+        path
+        for path in directory.glob("*.json")
+        if not path.name.endswith(catalogues.CONTEXT_SUFFIX)
+    ]
+    if not paths:
+        return None
+    keys: set[str] = set()
+    for path in paths:
+        try:
+            messages = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(messages, dict):
+            return None
+        keys.update(messages)
+    return keys
+
+
 def check_allowance_growth(base: str | None = None) -> list[str]:
     """Fail when HEAD adds missing-key entries relative to the base branch.
 
@@ -684,6 +771,12 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     stop someone editing the file, but an added entry becomes a red check that
     names the debt, so growth is a deliberate reviewed act rather than a
     silent escape. A base branch without the file is the introduction case.
+
+    The one legitimate addition is debt the tree already carried, recorded in
+    a change that adds NO English key (see ``allowance_growth``). If the
+    change adds English copy, every added entry stays red. When either
+    English key set cannot be read the check falls back to failing on every
+    addition and says so.
     """
     ref = _resolve_allowance_base(base)
     # A supplied ref is operator input, not a best-effort default: inside git,
@@ -704,9 +797,23 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     try:
         base_data = json.loads(shown.stdout)
         head_data = json.loads(ALLOWANCE.read_text(encoding="utf-8"))
-        added = allowance_growth(base_data, head_data)
+        base_english = _english_keys_at_ref(ref)
+        head_english = _english_keys_in_tree()
+        if base_english is None or head_english is None:
+            new_english: set[str] | None = None
+        else:
+            new_english = head_english - base_english
+        added = allowance_growth(base_data, head_data, new_english_keys=new_english)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return [f"allowance growth: cannot compare allowances: {exc}"]
+    if new_english is None:
+        # Say so even when nothing was added: the verdict is only trustworthy
+        # if a reader knows the English key sets could not be read.
+        print(
+            # i18n: ignore checker diagnostic (operator tooling output, English-only)
+            "allowance growth: base or head English catalogues unreadable; "
+            "every added entry counts as growth (conservative fallback)"
+        )
     return [
         f"allowance growth: added {locale}/{namespace}: {key}"
         for locale, namespace, key in sorted(added)
