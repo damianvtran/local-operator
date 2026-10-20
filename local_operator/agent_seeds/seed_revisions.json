@@ -231,6 +231,16 @@
         "effort": null,
         "delegate": true,
         "class": "proactive"
+      },
+      {
+        "sha": "67eaefe40cdd1f5f4b07c6e9e5796ac31cb0a9f9",
+        "version": "1.5.5",
+        "instructions_sha256": "a512280d99e165606865c7da20cdb8474537fe583f33e757f875809d1779d918",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
       }
     ],
     "architect": [
@@ -1020,6 +1030,27 @@
         "sha": "c5400d7df9911be8936a9db192e815148f820c5c",
         "version": "1.3.2",
         "instructions_sha256": "9c6beb64c84b7a9f53382e09fb2f419abda4f821eb29956f9cc15b41e2b4463c",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "67eaefe40cdd1f5f4b07c6e9e5796ac31cb0a9f9",
+        "version": "1.3.3",
+        "instructions_sha256": "d3a7be222fd043b099dc899750c77d0fb7e26764d4474e53162dd693279d9d57",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
         "tools": [
           "read",
