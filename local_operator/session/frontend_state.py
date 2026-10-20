@@ -917,6 +917,134 @@ def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
     return overrides
 
 
+def _restored_model_field(value: Any) -> Any:
+    """One live spec, in the restored field's own type.
+
+    ``model_copy`` does not validate, so the ``ModelSpec``-to-wire validator on
+    ``selected_model``/``effective_model`` does not run on this path — the same
+    reason the receipt fixup beside the call site has to hand over a validated
+    object rather than a dump. The dump is therefore re-validated into
+    ``FrontendModelSpec`` HERE, which is the shape ``refresh_from_session``'s
+    constructor call lands on the live path, so both stores hold the same type
+    and not merely the same values.
+    """
+    if isinstance(value, ModelSpec):
+        return FrontendModelSpec.model_validate(value.model_dump(mode="json"))
+    return value
+
+
+def _reading_pair(
+    configured: FrontendModelSpec | None, stored: FrontendModelSpec | None
+) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+    """The two specs a restored context reading is only meaningful between, or ``None``.
+
+    A token count is interpretable only against the window it was measured
+    against, so a reading may cross a restore only while BOTH sides name the
+    same model: the stored ``context_tokens`` were measured on the stored
+    spec's model, and the window about to divide them is the configured
+    spec's. Two different models have no honest conversion between them — the
+    user switched models since the checkpoint was written — so the reading is
+    DROPPED rather than recomputed.
+
+    ONE RULE, TWO CONSUMERS, IN TWO MODULES. ``attached.AttachedSession._restored_pair``
+    asks it for the COLD viewer (may this process adopt the checkpoint's
+    numerator and denominator?), and ``_live_model_updates`` asks it for the
+    first frame a restarted OWNER publishes (may it carry the checkpoint's
+    reading under a spec that names another model?). Those were two spellings
+    of the same comparison, and they drifted in exactly the way a duplicated
+    rule does: the viewer refused a cross-model reading while the owner's first
+    frame kept one (review round 1, M1 = QA round 1, Q2). A third consumer must
+    call this rather than restate the comparison.
+    """
+    if configured is None or stored is None:
+        return None
+    if configured.provider != stored.provider or configured.model_id != stored.model_id:
+        return None
+    return configured, stored
+
+
+def _live_model_updates(
+    session: Any, checkpoint_model: FrontendModelSpec | None = None
+) -> dict[str, Any]:
+    """The model pair a restored checkpoint must NOT be allowed to keep.
+
+    ``checkpoint_model`` is the spec the ROW's reading was measured on, which is
+    the row's ``effective_model`` — its SELECTED slot names the model the user
+    chose, and in a fallback session the two differ while only one of them
+    served the requests the tokens came from. Callers pass
+    ``effective_model or selected_model``, the same slot pair
+    ``refresh_from_session`` resolves (QA round 2, Q3).
+
+    A checkpoint is written at a turn end, so its ``selected_model`` /
+    ``effective_model`` describe the runtime that WROTE it. They were the one
+    live field ``_restored_state`` left standing, so a headless owner's FIRST
+    frame named the level the PREVIOUS runtime ran while ``session.model`` — the
+    level its requests, every later frame and the effort picker's entity list
+    read — named the one it had actually restored: the desktop chip painted
+    "High" over a session running "medium" until some unrelated refresh
+    happened to republish the pair (Defect B, session ddd673e63db8).
+
+    The checkpoint's spec is stale for exactly the reason its ``cwd`` is (see
+    the call site): a successor's own spec is authoritative for what it runs.
+    The projection is ``refresh_from_session``'s — ``session.model``, and
+    ``effective_model or selected`` — so the first frame a restarted owner
+    publishes and every frame after it cannot disagree about the running level.
+
+    An empty dict for a host that exposes no model at all: a reduced facade and
+    a test double have none, and there the checkpoint's spec is still the only
+    answer available (the fallback the ``cwd`` fixup documents).
+
+    THE CONTEXT READING IS THE MODEL'S TOO, and the pair above is what decides
+    it: ``context_tokens`` was measured on the model the row's ``effective_model``
+    NAMES — the one that served those calls — so when the restore lands on a
+    different ``(provider, model_id)`` that numerator and its window describe a
+    model that is not about to run. Left in place they made
+    the first frame name one model and divide another model's reading by its
+    window — the ``attached.py`` cold pair refused exactly this pairing while
+    this path published it (review round 1, M1 = QA round 1, Q2). The reading is
+    therefore DROPPED, not converted: no token count is known on the new model,
+    so ``context_tokens`` and its estimate flag go unset (the same honest
+    degradation the band already renders as ``—`` / the mobile meter as
+    ``no-reading``), and the window is the LIVE spec's own — the field
+    ``refresh_from_session`` publishes, so the first frame and every frame after
+    it divide by the same number. A SAME-model restore keeps the checkpoint's
+    pair exactly as it did, because that is the reading the conversation was
+    actually measured at; identity, not a window mismatch, is the gate.
+
+    THE PAIR'S OWN DERIVED FIELD MOVES WITH IT. ``effort_displacement`` (#2658)
+    is a fact ABOUT ``selected``/``effective`` — computed from them and the
+    conversation's ``chosen_effort`` — so re-stamping the pair without it
+    published a frame that contradicted itself: the pair named the level the
+    successor runs while the note still narrated the checkpoint's. Reproduced by
+    review round 4 (m1): a checkpoint written while ``minimal`` was clamped to
+    ``low``, a later ``/effort high``, and the successor's FIRST frame carried
+    ``high/high`` beside ``Effort: low on anthropic/claude-opus-5; you chose
+    minimal.`` until some unrelated refresh recomputed it. Same call and same
+    arguments as ``refresh_from_session``'s, deliberately: a second spelling of
+    the rule is how a derived field and its input drift apart.
+    """
+    selected = getattr(session, "model", None)
+    if selected is None:
+        return {}
+    effective = getattr(session, "effective_model", None) or selected
+    updates: dict[str, Any] = {
+        "selected_model": _restored_model_field(selected),
+        "effective_model": _restored_model_field(effective),
+        "effort_displacement": effort_displacement(
+            selected, effective, getattr(session, "chosen_effort", None)
+        ),
+    }
+    if _reading_pair(effective, checkpoint_model) is None:
+        updates.update(
+            {
+                "context_tokens": None,
+                "context_is_estimate": None,
+                "context_window": getattr(effective, "context_window", None),
+            }
+        )
+    return updates
+
+
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
     """Fields a restored checkpoint must NOT be allowed to carry across a fork.
 
@@ -7352,6 +7480,16 @@ class FrontendStateStore:
                     else state.loop
                 ),
                 **_inherited_identity_fixups(state, session_id),
+                # WHAT THIS RUNTIME RUNS IS NOT THE CHECKPOINT'S TO DECIDE
+                # either, and this pair is the field the rule above was still
+                # missing: the row names the model the previous runtime ran, and
+                # the owner's own spec is the one its requests use. The
+                # comparison slot is the row's EFFECTIVE model, not its
+                # selected one: that is the model the row's ``context_tokens``
+                # were measured on, so gating on ``selected_model`` dropped a
+                # still-serving model's reading whenever a fallback had been in
+                # force when the row was written (QA round 2, Q3).
+                **_live_model_updates(session, state.effective_model or state.selected_model),
             }
         )
 

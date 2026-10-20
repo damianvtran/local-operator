@@ -43,9 +43,12 @@ from local_operator.tui import _register_secret_session
 from local_operator.variables import VariableStore
 
 _SUPPORTED = sys.platform == "darwin" or sys.platform.startswith("linux")
-pytestmark = pytest.mark.skipif(
-    not _SUPPORTED, reason="the broker is implemented for macOS and Linux"
-)
+# These cells register real sessions with a REAL broker and assert its refusals;
+# the suite's autouse gate is for ordinary tests that merely read the store.
+pytestmark = [
+    pytest.mark.skipif(not _SUPPORTED, reason="the broker is implemented for macOS and Linux"),
+    pytest.mark.allow_secret_broker,
+]
 
 SECRET_NAME = "RUNTIME_SINK_TOKEN"
 SECRET_VALUE = "runtime-sink-7c1f0b2a"

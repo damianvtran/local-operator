@@ -26,6 +26,29 @@ from local_operator.memory_capture import (
     watermark,
 )
 
+
+async def _await_capture_row(memory: MemoryStore, marker: str, *, timeout: float = 10.0) -> Any:
+    """The marker's capture row, waiting for a worker that has not landed yet.
+
+    THE FAILURE THIS REPLACES was a bare ``assert all(watermark(...))``: a False
+    with no marker, no status and no reason (run 39383034418, job 118496365150,
+    ``[context-full]`` at :1162). A capture row is written by
+    ``complete_memory_capture`` after it awaits the scan task, so the honest wait
+    is for the ROW, not for a snapshot of ``_background_tasks`` — a completion
+    task that is spawned or rescheduled after the snapshot is invisible to it.
+
+    Returns ``capture_detail`` (``status``/``n``/``reason``/``refused``/
+    ``skipped``) or ``None``. The caller asserts on the value, so a timeout is a
+    named reading rather than a lost assertion.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        detail = capture_detail(memory, marker)
+        if detail is not None or time.monotonic() >= deadline:
+            return detail
+        await asyncio.sleep(0.05)
+
+
 NOISY_LOCATORS = (
     "Ratio 9/1, see guide://credentials and skill://software-development. "
     "The branch that we discussed is ready."
@@ -1141,6 +1164,7 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
     memory = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
     explicit = memory.put("session", {"title": "Release decision", "body": "Decision: ship Friday"})
     markers = []
+    readings: list[tuple[str, Any]] = []
     try:
         for n in range(3):
             for m in range(3):
@@ -1158,8 +1182,25 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
             assert archived == (strategy == "snapcompact"), entry.payload.get("summary", "")[:80]
             for task in list(session._background_tasks):
                 await asyncio.wait_for(task, 5)
+            # WAIT FOR THE ROW, and carry its fields into the failure. A chained
+            # pass's completion can be scheduled around the snapshot above; the
+            # postcondition is the persisted row, which is what the rest of this
+            # cell (and a resumed session) actually reads.
+            readings.append((entry.id, await _await_capture_row(memory, entry.id)))
         assert len(set(markers)) == 3
-        assert all(watermark(memory, marker) for marker in markers)
+        missing = [marker for marker, detail in readings if detail is None]
+        assert not missing, (
+            "a chained compaction left no capture row: "
+            + "; ".join(
+                f"{marker}: status={detail.status if detail else None} "
+                f"n={detail.n if detail else None} reason={detail.reason if detail else None} "
+                f"refused={detail.refused if detail else None} "
+                f"skipped={detail.skipped if detail else None}"
+                for marker, detail in readings
+            )
+            + f"; pending_background={len(session._background_tasks)} "
+            f"last_terminal={getattr(session, '_memory_terminal', None)!r}"
+        )
         before = len(requests)
     finally:
         await session.dispose()

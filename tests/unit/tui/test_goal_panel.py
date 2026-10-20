@@ -15,6 +15,7 @@ which is what would make a new global action a config migration.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -556,14 +557,80 @@ async def test_the_card_never_covers_the_docked_composer(size: tuple[int, int]) 
         app._cmd_goal("", lambda body, kind="info": None)
         await pilot.pause()
         panel = app.query_one(GoalPanel)
+        shell = app.query_one("#input-shell")
+        # WAIT FOR THE DECISION, NOT A FRAME. `_fit` reads the DOCK's laid-out
+        # height, so the first repaint (at mount) can see a ground the final dock
+        # never leaves. `on_resize` repaints when that settles; one `pause()`
+        # asserted the class before the repaint had run under CI load — the failure
+        # was always the class, never the geometry (run 39286870604, job
+        # 118199298717, `[size1]`). This waits for the class to agree with the
+        # fit that is now in force.
+        for _ in range(200):
+            rows, gutter, _shown = panel._fit()
+            if panel.region.height and panel.has_class("-squeezed") == (gutter == 0):
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(
+                f"{size}: the card never settled its squeeze decision: "
+                f"fit={panel._fit()!r}, squeezed={panel.has_class('-squeezed')}, "
+                f"region={panel.region!r}, display={panel.display}, "
+                f"styles={panel.styles.width!r}x{panel.styles.height!r}, app={app.size!r}"
+            )
+        card_bottom = panel.region.y + panel.region.height
+        assert (
+            card_bottom <= shell.region.y
+        ), f"{size}: card bottom {card_bottom} covers the composer at {shell.region.y}"
+        # ...and the class tells the truth about the FIT that produced this: below
+        # the squeeze threshold the gutter is spent, at or above it the card can
+        # afford the gutter and is not required to squeeze. Asserting the class is
+        # ALWAYS present was the test assuming a ground that 80x12 does not always
+        # have, not the invariant the card owes.
+        rows, gutter, _shown = panel._fit()
+        assert panel.has_class("-squeezed") == (
+            gutter == 0
+        ), f"{size}: squeeze class does not match fit rows={rows} gutter={gutter}"
+
+
+@pytest.mark.asyncio
+async def test_a_resize_while_open_repaints_the_card_for_the_new_ground() -> None:
+    """A terminal resize must re-fit the card, not keep its old ground.
+
+    THE SIBLING'S RULE (``UsagePanel.on_resize``) that this card lacked. The card
+    is opened at 100x40, where it can afford its gutter, then the terminal shrinks
+    to 80x12, where it cannot. Without a resize repaint both the pinned height and
+    the squeeze class stay at the 100x40 decision — on a shorter ground that puts
+    the card over the docked composer, which is the one invariant the card owes.
+    """
+    session = _armed()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app._cmd_goal("", lambda body, kind="info": None)
+        await pilot.pause()
+        panel = app.query_one(GoalPanel)
+        assert panel.has_class("-squeezed") is False, "the wide card should afford its gutter"
+
+        await pilot.resize_terminal(80, 12)
+        for _ in range(200):
+            rows, gutter, _shown = panel._fit()
+            if panel.region.height and panel.has_class("-squeezed") == (gutter == 0):
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(
+                "the card never re-fit after the resize: "
+                f"fit={panel._fit()!r}, squeezed={panel.has_class('-squeezed')}, "
+                f"region={panel.region!r}, display={panel.display}, "
+                f"styles={panel.styles.width!r}x{panel.styles.height!r}, app={app.size!r}"
+            )
         card_bottom = panel.region.y + panel.region.height
         shell = app.query_one("#input-shell")
         assert (
             card_bottom <= shell.region.y
-        ), f"{size}: card bottom {card_bottom} covers the composer at {shell.region.y}"
-        # ...and it is the SQUEEZE that bought that, not a card that simply
-        # refused to paint its own content.
-        assert panel.has_class("-squeezed")
+        ), f"after resize: card bottom {card_bottom} covers the composer at {shell.region.y}"
 
 
 async def _adopted(pilot, app: OperatorApp, session: object) -> None:  # noqa: ANN001
