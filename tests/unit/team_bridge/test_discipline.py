@@ -1283,3 +1283,97 @@ async def test_an_active_endpoint_without_a_local_receipt_is_repaired(tmp_path: 
     )
     # The marker records only the B-time PUT, not the repair.
     assert _local(tmp_path).default_enrollment == {}
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_session_after_auto_enrollment_makes_it_wakeable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """M1 direction 1: enrol silently, choose the CoS session later.
+
+    The default path must not freeze the designation at first commit: a later
+    ``team_bridge.session`` write reaches the native record on the next fresh
+    status read, and the host then builds the runtime for THAT session.
+    """
+
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+    from local_operator.team_bridge.store import Store
+
+    payloads = [_ready_payload(consent=SERVED_CONSENT)]
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(payloads.pop(0) if payloads else _endpoint_payload("active"))
+
+    discipline = _discipline(_Counter(responder), tmp_path)
+    await discipline.check(Boundary.APP_START)
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert store.designated_session_for(owner) is None
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_x")
+        is None
+    )
+
+    _set_local(tmp_path, session="sess_x")
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert store.designated_session_for(owner) == "sess_x"
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_x")
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_session_withdraws_wake_consent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """M1 direction 2: clearing the row is a WITHdrawal, not a no-op.
+
+    The native designation must go back to NULL, the host runtime must close,
+    and the wake producer fence must answer ``no_designation`` (badge-only).
+    """
+
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.team_bridge.connector.wake import _producer_fence
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+    from local_operator.team_bridge.store import Store
+
+    _set_local(tmp_path, session="sess_cos")
+    payloads = [_ready_payload(consent=SERVED_CONSENT)]
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(payloads.pop(0) if payloads else _endpoint_payload("active"))
+
+    discipline = _discipline(_Counter(responder), tmp_path)
+    await discipline.check(Boundary.APP_START)
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert store.designated_session_for(owner) == "sess_cos"
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is not None
+    )
+
+    _set_local(tmp_path, session="")
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert store.designated_session_for(owner) is None
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is None
+    )
+    access = OAuthAccess(
+        access_token="token-1", credential_id=owner.credential_id, account_id="acc_1"
+    )
+    assert _producer_fence(store, owner, access, None) == "no_designation"

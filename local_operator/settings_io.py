@@ -5568,9 +5568,10 @@ SETTINGS: tuple[Setting, ...] = (
     # start), and `_consumer_defaults()` in tests/unit/test_settings_io.py
     # imports DEFAULT_TEAM_BRIDGE_* from ``local_operator.team_bridge.settings``
     # to pin that the two cannot drift. Every path is a genuinely NESTED tuple;
-    # the fail-closed normalisation of each value lives with the consumer, so a
-    # hand-edited value reads as the shipped default rather than crashing a
-    # surface.
+    # the fail-closed normalisation of each value lives with the consumer, so an
+    # ABSENT key reads the shipped default and a PRESENT but unparseable
+    # ``team_bridge.enabled`` reads OFF (the ON default performs a consent
+    # write) rather than crashing or consenting on a bad value.
     #
     # TWO ROWS, DELIBERATELY. ``team_bridge.onboarding`` is internal UI
     # bookkeeping (the one-time dialog's shown-flag) and is NOT registered: a

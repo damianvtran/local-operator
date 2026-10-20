@@ -2458,6 +2458,23 @@ class StatusDiscipline:
             return check
         return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
 
+    def _sync_designation(self, store: Any, owner: Any, session: str) -> None:
+        """Apply the current ``team_bridge.session`` to the native record.
+
+        A no-op when the designation already matches. Clearing the row writes
+        SQL NULL, which is the same state as never having designated one, so
+        the wake fence's ``no_designation`` / badge-only path applies. The
+        writer's own live-generation fence refuses a stale owner; that is
+        "no authority", not a status-read error.
+        """
+
+        try:
+            desired = session.strip() or None
+            if (store.designated_session_for(owner) or None) != desired:
+                store.update_designated_session(owner, desired)
+        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
+            return
+
     def _ensure_local_enrollment(
         self,
         check: StatusCheck,
@@ -2465,18 +2482,38 @@ class StatusDiscipline:
         access: OAuthAccess,
         local: TeamBridgeSettings,
     ) -> StatusCheck:
-        """Commit the native receipt for an ACTIVE endpoint that lacks one.
+        """Commit the native receipt for an ACTIVE endpoint, and keep the wake
+        designation in step with ``team_bridge.session``.
 
         This is the repair half of the default-on path, and it is deliberately
         driven by a FRESH status answer rather than by a stored flag: an account
         enabled on another machine, or a first PUT whose local commit failed,
-        lands here on the next read. It never touches a committed owner (a
-        different namespace needs explicit re-enrollment), never re-sends
-        consent, and never guesses a wake designation — ``team_bridge.session``
-        is the user's choice; empty stays badge-only per RFC §13.6.
+        lands here on the next read. It never rebinds a committed owner (a
+        different namespace needs explicit re-enrollment) and never re-sends
+        consent.
+
+        DESIGNATION. ``_sync_designation`` runs on every fresh READY answer for
+        the committed owner, so a session chosen AFTER the silent enrollment
+        becomes wakeable, and clearing the row withdraws wake consent (review
+        round 2, M1). A settings edit reaches the native record on the next
+        fresh read — at most ``STATUS_CACHE_TTL_S`` later — because the status
+        cache is the boundary at which local state is reconciled. Empty stays
+        badge-only per RFC §13.6; the designation is never guessed from "the
+        current session".
         """
 
         if self._config_dir is None or check.state != STATE_READY:
+            return check
+        try:
+            from local_operator.team_bridge.store import Store
+
+            store = Store(self._config_dir)
+            owner = store.active_owner()
+        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
+            return check
+        if owner is not None:
+            if owner.account_id == check.account_id:
+                self._sync_designation(store, owner, local.session)
             return check
         tenant = select_tenant(check.payload)
         if tenant is None or not bool(tenant.get("eligible")):
