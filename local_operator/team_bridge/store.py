@@ -1568,10 +1568,10 @@ class Store:
 
         WHY THIS EXISTS. ``active_owner()`` answers ``None`` for BOTH zero rows
         and an ambiguous store (two or more), and a writer cannot tell a fresh
-        machine from a corrupted one from that answer. The opt-out default's
-        local commit must refuse to ADD a row to an ambiguous store rather than
-        guessing — a write path is exactly where "None means fresh" would turn
-        ambiguity into a second owner.
+        machine from a corrupted one from that answer. The explicit settings
+        enable's local commit must refuse to ADD a row to an ambiguous store
+        rather than guessing — a write path is exactly where "None means fresh"
+        would turn ambiguity into a second owner.
         """
 
         with self._connect() as conn:

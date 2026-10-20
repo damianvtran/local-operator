@@ -731,8 +731,8 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["state_note"] is None
     assert result["texts_rejected"] == []
     # The local keys the renderer composes its gate from.
-    # The opt-out default: an absent local key reads as ON.
-    assert result["local"] == {"enabled": True, "onboarding": "", "session": ""}
+    # The consent hold: an absent local key reads as OFF.
+    assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
     # The consent renders exactly as served, with its source named.
     assert result["consent"] == {
         "version": "bridge_consent_v1",
@@ -1149,7 +1149,7 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     assert first.status_code == 200
     first_body = first.json()["result"]
     assert first_body["state"] == STATE_SIGNED_OUT
-    assert first_body["local"] == {"enabled": True, "onboarding": "", "session": ""}
+    assert first_body["local"] == {"enabled": False, "onboarding": "", "session": ""}
 
     # A real separate process writes the registered keys through settings_io.
     _external(
