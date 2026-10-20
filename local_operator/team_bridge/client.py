@@ -80,7 +80,11 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
-from local_operator.team_bridge.settings import TeamBridgeSettings
+from local_operator.team_bridge.settings import (
+    DEFAULT_ENROLLMENT_DONE,
+    TeamBridgeSettings,
+    record_default_enrollment,
+)
 
 # ---------------------------------------------------------------------------
 # Embedded served texts (fallbacks; the server is each text's canonical home)
@@ -100,8 +104,27 @@ SUPPORTED_API_VERSION = 1
 TEXT_CAP_BYTES = 2048
 
 CONSENT_VERSION_V1 = "bridge_consent_v1"
+#: bridge_consent_v2, the disclosure the server serves for NEW enrollments once
+#: Team Bridge is default-on. It is accepted and echoed exactly like v1; the
+#: difference is that only v2 can authorise the AUTOMATIC default enrollment
+#: (:data:`DEFAULT_ENROLLMENT_CONSENT_VERSION`).
+CONSENT_VERSION_V2 = "bridge_consent_v2"
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
+
+#: The ONE consent version under which the automatic default enrollment may run.
+#:
+#: The consent hold (#2712) stopped the status read from enrolling under v1,
+#: whose copy never offered an opt-out. This constant is the narrow reopening:
+#: only the version whose disclosure says on-by-default may drive the no-dialog
+#: write. The shipped local default is still OFF
+#: (:data:`local_operator.team_bridge.settings.DEFAULT_TEAM_BRIDGE_ENABLED`), so
+#: today the path runs only after an explicit local enable. Flipping that
+#: default after v2 approval is the single product change -- and even then it
+#: enrolls nobody on a v1-only server. v1 still works for an EXPLICIT enable
+#: (the settings PUT echoes whatever the server served); it just never
+#: authorises a consent the member did not give.
+DEFAULT_ENROLLMENT_CONSENT_VERSION = CONSENT_VERSION_V2
 
 #: bridge_consent_v1, byte-equal to the server's frozen constant and the RFC §5.2
 #: source of record. Rendered as served while status is reachable (§13.1).
@@ -120,6 +143,24 @@ CONSENT_TEXT_V1 = (
     "mited to what was asked. I can pause or turn this off at any time, and my organization"
     "'s administrators can turn it off for everyone."
 )
+
+#: bridge_consent_v2, byte-equal to the server's frozen constant (agent-server
+#: ``internal/bridge/texts.go``). It is the default-on disclosure served for a
+#: NEW enrollment, so it is only rendered as served; the embedded offline
+#: fallback stays v1 while this build is opt-in, because v1 is the truthful text
+#: for a build whose local default is OFF. It must move to v2 in the SAME
+#: post-approval step as
+#: :data:`local_operator.team_bridge.settings.DEFAULT_TEAM_BRIDGE_ENABLED`.
+#: (Until then an offline dialog keeps showing what the build actually does.)
+CONSENT_TEXT_V2 = (
+    "Team Bridge is on by default for members of an active Team plan. It lets your "
+    "teammates and their agents message you and your chief-of-staff agent, and lets agents "
+    "collaborate in shared channels. Every new message is screened; personal information "
+    "and out-of-scope work requests are refused. You can turn Team Bridge off at any time "
+    "in Settings — new messages stop, existing history stays readable."
+)
+
+CONSENT_TEXT_V2_SHA256 = hashlib.sha256(CONSENT_TEXT_V2.encode("utf-8")).hexdigest()
 
 #: bridge-screen-v1, byte-equal to the server's frozen v1 constant. The screening
 #: template ships as the client's FLOOR: the server can strengthen a template only
@@ -1221,11 +1262,12 @@ class TeamBridgeClient:
         ``consent_version_unknown`` drives the refresh-and-re-render path, which
         is the designed flow rather than a failure.
 
-        A 200 with an ACTIVE endpoint also commits the NATIVE receipt: this call
-        is the user's explicit consent action, and the consent hold (#2712)
-        forbids a status read writing one. The commit is skipped for every
-        other answer (pause, disable, missing echo/tenant), so a settings edit
-        never invents consent.
+        A 200 with an ACTIVE endpoint also commits the NATIVE receipt. The
+        caller is either the user's explicit enable or the v2-gated automatic
+        enrollment (:meth:`StatusDiscipline._consent_default`); the consent hold
+        (#2712) keeps every OTHER status-read path out of the store. The commit
+        is skipped for every other answer (pause, disable, missing echo/tenant),
+        so a settings edit never invents consent.
         """
 
         if state not in VALID_STATES:
@@ -1258,7 +1300,7 @@ class TeamBridgeClient:
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         result = await self._send("PUT", "/messaging/settings", body=body, access=access)
-        self._commit_explicit_enable(
+        self._commit_settings_enrollment(
             state=state,
             tenant_id=tenant_id,
             consent_version=consent_version,
@@ -1267,7 +1309,7 @@ class TeamBridgeClient:
         )
         return result
 
-    def _commit_explicit_enable(
+    def _commit_settings_enrollment(
         self,
         *,
         state: str,
@@ -1276,12 +1318,14 @@ class TeamBridgeClient:
         result: Mapping[str, Any],
         access: OAuthAccess | None,
     ) -> None:
-        """Commit the native receipt for THIS user's explicit settings enable.
+        """Commit the native receipt for a settings PUT that proved consent.
 
-        The settings PUT is the user's action (the surface has just sent the
-        consent echo), so its 200 with an ACTIVE endpoint is the one place a
-        receipt may be created without reopening a dialog. A status read never
-        reaches here (consent hold, #2712).
+        TWO callers, ONE rule: the settings PUT carries the consent echo the
+        surface sent, and its 200 with an ACTIVE endpoint is proof the server
+        recorded it. The caller is the user's own explicit enable, or the
+        v2-gated automatic enrollment whose no-dialog write is authorised by the
+        served bridge_consent_v2 disclosure. A plain status read never reaches
+        here (consent hold, #2712).
 
         NOTHING IS COMMITTED for a pause/disable, an answer that does not prove
         active state, or a caller that omitted the consent echo or tenant: the
@@ -2431,6 +2475,9 @@ class StatusDiscipline:
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+        check = await self._default_enroll(
+            check, boundary=boundary, access=access, texts=texts
+        )
         check = self._sync_local_designation(check)
         self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
         return check
@@ -2488,6 +2535,117 @@ class StatusDiscipline:
             check = replace(check, state_note=STATE_NOTE_NEUTRAL)
         return check
 
+    def _enrolled_by_default(self, local: TeamBridgeSettings, check: StatusCheck) -> bool:
+        account_id = check.account_id
+        return bool(account_id) and (
+            local.default_enrollment.get(account_id) == DEFAULT_ENROLLMENT_DONE
+        )
+
+    async def _default_enroll(
+        self,
+        check: StatusCheck,
+        *,
+        boundary: Boundary,
+        access: OAuthAccess,
+        texts: AcceptedTexts,
+    ) -> StatusCheck:
+        """Consent this account ONCE under the v2 default-on disclosure.
+
+        WHY. When Team Bridge is default-on, "on" is TWO facts: the SERVER
+        endpoint is active (state C, ``can_receive``), and the NATIVE owner +
+        consent receipt the runtime, reads and connector gate on exist locally.
+        The v2 path therefore performs the consented enable on a fresh B answer
+        (the PUT's own commit creates the receipt) instead of leaving the
+        surface at B and pretending the feature is on.
+
+        WHEN IT DOES NOTHING. The local key must be ON (an absent key is OFF
+        until the product flip), the answer must be state B (which excludes
+        ineligible / signed-out / dark-launch / disabled membership), and the
+        served consent must be :data:`DEFAULT_ENROLLMENT_CONSENT_VERSION` --
+        bridge_consent_v2, the disclosure whose copy says on-by-default. A
+        v1-only server does NOTHING automatically: v1's opt-in text never
+        authorised a consent the member did not give, and the explicit settings
+        route remains the way to consent there. A disabled endpoint is E and is
+        never re-enabled.
+
+        FAILURE. A refusal or transport failure leaves the answer exactly as
+        read and records NO marker, so the next fresh read may try again.
+        """
+
+        if self._config_dir is None:
+            return check
+        local = _local_settings_snapshot(self._config_dir)
+        if local is None or not local.enabled:
+            return check
+        if _surface_state(check) != "B":
+            return check
+        if self._enrolled_by_default(local, check):
+            return check
+        return await self._consent_default(
+            check, boundary=boundary, access=access, texts=texts
+        )
+
+    async def _consent_default(
+        self,
+        check: StatusCheck,
+        *,
+        boundary: Boundary,
+        access: OAuthAccess,
+        texts: AcceptedTexts,
+    ) -> StatusCheck:
+        """The one B-time settings PUT, its marker, and the adopted answer."""
+
+        if self._config_dir is None:
+            return check
+        consent = consent_for_display(check)
+        tenant_id = selected_tenant_id(check.payload)
+        if consent is None or tenant_id is None or not check.account_id:
+            return check
+        version, _text, source = consent
+        if source != "served":
+            return check
+        if version != DEFAULT_ENROLLMENT_CONSENT_VERSION:
+            # A v1-only server (or any older served version) must do nothing
+            # automatically: only v2's default-on copy authorises a no-dialog
+            # write. The explicit settings route still accepts and echoes v1.
+            return check
+        try:
+            await self._client.put_settings(
+                state="active",
+                tenant_id=tenant_id,
+                consent_version=version,
+                # PROVENANCE CAVEAT. The server's v1 enum is ("dialog",
+                # "settings") and its audit reads this as "which surface
+                # collected the consent"; a status read is neither. No honest
+                # value exists in v1, so this writes the closest accepted one
+                # rather than lying with "dialog"; a distinct provenance value
+                # is a cross-repo dependency on the server's enum.
+                consented_via="settings",
+                endpoint=None,
+                expected_account_id=check.account_id,
+            )
+        except (BridgeRefusal, ValueError):
+            # A refusal, a transport failure, or a §5.2 precondition this build
+            # refuses is an enrollment problem: the status answer stands, and no
+            # marker is recorded so the next FRESH read may try again.
+            return check
+        try:
+            record_default_enrollment(self._config_dir, check.account_id)
+        except Exception:  # noqa: BLE001 - the enrollment already succeeded
+            pass
+        # ADOPT THE POST-ENROLLMENT ANSWER when the server already reflects
+        # it: returning B after consenting would tell the surface this machine
+        # is still un-enrolled (and offer a second consent) for the whole cache
+        # TTL. A stale or failed refresh keeps the original answer — the marker
+        # above is what prevents a repeat, not this read.
+        try:
+            payload = await self._client.status(access=access)
+        except (BridgeRefusal, BridgeSignInRequired):
+            return check
+        if not isinstance(payload, dict):
+            return check
+        return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+
     def _sync_designation(self, store: Any, owner: Any, session: str) -> None:
         """Apply the current ``team_bridge.session`` to the native record.
 
@@ -2508,10 +2666,12 @@ class StatusDiscipline:
     def _sync_local_designation(self, check: StatusCheck) -> StatusCheck:
         """Keep the wake designation in step with ``team_bridge.session``.
 
-        A STATUS READ IS NOT AN ENROLLMENT PATH (consent hold, #2712). It never
-        performs the settings PUT and never writes an ``OwnerReceipt``: an
-        active endpoint in a server answer can come from another surface or an
-        older build, so only the user's explicit settings write may enroll.
+        A STATUS READ IS NOT AN ENROLLMENT PATH (consent hold, #2712), with ONE
+        narrow exception: :meth:`_default_enroll` may perform the
+        bridge_consent_v2 no-dialog write before this runs. Nothing else here
+        writes an ``OwnerReceipt``: an active endpoint in a server answer can
+        come from another surface or an older build, so the read alone never
+        enrolls.
 
         The one local write left here is the designation for an ALREADY
         committed owner: the setting the user chose must reach the native record

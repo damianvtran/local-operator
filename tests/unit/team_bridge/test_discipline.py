@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,10 @@ from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
     CONSENT_TEXT_V1,
     CONSENT_TEXT_V1_SHA256,
+    CONSENT_TEXT_V2,
+    CONSENT_TEXT_V2_SHA256,
     CONSENT_VERSION_V1,
+    CONSENT_VERSION_V2,
     SCREENING_TEMPLATE_V1,
     SCREENING_TEMPLATE_V1_SHA256,
     SCREENING_VERSION_V1,
@@ -51,6 +55,9 @@ from tests.unit.team_bridge.test_client import FakeRow, FakeStore
 #: record). Small, and deliberately not the embedded 1 KiB copy: acceptance only
 #: cares that it is a string that fits the cap.
 SERVED_CONSENT = {"version": "bridge_consent_v1", "text": "served consent text"}
+#: The v2 pair the default-on server serves: the ONLY version that authorises
+#: the automatic default enrollment.
+SERVED_CONSENT_V2 = {"version": "bridge_consent_v2", "text": "served consent text v2"}
 
 
 def _signed_store(account: str = "acc_1", token: str = "token-1") -> FakeStore:
@@ -276,6 +283,23 @@ async def test_embedded_texts_are_byte_equal_to_the_frozen_server_constants():
     assert CONSENT_TEXT_V1_SHA256 == (
         "04939536c78bad5de750576add63f661c7c5cc6c7bb0da4799142dc39e3d1134"
     )
+    # v2's bytes are pinned here too: the server test pins the Go constant, and
+    # this pin is what makes a local transcription error fail instead of
+    # silently rendering different words under the version the server records.
+    assert CONSENT_VERSION_V2 == "bridge_consent_v2"
+    assert CONSENT_TEXT_V2 == (
+        "Team Bridge is on by default for members of an active Team plan. It lets "
+        "your teammates and their agents message you and your chief-of-staff agent, "
+        "and lets agents collaborate in shared channels. Every new message is "
+        "screened; personal information and out-of-scope work requests are refused. "
+        "You can turn Team Bridge off at any time in Settings — new messages stop, "
+        "existing history stays readable."
+    )
+    assert hashlib.sha256(CONSENT_TEXT_V2.encode()).hexdigest() == CONSENT_TEXT_V2_SHA256
+    assert CONSENT_TEXT_V2_SHA256 == (
+        "e95c5c9a690d6c918aca0a449b792108886dd5aba8b2e93105a4a177f3193d47"
+    )
+    assert CONSENT_TEXT_V2 != CONSENT_TEXT_V1
     assert SCREENING_TEMPLATE_V1_SHA256 == (
         "4e390aa8c8b85b4fbcfc60db9da5acb64196c48425c71ba3f7b4dcd2d9d7579b"
     )
@@ -940,9 +964,11 @@ def _local(root: Path) -> TeamBridgeSettings:
     return TeamBridgeSettings.from_config(ConfigManager(root))
 
 
-def _endpoint_payload(state: str = "active", *, eligible: bool = True) -> dict[str, Any]:
+def _endpoint_payload(
+    state: str = "active", *, eligible: bool = True, consent: dict[str, Any] | None = None
+) -> dict[str, Any]:
     return _ready_payload(
-        consent=SERVED_CONSENT,
+        consent=consent or SERVED_CONSENT,
         tenants=[
             {
                 "tenant_id": "tnt_1",
@@ -979,6 +1005,119 @@ def _committed_owner(root: Path, *, session: str | None = None):
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_local_opt_in_enrolls_once_under_served_v2(tmp_path: Path):
+    """B + local enable + served v2 performs the no-dialog consent ONCE.
+
+    The body is the settings route's own: ``state=active``, the tenant, the
+    SERVED v2 version and ``consented_via=settings``. The PUT's own commit
+    creates the owner + receipt (citing v2), so the surface moves B -> C and
+    the native gates open. The per-account marker records the one write.
+    """
+
+    _set_local(tmp_path, enabled=True, session="sess_cos")
+    payloads = [
+        _ready_payload(consent=SERVED_CONSENT_V2),  # B
+        _endpoint_payload("active", consent=SERVED_CONSENT_V2),  # C
+    ]
+    puts: list[dict[str, Any]] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(payloads.pop(0))
+
+    counter = _Counter(responder)
+    check = await _discipline(counter, tmp_path).check(Boundary.SURFACE_OPEN)
+
+    assert [request.method for request in counter.requests] == ["GET", "PUT", "GET"]
+    assert puts == [
+        {
+            "state": "active",
+            "tenant_id": "tnt_1",
+            "consent_version": "bridge_consent_v2",
+            "consented_via": "settings",
+        }
+    ]
+    assert surface_projection(check)["surface_state"] == "C"
+    assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
+
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert (owner.account_id, owner.tenant_id, owner.endpoint_id) == ("acc_1", "tnt_1", "bep_1")
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v2",
+        "consent_ref": "bep_1",
+    }
+    assert store.designated_session_for(owner) == "sess_cos"
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_opt_in_default_does_not_enroll_under_v2(tmp_path: Path):
+    """An absent ``team_bridge.enabled`` is OFF: v2 alone does not enroll."""
+
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT_V2)))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    assert _local(tmp_path).default_enrollment == {}
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_local_opt_out_wins_over_served_v2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """``team_bridge.enabled: false`` is the machine's opt-out: zero writes.
+
+    Durable across fresh reads too: a later v2 answer cannot undo the choice.
+    """
+
+    _set_local(tmp_path, enabled=False, session="sess_cos")
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT_V2)))
+    discipline = _discipline(counter, tmp_path)
+
+    check = await discipline.check(Boundary.APP_START)
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert [request.method for request in counter.requests] == ["GET", "GET"]
+    assert _local(tmp_path).default_enrollment == {}
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_endpoint_is_never_reenabled_under_v2(tmp_path: Path):
+    """State E is the user's server-side opt-out: nothing may undo it."""
+
+    _set_local(tmp_path, enabled=True)
+    counter = _Counter(lambda request: _ok(_endpoint_payload("disabled")))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "E"
+    assert _local(tmp_path).default_enrollment == {}
+
+
+@pytest.mark.asyncio
 async def test_an_eligible_state_b_never_consents_on_a_status_read(tmp_path: Path):
     """State B is a prompt to the USER: the read itself performs zero writes.
 
@@ -1000,11 +1139,12 @@ async def test_an_eligible_state_b_never_consents_on_a_status_read(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_an_explicit_local_opt_in_does_not_turn_the_read_into_consent(tmp_path: Path):
-    """``team_bridge.enabled: true`` is a machine gate, not a consent flow.
+async def test_an_explicit_local_opt_in_does_not_consent_under_served_v1(tmp_path: Path):
+    """A v1-only server does nothing automatically, even with the local key ON.
 
-    The row may have been written before the hold (or by hand). The status read
-    still performs no PUT, commits no receipt, and the host gate stays closed.
+    v1's copy never offered an opt-out, so the hold still applies: the status
+    read performs no PUT and commits no receipt. The explicit settings route is
+    the way to consent there.
     """
 
     _set_local(tmp_path, enabled=True, session="sess_cos")
@@ -1026,13 +1166,13 @@ async def test_an_explicit_local_opt_in_does_not_turn_the_read_into_consent(tmp_
 
 @pytest.mark.asyncio
 async def test_the_legacy_marker_never_drives_a_consent_write(tmp_path: Path):
-    """A file from an earlier build must not authorize anything by itself."""
+    """A marker is memory, not authority: it stops a REPEAT, never asks for one."""
 
     from local_operator.team_bridge.settings import record_default_enrollment
 
     record_default_enrollment(tmp_path, "acc_1")
     _set_local(tmp_path, enabled=True)
-    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT)))
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT_V2)))
 
     check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
 
@@ -1048,12 +1188,13 @@ async def test_an_active_endpoint_without_a_local_receipt_is_not_committed(tmp_p
     """State C from server truth is not proof of THIS user's consent.
 
     An endpoint can be active because another surface or an older build enabled
-    it. Only the explicit settings write may commit the receipt, so a status
-    read leaves the store untouched (badge-only; the runtime stays closed).
+    it. Only a settings PUT (the user's, or the v2-gated automatic one) may
+    commit the receipt, so a status read leaves the store untouched
+    (badge-only; the runtime stays closed).
     """
 
     _set_local(tmp_path, enabled=True, session="sess_cos")
-    counter = _Counter(lambda request: _ok(_endpoint_payload("active")))
+    counter = _Counter(lambda request: _ok(_endpoint_payload("active", consent=SERVED_CONSENT_V2)))
 
     check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
 
@@ -1067,6 +1208,66 @@ async def test_an_active_endpoint_without_a_local_receipt_is_not_committed(tmp_p
         bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_the_v2_enrollment_keeps_the_captured_account_guard(tmp_path: Path):
+    """A sign-in switch between the status read and the consent write refuses.
+
+    The captured-account guard rides the PUT: the account the answer was filed
+    under must still be the pinned snapshot's account, and a mismatch is a local
+    refusal with ZERO writes — the v2 default must never consent as somebody
+    else.
+    """
+
+    store = FakeStore(rows=[FakeRow(1, data={"access": "token-1", "account_id": "acc_1"})])
+    _set_local(tmp_path, enabled=True)
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        # The switch lands AFTER the status read resolved its account and
+        # BEFORE the consent write resolves its guard.
+        store.rows = [FakeRow(9, data={"access": "token-9", "account_id": "acc_9"})]
+        return _ok(_ready_payload(consent=SERVED_CONSENT_V2))
+
+    counter = _Counter(responder)
+    check = await _discipline(counter, tmp_path, store=store).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    assert _local(tmp_path).default_enrollment == {}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_v2_consent_write_records_no_marker_and_retries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A refusal records NOTHING; the next fresh read performs the one write."""
+
+    _set_local(tmp_path, enabled=True)
+    puts = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal puts
+        if request.method == "PUT":
+            puts += 1
+            if puts == 1:
+                return httpx.Response(
+                    503, json={"error": "refused", "code": "messaging_unavailable"}
+                )
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(_ready_payload(consent=SERVED_CONSENT_V2))
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    assert puts == 1
+    assert _local(tmp_path).default_enrollment == {}
+
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert puts == 2
+    assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
 
 
 @pytest.mark.asyncio

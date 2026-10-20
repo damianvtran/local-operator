@@ -18,7 +18,8 @@ endpoint state are SERVER state (``GET /v1/messaging/status`` and
 ``/settings``); nothing here duplicates them. The master switch is a machine
 gate — the composed gate a surface checks is capability × eligible × enabled
 (RFC §5.4). Each reader's fallback is deliberate: an ABSENT value reads the
-shipped default (OFF for ``enabled`` during the consent hold), while a PRESENT
+shipped default (OFF for ``enabled`` until ``bridge_consent_v2`` is served and
+accepted), while a PRESENT
 but unparseable value reads what the shipped default says, never a coerced ON.
 """
 
@@ -31,19 +32,25 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.config import ConfigManager
 
-#: ``team_bridge.enabled`` — OFF by default (a consent hold).
+#: ``team_bridge.enabled`` — OFF by default (the consent hold continues).
 #:
-#: #2712 shipped the opt-out default ON, but the server still served
-#: ``bridge_consent_v1``, whose copy describes the data handling without ever
+#: #2712 shipped the opt-out default ON while the server still served
+#: ``bridge_consent_v1``, whose copy described the data handling without ever
 #: offering an opt-out. A status read could therefore turn an eligible Team
 #: plan on and write a consent receipt before the member saw anything that
-#: asked them. Until a consent version carrying opt-out copy is served AND
-#: accepted, an absent key must mean OFF. This key remains only the LOCAL half
-#: of the composed gate — capability × eligible × enabled (RFC §5.4) — so an
-#: explicit ``true`` (the settings row, a hand edit) enables only the surfaces on
-#: this machine; the server still decides eligibility, consent and launch.
-#: Restoring the ON default belongs to the new-consent-version change, not a
-#: local flip.
+#: asked them. The hold keeps an absent key OFF. The server now has
+#: ``bridge_consent_v2``, whose copy says on-by-default, but this build still
+#: ships opt-in: an explicit ``true`` (the settings row, a hand edit) is the
+#: member's enable. The automatic enrollment exists behind that explicit local
+#: gate and refuses any served version except v2
+#: (``client.DEFAULT_ENROLLMENT_CONSENT_VERSION``). Flipping this constant (and
+#: its pinned registry literal) to True after v2 is approved is the single
+#: product change: a v1-only server is still left untouched.
+#:
+#: This key remains only the LOCAL half of the composed gate — capability ×
+#: eligible × enabled (RFC §5.4) — so an explicit ``true`` enables only the
+#: surfaces on this machine; the server still decides eligibility, consent and
+#: launch.
 DEFAULT_TEAM_BRIDGE_ENABLED = False
 
 #: ``team_bridge.onboarding`` — the one-time dialog's shown-flag (RFC §5.3:
@@ -57,15 +64,18 @@ ONBOARDING_SEEN = "seen"
 
 #: ``team_bridge.default_enrollment`` — internal state (deliberately NOT a
 #: registry row, exactly like ``onboarding``): a mapping of ACCOUNT id to
-#: ``"done"`` recording the consent write an earlier opt-out default ran for
-#: that member. PER ACCOUNT on purpose: it was a per-member product rule, so
-#: account A enrolling did not suppress account B on the same machine.
-#:
-#: UNDER THE CONSENT HOLD NOTHING WRITES THIS. No status read may perform a
-#: consent write (#2712's auto-enrollment), and the explicit settings path does
-#: not need a per-account memory because the user's own PUT is the action. The
-#: reader and writer stay so an older build's file still loads and so a future
-#: consent version can reuse the shape; they must never drive auto-consent.
+#: ``"done"`` recording that the v2 automatic enrollment's consent write ran
+#: for that member. PER ACCOUNT on purpose: the default is a per-member product
+#: rule, so account A enrolling must not suppress account B on the same machine.
+#: It is the memory that keeps each consent write to ONE: the server's endpoint
+#: is normally that memory, but an endpoint can disappear (a server-side reset),
+#: and without this marker a later status answer would read the same "eligible,
+#: no endpoint" state and consent again on the user's behalf. Only a literal
+#: ``"done"`` under a non-empty account id counts; anything else reads as "not
+#: enrolled by default", the safe direction for a marker whose only job is to
+#: suppress a REPEAT of a write the member's local enable already authorised.
+#: The marker is never what AUTHORISES a write: the v2 served version and the
+#: local ``enabled`` key are.
 DEFAULT_TEAM_BRIDGE_ENROLLMENT: Mapping[str, str] = {}
 DEFAULT_ENROLLMENT_DONE = "done"
 
@@ -139,8 +149,8 @@ class TeamBridgeSettings:
     deliberately NOT a registry row: it is UI bookkeeping, not a knob, and a
     public row would dress session-format state as configuration.
     ``default_enrollment`` is the same kind of internal state: the receipt that
-    an earlier opt-out default consented once, not a user preference; under the
-    consent hold nothing writes it and it drives no consent. SCREENING IS
+    the v2 automatic enrollment consented once, not a user preference; it is the
+    memory that suppresses a repeat, never the authority for a write. SCREENING IS
     NOT HERE AT ALL: it is the admission gate (§8, §13.9), an invariant the
     implementation enforces — not a setting any write can turn off.
     """
@@ -183,12 +193,12 @@ class TeamBridgeSettings:
 
 
 def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
-    """Record a completed default-enrollment consent write for ``account_id``.
+    """Record a completed v2 automatic-enrollment consent write for ``account_id``.
 
-    Retained through the consent hold: no production path calls this while the
-    status read is forbidden from enrolling, but the stored marker keeps its
-    reader and a future consent version may reuse the shape. It must never be
-    what authorizes a consent write.
+    Memory, never authority: the caller runs only after a successful
+    ``bridge_consent_v2`` settings PUT, and the stored marker merely suppresses a
+    repeat when a later status answer loses the endpoint. The v2 served version
+    and the local ``enabled`` key are what authorise the write.
 
     Written through ``settings_io._store`` because this is INTERNAL state with
     no registry row (the same reason ``onboarding`` is hand-written): a public

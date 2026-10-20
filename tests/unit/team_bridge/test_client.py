@@ -964,6 +964,52 @@ async def test_an_explicit_enable_commits_the_native_receipt(tmp_path: Path):
     }
 
 
+@pytest.mark.parametrize("version", ["bridge_consent_v1", "bridge_consent_v2"])
+async def test_an_explicit_enable_echoes_either_served_consent_version(
+    tmp_path: Path, version: str
+):
+    """Explicit enable is version-agnostic: echo what was served, store that.
+
+    v2 is the new default-on disclosure and v1 remains valid history, so the
+    transport must not pin or rewrite the version. The receipt cites exactly the
+    version the machine sent, which is what the server recorded.
+    """
+
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        consent_version=version,
+        consented_via="dialog",
+        endpoint=None,
+        expected_account_id="acc_1",
+    )
+
+    assert sent == [
+        {
+            "state": "active",
+            "tenant_id": "tnt_1",
+            "consent_version": version,
+            "consented_via": "dialog",
+        }
+    ]
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": version,
+        "consent_ref": "bep_1",
+    }
+
+
 async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
     """Turning off is not consent: a pause leaves the store empty."""
 
