@@ -89,8 +89,33 @@ def normalize_source(source: str) -> str:
 
 
 def approve_source(source: str, approved: tuple[str, ...]) -> str:
-    normalized = normalize_source(source)
-    if normalized not in {normalize_source(candidate) for candidate in approved}:
+    """Complete the version segment, then require the configured origin exactly.
+
+    THE SEGMENT IS COMPLETION, NOT GUESSING. The renderer composes its
+    ``hub_source`` from the UNVERSIONED server base
+    (``https://api.radienthq.com`` or the rig's ``http://127.0.0.1:8127``), while
+    the configured base carries ``/v1``; the two spellings name the same API
+    origin. ``normalize_radient_api_base_url`` is the ONE completion rule every
+    producer already applies (``env`` for the configured value and the
+    environment), so applying it to the INCOMING value here is what lets the
+    desktop reach pull, subscribe and publish without teaching each surface a
+    private spelling.
+
+    It is not a relaxation: only a ROOT with no path gets ``/v1`` appended; a
+    custom gateway path is untouched, and host/scheme are never rewritten. The
+    equality below is still the authorization check, and a source that does not
+    name the configured origin keeps the same nondisclosing refusal.
+    """
+
+    # Imported here: `local_operator.env` loads `.env` at import time, and the
+    # pure identity helpers must not pull that cost into every hub_sync import.
+    from local_operator.env import normalize_radient_api_base_url
+
+    def canonical(value: str) -> str:
+        return normalize_source(normalize_radient_api_base_url(value))
+
+    normalized = canonical(source)
+    if normalized not in {canonical(candidate) for candidate in approved}:
         raise LinkError("origin-conflict", "hub source is not configured or approved")
     return normalized
 

@@ -227,6 +227,37 @@ async def test_a_public_pull_installs_every_file_and_reads_back_the_contract(api
     assert call["with_credential"] is False
 
 
+async def test_an_unversioned_renderer_source_is_completed_not_refused(api) -> None:
+    """The UI sends VITE_RADIENT_SERVER_BASE_URL verbatim, without `/v1`.
+
+    The route must complete it with the same rule the configured base uses and
+    answer the work, while the minted link carries the versioned origin.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="https://api.radienthq.com"),
+    )
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+    assert row["hub_source"] == BASE
+    record = prov.read_baseline(root, "skill", row["local_id"])
+    assert record is not None and record.identity is not None
+    assert record.identity.hub_source == BASE
+
+    # A DIFFERENT origin is still refused after completion.
+    holder["anon"].calls.clear()
+    refused = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="https://elsewhere.invalid"),
+    )
+    assert refused.status_code == 422, refused.text
+    assert holder["anon"].calls == []
+
+
 async def test_an_org_pull_uses_the_org_client_and_records_the_tenant(api) -> None:
     client, root, holder = api
     holder["client"] = SkillClient(BASE, org_envelope(manifest()), api_key="org-key")
