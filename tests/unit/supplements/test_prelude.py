@@ -686,7 +686,6 @@ def test_the_dark_fallback_declares_ink_that_is_readable_on_its_own_ground() -> 
     The light-theme ink defaults (``#1f1f1f`` / ``#4e4e4e`` / ``#666``) are then unreadable —
     the operator's 2026-10-19 screenshot showed the value and axis labels as dark-on-dark.
     The fallback must carry its own light ink; a real host push overrides these inline."""
-    _, _ = _pair()
     css = (PRELUDE_DIR / "prelude.css").read_text(encoding="utf-8")
     dark = _declarations(_DARK_RULE, css)
     assert dark["--lo-canvas"] == "#121212"
