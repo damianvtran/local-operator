@@ -26,7 +26,7 @@ import asyncio
 from typing import Any, Callable, Literal, NoReturn, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, model_validator
 
 from local_operator.config import ConfigManager
 from local_operator.hub_sync.identity import Visibility
@@ -137,6 +137,43 @@ class SkillUnpull(Input):
 
     request_id: RequestID
     link_id: str = Field(min_length=1, max_length=256)
+
+
+class SkillPublish(Input):
+    """``POST /v1/desktop/hub/skills/publish`` -- the UI's ``hub.skillPublish`` arm.
+
+    The body is the desktop contract's exact spelling (composed by
+    ``desktop-contract.ts``'s ``hub.skillPublish`` case and pinned by its zod
+    schema). ``source_skill`` names a locally authored skill from the SAME
+    sessionless catalogue the picker reads; ``local_alias`` is the managed name
+    the publication becomes. The paired scope rule is the pull route's.
+
+    The receipt pairing is the contract's own: a DRY RUN may not carry a
+    receipt or a confirmation, and a CONFIRM must carry both. Enforced here, as
+    the renderer does, so an unreviewed publication cannot be expressed by
+    omitting a field.
+    """
+
+    request_id: RequestID
+    dry_run: bool
+    source_skill: str = Field(min_length=1, max_length=128)
+    local_alias: str = Field(min_length=1, max_length=128)
+    visibility: Literal["public", "org"]
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    subscribe: StrictBool
+    auto_push: StrictBool
+    confirm_public_egress: StrictBool
+    preview_receipt: str | None = Field(default=None, min_length=1, max_length=4096)
+    confirm_publish: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _reviewed_draft(self) -> "SkillPublish":
+        if self.dry_run:
+            if self.preview_receipt is not None or self.confirm_publish is not None:
+                raise ValueError("a dry-run publication cannot carry a confirmation")
+        elif self.preview_receipt is None or self.confirm_publish is not True:
+            raise ValueError("an initial skill publication requires its reviewed draft receipt")
+        return self
 
 
 async def _run(
@@ -774,5 +811,83 @@ async def skill_unpull(
                 body.model_dump(),
                 mutate,
                 retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/hub/skills/publish", response_model=CRUDResponse)
+async def skill_publish(
+    body: SkillPublish,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Publish one locally authored skill as a NEW hub row (``hub.skillPublish``).
+
+    Dry run projects the exact bytes a confirm would send and returns the
+    preview receipt (no network); confirm re-reads the authored files, refuses
+    drift, publishes through the credentialed client, then materializes the
+    managed baseline/policy and answers the REAL ``links_snapshot`` row. The
+    refused-publication path writes nothing local except the review receipt.
+    """
+
+    if body.visibility == "public" and body.tenant_id:
+        raise _refusal(422, "a public skill publication must not name an organization")
+    if body.visibility == "org" and not body.tenant_id:
+        raise _refusal(422, "an org skill publication needs tenant_id")
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            return svc.publish_skill(
+                ctx,
+                source_skill=body.source_skill,
+                local_alias=body.local_alias,
+                visibility=body.visibility,
+                tenant_id=body.tenant_id,
+                subscribe=body.subscribe,
+                auto_push=body.auto_push,
+                confirm_public_egress=body.confirm_public_egress,
+                dry_run=body.dry_run,
+                preview_receipt=body.preview_receipt,
+            )
+        except LinkError as error:
+            code = getattr(error, "code", "") or ""
+            if code == "no-credential":
+                from local_operator.providers.radient_credentials import (
+                    ORG_LOGIN_REMEDY,
+                )
+
+                raise _refusal(401, ORG_LOGIN_REMEDY) from None
+            if code == "unauthorized":
+                from local_operator.providers.radient_credentials import (
+                    ORG_LOGIN_REMEDY,
+                )
+
+                raise _refusal(401, str(error), code=code) from None
+            if code == "skill-not-found":
+                raise _refusal(404, str(error), code=code) from None
+            if code in (
+                "preview_mismatch",
+                "preview_expired",
+                "preview_stale",
+                "policy-revision-changed",
+            ):
+                raise _refusal(409, str(error), code=code) from None
+            if code in ("hub-upstream", "hub-error"):
+                raise _refusal(502, str(error), code=code) from None
+            if code in ("not_a_member", "insufficient_role", "forbidden"):
+                raise _refusal(403, str(error), code=code) from None
+            raise _refusal(422, str(error), code=code or None) from None
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-skill-publish:" + body.request_id, body.model_dump(), mutate, retry_safe=True
             )
         )

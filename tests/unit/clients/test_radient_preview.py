@@ -302,3 +302,84 @@ def test_get_team_anonymous_sends_no_authorization(
 
     with pytest.raises(RuntimeError):
         anonymous_client.get_team("t1")
+
+
+_SKILL_DOCUMENT: Dict[str, Any] = {
+    "document_version": 1,
+    "name": "weather-buddy",
+    "description": "Small skill.",
+    "files": [
+        {
+            "path": "SKILL.md",
+            "content": "---\nname: weather-buddy\ndescription: Small skill.\n---\n\nBody.\n",
+        }
+    ],
+}
+
+
+def test_publish_skill_document_posts_the_bare_manifest(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    result = {"skill": {"id": "sk-1", "name": "weather-buddy"}, "revision": '"r1"'}
+    with patch("requests.post", return_value=_envelope(result)) as mock_post:
+        published = radient_client.publish_skill_document(dict(_SKILL_DOCUMENT))
+
+    assert published == result
+    args, kwargs = mock_post.call_args
+    assert args[0] == f"{base_url}/skills/publish"
+    # The commit decoders read the BARE manifest; a preview envelope is a 422.
+    assert kwargs["json"] == _SKILL_DOCUMENT
+    assert kwargs["params"] == {}
+    assert kwargs["allow_redirects"] is False
+    assert PREVIEW_TOKEN_HEADER not in kwargs["headers"]
+    assert PREVIEW_ACCEPT_HEADER not in kwargs["headers"]
+
+
+def test_publish_skill_document_puts_the_org_target_on_query_params(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    with patch("requests.post", return_value=_envelope({})) as mock_post:
+        radient_client.publish_skill_document(
+            dict(_SKILL_DOCUMENT), visibility="org", tenant_id="org-a"
+        )
+
+    _args, kwargs = mock_post.call_args
+    assert kwargs["params"] == {"visibility": "org", "tenant_id": "org-a"}
+
+    with patch("requests.post", return_value=_envelope({})) as mock_post:
+        radient_client.publish_skill_document(
+            dict(_SKILL_DOCUMENT), visibility="public", tenant_id=None
+        )
+    _args, kwargs = mock_post.call_args
+    assert kwargs["params"] == {}
+
+
+def test_publish_skill_document_carries_the_commit_protocol(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    with patch("requests.post", return_value=_envelope({})) as mock_post:
+        radient_client.publish_skill_document(
+            dict(_SKILL_DOCUMENT),
+            preview_token="pin-1",
+            accept_unresolved=["u-1", "u-2"],
+            moderation_allowance="allow-1",
+        )
+
+    _args, kwargs = mock_post.call_args
+    assert kwargs["headers"][PREVIEW_TOKEN_HEADER] == "pin-1"
+    assert kwargs["headers"][PREVIEW_ACCEPT_HEADER] == "u-1,u-2"
+    assert kwargs["params"] == {"moderation_allowance": "allow-1"}
+
+
+def test_publish_skill_document_keeps_the_hub_refusal_code(radient_client: RadientClient) -> None:
+    with patch(
+        "requests.post",
+        return_value=MagicMock(
+            status_code=422,
+            raise_for_status=MagicMock(side_effect=_refusal(422, {"code": "name_taken"})),
+        ),
+    ):
+        with pytest.raises(APIError) as caught:
+            radient_client.publish_skill_document(dict(_SKILL_DOCUMENT))
+
+    assert caught.value.code == "name_taken"
