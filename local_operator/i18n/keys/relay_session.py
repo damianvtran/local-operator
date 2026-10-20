@@ -26,6 +26,10 @@ def list_no_matches() -> Msg:
     return Msg("relay.session.list.no_matches", {})
 
 
+def list_pin_and_tags_hint() -> Msg:
+    return Msg("relay.session.list.pin_and_tags_hint", {})
+
+
 def list_search_placeholder() -> Msg:
     return Msg("relay.session.list.search_placeholder", {})
 

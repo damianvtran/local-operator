@@ -25,7 +25,7 @@
  * changes carry the pending mark; every control is disabled while it is in
  * flight, so two writes can never interleave into a state neither requested.
  */
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { getTags, setSessionTags } from "../api";
 import { refusalText } from "../lib/refusal";
 import {
@@ -50,6 +50,7 @@ export function SessionTagsSheet({
 	assigned,
 	primary,
 	revision,
+	returnFocusRef,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -61,6 +62,9 @@ export function SessionTagsSheet({
 	    The sheet compares it at write start and at read-back; a change means a
 	    NEWER truth exists, so the older answer must not paint. */
 	revision: number;
+	/** The row that opened the sheet, so Done/Escape returns focus to it rather
+	    than to the pin sheet's button, which unmounts in the same commit. */
+	returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
 	const [catalogue, setCatalogue] = useState<TagCatalogueEntry[] | null>(null);
 	const [loadError, setLoadError] = useState("");
@@ -80,6 +84,25 @@ export function SessionTagsSheet({
 	/* Writes are sequenced for the same reason: an older promise settling after
 	   a newer write started must not clear the newer write's pending mark. */
 	const writeSeq = useRef(0);
+	/* The row this sheet is CURRENTLY writing for. `writeSeq` is bumped whenever
+	   the target changes (a close/reopen, or the parent pointing at another
+	   row), and both the read-back and the refusal check it: a slow answer for
+	   row A must never paint A's assignment — or A's error — into B's sheet. */
+	const targetRef = useRef(sessionId);
+
+	useEffect(() => {
+		/* A NEW TARGET INVALIDATES EVERYTHING IN FLIGHT. The sequence bump makes
+		   both callbacks of the old write no-ops; clearing the speculative state
+		   keeps a closed or re-opened sheet from showing the last row's draft,
+		   pending mark or error before its own first frame arrives. */
+		targetRef.current = sessionId;
+		writeSeq.current++;
+		setDraft(null);
+		setPending(null);
+		setWriteError("");
+		/* `open` belongs here too: closing and re-opening the SAME row is also a
+		   new sheet whose state must not be inherited from the previous one. */
+	}, [sessionId, open]);
 
 	useEffect(() => {
 		if (!open) return;
@@ -127,12 +150,19 @@ export function SessionTagsSheet({
 
 	const submit = (next: TagAssignment, ids: readonly string[]) => {
 		const seq = ++writeSeq.current;
+		const target = targetRef.current;
 		const startedAt = revisionRef.current;
 		setWriteError("");
 		setPending({ ids });
 		setSessionTags(sessionId, next.tags, next.primary)
 			.then((answer) => {
 				if (seq !== writeSeq.current) return;
+				/* The answer must be about the row this sheet is showing. A relay
+				   that answers for the row it was asked about (the normal case) is
+				   still checked here, so a retargeted sheet cannot paint A's
+				   assignment into B even if the sequence guard were missed. */
+				if (targetRef.current !== target) return;
+				if (answer.session_id !== target) return;
 				/* A frame newer than this write started already painted the store's
 				   answer; this read-back is older than it. */
 				if (revisionRef.current !== startedAt) return;
@@ -140,6 +170,9 @@ export function SessionTagsSheet({
 			})
 			.catch((error) => {
 				if (seq !== writeSeq.current) return;
+				/* A refusal belongs to the row that asked. After a close/reopen
+				   it must be dropped, not shown under the new row's checkboxes. */
+				if (targetRef.current !== target) return;
 				/* Revert to the newest authoritative frame, then say why. */
 				setDraft(null);
 				setWriteError(
@@ -181,6 +214,7 @@ export function SessionTagsSheet({
 			open={open}
 			onClose={onClose}
 			title={messageRuntime.t("relay.session.tags.sheet_title")}
+			returnFocusRef={returnFocusRef}
 		>
 			<div className="flex flex-col p-2">
 				{loadError ? (
@@ -224,6 +258,25 @@ export function SessionTagsSheet({
 								})}
 							</p>
 						) : null}
+						{current.tags.length > 0 ? (
+							/* THE PRIMARY COLUMN'S LEGEND. The radios sit in a column of their
+							   own, and without a header the isolated control reads as an
+							   unexplained dot beside a row. It mirrors the row geometry exactly
+							   (flex-1 label, w-11 radio column, w-14 status column) so it stays
+							   over the controls it names; each radio keeps its own
+							   `make {name} the primary tag` label, so this legend is visual
+							   scaffolding and stays out of the accessibility tree. */
+							<div
+								className="flex items-center gap-2 px-2 pb-1"
+								aria-hidden
+							>
+								<span className="min-w-0 flex-1" />
+								<span className="flex w-11 shrink-0 justify-center text-meta text-ink-dim">
+									{messageRuntime.t("relay.session.tags.primary")}
+								</span>
+								<span className="w-14 shrink-0" />
+							</div>
+						) : null}
 						<ul className="flex flex-col">
 							{rows.map((row) => {
 								const blocked = !row.selected && capped;
@@ -258,21 +311,30 @@ export function SessionTagsSheet({
 										    the relay refuses a primary outside `tags`, so
 										    offering it on an unchecked row would build the
 										    refusal into the surface. */}
+										{/* The radio's own 16px disc is the target's visual size, but its
+										    BOX is a full 44×44 touch target: a bare 16px radio is a
+										    control a thumb misses, and the second column is where
+										    those misses land beside a neighbour. The box is a
+										    sibling of the checkbox label, never inside it — nesting
+										    would make one press ambiguous between checking the row and
+										    making it primary. */}
 										{row.selected ? (
-											<input
-												type="radio"
-												name={`session-tags-primary-${sessionId}`}
-												checked={row.primary}
-												disabled={pending !== null}
-												aria-label={messageRuntime.t(
-													"relay.session.tags.make_primary",
-													{ name: row.name },
-												)}
-												onChange={() => makePrimary(row.id)}
-												className="size-4 shrink-0 accent-[var(--color-accent)]"
-											/>
+											<label className="flex size-11 shrink-0 items-center justify-center">
+												<input
+													type="radio"
+													name={`session-tags-primary-${sessionId}`}
+													checked={row.primary}
+													disabled={pending !== null}
+													aria-label={messageRuntime.t(
+														"relay.session.tags.make_primary",
+														{ name: row.name },
+													)}
+													onChange={() => makePrimary(row.id)}
+													className="size-4 accent-[var(--color-accent)]"
+												/>
+											</label>
 										) : (
-											<span className="size-4 shrink-0" aria-hidden />
+											<span className="size-11 shrink-0" aria-hidden />
 										)}
 										<span className="w-14 shrink-0 text-right text-meta text-ink-dim">
 											{rowPending

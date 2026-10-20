@@ -24,6 +24,7 @@ export type MessageParams = {
   "relay.session.directory.sheet_title": undefined;
   "relay.session.list.empty_hint": undefined;
   "relay.session.list.no_matches": undefined;
+  "relay.session.list.pin_and_tags_hint": undefined;
   "relay.session.list.search_placeholder": undefined;
   "relay.session.list.start_busy": undefined;
   "relay.session.list.start_idle": undefined;

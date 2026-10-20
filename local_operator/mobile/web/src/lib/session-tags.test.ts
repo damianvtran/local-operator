@@ -133,13 +133,6 @@ describe("choosePrimary", () => {
 		const current = { tags: ["a"], primary: "a" };
 		expect(choosePrimary(current, "b")).toEqual(current);
 	});
-
-	it("can clear the primary without clearing the assignment", () => {
-		expect(choosePrimary({ tags: ["a"], primary: "a" }, null)).toEqual({
-			tags: ["a"],
-			primary: null,
-		});
-	});
 });
 
 describe("catalogueRows", () => {

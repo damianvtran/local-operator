@@ -72,12 +72,12 @@ export function toggleAssignment(
 }
 
 /** Mark one SELECTED category primary. An unselected id cannot be primary (the
-    relay refuses that body), so it is a no-op rather than a local invention. */
-export function choosePrimary(
-	current: TagAssignment,
-	id: string | null,
-): TagAssignment {
-	if (id === null) return { tags: current.tags, primary: null };
+    relay refuses that body), so it is a no-op rather than a local invention.
+
+    There is deliberately no "clear the primary" arm: the store resolves a null
+    primary to the first assigned tag, so a locally-cleared primary would be a
+    state the relay never serves — the assignment surface offers no such verb. */
+export function choosePrimary(current: TagAssignment, id: string): TagAssignment {
 	if (!current.tags.includes(id)) return current;
 	return { tags: current.tags, primary: id };
 }
