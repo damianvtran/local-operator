@@ -2214,13 +2214,19 @@ def _headless_owner(tmp_path) -> Session:
 async def test_a_headless_restore_publishes_the_level_the_session_runs(tmp_path) -> None:
     """The reported symptom, end to end on a real ``Session``.
 
-    The checkpoint is written at ``high``; the newest selection row (the birth
-    row, ``medium``) is what a restart restores, so the successor RUNS medium.
-    Its first frame used to say high.
+    The checkpoint is written at ``medium`` (a turn end); the user then takes
+    ``high`` and quits, and the successor RUNS ``high``. Its first frame used to
+    say the row's medium.
+
+    The staged pair is the mirror of the incident's (a band painting one level
+    over a session running another), and it is the only shape #2658 leaves open:
+    that change makes a level in force survive a restart, so the row and the
+    restore no longer part company merely because a knob moved. A checkpoint
+    written BEFORE the last ``/effort`` still does — which is why the successor
+    must be asked what it runs rather than what the row says.
     """
     owner = _headless_owner(tmp_path)
     await owner._persist_selected_model()
-    owner.set_model(_BOOT_MODEL.model_copy(update={"reasoning_effort": "high"}))
     owner.refresh_frontend_state()
     written = owner._frontend_state_store.state
     await owner._transcript.append_custom(
@@ -2228,15 +2234,20 @@ async def test_a_headless_restore_publishes_the_level_the_session_runs(tmp_path)
         {"checkpoint_id": "cp-effort", "state": written.model_dump(mode="json")},
     )
     assert written.selected_model is not None
-    assert written.selected_model.reasoning_effort == "high"
+    assert written.selected_model.reasoning_effort == "medium"
+    # AFTER the checkpoint: this is the level the successor restores, and the one
+    # the row above does not know about.
+    owner.set_model(
+        _BOOT_MODEL.model_copy(update={"reasoning_effort": "high"}), effort_choice="high"
+    )
     await owner.dispose()
 
     resumed = _headless_owner(tmp_path)
     first = resumed._frontend_state_store.state
 
-    # The divergence this pins: the row says high, the restored session runs the
-    # level its selection row names.
-    assert resumed.model.reasoning_effort == "medium"
+    # The divergence this pins: the row says medium, the restored session runs
+    # high.
+    assert resumed.model.reasoning_effort == "high"
     assert first.selected_model is not None and first.effective_model is not None
     assert first.selected_model.reasoning_effort == resumed.model.reasoning_effort
     assert first.effective_model.reasoning_effort == resumed.model.reasoning_effort
