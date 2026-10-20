@@ -1,0 +1,20 @@
+{
+  "wire.remote_compute.alone": "--remote-status и --remote-cancel — самостоятельные команды: каждую запускают отдельно, без --remote и других параметров запуска.",
+  "wire.remote_compute.cancelled": "Удалённый запуск {run_id} отменён.",
+  "wire.remote_compute.conflict": "Этот ключ идемпотентности уже использовался с другим телом запроса. Передайте новый с --idempotency-key.",
+  "wire.remote_compute.detached": "Удалённый запуск {run_id} отправлен в сеть {network_id}.\nКлюч идемпотентности: {idempotency_key}\nСледить: lop exec --remote-status {run_id}\nОтменить: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.disabled": "Удалённые вычисления выключены. Включите их командой `lop config edit remote_compute.enabled true`, затем повторите запуск.",
+  "wire.remote_compute.failed": "сбой удалённых вычислений: {error}",
+  "wire.remote_compute.finished": "Удалённый запуск {run_id} завершён: {status}.",
+  "wire.remote_compute.interrupted": "Отслеживание запуска {run_id} остановлено; он всё ещё выполняется удалённо. Отменить: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.invalid_request": "Radient отклонил запрос как некорректный. Это ошибка в этом клиенте, а не повод вводить всё заново.",
+  "wire.remote_compute.local_only": "{flag} имеет смысл только для локального запуска, поэтому его нельзя сочетать с --remote.",
+  "wire.remote_compute.needs_prompt": "--remote требует промпт: передайте задачу единственным позиционным аргументом.",
+  "wire.remote_compute.needs_repo": "--remote требует --repo <url> и --sha <commit>: этот запуск никогда не загружает локальные файлы, поэтому укажите репозиторий и коммит для извлечения.",
+  "wire.remote_compute.no_capacity": "У Radient сейчас нет свободных мощностей для удалённых вычислений; повторите попытку позже.",
+  "wire.remote_compute.no_credit": "У Radient нет вычислительного кредита для этой учётной записи, поэтому запуск не был допущен.",
+  "wire.remote_compute.only_with": "{flag} применяется только вместе с --remote.",
+  "wire.remote_compute.status_line": "статус: {status}",
+  "wire.remote_compute.unknown_run": "У Radient нет такого удалённого запуска для выбранного входа.",
+  "wire.remote_compute.unreachable": "Не удалось связаться с Radient; проверьте сеть и повторите попытку."
+}

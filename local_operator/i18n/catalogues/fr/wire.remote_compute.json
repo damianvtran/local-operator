@@ -1,0 +1,20 @@
+{
+  "wire.remote_compute.alone": "--remote-status et --remote-cancel sont des commandes à part : lancez-en une seule, sans --remote ni d’autres options d’exécution.",
+  "wire.remote_compute.cancelled": "L’exécution distante {run_id} est annulée.",
+  "wire.remote_compute.conflict": "Cette clé d’idempotence a déjà été utilisée avec un autre corps de requête. Indiquez-en une nouvelle avec --idempotency-key.",
+  "wire.remote_compute.detached": "Exécution distante {run_id} soumise au réseau {network_id}.\nClé d’idempotence : {idempotency_key}\nSuivre : lop exec --remote-status {run_id}\nAnnuler : lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.disabled": "Le calcul distant est désactivé. Activez-le avec `lop config edit remote_compute.enabled true`, puis relancez cette commande.",
+  "wire.remote_compute.failed": "échec du calcul distant : {error}",
+  "wire.remote_compute.finished": "Exécution distante {run_id} terminée : {status}.",
+  "wire.remote_compute.interrupted": "Suivi de l’exécution {run_id} arrêté ; elle continue de tourner à distance. Pour l’annuler : lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.invalid_request": "Radient a rejeté la requête comme invalide. C’est un bug de ce client, pas une saisie à refaire.",
+  "wire.remote_compute.local_only": "{flag} n’a de sens que pour une exécution locale : il ne peut donc pas être combiné avec --remote.",
+  "wire.remote_compute.needs_prompt": "--remote exige un prompt : passez la tâche comme unique argument positionnel.",
+  "wire.remote_compute.needs_repo": "--remote exige --repo <url> et --sha <commit> : cette exécution ne téléverse jamais de fichiers locaux, indiquez donc le dépôt et le commit à récupérer.",
+  "wire.remote_compute.no_capacity": "Radient n’a aucune capacité de calcul distant pour le moment ; réessayez plus tard.",
+  "wire.remote_compute.no_credit": "Radient n’a pas de crédit de calcul pour ce compte : l’exécution n’a pas été admise.",
+  "wire.remote_compute.only_with": "{flag} ne s’applique qu’avec --remote.",
+  "wire.remote_compute.status_line": "statut : {status}",
+  "wire.remote_compute.unknown_run": "Radient n’a aucune exécution distante de ce type pour la connexion choisie.",
+  "wire.remote_compute.unreachable": "Radient est injoignable ; vérifiez le réseau et réessayez."
+}

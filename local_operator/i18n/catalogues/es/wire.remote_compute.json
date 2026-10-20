@@ -1,0 +1,20 @@
+{
+  "wire.remote_compute.alone": "--remote-status y --remote-cancel son comandos independientes: ejecuta uno solo, sin --remote ni otras opciones de ejecución.",
+  "wire.remote_compute.cancelled": "La ejecución remota {run_id} está cancelada.",
+  "wire.remote_compute.conflict": "Esa clave de idempotencia ya se usó con otro cuerpo de solicitud. Pasa una nueva con --idempotency-key.",
+  "wire.remote_compute.detached": "Ejecución remota {run_id} enviada a la red {network_id}.\nClave de idempotencia: {idempotency_key}\nSeguirla: lop exec --remote-status {run_id}\nCancelarla: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.disabled": "El cómputo remoto está desactivado. Actívalo con `lop config edit remote_compute.enabled true` y vuelve a ejecutar esto.",
+  "wire.remote_compute.failed": "el cómputo remoto falló: {error}",
+  "wire.remote_compute.finished": "La ejecución remota {run_id} terminó: {status}.",
+  "wire.remote_compute.interrupted": "Se dejó de seguir la ejecución {run_id}; sigue en marcha en remoto. Cancélala con: lop exec --remote-cancel {run_id}",
+  "wire.remote_compute.invalid_request": "Radient rechazó la solicitud por no ser válida. Es un bug de este cliente, no algo que debas volver a escribir.",
+  "wire.remote_compute.local_only": "{flag} solo tiene sentido en una ejecución local, así que no se puede combinar con --remote.",
+  "wire.remote_compute.needs_prompt": "--remote necesita un prompt: pasa la tarea como único argumento posicional.",
+  "wire.remote_compute.needs_repo": "--remote necesita --repo <url> y --sha <commit>: esta ejecución nunca sube archivos locales, así que indica el repositorio y el commit que hay que extraer.",
+  "wire.remote_compute.no_capacity": "Radient no tiene capacidad de cómputo remoto en este momento; inténtalo de nuevo más tarde.",
+  "wire.remote_compute.no_credit": "Radient no tiene crédito de cómputo para esta cuenta, así que la ejecución no fue admitida.",
+  "wire.remote_compute.only_with": "{flag} solo se aplica con --remote.",
+  "wire.remote_compute.status_line": "estado: {status}",
+  "wire.remote_compute.unknown_run": "Radient no tiene esa ejecución remota para el inicio de sesión seleccionado.",
+  "wire.remote_compute.unreachable": "No se pudo contactar con Radient; comprueba la red y vuelve a intentarlo."
+}
