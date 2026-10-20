@@ -4225,7 +4225,7 @@ async def test_the_fork_intent_rides_the_naming_call_and_assigns_once(tmp_path: 
     assert session.conversation_name == "Billing importer rewrite"
     system, prompt = session._complete_calls[0]
     assert "<available-tags" in system
-    assert "a1b2c3d4e5" not in prompt  # the tag list is prefix, not the excerpt
+    assert review not in prompt  # the tag list is prefix, not the excerpt
     state = session_tags.read_entity_tags(tmp_path, "session", session.session_id)
     assert state["tags"] == [review, project]
     assert state["primary"] == review

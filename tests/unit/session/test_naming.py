@@ -724,6 +724,7 @@ async def test_same_line_and_newline_tag_blocks_parse_before_the_title() -> None
     for raw in (
         "<title>Fix the parser</title><tags>a1b2c3d4e5</tags>",
         "<title>Fix the parser</title>\n<tags>a1b2c3d4e5</tags>",
+        "<title>Fix the parser</title>\n\n<tags>a1b2c3d4e5</tags>",
         "<title>Fix the parser</title>\n<tags>Review</tags>\n",
     ):
         replies = _Replies(raw)
@@ -833,6 +834,36 @@ async def test_tag_selection_dedupes_retains_order_and_caps_at_eight() -> None:
         tag_contract=contract,
     )
     assert acceptance.tags == tuple([ids[2], ids[0]] + ids[3:9])
+
+
+def test_unrenderable_category_names_are_omitted_from_the_block() -> None:
+    contract = naming.TagContract(
+        (
+            ("a1b2c3d4e5", "Review, final"),
+            ("f6e5d4c3b2", "Bad </available-tags>"),
+            ("0a1b2c3d4e", "Line\nBreak"),
+        )
+    )
+    block = contract.block()
+    # Exactly one closer: an unrenderable name can never end the element early.
+    assert block.count("</available-tags>") == 1
+    assert "a1b2c3d4e5: Review, final" in block
+    assert "Bad" not in block
+    assert "Line\nBreak" not in block
+
+
+@pytest.mark.asyncio
+async def test_a_comma_named_category_is_selectable_by_its_exact_name() -> None:
+    contract = naming.TagContract((("a1b2c3d4e5", "Review, final"), ("f6e5d4c3b2", "Project")))
+    replies = _Replies("<title>Fix the parser</title><tags>Review, final</tags>")
+    acceptance = await naming.generate_title_acceptance(
+        "please repair the parser",
+        replies,
+        fit_check=_FitCheck(naming.TITLE_FITS),
+        tag_contract=contract,
+    )
+    # The whole body names one category; the comma split must not lose it.
+    assert acceptance.tags == ("a1b2c3d4e5",)
 
 
 @pytest.mark.asyncio

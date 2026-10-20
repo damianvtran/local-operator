@@ -4281,11 +4281,13 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("mobile conversation naming failed", exc_info=True)
             return
         if intent is not None and acceptance.title:
-            # Only a title the cascade ACCEPTED may carry tags. ``settle`` is
-            # the one write and it also spends the sidecar, so the heal path
-            # and any later retry cannot re-apply; it never raises, and a
-            # revision conflict inside it is a human edit winning rather than
-            # a failure worth surfacing from a detached task.
+            # Any returned title spends the intent — including the Tier 3
+            # opener fallback, which carries no model tags but is still the
+            # answer this attempt settled on. Only a title-less answer (the
+            # sentinel, a failed call) keeps the sidecar for a retry. ``settle``
+            # is the one write and it never raises; a revision conflict inside
+            # it is a human edit winning rather than a failure worth surfacing
+            # from a detached task, and the heal path never reads the intent.
             await asyncio.to_thread(auto_tag.settle, intent, acceptance.tags)
         title = acceptance.title
         existing = getattr(self._session, "conversation_name", "")

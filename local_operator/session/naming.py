@@ -679,7 +679,7 @@ def parse_title(raw: str) -> str | None:
 #: ``[^<]*`` rather than a lazy ``.*?`` so a malformed reply cannot swallow a
 #: second element into the tag body; the body is then validated strictly.
 _TRAILING_TAGS_RE = re.compile(
-    r"</title\s*>[ \t]*(?:\r?\n[ \t]*)?"
+    r"</title\s*>[ \t\r\n]*"
     r"(?P<block><tags\s*>(?P<body>[^<]*)</tags\s*>)[ \t\r\n]*\Z",
     re.IGNORECASE,
 )
@@ -689,6 +689,15 @@ _TRAILING_TAGS_RE = re.compile(
 #: names legitimately contain spaces ("Q3 planning"), so splitting on a space
 #: would make every multi-word name unresolvable.
 _TAG_TOKEN_SPLIT_RE = re.compile(r"[,\n]+")
+
+#: A name the block cannot render safely. Newlines and control characters would
+#: break the one-line ``id: name`` list, and ``<``/``>`` would close or reopen
+#: the ``<available-tags>`` element itself — a category called
+#: ``</available-tags>`` would truncate the prompt block. Those categories are
+#: OMITTED from the rendered list deterministically (the store's name grammar is
+#: not narrowed: an existing name must not make a prompt malformed), and the
+#: model therefore never sees them. Ids still match if a caller sends one.
+_UNRENDERABLE_TAG_NAME_RE = re.compile(r"[<>\x00-\x1f\x7f]")
 
 #: The store's per-assignment cap, repeated here because the model's answer is
 #: parsed before any store call exists. A longer answer keeps its first 8 in
@@ -743,8 +752,15 @@ class TagContract:
         rename between the prompt and the write must not silently retarget an
         assignment; exact names are accepted because models copy them more
         reliably. Only the caller that supplies a contract gets this block.
+        A name the element cannot carry (angle brackets, control characters) is
+        omitted rather than escaped: the store's name grammar stays open, and a
+        malformed prompt would be the worse failure.
         """
-        listed = "\n".join(f"{key}: {name}" for key, name in self.tags)
+        listed = "\n".join(
+            f"{key}: {name}"
+            for key, name in self.tags
+            if not _UNRENDERABLE_TAG_NAME_RE.search(name)
+        )
         return (
             f'<available-tags hash="{self.hash}">\n'
             "Assign tags only from this list. Reply with <title>3 to 7 words</title>, "
@@ -788,7 +804,10 @@ def _select_tags(body: str | None, tag_contract: TagContract | None) -> tuple[st
     """Resolve a tag block body to known category ids, in the model's order.
 
     Ids are matched exactly; names case-insensitively against the contract's
-    own spelling. Unknown tokens are IGNORED — never created, never an error —
+    own spelling. A body that IS exactly one name wins before the comma/newline
+    split, so a category the store allows to contain a separator ("Review,
+    final") stays selectable by its exact name; a body listing several tags
+    still splits. Unknown tokens are IGNORED — never created, never an error —
     because the tags ride the title call and a bad tag half must not discard a
     good title. Duplicates keep their first occurrence, and the cap keeps the
     first ``MAX_ASSIGNED_TAGS``. An empty or entirely invalid body means "no
@@ -798,6 +817,12 @@ def _select_tags(body: str | None, tag_contract: TagContract | None) -> tuple[st
         return ()
     by_id = {key: key for key, _ in tag_contract.tags}
     by_name = {name.casefold(): key for key, name in tag_contract.tags}
+    stripped = body.strip()
+    if stripped in by_id:
+        return (stripped,)
+    whole = by_name.get(stripped.casefold())
+    if whole is not None:
+        return (whole,)
     chosen: list[str] = []
     for token in _TAG_TOKEN_SPLIT_RE.split(body):
         token = token.strip()

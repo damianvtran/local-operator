@@ -309,7 +309,7 @@ def _set_entity_tags(
         )
     known = {item["id"] for item in categories}
     if len(tag_ids) > MAX_TAGS or len(set(tag_ids)) != len(tag_ids):
-        raise ValueError("At most 8 distinct tags are allowed")
+        raise ValueError(f"At most {MAX_TAGS} distinct tags are allowed")
     if any(key not in known for key in tag_ids):
         raise ValueError("Unknown category id")
     if primary is not None and primary not in tag_ids:
