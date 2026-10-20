@@ -1588,11 +1588,14 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #     occasion to fit 45 chars of headroom would delete the change. The raise
 #     is stated in the PR thread for a reviewer to verify before it settles.
 #
-# AND THEN for the ask RELAY field (#2520): one property on ``AskParams`` plus
-# ONE clause in the queued description. The relay delta is measured against the
-# tree this branch was rebased onto, not carried forward from its old base —
-# re-derive with this script rather than trusting the figure below.
-BUDGET_BILLED_TOKENS = 31_160
+# AND THEN 31,100 -> 31,232 for the ask RELAY field (#2520): one property on
+# ``AskParams`` plus ONE clause in the queued description. Re-measured on the
+# tree this branch was rebased onto (origin/main c0de80241), not carried forward
+# from its old base:
+#   rebased head   86,673 chars = ~31,177 billed  (vs the 31,100 ceiling: +77)
+# The ceiling is the measured head plus the ~55-token band the child entries
+# use, so the next field-size edit is a deliberate raise rather than creep.
+BUDGET_BILLED_TOKENS = 31_232
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
