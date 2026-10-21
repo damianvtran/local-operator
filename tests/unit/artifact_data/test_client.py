@@ -7,6 +7,7 @@ server would see — URL, headers, body — is asserted, not inferred.
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -128,9 +129,11 @@ def test_write_args_match_the_servers_shapes() -> None:
     }
     assert wire.write_args("update", "t/d", data={"a": 1}) == {"path": "t/d", "data": {"a": 1}}
     assert wire.write_args("delete", "t/d", if_version=2) == {"path": "t/d", "ifVersion": 2}
-    assert wire.write_args(
+    edit = wire.write_args(
         "str_replace", "t/d", field="f", old_str="a", new_str="b", replace_all=True, if_version=4
-    ) == {
+    )
+    assert edit.pop("idem")
+    assert edit == {
         "path": "t/d",
         "field": "f",
         "old_str": "a",
@@ -143,6 +146,16 @@ def test_write_args_match_the_servers_shapes() -> None:
     assert "replace_all" not in wire.write_args(
         "str_replace", "t/d", field="f", old_str="a", new_str="b"
     )
+
+
+def test_str_replace_carries_a_fresh_url_safe_idem_per_call() -> None:
+    first = wire.write_args("str_replace", "t/d", field="f", old_str="a", new_str="b")
+    second = wire.write_args("str_replace", "t/d", field="f", old_str="a", new_str="b")
+    for args in (first, second):
+        assert re.fullmatch(r"[A-Za-z0-9_-]{16,}", args["idem"])
+    assert first["idem"] != second["idem"]
+    # Only str_replace carries one; Claude Code sends none on the other writes.
+    assert "idem" not in wire.write_args("set", "t/d", data={})
 
 
 # -- errors --------------------------------------------------------------------
@@ -271,5 +284,20 @@ async def test_no_login_raises_login_required_without_a_request() -> None:
 
 def test_whoami_ids_are_validated() -> None:
     assert wire.user_id_from_whoami({"id": "u_abc"}) == "u_abc"
+    for bad in ("../x", "u_abc\n"):
+        with pytest.raises(wire.ArtifactDataError):
+            wire.user_id_from_whoami({"id": bad})
+
+
+def test_a_trailing_newline_is_never_a_valid_id_or_segment() -> None:
+    # ``$`` matches before a final newline; every check must reject it.
     with pytest.raises(wire.ArtifactDataError):
-        wire.user_id_from_whoami({"id": "../x"})
+        wire.check_doc_id("doc-1\n")
+    with pytest.raises(wire.ArtifactDataError):
+        wire.collection_segments("items\n")
+    with pytest.raises(wire.ArtifactDataError):
+        wire.collection_segments("data/users/me\n")
+    with pytest.raises(wire.ArtifactDataError):
+        wire.decode_short_id("GiE3GRkwXeG1q827vXX6g7\n")
+    with pytest.raises(wire.ArtifactDataError):
+        wire.check_doc_id("..\n")

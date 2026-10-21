@@ -11,8 +11,10 @@ behind a Cloudflare browser challenge that a non-browser client cannot pass.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
+import secrets
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -52,10 +54,12 @@ MAX_PATH_BYTES = 1000
 MAX_SEGMENTS = 15
 
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-_SHORT_ID_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{22}$")
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-_SEGMENT_RE = re.compile(r"^(?!\.\.?$)[A-Za-z0-9_\-.~:@+]{1,200}$")
-_USER_ID_RE = re.compile(r"^u_[A-Za-z0-9_-]{1,64}$")
+# Always applied with ``fullmatch``: ``$`` also matches before a trailing
+# newline, so a ``.match`` + ``$`` check would let ``"id\n"`` through.
+_SHORT_ID_RE = re.compile(r"[1-9A-HJ-NP-Za-km-z]{22}")
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_SEGMENT_RE = re.compile(r"(?!\.\.?\Z)[A-Za-z0-9_\-.~:@+]{1,200}")
+_USER_ID_RE = re.compile(r"u_[A-Za-z0-9_-]{1,64}")
 _ARTIFACT_HOSTS = frozenset({"claude.ai", "preview.claude.ai"})
 
 #: ``data/users/me`` is a CLIENT-side alias (the server only knows real ids):
@@ -137,7 +141,7 @@ def decode_short_id(short_id: str) -> str:
     The server refuses the short id itself (``invalid_slug``); the link form
     and the slug are two spellings of one 128-bit number.
     """
-    if not _SHORT_ID_RE.match(short_id):
+    if not _SHORT_ID_RE.fullmatch(short_id):
         raise ArtifactDataError("invalid_url", f"{short_id!r} is not a 22-character artifact id")
     number = 0
     for char in short_id:
@@ -165,7 +169,11 @@ def slug_from_url(url: str) -> str:
     segments = [segment for segment in parts.path.split("/") if segment]
     if len(segments) == 2 and segments[0] == "artifact":
         return decode_short_id(segments[1])
-    if len(segments) == 3 and segments[:2] == ["code", "artifact"] and _UUID_RE.match(segments[2]):
+    if (
+        len(segments) == 3
+        and segments[:2] == ["code", "artifact"]
+        and _UUID_RE.fullmatch(segments[2])
+    ):
         return segments[2].lower()
     raise ArtifactDataError(
         "invalid_url",
@@ -181,7 +189,7 @@ def slug_from_url(url: str) -> str:
 def collection_segments(collection: str) -> list[str]:
     """Validate a collection path and return its segments (odd count, 1-15)."""
     segments = (collection or "").split("/")
-    if not collection or any(not _SEGMENT_RE.match(segment) for segment in segments):
+    if not collection or any(not _SEGMENT_RE.fullmatch(segment) for segment in segments):
         raise ArtifactDataError(
             "invalid_path",
             f"collection {collection!r} is not a valid path: '/'-separated segments of "
@@ -198,7 +206,7 @@ def collection_segments(collection: str) -> list[str]:
 
 
 def check_doc_id(doc_id: str) -> str:
-    if not doc_id or not _SEGMENT_RE.match(doc_id):
+    if not doc_id or not _SEGMENT_RE.fullmatch(doc_id):
         raise ArtifactDataError(
             "invalid_path",
             f"doc_id {doc_id!r} must be one path segment: letters, digits and _ - . ~ : @ + "
@@ -267,7 +275,9 @@ def write_args(
 
     ``set`` is the server's ``replace: true`` write (the doc becomes ``data``);
     ``update`` without it is a merge. ``ifVersion`` is omitted, never sent as
-    null, when the caller did not pin.
+    null, when the caller did not pin. ``str_replace`` carries a fresh ``idem``
+    (idempotency key) per call, as Claude Code builds it; a reused key could
+    let the server treat a second, intended edit as a replay of the first.
     """
     pin: dict[str, Any] = {"ifVersion": if_version} if if_version is not None else {}
     if op == "delete":
@@ -285,6 +295,7 @@ def write_args(
         }
         if replace_all:
             args["replace_all"] = True
+        args["idem"] = secrets.token_urlsafe(16)
         return {**args, **pin}
     raise ArtifactDataError("invalid_argument", f"unknown write op {op!r}")
 
@@ -365,8 +376,13 @@ def error_from_response(status: int, body_text: str) -> ArtifactDataError:
 class Bearer:
     """One resolved access token, plus how to get a fresher one after a 401."""
 
-    token: str
+    # repr=False: a Bearer that lands in a log line or traceback must not leak it.
+    token: str = dataclasses.field(repr=False)
     refresh: Callable[[], Awaitable[str | None]] | None = None
+    #: Which login minted the token (account or credential row). Anything
+    #: cached per caller — the ``whoami`` id — keys on it, so a different
+    #: login mid-session is never answered with the previous account's id.
+    identity: str | None = None
 
 
 TokenSource = Callable[[], Awaitable[Bearer | None]]
@@ -459,7 +475,7 @@ async def call_verb(
 
 def user_id_from_whoami(payload: Mapping[str, Any]) -> str:
     user_id = payload.get("id")
-    if not isinstance(user_id, str) or not _USER_ID_RE.match(user_id):
+    if not isinstance(user_id, str) or not _USER_ID_RE.fullmatch(user_id):
         raise ArtifactDataError(
             "store_unavailable", "the artifact data store's whoami answer carried no user id"
         )
