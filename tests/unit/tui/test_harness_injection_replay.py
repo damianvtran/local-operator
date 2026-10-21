@@ -434,3 +434,42 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
     # The delivered row's own arrival is the answer it bought, which is not in
     # this history — so nothing licenses painting it here.
     assert "rev-r6" not in shown
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
+    """Stored per-tick account notices paint ONCE; a real switch still paints.
+
+    Builds before the stable-account binding journaled one
+    ``session_credential_binding_notice.v1`` row per sync re-copy — the same
+    sentence dozens of times (the live cloud-node-1 screenshot). The fold drops a
+    sentence equal to the last one painted, so the flood reads as one row, while
+    a DIFFERENT sentence (a genuine switch) still gets its own. Driven through the
+    real app's own boot replay, like the MCP-warning cell above.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    same = "[session credential] This session is now using the stub login on node-a."
+    switched = "[session credential] This session is now using the stub login on node-b."
+
+    def _notice(text: str) -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text},
+        )
+
+    session = FakeSession()
+    session._history = [_notice(same) for _ in range(12)] + [_notice(switched)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert notices == [same, switched], notices

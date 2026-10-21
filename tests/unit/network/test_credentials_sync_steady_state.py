@@ -258,9 +258,7 @@ def test_owner_reads_a_legacy_members_ack_as_its_held_digest(rig: _Rig) -> None:
         detail = sync.owner_copy(rig.broker, link, dict(legacy))
         assert detail["kind"] == "copy" and detail["gen"] == gen, detail
         # The old member's own rule, exercised: at-or-below held is dropped.
-        assert (
-            rig.engine.apply_copy_reply(KEY, detail, owner=OWNER, held_gen=gen) == "in_sync"
-        )
+        assert rig.engine.apply_copy_reply(KEY, detail, owner=OWNER, held_gen=gen) == "in_sync"
     assert rig.owner_gen() == gen, "a legacy steady-state request must not bump"
 
     # An empty field is a claim of "nothing held": served, as before the fix.
@@ -326,7 +324,7 @@ def test_member_keeps_its_row_when_a_legacy_owner_re_serves_the_same_bytes(
     assert [int(frame["gen"]) for frame in acks] == [1, 2, 3]
 
 
-def test_two_relays_steady_state_writes_no_copy_audit_rows(sync_mesh: Any) -> None:
+def test_two_relays_steady_state_writes_no_copy_audit_rows(sync_mesh: Any) -> None:  # noqa: F811
     """Real relays, real links, the real tick step on the MEMBER side.
 
     ``credentials_sync_step(member, owner)`` is what the member's definitions

@@ -1388,6 +1388,8 @@ def project_settled_rows(
         for block in transcript.blocks()
         if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
     }
+    # The last account-change sentence painted in this fold (see that arm).
+    last_binding_notice = ""
     with batch:
         for message in history:
             # A mounted replay consumes the actual quiet result at its original
@@ -1679,7 +1681,15 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
+                # LEGACY FLOODS FOLD TO ONE ROW. Builds before the stable-account
+                # binding journaled one notice per sync re-copy — dozens of the
+                # SAME sentence (one per 15 s tick on the live mesh). A sentence
+                # equal to the last one painted announces nothing new, so it is
+                # dropped here; a genuinely different switch still paints.
+                if text and text == last_binding_notice:
+                    continue
                 if text:
+                    last_binding_notice = text
                     self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
                     appended = True
                 continue

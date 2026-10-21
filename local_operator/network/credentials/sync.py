@@ -1160,9 +1160,7 @@ class SyncEngine:
         except Exception:  # noqa: BLE001 — cannot tell: pull rather than guess
             return False
         try:
-            for row in store.list_credentials(
-                str(entry.provider or key), include_disabled=True
-            ):
+            for row in store.list_credentials(str(entry.provider or key), include_disabled=True):
                 origin = getattr(row, "data", {}).get(MESH_ORIGIN_KEY)
                 if (
                     isinstance(origin, dict)
@@ -2215,9 +2213,7 @@ class SyncEngine:
         finally:
             _close_quietly(store)
 
-    def _adopt_counter(
-        self, network_id: str, key: str, owner: str, gen: int, digest: str
-    ) -> None:
+    def _adopt_counter(self, network_id: str, key: str, owner: str, gen: int, digest: str) -> None:
         """Move the held copy's counter to ``gen`` and ack it — no value moves.
 
         THE ONE ADOPT, shared by the three paths that prove equal bytes (an
