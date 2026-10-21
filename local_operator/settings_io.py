@@ -69,6 +69,7 @@ from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
+from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
@@ -152,6 +153,15 @@ try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
     # The new child keeps translated wire.settings source hashes unchanged.
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.account_policy"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# The Hub defaults rows read their copy from their own English-only child: the
+# switch they describe governs BOTH agent and skill links, and that correction
+# must not move the already-audited ``wire.settings`` source hash the carried
+# locales are pinned to (the same reason as ``wire.aida_cadence`` above).
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.hub_defaults"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -5012,14 +5022,14 @@ SETTINGS: tuple[Setting, ...] = (
         key="hub.auto_update.agents",
         path=("hub", "auto_update", "agents"),
         section="hub",
-        label=_t(_ws.hub_auto_update_agents_label()),
+        label=_t(_hd.agents_label()),
         kind=Kind.BOOL,
         default=True,
         choices=_bool_choices(
-            _t(_ws.hub_auto_update_agents_choice_true_description()),
-            _t(_ws.hub_auto_update_agents_choice_false_description()),
+            _t(_hd.agents_on_description()),
+            _t(_hd.agents_off_description()),
         ),
-        help=_t(_ws.hub_auto_update_agents_help()),
+        help=_t(_hd.agents_help()),
     ),
     Setting(
         key="hub.auto_update.teams",
