@@ -299,6 +299,10 @@ class ConversationFeedRef:
     conversation_name: str | None = None
     sender_label: str | None = None
     sender_kind: str | None = None
+    #: Set only when the message is a thread REPLY (agent-server threads): the
+    #: root it answers, so the card can tell the agent to answer in-thread.
+    #: Optional and additive — a ref persisted before threads still parses.
+    thread_root_id: str | None = None
 
     def has_card_metadata(self) -> bool:
         """Whether the feed supplied enough provenance to render without a human read."""
@@ -334,6 +338,10 @@ class ConversationFeedRef:
             for value in card_fields:
                 if value is not None and len(value) > _CONVERSATION_CARD_LABEL_MAX:
                     raise TeamBridgeTypeError("card label exceeds its bound")
+        if self.thread_root_id is not None and (
+            _CONVERSATION_MESSAGE_ID.fullmatch(self.thread_root_id) is None
+        ):
+            raise TeamBridgeTypeError("thread_root_id is not a bcmsg_ id")
         return self
 
     def encode(self) -> str:
@@ -344,28 +352,33 @@ class ConversationFeedRef:
             f"{self.conversation_id}/{self.message_id}/{self.conversation_seq}/"
             f"{1 if self.mention else 0}"
         )
-        if not any(
+        if self.thread_root_id is None and not any(
             value is not None
             for value in (self.conversation_name, self.sender_label, self.sender_kind)
         ):
             return base
         name = quote(self.conversation_name or "", safe="")
         label = quote(self.sender_label or "", safe="")
-        return f"{base}/{name}/{label}/{self.sender_kind or ''}"
+        meta = f"{base}/{name}/{label}/{self.sender_kind or ''}"
+        # The thread root is an 8th segment, appended so the 4- and 7-part refs
+        # already persisted in ``feed_refs`` keep their exact spelling. A
+        # ``bcmsg_`` id has no ``/``, so it needs no quoting.
+        return f"{meta}/{self.thread_root_id}" if self.thread_root_id else meta
 
 
 def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     """Decode a conversation feed ref value; ``None`` means malformed (skip, never guess).
 
     Four parts is the original ref (no card metadata); seven is the additive
-    form carrying the server-resolved name/label/kind. Anything else is
-    malformed, including a partial metadata tuple.
+    form carrying the server-resolved name/label/kind; eight adds a thread
+    reply's root id. Anything else is malformed, including a partial metadata
+    tuple.
     """
 
     if not isinstance(value, str):
         return None
     parts = value.split("/")
-    if len(parts) not in (4, 7):
+    if len(parts) not in (4, 7, 8):
         return None
     conversation_id, message_id, seq_text, mention_text = parts[:4]
     if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
@@ -373,8 +386,9 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     if mention_text not in ("0", "1"):
         return None
     name = label = kind = None
-    if len(parts) == 7:
-        encoded_name, encoded_label, kind = parts[4:]
+    thread_root_id = parts[7] if len(parts) == 8 else None
+    if len(parts) >= 7:
+        encoded_name, encoded_label, kind = parts[4:7]
         if (
             len(encoded_name) > _CONVERSATION_CARD_LABEL_MAX * 12
             or len(encoded_label) > _CONVERSATION_CARD_LABEL_MAX * 12
@@ -382,6 +396,9 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
             return None
         name = unquote(encoded_name)
         label = unquote(encoded_label)
+        if thread_root_id is not None and not (encoded_name or encoded_label or kind):
+            # A reply ref without card metadata pads the three slots empty.
+            name = label = kind = None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
@@ -391,6 +408,7 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
             conversation_name=name,
             sender_label=label,
             sender_kind=kind,
+            thread_root_id=thread_root_id,
         ).validated()
     except TeamBridgeTypeError:
         return None
@@ -638,6 +656,13 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                             f"events[{index}].ids.{field_name} must be a string"
                         )
                     card_meta[field_name] = value
+            thread_root = ids.get("thread_root_id")
+            if thread_root not in (None, ""):
+                if not isinstance(thread_root, str):
+                    raise TeamBridgeTypeError(
+                        f"events[{index}].ids.thread_root_id must be a string"
+                    )
+                card_meta["thread_root_id"] = thread_root
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")

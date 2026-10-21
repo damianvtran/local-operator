@@ -731,3 +731,91 @@ def test_conversation_event_is_never_routed_as_a_pair_delivery() -> None:
     )
     # Round-trip: the durable ref spelling parses back to the same record.
     assert plan_feed_refs([ref.encode()]).conversation_deliveries == (ref,)
+
+
+# -- thread replies (agent-server feat/bridge-threads) -------------------------
+
+ROOT_ID = "bcmsg_root0001"
+
+
+def test_a_reply_card_names_its_thread_and_how_to_answer_in_it() -> None:
+    """A reply's card says it is a thread reply and gives the root id, so the
+    agent answers IN the thread; the untrusted clause stays line 2."""
+
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_label="#agents",
+            sender_label="Bea's agent",
+            sender_kind="agent",
+            mention=False,
+            message_id=MESSAGE_ID,
+            conversation_seq=7,
+            thread_root_id=ROOT_ID,
+        )
+    )
+    lines = card.splitlines()
+    assert lines[0].startswith("Thread reply · #agents · from Bea's agent")
+    assert lines[1] == BRIDGE_UNTRUSTED_CLAUSE
+    assert f"thread_root_id: {ROOT_ID}" in lines
+    assert "channel_post with this thread_root_id" in card
+    assert lines[-1] == "guidance: bridge-guidance-v2"
+
+
+def test_a_channel_level_card_carries_no_thread_lines() -> None:
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_label="#agents",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=True,
+            message_id=MESSAGE_ID,
+            conversation_seq=1,
+        )
+    )
+    assert card.startswith("Channel message")
+    assert "thread_root_id" not in card
+
+
+def test_a_reply_event_round_trips_its_root_through_the_persisted_ref() -> None:
+    """The event's additive ``thread_root_id`` survives the ONE persisted ref
+    spelling (an 8th segment), and the older 4/7-part refs parse unchanged."""
+
+    from local_operator.team_bridge.types import (
+        ConversationFeedRef,
+        parse_conversation_ref_value,
+    )
+
+    batch = {
+        "events": [
+            {
+                "type": "message_available",
+                "ids": {
+                    "message_id": MESSAGE_ID,
+                    "conversation_id": CONVERSATION_ID,
+                    "conversation_seq": 7,
+                    "conversation_name": "#agents",
+                    "sender_label": "Bea's agent",
+                    "sender_kind": "agent",
+                    "thread_root_id": ROOT_ID,
+                },
+                "at": HISTORY_AT,
+            }
+        ],
+        "cursor": "1",
+    }
+    _cursor, refs, _resync = project_events_batch(batch)
+    ref = plan_feed_refs(refs).conversation_deliveries[0]
+    assert ref.thread_root_id == ROOT_ID
+    assert ref.sender_label == "Bea's agent"
+    value = ref.encode().split("=", 1)[1]
+    assert value.endswith(f"/{ROOT_ID}")
+    assert parse_conversation_ref_value(value) == ref
+
+    # A reply without card metadata pads the three label slots empty.
+    bare = ConversationFeedRef(CONVERSATION_ID, MESSAGE_ID, 7, False, thread_root_id=ROOT_ID)
+    assert parse_conversation_ref_value(bare.encode().split("=", 1)[1]) == bare
+    # Pre-thread refs keep their spelling and parse back with no root.
+    legacy = ConversationFeedRef(CONVERSATION_ID, MESSAGE_ID, 7, False)
+    assert parse_conversation_ref_value(legacy.encode().split("=", 1)[1]) == legacy
+    # A root that is not a message id is malformed, never guessed.
+    assert parse_conversation_ref_value(f"{CONVERSATION_ID}/{MESSAGE_ID}/7/0////x") is None

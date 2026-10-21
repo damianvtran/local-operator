@@ -80,6 +80,7 @@ class RecordingClient:
         }
         self.sent_result = sent or {"message": {"id": "cmsg_1", "seq": 4}}
         self.messages_result = messages or {"messages": []}
+        self.replies_result: dict[str, Any] = {"root": {}, "replies": [], "has_more": False}
         self.calls: list[dict[str, Any]] = []
 
     async def conversations(self, **kwargs: Any) -> dict[str, Any]:
@@ -113,6 +114,7 @@ class RecordingClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        thread_root_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -124,9 +126,33 @@ class RecordingClient:
                 "agent_label": agent_label,
                 "actor_endpoint_id": actor_endpoint_id,
                 "origin_session_id": origin_session_id,
+                "thread_root_id": thread_root_id,
             }
         )
         return self.sent_result
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+        endpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "method": "conversation_replies",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "tenant_id": tenant_id,
+                "limit": limit,
+                "after_seq": after_seq,
+                "endpoint_id": endpoint_id,
+            }
+        )
+        return self.replies_result
 
     async def conversation_messages(
         self,
@@ -472,3 +498,114 @@ async def test_a_whitespace_human_endpoint_is_absent_not_wired() -> None:
     members = client.calls[0]["body"]["members"]
     human = next(member for member in members if member["account_id"] == "acc_2")
     assert "endpoint_id" not in human
+
+
+# -- threads (agent-server feat/bridge-threads) --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_post_with_a_thread_root_replies_in_that_thread() -> None:
+    """An agent coordinates IN a thread (e.g. a QA-claim thread in #agents):
+    the root id rides to the client as ``thread_root_id``, identity stays
+    runtime-owned, and the confirmation names the thread."""
+
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_post",
+            "channel_id": "bcv_abcd1234",
+            "body": "claiming QA-1426",
+            "thread_root_id": "bcmsg_root0001",
+        },
+    )
+    assert outcome["ok"] is True
+    assert "reply in thread bcmsg_root0001" in outcome["content"]
+    (call,) = client.calls
+    assert call["thread_root_id"] == "bcmsg_root0001"
+    assert call["actor_endpoint_id"] == "bep_1"
+    assert call["origin_session_id"] == "sess_1"
+
+
+@pytest.mark.asyncio
+async def test_channel_post_without_a_thread_root_stays_channel_level() -> None:
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client), {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hi"}
+    )
+    assert outcome["ok"] is True
+    assert client.calls[0]["thread_root_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["x", "bcmsg_../../x", "bcmsg_abcd1234/replies", "bcv_abcd1234"])
+async def test_a_malformed_thread_root_never_reaches_the_client(root: str) -> None:
+    """The root id is interpolated into the replies path; the bcmsg_ grammar gates it."""
+
+    for args in (
+        {"op": "channel_post", "body": "hi", "thread_root_id": root},
+        {"op": "channel_thread", "thread_root_id": root},
+    ):
+        client = RecordingClient()
+        outcome = await execute_bridge(_runtime(client), {"channel_id": "bcv_abcd1234", **args})
+        assert outcome["ok"] is False and outcome["code"] == "invalid_request", args
+        assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_channel_thread_reads_as_the_agent_endpoint_untrusted_wrapped() -> None:
+    client = RecordingClient()
+    client.replies_result = {
+        "root": {"id": "bcmsg_root0001", "seq": 3, "reply_count": 1, "body": None},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 4, "body": None}],
+        "has_more": False,
+    }
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_thread",
+            "channel_id": "bcv_abcd1234",
+            "thread_root_id": "bcmsg_root0001",
+            "limit": 10,
+            "after_seq": 4,
+        },
+    )
+    assert outcome["ok"] is True
+    assert outcome["content"].startswith(BRIDGE_UNTRUSTED_CLAUSE)
+    assert client.calls == [
+        {
+            "method": "conversation_replies",
+            "conversation_id": "bcv_abcd1234",
+            "message_id": "bcmsg_root0001",
+            "tenant_id": TENANT,
+            "limit": 10,
+            "after_seq": 4,
+            "endpoint_id": "bep_1",
+        }
+    ]
+    page = json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
+    assert page["replies"][0]["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_channel_thread_refuses_a_before_cursor() -> None:
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "channel_thread",
+            "channel_id": "bcv_abcd1234",
+            "thread_root_id": "bcmsg_root0001",
+            "before_seq": 9,
+        },
+    )
+    assert outcome["ok"] is False and outcome["code"] == "invalid_request"
+    assert client.calls == []
+
+
+def test_channel_thread_is_a_read_tier_op() -> None:
+    tool = build_bridge_tool(ToolContext(bridge_runtime=_runtime(RecordingClient())))
+    assert tool is not None
+    assert tool.call_approval_tier is not None
+    assert tool.call_approval_tier({"op": "channel_thread"}) == "read"
+    assert tool.call_approval_tier({"op": "channel_post"}) == "write"
