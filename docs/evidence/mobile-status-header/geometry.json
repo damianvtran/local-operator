@@ -27,6 +27,8 @@
       "chips": [],
       "untracked": null,
       "more": null,
+      "costDetail": null,
+      "scroll": null,
       "headerControls": [
         {
           "label": "back to sessions",
@@ -66,6 +68,8 @@
         "chips": [],
         "untracked": null,
         "more": null,
+        "costDetail": null,
+        "scroll": null,
         "headerControls": [
           {
             "label": "back to sessions",
@@ -104,6 +108,8 @@
         "chips": [],
         "untracked": null,
         "more": null,
+        "costDetail": null,
+        "scroll": null,
         "headerControls": [
           {
             "label": "back to sessions",
@@ -154,6 +160,8 @@
       ],
       "untracked": "channels not tracked",
       "more": "\u00b7 +2 more",
+      "costDetail": null,
+      "scroll": null,
       "headerControls": [
         {
           "label": "back to sessions",
@@ -192,6 +200,8 @@
       "chips": [],
       "untracked": null,
       "more": null,
+      "costDetail": null,
+      "scroll": null,
       "headerControls": [
         {
           "label": "back to sessions",
@@ -209,7 +219,7 @@
       "rows": [
         {
           "text": "Pin sessionnot pinned",
-          "label": "pin this session",
+          "label": "Pin session",
           "pressed": "false"
         },
         {
@@ -223,6 +233,430 @@
           "pressed": null
         }
       ]
+    },
+    "long": {
+      "before": {
+        "viewport": [
+          390,
+          844
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 390
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 300,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "costDetail": null,
+        "scroll": {
+          "top": 5999,
+          "height": 6587,
+          "client": 588
+        },
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      },
+      "samples": [
+        {
+          "ms": 0,
+          "probe": {
+            "viewport": [
+              390,
+              844
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 390
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 300,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 390
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 5999,
+              "height": 6587,
+              "client": 527
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        },
+        {
+          "ms": 100,
+          "probe": {
+            "viewport": [
+              390,
+              844
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 390
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 300,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 390
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6060,
+              "height": 6587,
+              "client": 527
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        },
+        {
+          "ms": 500,
+          "probe": {
+            "viewport": [
+              390,
+              844
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 390
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 300,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 390
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6060,
+              "height": 6587,
+              "client": 527
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        },
+        {
+          "ms": 1000,
+          "probe": {
+            "viewport": [
+              390,
+              844
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 390
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 300,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 390
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6060,
+              "height": 6587,
+              "client": 527
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        }
+      ],
+      "after_swipe": {
+        "viewport": [
+          390,
+          844
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 390
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 300,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "costDetail": null,
+        "scroll": {
+          "top": 5999,
+          "height": 6587,
+          "client": 588
+        },
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      }
+    },
+    "zero": {
+      "collapsed": {
+        "viewport": [
+          390,
+          844
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 390
+        },
+        "spend": null,
+        "spendText": null,
+        "spendLabel": null,
+        "spendExpanded": null,
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "costDetail": {
+          "rect": {
+            "top": 53,
+            "bottom": 97,
+            "h": 44,
+            "left": 279,
+            "width": 99
+          },
+          "text": "cost detail\u25be",
+          "label": "cost detail",
+          "expanded": "false"
+        },
+        "scroll": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      },
+      "expanded": {
+        "viewport": [
+          390,
+          844
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 390
+        },
+        "spend": null,
+        "spendText": null,
+        "spendLabel": null,
+        "spendExpanded": null,
+        "panelPresent": true,
+        "panel": {
+          "top": 98,
+          "bottom": 124,
+          "h": 26,
+          "left": 0,
+          "width": 390
+        },
+        "chips": [
+          "image $0.0000"
+        ],
+        "untracked": null,
+        "more": null,
+        "costDetail": {
+          "rect": {
+            "top": 53,
+            "bottom": 97,
+            "h": 44,
+            "left": 279,
+            "width": 99
+          },
+          "text": "cost detail\u25b4",
+          "label": "cost detail",
+          "expanded": "true"
+        },
+        "scroll": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      }
     },
     "asks_header": [
       {
@@ -240,7 +674,7 @@
         "text": "\u2039"
       },
       {
-        "label": "approvals in this session",
+        "label": "needs you \u2014 approvals in this session",
         "text": "needs you"
       },
       {
@@ -277,6 +711,8 @@
       "chips": [],
       "untracked": null,
       "more": null,
+      "costDetail": null,
+      "scroll": null,
       "headerControls": [
         {
           "label": "back to sessions",
@@ -316,6 +752,8 @@
         "chips": [],
         "untracked": null,
         "more": null,
+        "costDetail": null,
+        "scroll": null,
         "headerControls": [
           {
             "label": "back to sessions",
@@ -354,6 +792,8 @@
         "chips": [],
         "untracked": null,
         "more": null,
+        "costDetail": null,
+        "scroll": null,
         "headerControls": [
           {
             "label": "back to sessions",
@@ -404,6 +844,8 @@
       ],
       "untracked": "channels not tracked",
       "more": "\u00b7 +2 more",
+      "costDetail": null,
+      "scroll": null,
       "headerControls": [
         {
           "label": "back to sessions",
@@ -442,6 +884,8 @@
       "chips": [],
       "untracked": null,
       "more": null,
+      "costDetail": null,
+      "scroll": null,
       "headerControls": [
         {
           "label": "back to sessions",
@@ -459,7 +903,7 @@
       "rows": [
         {
           "text": "Pin sessionnot pinned",
-          "label": "pin this session",
+          "label": "Pin session",
           "pressed": "false"
         },
         {
@@ -473,6 +917,430 @@
           "pressed": null
         }
       ]
+    },
+    "long": {
+      "before": {
+        "viewport": [
+          360,
+          780
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 360
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 270,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "costDetail": null,
+        "scroll": {
+          "top": 6063,
+          "height": 6587,
+          "client": 524
+        },
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      },
+      "samples": [
+        {
+          "ms": 0,
+          "probe": {
+            "viewport": [
+              360,
+              780
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 360
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 270,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 360
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6063,
+              "height": 6587,
+              "client": 463
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        },
+        {
+          "ms": 100,
+          "probe": {
+            "viewport": [
+              360,
+              780
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 360
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 270,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 360
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6124,
+              "height": 6587,
+              "client": 463
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        },
+        {
+          "ms": 500,
+          "probe": {
+            "viewport": [
+              360,
+              780
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 360
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 270,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 360
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6124,
+              "height": 6587,
+              "client": 463
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        },
+        {
+          "ms": 1000,
+          "probe": {
+            "viewport": [
+              360,
+              780
+            ],
+            "status": {
+              "top": 53,
+              "bottom": 98,
+              "h": 45,
+              "left": 0,
+              "width": 360
+            },
+            "spend": {
+              "top": 53,
+              "bottom": 97,
+              "h": 44,
+              "left": 270,
+              "width": 78
+            },
+            "spendText": "\u2265$447.70\u25b4",
+            "spendLabel": "\u2265$447.70 spend breakdown",
+            "spendExpanded": "true",
+            "panelPresent": true,
+            "panel": {
+              "top": 98,
+              "bottom": 159,
+              "h": 61,
+              "left": 0,
+              "width": 360
+            },
+            "chips": [
+              "image/gpt-image-1 $0.080",
+              "image/gpt-image-1 $\u2014",
+              "image/gpt-image-2 $0.080",
+              "search $0.0000"
+            ],
+            "untracked": "channels not tracked",
+            "more": "\u00b7 +2 more",
+            "costDetail": null,
+            "scroll": {
+              "top": 6124,
+              "height": 6587,
+              "client": 463
+            },
+            "headerControls": [
+              {
+                "label": "back to sessions",
+                "text": "\u2039"
+              },
+              {
+                "label": "session menu",
+                "text": "\u22ee"
+              }
+            ]
+          }
+        }
+      ],
+      "after_swipe": {
+        "viewport": [
+          360,
+          780
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 360
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 270,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "costDetail": null,
+        "scroll": {
+          "top": 6063,
+          "height": 6587,
+          "client": 524
+        },
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      }
+    },
+    "zero": {
+      "collapsed": {
+        "viewport": [
+          360,
+          780
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 360
+        },
+        "spend": null,
+        "spendText": null,
+        "spendLabel": null,
+        "spendExpanded": null,
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "costDetail": {
+          "rect": {
+            "top": 53,
+            "bottom": 97,
+            "h": 44,
+            "left": 249,
+            "width": 99
+          },
+          "text": "cost detail\u25be",
+          "label": "cost detail",
+          "expanded": "false"
+        },
+        "scroll": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      },
+      "expanded": {
+        "viewport": [
+          360,
+          780
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 360
+        },
+        "spend": null,
+        "spendText": null,
+        "spendLabel": null,
+        "spendExpanded": null,
+        "panelPresent": true,
+        "panel": {
+          "top": 98,
+          "bottom": 124,
+          "h": 26,
+          "left": 0,
+          "width": 360
+        },
+        "chips": [
+          "image $0.0000"
+        ],
+        "untracked": null,
+        "more": null,
+        "costDetail": {
+          "rect": {
+            "top": 53,
+            "bottom": 97,
+            "h": 44,
+            "left": 249,
+            "width": 99
+          },
+          "text": "cost detail\u25b4",
+          "label": "cost detail",
+          "expanded": "true"
+        },
+        "scroll": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      }
     },
     "asks_header": [
       {
@@ -490,7 +1358,7 @@
         "text": "\u2039"
       },
       {
-        "label": "approvals in this session",
+        "label": "needs you \u2014 approvals in this session",
         "text": "needs you"
       },
       {
