@@ -141,17 +141,17 @@
   },
   "relay.asks.sheet.title_waiting": {
     "role": "asks sheet title with a live count",
-    "tone": "Preserve the leading 'asks ·' and lowercase. The count is an ICU plural over questions.",
+    "tone": "Preserve the leading section noun and its ' · ' separator, and lowercase. The section noun names the SHEET (asks, approvals and secrets all live here), so a locale must not reuse the question word as the section noun. The count is an ICU plural over questions.",
     "note": "Owned relay SPA asks copy. Counts questions, not asks, matching the dock and the session header."
   },
   "relay.asks.sheet.title_lapsed": {
     "role": "asks sheet title when only lapsed questions remain",
-    "tone": "Preserve the leading 'asks ·' and lowercase.",
+    "tone": "Preserve the leading section noun and its ' · ' separator, and lowercase. The section noun is the sheet's name, not the question count word.",
     "note": "Owned relay SPA asks copy. Lapsed questions are read-only; the title says what the sheet holds."
   },
   "relay.asks.sheet.title_plain": {
     "role": "asks sheet title with nothing waiting or lapsed",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Preserve casing, lowercase. This is the section noun alone.",
     "note": "Owned relay SPA asks copy. The bare sheet name."
   },
   "relay.asks.sheet.loading": {
