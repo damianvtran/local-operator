@@ -1473,7 +1473,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
     payload["rotations"] = dict(record.rotations)
     payload["members_digest"] = members_digest_of(record)
     payload["invites"] = [
-        {"invite_id": invite.invite_id, "state": invite.state, "role": invite.role}
+        {
+            "invite_id": invite.invite_id,
+            "state": invite.listed_state(time.time()),
+            "role": invite.role,
+        }
         for invite in record.invites
     ]
     return _emit(args, {"ok": True, **payload}, _show_lines(payload))
@@ -3167,8 +3171,11 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         or None,
         device_id=args.device,
     )
+    # Same rule as the relay's mint: dead entries go with the write that adds one.
+    expired = store.prune_invites(record)
     record.invites.append(minted.record)
     store.save(record)
+    store.forget_invite_tokens(expired)
     path = store.save_invite_token(minted.record.invite_id, minted.token)
     _audit(
         "invite_minted",

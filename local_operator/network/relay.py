@@ -4623,6 +4623,7 @@ class RelayServer:
         self._flush_outboxes()
         self._run_start_hooks()
         self._sweep_approvals_once()
+        self._sweep_invites_once()
         self._warm_open_frame_strip()
 
     def begin_reload(self) -> None:
@@ -4738,6 +4739,25 @@ class RelayServer:
                 print(f"mesh relay: approvals sweep failed ({exc})", file=sys.stderr)
 
         thread = threading.Thread(target=_run, name="mesh-start-approvals", daemon=True)
+        thread.start()
+
+    def _sweep_invites_once(self) -> None:
+        """One best-effort sweep of dead invite entries, on the approvals sweep's terms.
+
+        Minting prunes as it appends, but a device that stops minting would keep
+        whatever it last held; the relay start is the non-timer event every device
+        reaches (``_sweep_approvals_once`` records why), so the backlog clears there
+        too. Only rows dead by their own expiry AND past retention go
+        (``store.prune_invites``), never a live token.
+        """
+
+        def _run() -> None:
+            try:
+                store.sweep_invites(self.root)
+            except Exception as exc:  # noqa: BLE001 — a sweep never fails a relay
+                print(f"mesh relay: invite sweep failed ({exc})", file=sys.stderr)
+
+        thread = threading.Thread(target=_run, name="mesh-start-invites", daemon=True)
         thread.start()
 
     def serve_forever(self) -> None:
@@ -10972,9 +10992,15 @@ class RelayServer:
                 or None,
                 device_id=str(frame.get("device_id") or ""),
             )
+            # MINTING IS WHERE THE LIST GROWS, so it is where the dead entries go:
+            # the same locked write that adds a row drops the ones past their own
+            # expiry and the retention window (``store.prune_invites``), so repeated
+            # pairing attempts no longer accumulate ``minted`` rows forever.
+            expired = store.prune_invites(record)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
+        store.forget_invite_tokens(expired, self.root)
         self.audit.record(
             AuditEvent(
                 event="invite_minted",
@@ -12266,7 +12292,7 @@ class RelayServer:
         base["invites"] = [
             {
                 "invite_id": invite.invite_id,
-                "state": invite.state,
+                "state": invite.listed_state(time.time()),
                 "role": invite.role,
                 "bound_device": invite.device_id,
                 "expires_at": invite.expires_at,

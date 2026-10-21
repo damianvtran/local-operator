@@ -366,6 +366,26 @@ def network_topology(root: Path | None = None) -> dict[str, Any]:
             if not isinstance(entry, dict):
                 continue
             device_id = str(entry.get("device_id") or "")
+            is_self = bool(device_id) and device_id == str(record.self_device_id)
+            # A TOMBSTONE IS NOT A DEVICE, and every reader of this list counts and
+            # offers what it holds: the new-chat picker draws one row per member and
+            # heads the section with ``members.length - 1``, the sidebar and the mesh
+            # canvas draw one node per member. A removed member's row stays in the
+            # record (``MemberRecord`` keeps it so the burn is auditable — ``lop
+            # network show`` is where it is read), but here it was drawn as a second
+            # ``cloud-node-1`` reading "unreachable" beside the live one: a machine
+            # that re-joined after its old identity was removed has the SAME name and
+            # endpoints under a new id, so the tombstone is indistinguishable from a
+            # second device that does not answer (measured on damian-mesh,
+            # 2026-10-21: "2 devices" for one peer). Filtering on the record's own
+            # ``active`` (not removed, lifecycle not expired) is also what
+            # ``relay.peer_status`` uses, so the reach table and this list agree.
+            #
+            # THIS DEVICE'S OWN ROW STAYS even when inactive: a device removed by
+            # another member still needs to see its own revoked membership, and that
+            # is a fact about where the reader stands, not an extra device to pick.
+            if not entry.get("active") and not is_self:
+                continue
             member = record.member(device_id)
             reach = peer_table.get((record.network_id, device_id)) or {}
             reachable = bool(reach.get("reachable")) if relay_up else False
@@ -384,7 +404,7 @@ def network_topology(root: Path | None = None) -> dict[str, Any]:
                 # THIS FILE'S OWN PROSE, authored for the person reading the tab and
                 # not a transport token: it says why nothing could be asked at all.
                 reason = "the relay is not running, so no device was asked"
-            if device_id and device_id == str(record.self_device_id):
+            if is_self:
                 # THIS DEVICE IS HERE, and the relay never probed itself: the peer table
                 # skips the device that owns the table, so a join that read absence as
                 # "unreachable" drew the node for THIS machine as a dead device with

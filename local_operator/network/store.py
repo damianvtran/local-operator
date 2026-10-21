@@ -86,6 +86,7 @@ from typing import Any, Callable, Iterator, TextIO
 from local_operator.network.identity import ensure_network_root, network_root
 from local_operator.network.types import (
     PEERS_RUN_DIRNAME,
+    InviteRecord,
     JoinAnswer,
     MemberRecord,
     MeshRefusal,
@@ -966,13 +967,7 @@ def prune(record: NetworkRecord, *, now: float | None = None) -> dict[str, int]:
       the list instead of the row would un-burn every removed device.
     """
     moment = time.time() if now is None else now
-    invites_before = len(record.invites)
-    record.invites = [
-        invite
-        for invite in record.invites
-        if moment - invite.minted_at <= INVITE_PRUNE_AGE_S
-        or (invite.redeemed_at is not None and moment - invite.redeemed_at <= INVITE_PRUNE_AGE_S)
-    ]
+    invites_dropped = prune_invites(record, now=moment)
     tombstones_before = len(record.members)
     kept: list[MemberRecord] = []
     for member in record.members:
@@ -986,10 +981,90 @@ def prune(record: NetworkRecord, *, now: float | None = None) -> dict[str, int]:
         if moment - float(entry.get("started_at") or moment) <= INVITE_PRUNE_AGE_S
     ]
     return {
-        "invites_dropped": invites_before - len(record.invites),
+        "invites_dropped": len(invites_dropped),
         "tombstone_rows_dropped": tombstones_before - len(record.members),
         "burned_ids_kept": len(record.removed_ids),
     }
+
+
+def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[InviteRecord]:
+    """Drop the invite entries that are dead and past retention; return the dropped.
+
+    THE INVITE HALF OF :func:`prune`, split out because it is the half a live relay
+    runs (:meth:`relay.RelayServer._sweep_invites`) and the tombstone half is not:
+    a tombstone row is part of ``members_digest_of``, the fact two devices compare
+    to tell "same members" from "same count", so pruning it on one device's clock
+    is a membership change, not housekeeping. An invite is this device's own
+    bookkeeping — no peer reads the list.
+
+    WHY IT IS RUN AT ALL (2026-10-21): nothing called :func:`prune`, so every
+    pairing attempt left a ``minted`` row behind for good — the operator's
+    damian-mesh record held 24 of them, every one past its own expiry by 38-421
+    hours, and ``lop network show`` listed each as ``minted``.
+
+    AN ENTRY GOES ONLY WHEN IT IS DEAD BY ITS OWN EXPIRY *AND* OLDER THAN THE
+    RETENTION WINDOW. The earlier rule aged entries by ``minted_at`` alone, which
+    is harmless only while nothing runs it: ``--expires`` takes any duration, so
+    a 2-day invite would have been deleted on day one while its token was still
+    redeemable. ``is_fresh`` is the same test redemption applies (relay.py
+    refuses ``not invite.is_fresh(now)``), so a row dropped here is one no
+    redemption could have accepted. A redeemed entry is kept for the window after
+    its redemption as well, so a ceremony in flight never loses its row.
+    """
+    moment = time.time() if now is None else now
+    kept: list[InviteRecord] = []
+    dropped: list[InviteRecord] = []
+    for invite in record.invites:
+        if (
+            invite.is_fresh(moment)
+            or moment - invite.minted_at <= INVITE_PRUNE_AGE_S
+            or (
+                invite.redeemed_at is not None and moment - invite.redeemed_at <= INVITE_PRUNE_AGE_S
+            )
+        ):
+            kept.append(invite)
+        else:
+            dropped.append(invite)
+    record.invites = kept
+    return dropped
+
+
+def forget_invite_tokens(dropped: list[InviteRecord], root: Path | None = None) -> None:
+    """Delete the outbox token files of invites :func:`prune_invites` dropped.
+
+    The file is the only copy of the token this device keeps, and the row was its
+    only index: a row pruned without its file leaves a token nothing lists and
+    nothing would ever delete (only :func:`purge_network_artifacts`, which walks
+    the rows, did). Every dropped row is dead by its own expiry, so the token can
+    no longer be redeemed and the file is pure residue. Best-effort: a file that
+    cannot be removed costs disk, never the sweep.
+    """
+    for invite in dropped:
+        try:
+            invite_path(safe_component(invite.invite_id), root).unlink(missing_ok=True)
+        except (OSError, MeshRefusal):
+            continue
+
+
+def sweep_invites(root: Path | None = None, *, now: float | None = None) -> int:
+    """Run :func:`prune_invites` over every network record; return rows dropped.
+
+    Each record is rewritten under :func:`mutate` and ONLY when something was
+    dropped, so a sweep that finds nothing never bumps a record's sequence or
+    races the relay's own writers.
+    """
+    total = 0
+    for listed in list_networks(root):
+        try:
+            with mutate(listed.network_id, root) as record:
+                dropped = prune_invites(record, now=now)
+                if dropped:
+                    save(record, root)
+        except FileNotFoundError:
+            continue
+        forget_invite_tokens(dropped, root)
+        total += len(dropped)
+    return total
 
 
 # ---------------------------------------------------------------------------
