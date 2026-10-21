@@ -104,6 +104,7 @@ def test_a_delay_that_does_not_fit_the_wall_clock_window_is_refused() -> None:
         transport_retry_delay(_NOT_SENT, failed_attempt=1, remaining_s=-90.0, jitter=lambda: 0.5)
         is None
     )
-    assert transport_retry_delay(
-        _NOT_SENT, failed_attempt=1, remaining_s=3.0, jitter=lambda: 0.5
-    ) == 0.5
+    assert (
+        transport_retry_delay(_NOT_SENT, failed_attempt=1, remaining_s=3.0, jitter=lambda: 0.5)
+        == 0.5
+    )

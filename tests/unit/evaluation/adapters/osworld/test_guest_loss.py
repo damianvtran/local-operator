@@ -1146,9 +1146,7 @@ async def test_a_pre_action_path_failure_attempts_the_action_instead_of_dying(
             thread.join(timeout=5)
 
     assert len(received) == 1, "the action must be attempted, and applied once"
-    assert sum(stubs.slept) == (
-        aws_mod._PRE_ACTION_RECOVERY_BUDGET_S + provider._action_delay_s
-    )
+    assert sum(stubs.slept) == (aws_mod._PRE_ACTION_RECOVERY_BUDGET_S + provider._action_delay_s)
     assert provider._cache_root is not None
     evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
     assert evidence["read_failed"] is True

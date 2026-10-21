@@ -3310,10 +3310,10 @@ def _recovering_provider(
     provider = _provider_over(stubs, tmp_path)
     provider._supervisor_unit = "action-server.service"
     monkeypatch.setattr(
-            provider,
-            "_probe_control_server_outcome",
-            lambda timeout: (True, {"answered": True}),
-        )
+        provider,
+        "_probe_control_server_outcome",
+        lambda timeout: (True, {"answered": True}),
+    )
     monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
     monkeypatch.setattr(aws_mod.time, "monotonic", stubs.monotonic)
     events: list[str] = []
