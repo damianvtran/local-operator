@@ -25,8 +25,12 @@ SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "reap_superse
 
 def _load():
     spec = importlib.util.spec_from_file_location("reap_superseded_runs", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
+    # C-2: spec_from_file_location returns ModuleSpec | None, and its loader is
+    # Optional too. Asserting BOTH narrows them for the type checker rather
+    # than leaving pyright to flag an unchecked optional at three call sites.
+    assert spec is not None
     assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
@@ -145,13 +149,46 @@ def test_an_unreadable_pr_head_is_kept(api):
     assert "cannot read PR #999" in reason
 
 
-def test_an_unreadable_branch_tip_on_a_pr_run_is_kept(api):
-    api["pr"][7] = "b" * 40
+def test_a_pr_run_whose_head_moved_is_cancelled_even_when_the_branch_is_gone(api):
+    """The fork-PR case, and the correction it forced in the rule.
+
+    A fork's branch 404s in this repository, so the branch tip can never be
+    read for a fork PR. Treating that as "unresolvable" made the rule protect
+    EVERY superseded fork PR forever -- and, worse, the abandonment bound could
+    then cancel one whose PR head was readable and CURRENT. The PR head is the
+    authoritative reading for a pull_request run: if it has moved past the
+    run's commit, the run is superseded, and the tip only corroborates. If it
+    has NOT moved, the run is kept at any age (the test above).
+    """
+    api["pr"][7] = "b" * 40          # PR head moved past the run's commit
+    # no tip registered -> the branch does not resolve, as for a fork PR
     should, reason = reaper.decide(
         "o/r", _run(event="pull_request", pull_requests=[{"number": 7}]), 5.0
     )
+    assert should
+    assert "moved past" in reason
+
+
+def test_a_pr_run_is_kept_at_any_age_when_its_head_is_still_current(api):
+    """The fork-PR hole that the QA round found, closed.
+
+    A readable PR head equal to the run's commit means the run is about to be
+    current. That must beat the abandonment bound: an earlier version fell
+    through to the bound whenever the branch tip was unreadable, which is
+    exactly a fork PR, so a live fork PR older than the bound was cancelled.
+    """
+    ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    api["pr"][7] = "a" * 40          # PR head IS the run's commit
+    should, reason = reaper.decide(
+        "o/r",
+        _run(event="pull_request", created_at=ancient, updated_at=ancient,
+             pull_requests=[{"number": 7}]),
+        5.0,
+    )
     assert not should
-    assert "refusing to act on one reading" in reason
+    assert "is current" in reason
 
 
 def test_an_event_that_cannot_be_superseded_is_kept(api):
@@ -196,3 +233,65 @@ def test_abandonment_never_overrides_the_protected_branch_rule(api):
     should, reason = reaper.decide("o/r", _run(head_branch="main", created_at=ancient), 5.0, 24.0)
     assert not should
     assert "protected branch" in reason
+
+
+def test_abandonment_never_cancels_an_event_that_cannot_be_superseded(api):
+    """C-5: `schedule` runs are promised untouched, at ANY age.
+
+    The bound used to run before the event rules, so an ancient scheduled run
+    — the queue in this repository has held exactly that — was cancelled
+    despite the docstring saying schedules are never touched. Resolve first;
+    only an unresolvable run is ever subject to the bound.
+    """
+    ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    should, reason = reaper.decide("o/r", _run(event="schedule", created_at=ancient), 5.0, 24.0)
+    assert not should
+    assert "not superseded by definition" in reason
+
+
+def test_abandonment_never_cancels_a_resolvable_run_that_is_still_current(api):
+    """C-5: a 25-hour-old PR run whose head is current is KEPT.
+
+    Age must not decide anything while the run's own commit is still the head
+    that would run again. Only an UNRESOLVABLE run falls through to the bound.
+    """
+    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=25)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    api["pr"][7] = "a" * 40
+    api["tip"]["feat/x"] = "a" * 40
+    should, reason = reaper.decide(
+        "o/r", _run(event="pull_request", created_at=old, pull_requests=[{"number": 7}]), 5.0, 24.0
+    )
+    assert not should
+    assert "current" in reason
+
+
+def test_an_unresolvable_run_inside_the_bound_is_kept(api):
+    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=6)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    should, reason = reaper.decide("o/r", _run(event="pull_request", created_at=old), 5.0, 24.0)
+    assert not should
+    assert "inside the abandonment bound" in reason
+
+
+def test_a_rerun_of_an_old_run_is_protected_by_the_grace_period(api):
+    """Q3: age must be QUEUE RESIDENCE, not the run object's birth time.
+
+    Measured on run 39498542825: the run object reports created_at 21:13:02Z
+    while attempt 2 was created at 22:02:55Z. A re-run therefore inherits the
+    old created_at, and an age read from it put the re-run past the 24-hour
+    bound on its FIRST sweep -- bypassing the grace period and the current-tip
+    keep, and again on every retry. `updated_at` tracks the re-queue.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    long_ago = (now - datetime.timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    just_now = (now - datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    should, reason = reaper.decide(
+        "o/r", _run(created_at=long_ago, updated_at=just_now), 5.0, 24.0
+    )
+    assert not should
+    assert "grace period" in reason
