@@ -34,8 +34,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
-
 from ..types import ConversationFeedRef
 from .wake import CLAIM_TTL_S, _producer_fence, deliver_wake, screen_item
 
@@ -88,7 +86,6 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         else "mention: no — end the turn with no_reply if this is not your work"
     )
     lines = [
-        f"[{TEAM_BRIDGE_MESSAGE_TYPE}]",
         f"Channel message · {metadata.conversation_label} · "
         f"from {metadata.sender_label} ({metadata.sender_kind}, same tenant)",
         mention_line,

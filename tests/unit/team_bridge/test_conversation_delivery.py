@@ -41,8 +41,7 @@ SENDER = {"account_id": "acc_human", "kind": "human", "display_label": "Ada"}
 BODY = "hello from the channel"
 HISTORY_AT = "2026-10-20T00:00:00Z"
 
-EXPECTED_CARD_A = """[team_bridge_message]
-Channel message · #qa-coordination · from Ada (human, same tenant)
+EXPECTED_CARD_A = """Channel message · #qa-coordination · from Ada (human, same tenant)
 mention: yes — a reply is required
 message_id: bcmsg_abcdef01
 conversation_seq: 1
