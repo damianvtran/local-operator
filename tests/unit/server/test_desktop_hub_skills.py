@@ -1190,7 +1190,9 @@ async def test_a_matching_authored_folder_is_never_adopted_and_never_leaks(api) 
         json=pull_body(auto_push=True, confirm_public_egress=True),
     )
     assert response.status_code == 422, response.text
-    assert response.json()["detail"]["code"] == "origin-conflict"
+    # An UNOWNED copy holds the alias: a name collision (``alias-occupied``),
+    # not a lineage conflict -- the same category the publish preview reports.
+    assert response.json()["detail"]["code"] == "alias-occupied"
     local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
     identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
     values = read_config_values(root) or {}
