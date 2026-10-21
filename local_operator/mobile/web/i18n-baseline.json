@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. C (relay.shell) activated the two relay SPA shell screens it extracts from; C2 (relay.session) adds the two history/start surfaces it extracts from (past-sessions.tsx, and the directory/model sheets that carry the retired new-session screen's copy) — their residual (unextracted SessionCard/state/resume/sheet-row) copy is frozen as advisory-equivalent legacy, so a NEW hardcoded string in a touched path fails the gate. Other app paths remain scanned advisory until a later slice activates them.",
+  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. C (relay.shell) activated the two relay SPA shell screens it extracts from; C2 (relay.session) adds the two history/start surfaces it extracts from (past-sessions.tsx, and the directory/model sheets that carry the retired new-session screen's copy) — their residual (unextracted SessionCard/state/resume/sheet-row) copy is frozen as advisory-equivalent legacy, so a NEW hardcoded string in a touched path fails the gate. The asks/cards slice activates the eight ask and decision surfaces it fully extracts (ask card/dock/row/sheet, pending card, approval gate, disclosure and lib/asks): each now carries no unextracted prose, so its allowance is empty and any new literal fails. Other app paths remain scanned advisory until a later slice activates them.",
   "enforced": [
     "src/i18n/runtime.ts",
     "src/i18n/wire-cache.ts",
@@ -10,7 +10,15 @@
     "src/screens/session-view.tsx",
     "src/screens/past-sessions.tsx",
     "src/components/directory-sheet.tsx",
-    "src/components/model-sheet.tsx"
+    "src/components/model-sheet.tsx",
+    "src/components/ask-card.tsx",
+    "src/components/ask-dock.tsx",
+    "src/components/ask-row.tsx",
+    "src/components/asks-sheet.tsx",
+    "src/components/gate-sheet.tsx",
+    "src/components/pending-card.tsx",
+    "src/components/ui/disclosure.tsx",
+    "src/lib/asks.ts"
   ],
   "nontranslatable": [
     {
@@ -123,6 +131,14 @@
       "[\"jsx:expression\",\"no matching models — try a provider (anthropic, xai) or a\\n\\t\\t\\t\\t\\t\\tmodel name (opus, glm)\"]": 1,
       "[\"jsx:text\",\"no models available from this machine — check the runtime's\\n\\t\\t\\t\\t\\t\\tproviders\"]": 1,
       "[\"jsx:text\",\"no matching models — try a provider (anthropic, xai) or a\\n\\t\\t\\t\\t\\t\\tmodel name (opus, glm)\"]": 1
-    }
+    },
+    "src/components/ask-card.tsx": {},
+    "src/components/ask-dock.tsx": {},
+    "src/components/ask-row.tsx": {},
+    "src/components/asks-sheet.tsx": {},
+    "src/components/gate-sheet.tsx": {},
+    "src/components/pending-card.tsx": {},
+    "src/components/ui/disclosure.tsx": {},
+    "src/lib/asks.ts": {}
   }
 }
