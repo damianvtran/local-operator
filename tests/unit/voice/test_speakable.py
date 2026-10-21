@@ -135,6 +135,9 @@ def test_a_hand_edited_cap_never_breaks_voice(value: object, expected: int) -> N
         ("Whole reply.\n\nSpoken:", "Whole reply. Spoken:"),
         ("Whole reply.\n\nSpoken:   ", "Whole reply. Spoken:"),
         ("No marker at all.", "No marker at all."),
+        # 0-3 leading spaces still mark; four is a Markdown code block.
+        ("Body.\n\n   Spoken: Three spaces.", "Three spaces."),
+        ("Body.\n\n    Spoken: four spaces.", "Body. Spoken: four spaces."),
     ],
 )
 def test_the_last_spoken_paragraph_is_what_is_read(text: str, expected: str) -> None:

@@ -66,8 +66,9 @@ _WHITESPACE = re.compile(r"\s+")
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
 #: A paragraph's first token: ``Spoken:`` or ``**Spoken:**`` (the model bolds it
 #: now and then). Paragraph start only, so the word mid-sentence is not a marker.
+# 0-3 leading spaces: Markdown reads four as an indented code block, not prose.
 _SPOKEN_LABEL = re.compile(
-    r"\s*(?:\*\*\s*Spoken\s*:\s*\*\*|\*\*\s*Spoken\s*\*\*\s*:|Spoken\s*:)", re.IGNORECASE
+    r" {0,3}(?:\*\*\s*Spoken\s*:\s*\*\*|\*\*\s*Spoken\s*\*\*\s*:|Spoken\s*:)", re.IGNORECASE
 )
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 
