@@ -39,21 +39,9 @@ import {
 	type TagAssignment,
 } from "../lib/session-tags";
 import { cn } from "../lib/cn";
+import { messageRuntime } from "../store";
 import type { TagCatalogueEntry, TagRef } from "../types";
 import { Sheet } from "./ui/sheet";
-
-/* The session list's long-press caption is TAG-BEARING copy, so it ships beside
-   the other tag strings this slice carries as literals. It lives here, not in
-   `screens/session-list.tsx`, because that screen is an ACTIVATED i18n path: a
-   new hardcoded string there fails the fingerprint gate by design, and freezing
-   it into `i18n-baseline.json` would be the file exemption the gate forbids.
-   The `_TEXT` name keeps it counted as advisory legacy copy by the web scan. */
-export const PIN_AND_TAGS_HINT_TEXT = "touch and hold a row to pin or tag it";
-
-/* Same reason as the hint above: the action sheet's entry label is tag copy and
-   `screens/session-list.tsx` is an activated i18n path, so it ships here and is
-   counted as advisory debt (`_LABEL` keeps the web scan seeing it). */
-export const TAGS_ACTION_LABEL = "Tags…";
 
 export function SessionTagsSheet({
 	open,
@@ -187,7 +175,9 @@ export function SessionTagsSheet({
 				if (targetRef.current !== target) return;
 				/* Revert to the newest authoritative frame, then say why. */
 				setDraft(null);
-				setWriteError(refusalText("Could not save the tags", error));
+				setWriteError(
+					refusalText(messageRuntime.t("relay.session.tags.save_error"), error),
+				);
 			})
 			.finally(() => {
 				if (seq === writeSeq.current) setPending(null);
@@ -223,32 +213,34 @@ export function SessionTagsSheet({
 		<Sheet
 			open={open}
 			onClose={onClose}
-			title="tags"
+			title={messageRuntime.t("relay.session.tags.sheet_title")}
 			returnFocusRef={returnFocusRef}
 		>
 			<div className="flex flex-col p-2">
 				{loadError ? (
 					<div className="flex flex-col items-start gap-2 px-2 py-1">
 						<p className="text-body-sm text-danger">
-							Could not load the tag catalogue.
+							{messageRuntime.t("relay.session.tags.load_error")}
 						</p>
 						<button
 							type="button"
 							onClick={() => setReload((n) => n + 1)}
 							className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash"
 						>
-							try again
+							{messageRuntime.t("relay.session.tags.retry")}
 						</button>
 					</div>
 				) : catalogue === null ? (
-					<p className="px-2 py-1 text-body-sm text-ink-dim">loading…</p>
+					<p className="px-2 py-1 text-body-sm text-ink-dim">
+						{messageRuntime.t("relay.session.tags.loading")}
+					</p>
 				) : rows.length === 0 ? (
 					<div className="px-2 py-1">
 						<p className="text-body-sm text-ink-dim">
-							no tag categories yet
+							{messageRuntime.t("relay.session.tags.empty")}
 						</p>
 						<p className="text-meta text-ink-dim">
-							create one in the desktop app or the terminal
+							{messageRuntime.t("relay.session.tags.empty_hint")}
 						</p>
 					</div>
 				) : (
@@ -261,7 +253,9 @@ export function SessionTagsSheet({
 								id={limitHintId}
 								className="px-2 pb-1 text-meta text-ink-dim"
 							>
-								{`${MAX_ASSIGNED_TAGS} tags is the most a conversation can carry — remove one to add another.`}
+								{messageRuntime.t("relay.session.tags.limit_hint", {
+									count: String(MAX_ASSIGNED_TAGS),
+								})}
 							</p>
 						) : null}
 						{current.tags.length > 0 ? (
@@ -278,7 +272,7 @@ export function SessionTagsSheet({
 							>
 								<span className="min-w-0 flex-1" />
 								<span className="flex w-11 shrink-0 justify-center text-meta text-ink-dim">
-									primary
+									{messageRuntime.t("relay.session.tags.primary")}
 								</span>
 								<span className="w-14 shrink-0" />
 							</div>
@@ -309,7 +303,7 @@ export function SessionTagsSheet({
 											</span>
 											{row.missing ? (
 												<span className="shrink-0 text-meta text-ink-dim">
-													not in the catalogue
+													{messageRuntime.t("relay.session.tags.missing")}
 												</span>
 											) : null}
 										</label>
@@ -331,7 +325,10 @@ export function SessionTagsSheet({
 													name={`session-tags-primary-${sessionId}`}
 													checked={row.primary}
 													disabled={pending !== null}
-													aria-label={`make ${row.name} the primary tag`}
+													aria-label={messageRuntime.t(
+														"relay.session.tags.make_primary",
+														{ name: row.name },
+													)}
 													onChange={() => makePrimary(row.id)}
 													className="size-4 accent-[var(--color-accent)]"
 												/>
@@ -340,7 +337,9 @@ export function SessionTagsSheet({
 											<span className="size-11 shrink-0" aria-hidden />
 										)}
 										<span className="w-14 shrink-0 text-right text-meta text-ink-dim">
-											{rowPending ? "saving…" : ""}
+											{rowPending
+												? messageRuntime.t("relay.session.tags.saving")
+												: ""}
 										</span>
 									</li>
 								);
@@ -358,14 +357,14 @@ export function SessionTagsSheet({
 									disabled={pending !== null}
 									className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-danger active:bg-accent-wash disabled:opacity-50"
 								>
-									remove all tags?
+									{messageRuntime.t("relay.session.tags.remove_all_confirm")}
 								</button>
 								<button
 									type="button"
 									onClick={() => setConfirmClear(false)}
 									className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface"
 								>
-									cancel
+									{messageRuntime.t("relay.session.tags.cancel")}
 								</button>
 							</>
 						) : (
@@ -375,7 +374,7 @@ export function SessionTagsSheet({
 								disabled={pending !== null}
 								className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface disabled:opacity-50"
 							>
-								remove all tags
+								{messageRuntime.t("relay.session.tags.remove_all")}
 							</button>
 						)
 					) : null}
@@ -384,7 +383,7 @@ export function SessionTagsSheet({
 						onClick={onClose}
 						className="ml-auto min-h-11 rounded-sm border border-control bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
 					>
-						done
+						{messageRuntime.t("relay.session.tags.done")}
 					</button>
 				</div>
 				{/* THE SHEET'S LIVE REGION, mounted empty and filled on the commit
