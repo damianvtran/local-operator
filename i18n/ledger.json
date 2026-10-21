@@ -3002,6 +3002,120 @@
       },
       "status": "passed",
       "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 a597880d8b045c1000412af91bea5034de4567f4a383fd366632c6033bb61864. 0 findings."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "6 changed keys reviewed. cold_wait is now the terse 'démarrage de la session — jusqu’à ~30 s' (EN 'bringing the session up — this can take up to ~30 s'); error.read_timeout 'le délai de lecture a expiré' is now idiomatic; sheet.title_waiting/-_lapsed/-_plain and sheet.loading use the section noun 'demandes' while keeping the question count word inside the plural, so the header no longer reads 'questions · N questions'. MINOR (non-gating): the timed-out state word is still not shared on every surface — status.timed_out and card.timed_out_badge say 'Délai dépassé' while the changed sheet.title_lapsed (and the unchanged dock.timed_out) say 'hors délai'; align both to the 'délai dépassé' family. Round-1 NITs on unchanged keys remain (gate.notice_ask 'sur ask'; session_gone_reopen 'la session du terminal'; moved_on 'a été remplacée'). 1 MINOR, 3 NITs; PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "9 changed keys reviewed. title_* now use 'consultas' as the section noun (distinct from 'preguntas'); dock.timed_out uses 'con el tiempo agotado', the same agotar family as the status line and badge, closing the round-1 one-state-word finding; kind_approval/kind_secret are now noun labels ('aprobación necesaria'/'secreto solicitado') matching kind_question; read_timeout is 'se agotó el tiempo de lectura'; gate.body uses 'retiene' (holds), not 'detiene'. All changed plurals render correctly at 0/1/2/5/1e6, including 'de preguntas' for many. 0 new findings. Round-1 NIT on the unchanged gate.unpaired_middle ('primero' placement) remains. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "7 changed keys reviewed. title_* use 'पूछताछ' as the section noun (distinct from सवाल; the loading line agrees feminine 'पढ़ी जा रही है'); duration.less_than_minute/minutes/hours are unclipped ('<1 मिनट', '{count} मिनट', one घंटा / other घंटे) and the new plural renders 1→घंटा and 2/5/47→घंटे; the hours arm is 1-47, and 0→घंटा would match the hi guide's one-covers-0/1 rule anyway. 0 new findings. Round-1 minors on unchanged keys remain: status.expired 'समाप्त' and status.timed_out 'समय समाप्त' are near-identical adjacent state words; card.secret_notice(-persisted) use the adjective 'गुप्त' as a bare noun label. Round-1 NITs: lapsed_body habitual vs progressive; gate.body terse. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "7 changed keys reviewed. status.dismissed is now 'Скрыто', matching card.dismiss 'скрыть' and no longer collapsing into skip's 'пропустить'; status.expired 'Устарел' agrees with вопрос and is distinct from timed_out; title_* use 'запросы'; dock.timed_out and title_lapsed now use 'время истекло', matching status.timed_out and the badge, so the old expired-flavoured 'просрочен' is gone. All four plural branches render correctly at 0/1/2/5/21/22/1e6. 0 new findings. Round-1 MINOR on the unchanged status.queued remains (about 370px against the 314px card budget, wraps); NITs on approve/deny register and held_shut clipping remain. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "7 changed keys reviewed. status.late is now 'Đã trả lời muộn', matching the 'Đã …' settled receipts; status.dismissed is 'Đã đóng', matching card.dismiss 'đóng' and no longer reusing skip's 'bỏ qua'; title_* use 'yêu cầu' as the section noun (distinct from 'câu hỏi'); dock.timed_out and title_lapsed use 'hết thời gian' while status.expired keeps 'hết hạn', closing the round-1 FAIL-1 expired/timed-out confusion. status.queued_deadline_passed keeps 'đã hết hạn' for a passed deadline, which is the deadline expiring rather than the ask timing out — correct. Plurals are other-only per the vi guide and render correctly. 0 new findings. This row restores vi to shipped: the branch carries relay.asks, so without it vi is un-shipped by the carried-namespace gate. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "5 changed keys reviewed (no prior ur ledger row existed). title_* use 'درخواستیں' as the section noun (distinct from سوالات; the loading line agrees feminine plural 'پڑھی جا رہی ہیں'); duration.hours is now one/other and renders 1→'1 گھنٹہ', 2/5/47→'N گھنٹے', fixing the round-1 FAIL. All five plural keys render correctly, including sheet.title_waiting 1→'1 سوال' and dock.timed_out 1→'1 سوال کا وقت ختم'. The plural is only admissible because arguments_match now permits en number->plural; the copy itself is correct and uses the full ur category set (one/other), so it does not depend on the loose edge of that rule. 0 new findings. ur carries only relay.asks, so this passed row makes the locale eligible to ship with English fallback elsewhere. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     }
   ]
 }
