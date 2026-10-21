@@ -1266,7 +1266,7 @@ def test_drop_session_roles_moves_and_reports_what_stayed_behind(
     carry = result.get("carry") or {}
     assert carry.get("session_roles") == 1, result
     notice = str(carry.get("session_roles_notice") or "")
-    assert "were stashed on" in notice and "does not carry" in notice, notice
+    assert "was stashed on" in notice and "does not carry" in notice, notice
     # U9: the notice says what the stash HOLDS and how to get the definitions
     # back; the record file is the named handle.
     assert "stash.json" in notice, notice
@@ -1331,3 +1331,91 @@ def test_a_corrupt_role_file_refuses_the_move_instead_of_being_skipped(
     assert result.get("code") == "session_roles_unreadable", result
     assert "broken" in str(result.get("message") or ""), result
     assert directory.is_dir(), "the refusal changed nothing on the source"
+
+
+def test_a_recall_receipt_reads_the_sources_stamped_promise(tmp_path: Path) -> None:
+    """MAJOR 1: the destination has no queue record and no definitions.
+
+    The source stamps the count and the sentence on the record; a receipt built
+    on the recalling device (``queued_receipt["carry"]`` absent, ``root`` with no
+    session) must still name the stash from the record alone.
+    """
+    from local_operator.network import move_queue
+
+    record, _ = move_queue.enqueue(
+        tmp_path,
+        SESSION,
+        to_device="d_b",
+        to_name="dev-b",
+        request_id="rq1",
+        requested_by="d_a",
+        drop_session_roles=True,
+        session_roles=1,
+        session_roles_notice="1 session role/team definition will be stashed on dev-a at /x",
+    )
+    result = mobility._queued_receipt(
+        SESSION,
+        move_queue.payload(record) or {},
+        keep=False,
+        from_block={"device_id": "d_a", "name": "dev-a"},
+        to_block={"device_id": "d_b", "name": "dev-b"},
+    )
+
+    carry = result.get("carry") or {}
+    assert carry.get("session_roles") == 1, result
+    assert "/x" in str(carry.get("session_roles_notice") or ""), result
+
+
+def test_the_queued_notice_is_future_tense_and_agrees_with_the_count() -> None:
+    """U12 + agreement: a queued move says "will be stashed", one row is singular."""
+    one_future = mobility._session_roles_notice(1, "dev-a", Path("/stash"), future=True)
+    one_past = mobility._session_roles_notice(1, "dev-a", Path("/stash"))
+    two_past = mobility._session_roles_notice(2, "dev-a", Path("/stash"))
+    assert "1 session role/team definition will be stashed" in one_future, one_future
+    assert "1 session role/team definition was stashed" in one_past, one_past
+    assert "2 session role/team definitions were stashed" in two_past, two_past
+
+
+def test_a_dot_staging_dir_and_a_renamed_row_are_not_corrupt(tmp_path: Path) -> None:
+    """Round-3 false positives: the walk must not refuse a parseable tree.
+
+    The team store stages writes under a dot-prefixed sibling, and a row's YAML
+    id need not equal its directory name (a copied/hand-edited store). Neither
+    is a skipped row, so neither may raise.
+    """
+    import os
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    base = tmp_path / "sessions" / SESSION / "roles"
+    agents = AgentRegistry(base, initialize=True)
+    row = agents.create_agent(
+        AgentEditFields(
+            name="Alpha",
+            description="d",
+            tags=["role"],
+            categories=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    os.rename(base / "agents" / str(row.id), base / "agents" / "renamed-dir")
+
+    teams = TeamRegistry(base)
+    teams.create_team(TeamEditFields(name="Staged", manager="m", members=[]))
+    (staged,) = [p for p in (base / "teams").iterdir() if p.is_dir()]
+    os.rename(staged, base / "teams" / ".staging-tmp")
+
+    assert mobility._session_role_definitions(tmp_path, SESSION) == ["Alpha"]

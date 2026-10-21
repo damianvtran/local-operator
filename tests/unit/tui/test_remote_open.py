@@ -379,7 +379,9 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock) and "Moved sess1 to pixel-8" in block.text()
         )
-        assert finished._token == "muted", finished._token
+        # RENDERED ink, not the private token (round 3): read the object the
+        # transcript paints and compare its colour with the theme's `muted`.
+        assert _rendered_in_muted(finished), finished.renderable
 
 
 #: The five refusals the move contract can produce AFTER the current session has
@@ -721,6 +723,32 @@ class _QueuedFake:
         }
 
 
+def _rendered_in_muted(block: object) -> bool:
+    """Whether the block's RENDERABLE paints in the theme's `muted` ink.
+
+    Reads the painted object (text style + span styles), not the block's private
+    `_token`: the finding asked for the rendered ink, and a token assertion
+    passes even if the theme mapping changes the colour underneath it.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    text = getattr(block, "renderable", None)
+    target = theme_mod.semantic_color("muted")
+    styles = [getattr(text, "style", None)] + [span.style for span in getattr(text, "spans", [])]
+    for style in styles:
+        if style is None:
+            continue
+        if isinstance(style, str):
+            # A token span resolves through the theme; `muted` is the token whose
+            # ink this check is about.
+            if style == "muted":
+                return True
+            continue
+        if str(getattr(getattr(style, "color", None), "name", "")) == target:
+            return True
+    return False
+
+
 @pytest.mark.asyncio
 async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
     monkeypatch: pytest.MonkeyPatch,
@@ -771,7 +799,7 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock) and "Queued a move of other1" in block.text()
         )
-        assert receipt._token == "muted", receipt._token
+        assert _rendered_in_muted(receipt), receipt.renderable
         assert reopened == []
         # No phase row: a queued move has walked no move phase yet.
         assert not any(n.startswith("moving other1") for n in _notices(app)), _notices(app)

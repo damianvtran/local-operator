@@ -34795,7 +34795,9 @@ class OperatorApp(App[None]):
             carry = _carry_dict(result)
             stay_note = str(carry.get("session_roles_notice") or "")
             if stay_note:
-                text += f" {stay_note}."
+                # The notice is already a full sentence (it ends with its
+                # recovery clause); adding a period produced ".." (round 3, U13).
+                text += f" {stay_note}"
             if phase_notice.is_attached:
                 self._transcript_view().remove_block(phase_notice)
             # `note`, not `info` (design review round 1, D2): these are multi-line
@@ -34833,7 +34835,8 @@ class OperatorApp(App[None]):
         carry = _carry_dict(result)
         stay_note = str(carry.get("session_roles_notice") or "")
         if stay_note:
-            receipt += f" {stay_note}."
+            # No appended period: the notice carries its own (round 3, U13).
+            receipt += f" {stay_note}"
         # `note`, not `info` (round 3, U10): the queued receipt for the same
         # request rides `note`'s muted ink, and a finished move should not look
         # like a different class of event than the queue it came through.

@@ -1362,7 +1362,7 @@ async def _op_sync(
     # sync wrote account rows before this slice, and there is no session store
     # for the gate to protect.
     scoped_host = getattr(registry, "session_registry", None) is not None
-    needs_consent = bool(global_updates) or (config_dir is not None and scoped_host)
+    needs_consent = scoped_host and (bool(global_updates) or config_dir is not None)
     if needs_consent and context is not None:
         intent = DurableWriteIntent(
             kind="agent",
@@ -1379,11 +1379,12 @@ async def _op_sync(
         seed = SyncReport(entries=tuple(sync_installed_seeds(registry, names=names, force=False)))
         if config_dir is None:
             return seed.render()
-        if authorized_by is None:
+        if needs_consent and authorized_by is None:
             # NO CONSENT => NO ACCOUNT ARM. The hub rows are account rows by
             # definition; skipping them (and saying so) is the only honest
             # outcome, and it keeps the tool's promise that a session can never
-            # write the account on its own.
+            # write the account on its own. A host with NO conversation store
+            # (``needs_consent`` False) keeps pre-S2 behaviour and runs the arm.
             return seed.render() + (
                 "\n\nHub updates were not applied: they change roles saved in the "
                 "user's account, which needs their confirmation. The user can run "

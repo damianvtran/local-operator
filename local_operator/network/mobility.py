@@ -574,10 +574,18 @@ class _Progress:
         self._carry: dict[str, dict[str, Any]] = {}
 
     def note(self, session_id: str, phase: SessionMovePhase) -> None:
+        """Record a phase AND signal its marker.
+
+        The signal is what ``_await_own_progress`` waits on; without it the
+        "queued" outcome was unreachable — the waiter polled an Event nothing
+        ever set, so a queued move was reported as "nothing happened" while its
+        driver ran to completion (round 3).
+        """
         with self._lock:
             history = self._phases.setdefault(session_id, [])
             if phase not in [item["phase"] for item in history]:
                 history.append({"phase": phase, "at": time.time()})
+        self.signal(session_id, phase)
 
     def phases(self, session_id: str) -> list[MovePhaseStamp]:
         with self._lock:
@@ -1284,6 +1292,7 @@ def _queued_receipt(
     from_block: MoveDevice,
     to_block: MoveDevice,
     root: str | Path | None = None,
+    carry: dict[str, Any] | None = None,
 ) -> SessionMoveResult:
     """A queued accept as a receipt — SUCCESS, carrying the queue's own phase.
 
@@ -1318,22 +1327,34 @@ def _queued_receipt(
     # the path the run will move them to and the count it will move. Without
     # this, a queued drop said nothing about the definitions until (or unless)
     # the resume ran.
-    if bool(queue.get("drop_session_roles") or False) and root is not None:
-        try:
-            names = _session_role_definitions(root, session_id)
-        except _SessionRolesUnreadable:
-            names = []
+    # THE CARRY COMES FROM THE SOURCE (round 3, MAJOR 1). A recall runs on the
+    # DESTINATION: its root holds no queue record and no definitions, so computing
+    # anything here from ``root`` can only answer nothing. The source's reply
+    # carries its block; the record's stamped promise is the fallback; only a
+    # source-local caller (which HAS the tree) recomputes.
+    explicit = carry if isinstance(carry, dict) and carry.get("session_roles_notice") else None
+    if explicit is not None:
+        result["carry"] = dict(explicit)
+    elif bool(queue.get("drop_session_roles") or False):
         notice = str(queue.get("session_roles_notice") or "").strip()
-        if not notice and names:
-            notice = _session_roles_notice(
-                len(names),
-                device_name=str(from_block.get("name") or "this device"),
-                stash=session_roles_stash_path(root, session_id),
-                kept=False,
-            )
+        count = int(queue.get("session_roles") or 0)
+        if not notice and root is not None:
+            try:
+                names = _session_role_definitions(root, session_id)
+            except _SessionRolesUnreadable:
+                names = []
+            count = count or len(names)
+            if names:
+                notice = _session_roles_notice(
+                    len(names),
+                    device_name=str(from_block.get("name") or "this device"),
+                    stash=session_roles_stash_path(root, session_id),
+                    kept=False,
+                    future=True,
+                )
         if notice:
             result["carry"] = {
-                "session_roles": len(names),
+                "session_roles": count,
                 "session_roles_notice": notice,
             }
     return cast(SessionMoveResult, result)
@@ -1524,6 +1545,7 @@ def _destination_move(
             # value cannot differ.
             raw_queue = prepared.get("queue")
             queue_block = dict(raw_queue) if isinstance(raw_queue, dict) else {}
+            raw_carry = prepared.get("carry")
             return (
                 _queued_receipt(
                     session_id,
@@ -1531,7 +1553,7 @@ def _destination_move(
                     keep=keep,
                     from_block=_device_block(server, owner_device, owner_name),
                     to_block=_own_block(server),
-                    root=server.root,
+                    carry=dict(raw_carry) if isinstance(raw_carry, dict) else None,
                 ),
                 None,
                 "",
@@ -2648,30 +2670,34 @@ def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
         return []
     names: list[str] = []
 
-    def _unparsed(store_dir: Path, suffix: str, parsed_ids: set[str]) -> Path | None:
+    def _unparsed(store_dir: Path, suffix: str, parsed: int) -> Path | None:
         """The first row file on disk that the registry did NOT parse.
 
         THE STORES LOG AND SKIP a corrupt row (``invalid agent metadata in <id>``),
         so a list that came back short is indistinguishable from a clean tree by
-        its length alone. This walks the same directories and compares, which is
-        what turns a silent skip into the gate's own refusal (round-3 item 1).
+        its length alone. This counts the marker files the registry OUGHT to have
+        parsed and compares with what it returned, which turns a silent skip into
+        the gate's own refusal (round 3, item 1).
+
+        COUNT-BASED, not id-based, on purpose (round 3): a row's YAML ``id`` need
+        not equal its directory name (a copied or hand-edited store), so matching
+        names would refuse a perfectly parseable tree. Dot-prefixed siblings are
+        skipped for the same reason — the team store stages writes under a
+        temporary `.name` directory that no registry lists.
         """
         if not store_dir.is_dir():
             return None
-        for child in sorted(store_dir.iterdir()):
-            marker = child / suffix
-            if not child.is_dir() or not marker.is_file():
-                continue
-            if child.name not in parsed_ids:
-                return marker
-        return None
+        markers = sorted(
+            child / suffix
+            for child in store_dir.iterdir()
+            if child.is_dir() and not child.name.startswith(".") and (child / suffix).is_file()
+        )
+        return markers[0] if len(markers) > parsed else None
 
     try:
         store = AgentRegistry(base, initialize=False, migrate=False)
         agents = list(store.list_agents())
-        unparsed = _unparsed(
-            base / "agents", "agent.yml", {str(getattr(row, "id", "") or "") for row in agents}
-        )
+        unparsed = _unparsed(base / "agents", "agent.yml", len(agents))
         if unparsed is not None:
             raise _SessionRolesUnreadable(
                 f"the role store at {base / 'agents'} holds a file that does not parse: "
@@ -2686,9 +2712,7 @@ def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
         ) from exc
     try:
         teams = list(TeamRegistry(base).list_teams())
-        unparsed = _unparsed(
-            base / "teams", "team.yml", {str(getattr(team, "id", "") or "") for team in teams}
-        )
+        unparsed = _unparsed(base / "teams", "team.yml", len(teams))
         if unparsed is not None:
             raise _SessionRolesUnreadable(
                 f"the team store at {base / 'teams'} holds a file that does not parse: "
@@ -2787,7 +2811,7 @@ def _stash_session_roles(root: str | Path, session_id: str) -> Path | None:
 
 
 def _session_roles_notice(
-    count: int, device_name: str, stash: Path | None, *, kept: bool = False
+    count: int, device_name: str, stash: Path | None, *, kept: bool = False, future: bool = False
 ) -> str:
     """The receipt sentence for definitions a drop move left behind.
 
@@ -2809,8 +2833,16 @@ def _session_roles_notice(
     # refusal, the receipt and this notice. The earlier wording mixed
     # stayed/dropped/not deleted for the same act, which reads as three
     # different outcomes.
+    #
+    # THE TENSE IS THE CALLER'S (U12): a queued move has not run yet, so its
+    # notice is future — "will be stashed". And the verb agrees with the count
+    # (round 3): `1 … definition was stashed`, `2 … definitions were stashed`.
+    if future:
+        verb = "will be stashed"
+    else:
+        verb = "was stashed" if count == 1 else "were stashed"
     return (
-        f"{count} session role/team {noun} were stashed on {device_name} {where} — a "
+        f"{count} session role/team {noun} {verb} on {device_name} {where} — a "
         "mesh move does not carry them in this version. The stash holds the definition "
         "files and a stash.json record of what it contains; to use them again, recreate "
         "the roles and teams on the destination and copy their instructions from that "
@@ -2838,8 +2870,8 @@ def _session_roles_refusal(
         "message": (
             f"this conversation owns {len(names)} session definition(s) ({listed}), and a "
             "mesh move does not carry them in this version. Either stay on this device, "
-            "or re-run with --drop-session-roles: the definitions are stashed at "
-            f"{stash} on this device, and the receipt names that path."
+            "or re-run with --drop-session-roles: the definitions will then be stashed "
+            f"at {stash} on this device, and the receipt names that path."
         ),
         "session_id": session_id,
     }
@@ -3106,6 +3138,18 @@ def _source_prepare(
                     requested_by=str(frame.get("requester") or link.device_id),
                     engage_on_arrival=bool(frame.get("engage_on_arrival") or False),
                     drop_session_roles=drop_session_roles,
+                    session_roles=len(session_roles) if drop_session_roles else 0,
+                    session_roles_notice=(
+                        _session_roles_notice(
+                            len(session_roles),
+                            device_name=server._own_label(),  # noqa: SLF001
+                            stash=session_roles_stash_path(server.root, session_id),
+                            kept=False,
+                            future=True,
+                        )
+                        if drop_session_roles and session_roles
+                        else ""
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — a record that cannot be written is a refusal
                 return {
