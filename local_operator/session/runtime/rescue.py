@@ -456,7 +456,7 @@ def _exit_record_explains(config_dir: Path, session_id: str, pid: int, started_a
     unexplained death, which is the wrong-verdict hole QA round 1 found in the
     marker rung (Q-1) and the same mistake one artifact over.
 
-    requested`` TRUE IS NOT THIS RUNG. A covering stop marker is already refused
+    ``requested`` TRUE IS NOT THIS RUNG. A covering stop marker is already refused
     above (``refuse("stop-marker")``), and a record claiming a request with no
     marker to back it is a claim this pass has no evidence for; falling through
     to the existing ladder is the conservative answer where the evidence is
