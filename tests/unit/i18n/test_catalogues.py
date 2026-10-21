@@ -263,3 +263,26 @@ def test_context_sidecar_is_not_a_namespace_and_reads_when_present(
     assert catalogues.context("en", "demo") == sidecar
     # Absent sidecar is a valid state ({}), not an error.
     assert catalogues.context("en", "missing") == {}
+
+
+def test_the_bundle_identity_covers_the_eager_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespace moving between eager and deferred must change the ETag.
+
+    Reproduces review round 1 MAJOR-1: the hash once digested only
+    ``(namespace, file sha)`` pairs, so making ``wire.settings`` eager took the
+    served message count from 335 to 1139 while the ETag stayed
+    ``a6785c3f…``. A client holding that ETag revalidated to 304, skipped
+    re-registration, and kept the newly eager namespace English indefinitely.
+    """
+    deferred = catalogues.wire_bundle("en")
+    monkeypatch.setattr(catalogues, "DEFERRED_NAMESPACES", {})
+    eager = catalogues.wire_bundle("en")
+
+    assert len(eager["messages"]) > len(deferred["messages"])
+    assert len(eager["messages"]) - len(deferred["messages"]) == len(
+        catalogues.load_catalogue("en", "wire.settings")
+    )
+    # Identical file bytes, different split: the identity must still differ.
+    assert eager["content_sha256"] != deferred["content_sha256"]
