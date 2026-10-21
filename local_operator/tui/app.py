@@ -5822,10 +5822,14 @@ class OperatorApp(App[None]):
         #: transition seams instead, once ``_conversation_id()`` is the id here.
         #:
         #: THE TARGET ID ABOARD is what makes a carry undeliverable rather than
-        #: freshly wrong on a later adoption, and every seam DROPS a carry that
-        #: did not land — one failed reopen must not post into whatever the user
-        #: opens next. Single-use: the first seam that sees the target posts it.
-        self._move_notice_carry: tuple[str, NoticeKind, str] | None = None
+        #: freshly wrong on a later adoption: the BODY is destination-scoped and a
+        #: seam that landed elsewhere never posts it. The FALLBACK is the one body
+        #: that may land anywhere, because the reopen it was waiting on can fail
+        #: and take an ACCEPTED outcome off the screen with it (UX round 2, U2-1);
+        #: it names no current conversation and claims no completion, so it is true
+        #: wherever the user is left. Single-use either way: the first seam that
+        #: sees the carry posts one of the two and clears it.
+        self._move_notice_carry: tuple[str, NoticeKind, str, str] | None = None
         #: A ``/aida <request>`` typed BEFORE her conversation is on screen:
         #: ``(session_id, text, attachments)``, spent by ``_submit_aida_prompt``
         #: at the same adoption seams as the boot prompt and dropped — rather
@@ -34837,8 +34841,13 @@ class OperatorApp(App[None]):
         # composer with no sign anything was under way — the one state a user is
         # most likely to retry blind. Appended SYNCHRONOUSLY, before the worker
         # can yield, so the very first frame after Enter carries it.
+        # `note`, not `info` (agent review round 2, R2-3 / design D2-1): this is
+        # prose the user reads while the fan-out holds the worker, and `info`'s
+        # `dim` token measures 3.77:1 on light paper, under the 4.5:1 AA floor;
+        # `note`'s muted ink is 7.18:1 there — the same measurement that moved the
+        # phase row two lines below.
         checking_notice = self._system_notice_block(
-            f"checking whether {request.to} can take {target_id}…", "info"
+            f"checking whether {request.to} can take {target_id}…", "note"
         )
         # BUILT, NOT PAINTED: the phase row is a claim that the move has started,
         # and nothing may claim that before the target answered (design clause 2,
@@ -35117,6 +35126,34 @@ class OperatorApp(App[None]):
                 # route that works — the producer's own sentence says "queue the
                 # move", and this line carries the spelling THIS surface runs.
                 text += f" To queue it from here: /move {session_id} --to {request.to} --queue."
+            # THE FALLBACK (UX round 2, U2-1). Every sentence above assumes the
+            # reopen below LANDS — "you are back on …", "you are still in the
+            # conversation on …" — and the seam that would make that true can fail:
+            # the peer link can drop while opening, and then the accepted outcome
+            # vanishes from the only screen the user has left (measured: the final
+            # frame held only "could not open … link dropped"). This is the same
+            # sentence with the PLACEMENT CLAIM REMOVED, so it is true on whichever
+            # conversation the failed reopen leaves current. It never says a move
+            # completed: `changed` only widens it to "check where it is now", which
+            # is exactly the state a half-committed handoff leaves behind.
+            if left and code == "unreachable" and not changed and home:
+                fallback = (
+                    f"Could not move {session_id}: {home} did not answer. Nothing moved. "
+                    f"This window could not reopen the conversation on {home}; it is still "
+                    "there."
+                )
+            elif changed:
+                fallback = (
+                    f"Could not move {session_id}: {message}. This window could not reopen "
+                    f"the conversation {session_id}; check where it is now before asking "
+                    "again."
+                )
+            else:
+                fallback = (
+                    f"Could not move {session_id}: {message}. Nothing changed. This window "
+                    f"could not reopen the conversation {session_id}."
+                )
+            fallback = fallback.replace("..", ".")
             if reached in MOVE_PHASE_ORDER:
                 # A PARTIAL MOVE KEEPS ITS PHASE ROW: which step it reached is
                 # the fact the user needs to know what state the two devices are in.
@@ -35144,7 +35181,7 @@ class OperatorApp(App[None]):
                 # onto the fresh local transcript the reopen is about to replace, and
                 # the measured result was a final screen holding only "opened … on
                 # …". The carry posts it from the transition that lands the session.
-                self._carry_move_notice(text, "error", session_id)
+                self._carry_move_notice(text, "error", session_id, fallback)
                 self._reopen_where_the_session_lives(session_id)
             else:
                 self._system_notice(text, "error")
@@ -35180,9 +35217,18 @@ class OperatorApp(App[None]):
             head += f" — {note}." if note else "."
             if phase == "resumed":
                 text = head + " It is no longer running on this device."
+                fallback = (
+                    f"Queued a move of {session_id} to {target}. It has arrived on {target}. "
+                    f"This window could not reopen the conversation {session_id}."
+                )
             elif phase in ("paused", "copying"):
                 text = head + (
                     f" It can no longer be cancelled; the conversation continues on {target}."
+                )
+                fallback = (
+                    f"Queued a move of {session_id} to {target} — the move has started and "
+                    "can no longer be cancelled. This window could not reopen the "
+                    f"conversation {session_id}."
                 )
             else:
                 # THE CANCEL CLAUSE NAMES A PRODUCT ACTION, NEVER A TERMINAL
@@ -35196,6 +35242,15 @@ class OperatorApp(App[None]):
                     "that can't will be disconnected, and the conversation continues on "
                     f"{target}. It can still be cancelled before it starts — ask Local Operator "
                     "to cancel the queued move."
+                )
+                # THE QUEUE'S FALLBACK (UX round 2, U2-1): still queued, so it can
+                # still be cancelled — the same two facts the sentence above states,
+                # with no claim about which conversation this window ended up on.
+                fallback = (
+                    f"Queued a move of {session_id} to {target}. Nothing has moved yet. This "
+                    f"window could not reopen the conversation {session_id}; the move is "
+                    "still queued — ask Local Operator to cancel the queued move before it "
+                    "starts."
                 )
             if left and phase == "queued" and request.to == "local" and home:
                 # THE QUEUED RECALL, in the design's own words (UX round 1, U2,
@@ -35211,6 +35266,15 @@ class OperatorApp(App[None]):
                     "before it starts. Windows open on it are told first and get a moment to "
                     "follow; any that can't will be disconnected, and the conversation "
                     f"continues on {target}."
+                )
+                # The same receipt with the "you are still on <peer>" claim dropped:
+                # after a FAILED reopen that sentence would name a conversation this
+                # window is not in.
+                fallback = (
+                    f"Queued a move of {session_id} to this device. Nothing has moved yet. "
+                    f"This window could not reopen the conversation on {home}; the move is "
+                    "still queued — ask Local Operator to cancel the queued move before it "
+                    "starts."
                 )
             # WHAT STAYED BEHIND (agent review round 1, M4): the queued receipt
             # carries the same stash promise the run will honour; a TUI that did
@@ -35239,7 +35303,7 @@ class OperatorApp(App[None]):
                 # paint it on the fresh local transcript the navigation replaces
                 # next. The carry posts it from the transition that lands the
                 # session, so the cancellation guidance is on the final screen.
-                self._carry_move_notice(text, "note", session_id)
+                self._carry_move_notice(text, "note", session_id, fallback)
                 self._reopen_where_the_session_lives(session_id)
             else:
                 self._system_notice(text, "note")
@@ -35307,7 +35371,9 @@ class OperatorApp(App[None]):
         # from a listing taken before the move committed.
         self._reopen_where_the_session_lives(new_id)
 
-    def _carry_move_notice(self, body: str, kind: NoticeKind, target_id: str) -> None:
+    def _carry_move_notice(
+        self, body: str, kind: NoticeKind, target_id: str, fallback: str = ""
+    ) -> None:
         """Latch a move outcome that has to be read in ``target_id``'s session.
 
         THE REOPEN OWNS THE TRANSCRIPT. ``_reopen_where_the_session_lives`` runs
@@ -35321,40 +35387,58 @@ class OperatorApp(App[None]):
         session, where the current session is finally the one it describes.
 
         Single-use and destination-scoped: the target id rides with the text,
-        and every seam either posts it (matching current session, then clears)
-        or drops it. A latch that outlived a failed reopen would otherwise fire
-        into the next conversation the user opened, which is worse than a lost
-        receipt because it would be false about the screen it landed on.
+        and the BODY is posted only where the current session matches it. A
+        latch that outlived a failed reopen would otherwise fire into the next
+        conversation the user opened, which is worse than a lost receipt because
+        it would be false about the screen it landed on.
+
+        ``fallback`` is what keeps that rule from also losing an ACCEPTED
+        operation (UX round 2, U2-1). When the reopen itself fails — the peer
+        link drops mid-open, the source is gone, a newer navigation supersedes
+        this one — the destination never becomes current, so the body is
+        undeliverable by construction, and dropping it left the final screen
+        with nothing but "could not open …. link dropped". The fallback is the
+        same outcome with every placement claim removed (it names no current
+        conversation and never says a move completed), so it is true on whichever
+        conversation the failed reopen leaves current. An empty fallback keeps
+        the old drop: a refusal whose wording cannot be made placement-neutral
+        is better lost than posted false.
         """
-        self._move_notice_carry = (body, kind, target_id)
+        self._move_notice_carry = (body, kind, target_id, fallback)
 
     def _drain_move_notice_carry(self) -> None:
-        """Post a carried move outcome into its session, once; drop it otherwise.
+        """Post a carried move outcome once: the body in its session, else the fallback.
 
         Called from every seam a reopen can finish at — see
-        :meth:`_reopen_where_the_session_lives`. The guard is the whole point:
+        :meth:`_reopen_where_the_session_lives`. The BODY is destination-scoped:
         a transition can land on a DIFFERENT session (the open failed and the
         user stayed where they were, a newer navigation superseded this one, a
         local id had no source to resume), and a receipt about a move of
-        ``ux-session`` has no business appearing over anything else.
+        ``ux-session`` has no business appearing over anything else. The FALLBACK
+        is precisely for that mismatch: the move was accepted (or refused after
+        the leave), and the screen the user is left on is the only place that
+        fact can still be said. Posting it there is not a stale-navigation leak —
+        it asserts nothing about where the user is.
         """
         carried, self._move_notice_carry = self._move_notice_carry, None
         if carried is None:
             return
-        body, kind, target_id = carried
-        if self._conversation_id() != target_id:
-            return
-        self._system_notice(body, kind)
+        body, kind, target_id, fallback = carried
+        if self._conversation_id() == target_id:
+            self._system_notice(body, kind)
+        elif fallback:
+            self._system_notice(fallback, kind)
 
     def _carry_notice_after_navigation(self, _task: asyncio.Task[None]) -> None:
-        """Done-callback for a LOCAL reopen: publish the carry it was waiting on.
+        """Done-callback for a LOCAL reopen: settle the carry it was waiting on.
 
         The sidebar's own navigation is the seam for a session that lives on
         this device (a parked source, or one resumed from its directory), and
         its commit swaps the transcript before the task completes. Draining
         after the callback — not inside the commit — also means a CANCELLED or
-        failed navigation drops the carry instead of posting it into whatever is
-        current, which is the same bounded-once rule the other seams follow.
+        failed navigation settles the carry the same bounded-once way the other
+        seams do: the body only where the navigation landed on it, the fallback
+        (see :meth:`_drain_move_notice_carry`) where it did not.
         """
         self._drain_move_notice_carry()
 
@@ -35390,10 +35474,12 @@ class OperatorApp(App[None]):
         elif self._move_notice_carry is not None and not self._session_transition_pending:
             # THE PICK ANSWERED WITH A SENTENCE AND STARTED NOTHING (an
             # unreachable peer, U27's refusal): there is no transition coming to
-            # deliver into, and a carry that outlived it would fire on whatever
-            # the user opened next. Drop it here rather than let a rebuttal
-            # arrive in the wrong conversation.
-            self._move_notice_carry = None
+            # deliver into. Settle it here rather than let it outlive the move:
+            # the body needs the target's transcript, which this window never
+            # reached, so what lands is the fallback — the accepted outcome said
+            # on the conversation the user is actually looking at (UX round 2,
+            # U2-1, the shape that used to vanish entirely).
+            self._drain_move_notice_carry()
 
     def _apply_move(self, raw: str, notice: NoticeFn) -> None:
         """Validate ``raw`` and move the session to it, or say why not.

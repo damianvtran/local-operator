@@ -1368,6 +1368,19 @@ async def test_the_target_check_is_visible_while_it_is_held(
             if any("checking whether" in notice for notice in _notices(app)):
                 break
         assert "checking whether pixel-8 can take other1…" in _notices(app), _notices(app)
+        # R2-3 / D2-1: the held-probe row is prose the user reads while the
+        # fan-out can block, so it carries `note`'s muted ink (7.18:1 light) and
+        # not `info`'s dim (3.77:1 light) the design round measured below AA.
+        # Read the PAINTED block, not the token: the finding was about ink.
+        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+        checking = next(
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+            and block.text().startswith("checking whether pixel-8 can take other1")
+        )
+        assert _rendered_in_muted(checking), checking.renderable
         # NOTHING CLAIMS THE MOVE STARTED while the check is held: the phase row
         # is built but not painted, because no target has accepted yet.
         assert not any(n.startswith("requesting a move") for n in _notices(app)), _notices(app)
@@ -1472,6 +1485,104 @@ async def test_a_queued_recall_survives_the_real_remote_reopen(
         assert "Windows open on it are told first" in shown, shown
         assert opened == ["ux-session"], opened
         assert "Moved ux-session" not in shown, shown
+
+
+@pytest.mark.asyncio
+async def test_a_queued_recall_that_cannot_reopen_still_says_it_is_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2-1: an ACCEPTED queue must not vanish because the way back failed.
+
+    The real leave, the real ``_publish_move_result`` and the real
+    ``_reopen_where_the_session_lives`` run; only the peer's transport fails —
+    the link drops while opening, which is the shape the UX round measured (its
+    final frame held nothing but "could not open … link dropped"). The receipt
+    itself is destination-scoped and must NOT be posted on the fresh local
+    conversation, so what carries the accepted facts there is the fallback: the
+    same receipt with the "you are still on <peer>" claim removed.
+    """
+    opened = _patch_the_peer(monkeypatch)
+
+    async def dropped_link(session_id: str, **kwargs: Any) -> Any:
+        opened.append(session_id)
+        raise ConnectionError("synthetic peer link dropped during reopen")
+
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", dropped_link)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", lambda *a, **k: _queued_recall())
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local --queue")
+        for _ in range(80):
+            await pilot.pause()
+            if any("could not reopen" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        # The failure really happened, on the id the move was for.
+        assert "could not open ux-session on pixel-8" in shown, shown
+        # THE ACCEPTED OUTCOME SURVIVES, and it is still true on this screen:
+        # queued, nothing moved yet, and the cancel route before it starts.
+        assert "Queued a move of ux-session to this device." in shown, shown
+        assert "Nothing has moved yet." in shown, shown
+        assert "could not reopen the conversation on pixel-8" in shown, shown
+        assert "ask Local Operator to cancel the queued move before it starts." in shown, shown
+        # THE STALE-NAVIGATION GUARD STILL HOLDS: the destination-scoped body
+        # would claim this window is in the peer's conversation. It is not.
+        assert "you are still on" not in shown, shown
+        assert "Moved ux-session" not in shown, shown
+        assert opened == ["ux-session"], opened
+        # SINGLE USE: the fallback was spent, so no later transition can repeat it.
+        assert app._move_notice_carry is None, app._move_notice_carry
+
+
+@pytest.mark.asyncio
+async def test_a_late_failed_recall_keeps_its_refusal_when_the_reopen_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2-1's refusal neighbour: the OTHER fallback shape, on the same failed seam.
+
+    A recall whose peer went silent is REFUSED — nothing moved — and the reopen is
+    only the return trip to say so. When that trip fails, the pre-fix code dropped
+    the receipt on the same branch the queued cell above pins, leaving only
+    "could not open …". The fallback states what happened (nothing), where the
+    session is (still on the peer), and why this screen cannot show it — and it
+    drops the destination-scoped "you are still in the conversation on …" claim,
+    which would be false here.
+    """
+    opened = _patch_the_peer(monkeypatch)
+
+    async def dropped_link(session_id: str, **kwargs: Any) -> Any:
+        opened.append(session_id)
+        raise ConnectionError("synthetic peer link dropped during reopen")
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": "pixel-8 is not answering right now; nothing was changed",
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", dropped_link)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local")
+        for _ in range(80):
+            await pilot.pause()
+            if any("could not reopen" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "could not open ux-session on pixel-8" in shown, shown
+        assert (
+            "Could not move ux-session: pixel-8 did not answer. Nothing moved. This window "
+            "could not reopen the conversation on pixel-8; it is still there." in shown
+        ), shown
+        assert "you are still in the conversation on pixel-8" not in shown, shown
+        assert app._move_notice_carry is None, app._move_notice_carry
 
 
 @pytest.mark.asyncio
