@@ -15,6 +15,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -655,6 +656,314 @@ async def test_a_move_of_a_session_this_tui_holds_in_the_sidebar_is_refused(
             if ran:
                 break
         assert ran == ["held1"]
+
+
+# ---------------------------------------------------------------------------
+# the target is checked before the session is left (mesh-move-outcome, clause 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_recall_from_an_unreachable_peer_never_leaves_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clause 2, the operator's own report: leave nothing, name the device.
+
+    ``remote_row_and_silence`` answers the shape the sidebar's read really has:
+    the row, carrying the reason it cannot answer. The app must refuse BEFORE
+    the phase row and BEFORE ``_leave_for_move`` — that order IS the fix; the
+    old order left first and asked after, which is what put the operator back
+    on the same remote conversation.
+    """
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_and_silence",
+        lambda sid, root: (_row(sid, remote=True, reachable=False), ()),
+    )
+    ran: list[str] = []
+
+    def fake_move(
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
+    ) -> dict[str, Any]:
+        ran.append(f"move {session_id} {to}")
+        return dict(_COMMITTED)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        left: list[str] = []
+
+        async def leave() -> None:
+            left.append("left")
+
+        app._leave_for_move = leave  # type: ignore[method-assign]
+        app._run_slash_command("/move --to local")
+        for _ in range(40):
+            await pilot.pause()
+            if any("unreachable" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert left == [], "the session was left before the peer answered"
+        assert ran == [], "the CLI was run for a target that cannot take it"
+        assert "sess1 is on pixel-8, which is unreachable" in shown, shown
+        # NOTHING CLAIMED THE MOVE STARTED: no phase row was ever painted.
+        assert not any(
+            notice.startswith(("requesting a move", "moving sess1")) for notice in _notices(app)
+        ), _notices(app)
+        # THE REFUSAL RELEASES THE LOCK: the "a move is already running" guard
+        # is reset by the worker's own ``finally``, so the next request runs.
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(40):
+            await pilot.pause()
+            if ran:
+                break
+        assert ran == ["move sess1 pixel-8"], ran
+
+
+@pytest.mark.asyncio
+async def test_a_recall_where_a_device_stayed_silent_names_it_and_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolution miss WITH silence is not "nobody holds it": name the device.
+
+    The sentence reports what the devices did (did not answer), never asserts
+    absence, and its tail is true about the screen: the user is still in the
+    session because nothing was left.
+    """
+    from local_operator.session.peer_rows import UnansweredPeer
+
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_and_silence",
+        lambda sid, root: (
+            None,
+            (UnansweredPeer("d_cloud", "cloud-node-1", "connect_failed"),),
+        ),
+    )
+    ran: list[str] = []
+
+    def fake_move(
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
+    ) -> dict[str, Any]:
+        ran.append(f"move {session_id} {to}")
+        return dict(_COMMITTED)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        left: list[str] = []
+
+        async def leave() -> None:
+            left.append("left")
+
+        app._leave_for_move = leave  # type: ignore[method-assign]
+        app._run_slash_command("/move --to local")
+        for _ in range(40):
+            await pilot.pause()
+            if any(
+                "did not answer" in notice or "not answering" in notice for notice in _notices(app)
+            ):
+                break
+        shown = " ".join(_notices(app))
+        assert left == []
+        assert ran == []
+        assert (
+            "cloud-node-1 is not answering right now, so sess1 could not be handed over. "
+            "Nothing changed; you are still in it." in shown
+        ), shown
+        assert not any(
+            notice.startswith(("requesting a move", "moving sess1")) for notice in _notices(app)
+        ), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_recall_from_a_peer_that_answers_still_leaves_and_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-check is a GATE, not a new refusal: an answering peer proceeds.
+
+    The leave still comes first (the attached viewer blocks the owner's retire),
+    and the CLI still runs — the pre-check must not turn a working recall into a
+    no-op.
+    """
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_and_silence",
+        lambda sid, root: (_row(sid, remote=True), ()),
+    )
+    order: list[str] = []
+
+    def fake_move(
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
+    ) -> dict[str, Any]:
+        order.append(f"move {session_id} {to}")
+        return dict(_COMMITTED)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+
+        async def leave() -> None:
+            order.append("leave")
+
+        app._leave_for_move = leave  # type: ignore[method-assign]
+        app._select_sidebar_session = lambda _sid: None  # type: ignore[method-assign]
+        app._run_slash_command("/move --to local")
+        for _ in range(40):
+            await pilot.pause()
+            if order[-1:] == ["move sess1 local"]:
+                break
+        assert order == ["leave", "move sess1 local"], order
+        shown = " ".join(_notices(app))
+        assert "Moved sess1 home from laptop" in shown, shown
+
+
+def test_an_offload_to_a_peer_that_is_not_answering_is_refused_and_one_that_cannot_resolve_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The offload half of the pre-check, against its two real answers.
+
+    A peer this device knows and the relay reports silent is a refusal — the
+    move would otherwise leave a session behind for a device that is not there.
+    A token this device cannot resolve is NOT a refusal: the CLI resolves the
+    destination, and a TUI that guessed would refuse a spelling the relay
+    accepts.
+    """
+    from local_operator.network.peers import KnownPeer
+    from local_operator.session.peer_rows import UnansweredPeer
+    from local_operator.tui.app import _offload_target_refusal
+
+    monkeypatch.setattr(
+        "local_operator.network.peers.known_peers",
+        lambda root=None: [KnownPeer("d_cloud", "cloud-node-1")],
+    )
+    monkeypatch.setattr(
+        "local_operator.session.peer_rows.read_listing",
+        lambda root=None, **kwargs: (
+            (),
+            (UnansweredPeer("d_cloud", "cloud-node-1", "connect_failed"),),
+        ),
+    )
+    assert _offload_target_refusal("cloud-node-1", "other1", Path("/nowhere"), leaving=False) == (
+        "cloud-node-1 is not answering right now, so other1 could not be handed over. "
+        "Nothing changed; it is still here."
+    )
+    # A session the user is IN gets the tail about the screen they are on.
+    assert _offload_target_refusal("cloud-node-1", "other1", Path("/nowhere"), leaving=True) == (
+        "cloud-node-1 is not answering right now, so other1 could not be handed over. "
+        "Nothing changed; you are still in it."
+    )
+    assert _offload_target_refusal("elsewhere", "other1", Path("/nowhere"), leaving=False) is None
+    # A peer that ANSWERED is not in the silence list, so it may take the move.
+    monkeypatch.setattr(
+        "local_operator.session.peer_rows.read_listing",
+        lambda root=None, **kwargs: ((), ()),
+    )
+    assert (
+        _offload_target_refusal("cloud-node-1", "other1", Path("/nowhere"), leaving=False) is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_initial_phase_line_says_the_request_is_being_made() -> None:
+    """Clause 2's wording: "requesting" until a phase proves something started."""
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        before = app._move_phase_text("sess1", MoveTo(to="local"), [])
+        assert before.startswith("requesting a move of sess1 to local"), before
+        assert "moving" not in before, before
+        # The four step marks survive the tense change.
+        assert "· prepared" in before and "· done" in before, before
+        assert "✓" not in before, before
+        # Once a phase is present the move exists and the line says so.
+        started = app._move_phase_text("sess1", MoveTo(to="local"), ["prepared"])
+        assert started.startswith("moving sess1 to local"), started
+        assert "✓ prepared" in started, started
+        assert "· handing off" in started, started
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "phase", "reopens"),
+    [("in_progress", "prepared", False), ("completed", "done", True)],
+    ids=["in-progress", "completed"],
+)
+async def test_only_a_completed_move_says_moved_and_reopens(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    phase: str,
+    reopens: bool,
+) -> None:
+    """Clause 1: ``ok`` is acceptance, not arrival — gate on the verified state.
+
+    An ``ok`` receipt whose destination has only reached ``prepared`` is still
+    moving: it must NOT reopen the destination (the conversation is not there
+    yet) and must say so. The completed row is the control — same fake, same
+    command — so the gate is what the difference measures.
+    """
+    reached = list(MOVE_PHASE_ORDER[: MOVE_PHASE_ORDER.index(phase) + 1])
+
+    def fake_move(
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "new_session_id": session_id,
+            "mode": "move",
+            "from_device": {"device_id": "d_me", "name": "laptop"},
+            "to_device": {"device_id": "d_peer", "name": "pixel-8"},
+            "phase": phase,
+            "state": state,
+            "phases": [{"phase": item, "at": 0.0} for item in reached],
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move other1 --to pixel-8")
+        for _ in range(40):
+            await pilot.pause()
+            if any(notice.startswith(("Moved", "The move of")) for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        if reopens:
+            assert reopened == ["other1"], reopened
+            assert "Moved other1 to pixel-8. It runs there now." in shown, shown
+        else:
+            assert reopened == [], "an in-progress move reopened the destination"
+            assert (
+                "The move of other1 to pixel-8 is still in progress (prepared); "
+                "it has not landed there yet." in shown
+            ), shown
+            assert "Moved other1" not in shown, shown
 
 
 # ---------------------------------------------------------------------------
