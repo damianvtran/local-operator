@@ -23,7 +23,8 @@ two-device rig first:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -123,7 +124,10 @@ def test_a_half_moved_session_is_legible_from_the_refusal(
 
     The entry is written with THIS relay's ``instance_id`` on purpose: an entry
     from another instance is what §6.5's recovery table rolls back, and this cell is
-    about the refusal a person sees while one is live.
+    about the refusal a person sees while one is live. Its ``to_device`` names a
+    THIRD device: a prepared entry for the device that is asking is now the retry
+    case (``_source_prepare`` clears and re-journals it), which would show this cell
+    a successful move instead of the sentence it pins.
     """
     import time as time_mod
 
@@ -139,16 +143,20 @@ def test_a_half_moved_session_is_legible_from_the_refusal(
         {
             "role": "source",
             "phase": "prepared",
-            "to_device": server_b.identity.device_id,
+            "to_device": "d_elsewhere",
             "mode": "move",
             "instance_id": str(server_a.instance_id),
             "at": time_mod.time() - 42.0,
         },
     )
 
-    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    result = mobility._source_prepare(  # noqa: SLF001
+        server_a,
+        cast(Any, SimpleNamespace(device_id=server_b.identity.device_id)),
+        {"session_id": SESSION, "to_device": server_b.identity.device_id, "mode": "move"},
+    )
 
-    assert result["ok"] is False and result["code"] == "in_progress", result
+    assert result["result"] == "refused" and result["code"] == "in_progress", result
     message = str(result["message"])
     assert "phase: prepared" in message, message
     assert "ago)" in message, f"the refusal does not say how long it has been stuck: {message}"
@@ -185,13 +193,19 @@ def test_a_handoff_entry_without_a_timestamp_is_not_given_a_fake_age(
     entry = {
         "role": "source",
         "phase": "prepared",
-        "to_device": server_b.identity.device_id,
+        # A DIFFERENT destination from the asking device: same-destination is the
+        # retry case now (see the cell above).
+        "to_device": "d_elsewhere",
         "mode": "move",
         "instance_id": str(server_a.instance_id),
     }
     write_handoff_entry(server_a.root, SESSION, entry)
 
-    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    result = mobility._source_prepare(  # noqa: SLF001
+        server_a,
+        cast(Any, SimpleNamespace(device_id=server_b.identity.device_id)),
+        {"session_id": SESSION, "to_device": server_b.identity.device_id, "mode": "move"},
+    )
 
     assert result["code"] == "in_progress", result
     message = str(result["message"])
