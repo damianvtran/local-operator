@@ -1671,7 +1671,11 @@ def _scrub_raw_arguments(raw: str, redact: Callable[[str], str]) -> str:
     return redact(_scrub_json_string_values(raw, redact))
 
 
-def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
+def _scrub_history_arguments(
+    message: Message,
+    redact: Callable[[str], str] | None,
+    redact_arguments: Callable[[str], str] | None = None,
+) -> Message:
     """The copy of an assistant turn that history STORES and REPLAYS.
 
     **Why a copy rather than a scrub in place.** ``tool_calls[].arguments`` is
@@ -1694,13 +1698,26 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     paths never carry tool calls, so a scrubbed copy is only ever produced where
     that check is not in play — but returning a copy unconditionally would leave
     a refused turn in history the moment one of them grew a call.
+
+    **ARGUMENTS USE THEIR OWN PASS** (``redact_arguments``) where the session
+    provides one. This text is CODE: the model wrote it, the harness executes it,
+    and the retained copy is replayed to the provider on every later request — so a
+    shape heuristic that rewrites it rewrites the program the model then reads back
+    and copies. Session 6ccea512c372 measured exactly that: a Python keyword masked
+    as an assignment value in a ``bash`` call, replayed, and copied into new
+    ``eval`` cells that died with ``NameError``. The argument pass keeps the
+    exact-value scrub and a high-confidence shape floor, and skips the
+    name-driven guesses. ``redact`` remains the fallback for a caller that
+    supplies only the result hook, so a store outside this tree keeps its current
+    behaviour rather than losing argument scrubbing entirely.
     """
     # The executor still holds the original assistant/calls. Only the retained
     # copy changes, following this function's existing secret-argument contract.
     from local_operator.memory_privacy import retained_message
 
     message = retained_message(message)
-    if redact is None or not message.tool_calls:
+    scrub = redact_arguments if redact_arguments is not None else redact
+    if scrub is None or not message.tool_calls:
         return message
     calls: list[ToolCall] = []
     changed = False
@@ -1710,9 +1727,9 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
         # carries it), and a hit found here must be reported with the call it
         # came from rather than as an anonymous one.
         with tool_source(call.name, call.arguments):
-            arguments, arguments_changed = _scrub_argument_value(call.arguments, redact)
+            arguments, arguments_changed = _scrub_argument_value(call.arguments, scrub)
             raw = (
-                _scrub_raw_arguments(call.raw_arguments, redact)
+                _scrub_raw_arguments(call.raw_arguments, scrub)
                 if isinstance(call.raw_arguments, str)
                 else None
             )
@@ -2477,7 +2494,9 @@ class AgentLoop:
                                 # ``_scrub_history_arguments`` for why the
                                 # executor keeps the original.
                                 stored = _scrub_history_arguments(
-                                    assistant, config.redact_tool_result
+                                    assistant,
+                                    config.redact_tool_result,
+                                    config.redact_tool_arguments,
                                 )
                                 context.messages.append(stored)
                                 new_messages.append(stored)
@@ -2676,7 +2695,9 @@ class AgentLoop:
                         # omits it must not blank a figure the previous call
                         # (or the host's seed) supplied.
                         run_context_tokens = int(assistant.usage.context_tokens)
-                    stored = _scrub_history_arguments(assistant, config.redact_tool_result)
+                    stored = _scrub_history_arguments(
+                        assistant, config.redact_tool_result, config.redact_tool_arguments
+                    )
                     context.messages.append(stored)
                     new_messages.append(stored)
 
