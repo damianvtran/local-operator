@@ -77,7 +77,10 @@ more input can be accepted. Ambiguous failed input stays explicitly ambiguous in
 `guest-supervisor-recovery.json`; recovery does not claim it was unapplied.
 Recovery evidence includes the restart ID, exit status and secret-scrubbed stderr
 tail. A bounded recovery wait ends a still-unreachable episode through the usual
-guest-down diagnostics. The last retrieved records are retained; the final
+guest-down diagnostics. That exhaustion record lists every probe's verdict
+(`probe_outcomes`: delivery, kind, errno, exception class), so a future loss
+says WHICH element of the host-to-guest path failed rather than only that it
+did. The last retrieved records are retained; the final
 crash-loop record may exist only on the guest when the sole HTTP transport stays
 down, and the evidence explicitly marks it **not retrieved**, not as a known
 exit cause. A genuinely stopped EC2 instance is still reported as such by the
@@ -810,12 +813,21 @@ the message reads `guest action N was not sent (...)` and carries
 connection, an HTTP error) stays `outcome is unknown ... delivery=ambiguous`
 and is never replayed. Neither verdict permits replaying the whole batch.
 Only a provably unsent request can be retried inside `AwsProvider.execute`: at
-most three total attempts with a 0.25 s backoff, preserving earlier statements.
-Before the first retry, one bounded GET to `/terminal` must succeed; otherwise
-the error reports `guest down: readiness check failed` and no retry is attempted.
-Each retry logs the upcoming attempt number, `delivery=not_sent`, the exception
-class (never its potentially sensitive text), and whether readiness passed.
-Exhaustion preserves the existing failed-action message and console evidence.
+most four total attempts with a 0.5 s / 1 s / 2 s backoff (plus up to 25%
+jitter), preserving earlier statements and bounding the whole intervention at
+roughly 3.5 s. A refused port and an unreachable host (`EHOSTUNREACH`) are both
+retryable, because neither sent a byte. The bounded readiness GET to `/terminal`
+is still taken once and still logged, but it is **evidence, not a veto**: it
+rides the same host-to-guest path as the request that just failed, so a
+transient path failure fails the probe too, and requiring it would turn exactly
+that blip into a dead episode. Each retry logs the upcoming attempt number,
+`delivery=not_sent`, the exception class (never its potentially sensitive
+text), whether readiness passed, the classifier's cause and the delay taken; it
+also appends a ledger event to `guest-transport-retries.json` in the episode
+cache root, whose `<n> retries, <m> recovered` is what tells a post-mortem how
+much of a run's apparent transport loss was the network. Exhaustion preserves
+the existing failed-action message (adding `transport retries exhausted (N)`),
+console evidence, and the guest-down cause of death.
 The `delivery=ambiguous` verdict
 does feed exactly ONE gated harness measure: after such a failure the session
 asks a single read-only question, `probe` -- a bounded GET to the guest's

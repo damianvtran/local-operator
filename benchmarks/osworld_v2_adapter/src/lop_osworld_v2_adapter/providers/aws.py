@@ -73,10 +73,12 @@ from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
     GUEST_TRANSPORT_MARGIN_S,
+    TRANSPORT_RETRY_ATTEMPTS,
     GuestServerRecovered,
     InstructionUnavailable,
     bounded_observation_cause,
     guest_deadline_for,
+    transport_retry_delay,
 )
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
@@ -114,9 +116,12 @@ _READY_PATH = "/terminal"
 # directly, so a pipeline arrives as an explicit ``bash -c`` -- the same shape
 # upstream's own SetupController posts (setup.py:418).
 _EXECUTE_PATH = "/execute"
-# Bound recovery within one statement: earlier guest input must never be replayed.
-_EXECUTE_ATTEMPTS = 3
-_EXECUTE_RETRY_DELAY_S = 0.25
+# The readiness probe taken before a retry is scheduled. It is EVIDENCE (see
+# ``execute``), not a veto: it rides the same host->guest path as the request
+# that just failed, so when that PATH is down the probe fails for the same
+# reason and says nothing about whether the server is listening. The retry
+# bound lives in ``providers.base`` (``TRANSPORT_RETRY_ATTEMPTS``), where every
+# remote provider can share it.
 _EXECUTE_READINESS_TIMEOUT_S = 2.0
 
 # Where the episode's guest-preparation evidence is written, inside the
@@ -760,6 +765,20 @@ class AwsProvider:
         # at most once per provider, and only on a lost-guest path (see
         # ``_capture_guest_console``): a healthy episode never spends the calls.
         self._console_stages_done: set[str] = set()
+        # Every retry taken for a provably-unsent request, and how many of them
+        # were followed by a send that succeeded. The count answers the one
+        # question a post-mortem cannot answer from an episode that merely
+        # survived: how much of the apparent transport failure rate was a
+        # network blip rather than a dead guest. Persisted on each event (see
+        # ``_record_transport_retry``) so it is part of the episode's evidence,
+        # not only of the log.
+        self._transport_retries: list[dict[str, Any]] = []
+        self._transport_retry_recovered = 0
+        # The reason behind the most recent boolean probe, for the recovery
+        # evidence. ``_probe_control_server`` is boolean by contract (its async
+        # RPC caller acts on the boolean alone) and is patched directly by
+        # tests, so the record is a side channel that survives that contract.
+        self._last_probe_record: dict[str, Any] | None = None
         # Reset-retry tracking for ``_seal_upstream``. Upstream's ``reset``
         # loop writes ``is_environment_used = True`` before task-specific
         # setup and does not clear it when an attempt fails, so its OWN retry
@@ -968,11 +987,28 @@ class AwsProvider:
         A failed read is not evidence of no restart. Retry it once, then record
         the uncertainty and force the same fresh-frame boundary as a restart.
         Unreachable-server exhaustion remains distinct from receipt uncertainty.
+
+        The exhaustion branch records EVERY probe's reason, not just the fact
+        that all of them failed: six silent probes used to collapse to
+        ``read_failed: true``, which names a path failure and not its element.
+        The record is evidence and nothing else -- the decision is still the
+        boolean, and the six-attempt budget is unchanged.
         """
+
         if self._supervisor_unit is None:
             return guest_supervisor.ReceiptResult("verified_none")
+        probes: list[dict[str, Any]] = []
         for _ in range(6):
-            if self._probe_control_server(0.5):
+            # Clear BEFORE the call and read after: the record must belong to
+            # THIS probe. ``_probe_control_server`` is boolean by contract and
+            # is patched by callers (tests patch it), so a stale record left by
+            # an earlier probe elsewhere (``execute``'s readiness check) would
+            # otherwise be reported as this probe's reason.
+            self._last_probe_record = None
+            answered = self._probe_control_server(0.5)
+            record = self._last_probe_record
+            probes.append({"probe": len(probes) + 1, **(record or {"answered": answered})})
+            if answered:
                 break
             self._sleep(0.5)
         else:
@@ -984,6 +1020,7 @@ class AwsProvider:
                     "receipt_unavailable": True,
                     "records_withheld": False,
                     "cause": "supervisor recovery budget exhausted; server unreachable",
+                    "probe_outcomes": probes,
                     "records": self._supervisor_records,
                     "watchdog": self._watchdog_evidence(),
                     "final_guest_record": "not retrieved: action-server transport unavailable",
@@ -1860,6 +1897,75 @@ class AwsProvider:
             logger.warning("guest health capture failed unexpectedly")
         return cause
 
+    def transport_retry_summary(self) -> dict[str, Any]:
+        """How much of this episode's transport failure was recovered by a retry.
+
+        ``retries`` counts scheduled re-sends, ``recovered`` those followed by a
+        send that succeeded. The same numbers are on disk after every event
+        (``guest-transport-retries.json`` in the episode cache root), so a run
+        that only survived because a path blinked can be told apart from one
+        that never failed.
+        """
+
+        return {
+            "retries": len(self._transport_retries),
+            "recovered": self._transport_retry_recovered,
+            "causes": sorted({str(event["cause"]) for event in self._transport_retries}),
+        }
+
+    def _persist_transport_retries(self) -> None:
+        """Write the retry ledger. Fail-open: evidence never breaks an episode."""
+
+        self._write_supervisor_evidence(
+            "guest-transport-retries.json",
+            {
+                "recovered": self._transport_retry_recovered,
+                "retries": len(self._transport_retries),
+                "events": self._transport_retries,
+            },
+        )
+
+    def _record_transport_retry(
+        self,
+        *,
+        index: int,
+        attempt: int,
+        verdict: guest_loss.TransportVerdict,
+        delay_s: float,
+        ready: bool | None,
+        error: BaseException,
+    ) -> None:
+        """One structured event per retry, logged AND persisted.
+
+        Values only. Exception text can echo the guest's address or the command,
+        so it is reduced to its type name, and the transport verdict to the
+        classifier's closed vocabulary (see ``guest_loss.failure_record``).
+        ``attempt`` names the send ABOUT to happen, so ``attempt=2`` on the first
+        retry reads as it always has in this module's logs.
+        """
+
+        event = {
+            "statement": index,
+            "attempt": attempt + 1,
+            "cause": verdict.kind or "unknown",
+            "delivery": verdict.delivery,
+            "delay_ms": int(round(delay_s * 1000)),
+            "readiness_passed": ready,
+            "error_class": type(error).__name__,
+        }
+        self._transport_retries.append(event)
+        self._persist_transport_retries()
+        logger.warning(
+            "guest transport retry attempt=%d delivery=%s error_class=%s "
+            "readiness_passed=%s cause=%s delay_ms=%d",
+            attempt + 1,
+            verdict.delivery,
+            event["error_class"],
+            ready,
+            event["cause"],
+            event["delay_ms"],
+        )
+
     async def execute(self, statements: list[str], *, settle: bool = True) -> None:
         env = self._require_env()
 
@@ -1896,9 +2002,15 @@ class AwsProvider:
                 command = python_source_argv(script)
                 ready: bool | None = None
                 supervisor_exhausted = False
-                for attempt in range(1, _EXECUTE_ATTEMPTS + 1):
+                for attempt in range(1, TRANSPORT_RETRY_ATTEMPTS + 1):
                     try:
                         result = self._run_guest_command(command, timeout=GUEST_COMMAND_TIMEOUT_S)
+                        if attempt > 1:
+                            # The send that succeeded was itself a retry: this is
+                            # the count that says how much of the episode's
+                            # apparent transport loss was a network blip.
+                            self._transport_retry_recovered += 1
+                            self._persist_transport_retries()
                         break
                     except Exception as error:
                         # Only positive connect-phase evidence permits another
@@ -1915,33 +2027,54 @@ class AwsProvider:
                                 raise GuestServerRecovered(
                                     "action-server restart or receipt unavailable; refresh binding"
                                 ) from None
-                        if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
-                            if ready is None:
-                                ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
-                            if ready and attempt < _EXECUTE_ATTEMPTS:
-                                # Values only: exception text can leak the command
-                                # or credentials. Attempt names the upcoming send.
-                                logger.warning(
-                                    "guest transport retry attempt=%d delivery=%s "
-                                    "error_class=%s readiness_passed=%s",
-                                    attempt + 1,
-                                    verdict.delivery,
-                                    type(error).__name__,
-                                    ready,
-                                )
-                                self._sleep(_EXECUTE_RETRY_DELAY_S)
-                                continue
+                        if ready is None and verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
+                            # Evidence for the terminal message, NOT a veto. This
+                            # probe rides the same host->guest path as the request
+                            # that just failed, so a path failure fails it too and
+                            # "not ready" cannot distinguish a dead server from a
+                            # transient route. Gating the retry on it -- which is
+                            # what this code used to do -- turned exactly that
+                            # blip into a dead episode, and the recorded message
+                            # (connection could not be established, delivery=not_sent)
+                            # is the EHOSTUNREACH shape no other cause produces.
+                            ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
+                        # None means the classifier refused a retry (the request
+                        # may have been applied) or the bound is spent. That is
+                        # the ONLY gate; it takes a verdict, never a flag.
+                        delay = (
+                            None
+                            if supervisor_exhausted
+                            else transport_retry_delay(verdict, failed_attempt=attempt)
+                        )
+                        if delay is not None:
+                            self._record_transport_retry(
+                                index=index,
+                                attempt=attempt,
+                                verdict=verdict,
+                                delay_s=delay,
+                                ready=ready,
+                                error=error,
+                            )
+                            self._sleep(delay)
+                            continue
                         # Capture only on terminal failure, before termination;
                         # a recovered refusal is not a lost-guest incident.
                         self._capture_guest_console(
                             guest_loss.STAGE_EXECUTE, f"execute-{verdict.delivery}"
                         )
                         message = guest_loss.describe_failed_action(index, verdict)
+                        if attempt > 1:
+                            # Say how much was spent trying: the terminal line is
+                            # otherwise indistinguishable from one that never
+                            # retried, and the difference is a diagnosis.
+                            message += f"; transport retries exhausted ({attempt})"
                         if ready is False:
                             cause = self._execute_guest_health_cause()
                             if supervisor_exhausted:
                                 cause += "; supervisor recovery budget exhausted"
-                            message += f"; guest down: {cause}; no transport retry"
+                            message += f"; guest down: {cause}"
+                            if attempt == 1:
+                                message += "; no transport retry"
                         raise GuestExecutionError(message, delivery=verdict.delivery) from None
                 else:
                     # The last failed attempt raises above; falling through
@@ -1997,14 +2130,32 @@ class AwsProvider:
     def _probe_control_server(self, timeout: float) -> bool:
         """Shared read-only probe for the worker thread and async RPC path."""
 
+        answered, record = self._probe_control_server_outcome(timeout)
+        self._last_probe_record = record
+        return answered
+
+    def _probe_control_server_outcome(self, timeout: float) -> tuple[bool, dict[str, Any]]:
+        """The probe answer plus a value-free account of why it was that answer.
+
+        EVIDENCE ONLY. The boolean is the whole decision surface -- a recovery
+        that gives up after six silent probes records ``read_failed``, and that
+        must stay exactly as it was -- but six false answers used to be
+        indistinguishable from one another in the evidence. ``kind`` names which
+        element of the path failed and ``errno`` the OS's reason; neither can
+        carry the guest's address or the command, which is why the exception's
+        text is still discarded. A non-200 status is reported as itself: the
+        server answered, so there is no transport fault to classify.
+        """
+
         origin = self._guest_origin()
         if origin is None:
-            return False
+            return False, {"answered": False, "cause": "no_origin"}
         try:
-            return int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout)) == 200
-        except Exception:
+            status = int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout))
+        except Exception as error:
             # Discard exception text: it may contain guest addresses or state.
-            return False
+            return False, {"answered": False, **guest_loss.failure_record(error, origin=origin)}
+        return status == 200, {"answered": status == 200, "status": status}
 
     async def evaluate(self) -> Any:
         env = self._require_env()

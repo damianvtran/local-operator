@@ -130,7 +130,12 @@ def test_hung_cloud_probe_is_abandoned_without_contacting_guest(tmp_path: Path) 
 async def test_real_execute_retains_delivery_outcome_and_records_instance_loss(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, diagnostics_raises: bool
 ) -> None:
-    """Real refused HTTP connection; diagnostics must not change action delivery."""
+    """Real refused HTTP connection; diagnostics must not change action delivery.
+
+    A probe answering 503 is EVIDENCE that the guest is down, not a reason to
+    skip the bounded retry: the attempts are spent, and the failure still
+    reports the same ``not_sent`` verdict with the same instance-loss cause.
+    """
     monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
     transport = _CountingTransport()
     with _Stubs() as stubs:
@@ -148,7 +153,7 @@ async def test_real_execute_retains_delivery_outcome_and_records_instance_loss(
         with pytest.raises(GuestExecutionError) as caught:
             await provider.execute(["first()", "second()"])
     assert caught.value.delivery == "not_sent"
-    assert transport.calls == 1
+    assert transport.calls == aws_mod.TRANSPORT_RETRY_ATTEMPTS
     assert "no input of this batch was applied" in str(caught.value)
     assert "private task content" not in str(caught.value)
     if diagnostics_raises:

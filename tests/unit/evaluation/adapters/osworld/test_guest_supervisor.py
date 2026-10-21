@@ -503,7 +503,45 @@ async def test_crash_loop_exhausts_wait_and_ends_cleanly(
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is False
         assert evidence["final_guest_record"].startswith("not retrieved")
+        # Every probe is accounted for, even when the probe itself is stubbed:
+        # the list is index-aligned with the six attempts, never padded.
+        assert [entry["probe"] for entry in evidence["probe_outcomes"]] == [1, 2, 3, 4, 5, 6]
         assert not any("not_applied()" in str(body) for body in stubs.guest_posts)
+
+
+def test_exhaustion_evidence_names_which_path_element_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six silent probes used to collapse to ``read_failed: true``.
+
+    The decision is unchanged -- still ``read_failed``, still six waits, still no
+    input sent -- but the evidence now names the element that failed. A refused
+    port, a name that does not resolve and a connect timeout are three different
+    faults, and only one of them is the action server.
+    """
+
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        provider._supervisor_unit = "action-server.service"
+        # The REAL probe, over a real (closed) loopback port: the chain under
+        # test is the one a dying guest produces, not a stand-in.
+        provider._clients.http_get = aws_mod.build_clients(
+            provider._credentials, provider._region
+        ).http_get
+        result = provider._recover_guest_supervisor()
+        assert stubs.slept.count(0.5) == 6
+
+    assert result.state == "read_failed"
+    assert result.recovery_exhausted is True
+    assert provider._cache_root is not None
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    assert evidence["read_failed"] is True
+    outcomes = evidence["probe_outcomes"]
+    assert len(outcomes) == 6
+    assert {outcome["kind"] for outcome in outcomes} == {"refused"}
+    assert {outcome["errno"] for outcome in outcomes} == {errno.ECONNREFUSED}
+    assert all(outcome["answered"] is False for outcome in outcomes)
 
 
 _LOOPBACK_SERVER = r"""

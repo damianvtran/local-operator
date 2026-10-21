@@ -306,6 +306,39 @@ def describe_failed_action(index: int, verdict: TransportVerdict) -> str:
     )
 
 
+def failure_record(error: BaseException, *, origin: str | None) -> dict[str, Any]:
+    """A value-free account of one failed guest request, for EVIDENCE only.
+
+    The same discipline as ``describe_failed_action``: ``delivery`` and ``kind``
+    come from the closed classifier vocabulary, ``errno`` is a number and
+    ``error_class`` a type name. Nothing here can carry exception text -- such
+    text echoes the URL (the guest's address) and sometimes the command, which
+    is why ``execute`` has never exposed a transport error.
+
+    WHY THIS EXISTS. A recovery attempt that probes the guest six times and
+    gives up used to record only ``read_failed: true``, which says a path failed
+    and not WHICH element of it: a name that did not resolve, a route that had
+    no answer, a port with nothing listening and a server that accepted and
+    stayed silent are four different faults with four different fixes. The kind
+    names the element and the errno names the OS's reason; neither changes any
+    decision -- every caller of this function is already on a failure branch.
+    """
+
+    verdict = classify_transport_failure(error, origin=origin)
+    errno: int | None = None
+    for link in _walk(error):
+        value = getattr(link, "errno", None)
+        if isinstance(value, int):
+            errno = value
+            break
+    return {
+        "delivery": verdict.delivery,
+        "kind": verdict.kind or "unknown",
+        "errno": errno,
+        "error_class": type(error).__name__,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 2. Console capture
 # ---------------------------------------------------------------------------

@@ -13,9 +13,13 @@ resource; it is called from ``reset_start``, never from ``prepare``.
 
 from __future__ import annotations
 
+import math
+import random
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from lop_osworld_v2_adapter.guest_loss import DELIVERY_NOT_SENT, TransportVerdict
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -158,6 +162,89 @@ def guest_deadline_for(socket_timeout_s: float) -> float:
 # ``GUEST_EXECUTE_TIMEOUT_S < GUEST_COMMAND_TIMEOUT_S``, and a hand-written
 # second number is exactly how that invariant was lost the first time.
 GUEST_EXECUTE_TIMEOUT_S = guest_deadline_for(GUEST_COMMAND_TIMEOUT_S)
+
+# ---------------------------------------------------------------------------
+# Retrying a guest request that PROVABLY never left this host
+# ---------------------------------------------------------------------------
+#
+# WHY A RETRY IS NOT A REPLAY. A request whose TCP connection was never
+# established carried no byte of the batch, so the guest applied nothing; sending
+# it again is not a second application of an effect, it is the FIRST delivery.
+# That is a different fact from "the response was lost", which stays fatal: the
+# guest may already have typed the text, and no retry can undo or safely repeat
+# that. The classifier in ``guest_loss`` is the authority on which of the two
+# happened, and ``transport_retry_delay`` below refuses to schedule a retry
+# unless that authority said ``DELIVERY_NOT_SENT``.
+#
+# WHY THE BOUND IS A CONSTANT RATHER THAN A CALLER'S CHOICE. An episode budget is
+# measured in minutes and a lost guest costs all of it, so spending a few seconds
+# to distinguish "the network path blinked" from "the guest is gone" is cheap.
+# Spending an unbounded number of them is not: the one preserved execute-phase
+# loss refused every request for the remaining ~4 minutes, and a policy that
+# followed it would have turned four minutes of dead time into four minutes of
+# retries. Four attempts with 0.5 s / 1 s / 2 s backoff bound the whole
+# intervention at ~3.5 s (plus jitter), which is sized to the OBSERVED failure
+# class: a host->guest path failure that cleared within ~2 s, corroborated by the
+# episode's own bundle (the guest health POST that ran a command in the guest was
+# written 2 s after the recovery record).
+TRANSPORT_RETRY_ATTEMPTS = 4
+_TRANSPORT_RETRY_BASE_DELAY_S = 0.5
+_TRANSPORT_RETRY_MAX_DELAY_S = 2.0
+# +/-25% on every delay. The guests of one fleet usually share one network path,
+# so without jitter a path blip synchronises every client's retries onto the same
+# instants -- the opposite of what a transient congestion or route-convergence
+# event needs.
+_TRANSPORT_RETRY_JITTER_FRACTION = 0.25
+
+
+def transport_retry_delay(
+    verdict: TransportVerdict,
+    *,
+    failed_attempt: int,
+    attempts: int = TRANSPORT_RETRY_ATTEMPTS,
+    jitter: Callable[[], float] = random.random,
+) -> float | None:
+    """Seconds to wait before re-sending, or None when no retry is permitted.
+
+    THE GATE IS THE CLASSIFIER, NOT THE CALLER. ``verdict`` is what
+    ``guest_loss.classify_transport_failure`` returned for the failure that just
+    happened, and only ``DELIVERY_NOT_SENT`` schedules a retry -- that verdict
+    means POSITIVE evidence the connection was never established, so nothing
+    reached the guest. Every verdict meaning "sent" or "unknown" (a read
+    timeout, a reset or abort after the write, a 5xx, a redirect) returns None
+    here however the caller feels about it. There is deliberately no boolean
+    argument that could bypass this distinction: the only way to obtain a
+    retryable verdict is to classify a failure, and the classifier has no third
+    "probably not sent".
+
+    ``failed_attempt`` is the 1-based ordinal of the attempt that just failed.
+    ``None`` at or past ``attempts`` is the terminal answer, so the caller's loop
+    ends exactly where this bound says it does.
+
+    Jitter is applied AFTER the exponential cap, so a delay can exceed
+    ``_TRANSPORT_RETRY_MAX_DELAY_S`` by at most the jitter fraction -- a fraction
+    of a second, which is not the bound that matters here.
+    """
+
+    if verdict.delivery != DELIVERY_NOT_SENT:
+        return None
+    used = max(failed_attempt, 1)
+    if used >= attempts:
+        return None
+    delay = min(
+        _TRANSPORT_RETRY_MAX_DELAY_S,
+        _TRANSPORT_RETRY_BASE_DELAY_S * (2 ** (used - 1)),
+    )
+    # Clamp the sample so a caller-supplied generator cannot produce a negative
+    # or absurd delay -- and reject a non-finite one outright, because a NaN
+    # would propagate through ``min``/``max`` into ``time.sleep``: this function
+    # owns the bound, not its caller.
+    sample = float(jitter())
+    if not math.isfinite(sample):
+        sample = 0.5
+    sample = min(max(sample, 0.0), 1.0)
+    return delay * (1.0 + _TRANSPORT_RETRY_JITTER_FRACTION * (2.0 * sample - 1.0))
+
 
 # Budgeted cost of delivering ONE character through the guest's X11 synthetic
 # key path, with pyautogui's default (zero) inter-key interval.
