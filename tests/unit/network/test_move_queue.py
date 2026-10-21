@@ -365,3 +365,19 @@ class TestCliSurface:
         args = parser.parse_args(["sessions", "move", "--cancel-queued", "abc123", "--json"])
         assert cli.sessions_move_command(args) == 0
         assert calls[-1][0] == "cancel" and calls[-1][1]["session_id"] == "abc123", calls
+
+
+def test_the_drop_roles_flag_is_durable_on_the_record(tmp_path: Path) -> None:
+    """M3: the resume prepare runs long after the request frame is gone, so the
+    opt-out has to live on the record — and default to False for an older or
+    non-flagged request."""
+    record = _enqueue(tmp_path, drop_session_roles=True)
+    assert record["drop_session_roles"] is True
+    assert (mq.read_record(tmp_path, SID) or {})["drop_session_roles"] is True
+
+    other = tmp_path / "other"
+    other.mkdir()
+    plain, _ = mq.enqueue(
+        other, SID, to_device="d_b", to_name="dev-b", request_id="rq", requested_by="d_a"
+    )
+    assert plain["drop_session_roles"] is False

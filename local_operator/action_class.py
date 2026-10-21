@@ -241,7 +241,9 @@ def set_registered_action_class(registry: Any, name: str, action_class: object) 
         try:
             from local_operator.agent_profiles import install_seed
 
-            installed = install_seed(key, registry=registry)
+            # ``/agent class`` is a USER action, so its install is an account
+            # write (design §3.4) — never a conversation row the user cannot see.
+            installed = install_seed(key, registry=registry, scope="global")
         except Exception as error:  # noqa: BLE001 — NameTakenError et al are refusals
             raise ValueError(f"cannot switch {name!r}: {error}") from None
         if installed is None:

@@ -848,11 +848,24 @@ async def entities(
                 raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
             if spec.name == "team":
                 from local_operator.org_chart import resolve_org
+                from local_operator.profile_scope import row_scope
 
-                rows = [
-                    item.model_dump(mode="json") | {"value": item.name}
-                    for item in registry.list_teams()
-                ]
+                # The team rows bypass ``team_catalogue`` here, so the additive
+                # scope fact has to be added in this assembly too (LOH-9 S2).
+                # AND they dedupe like the agent path (QA round 2): a session
+                # team racing an account team of the same name is ONE row, and
+                # the composite lists the session one first — the row in force.
+                seen_teams: set[str] = set()
+                rows = []
+                for item in registry.list_teams():
+                    key = str(getattr(item, "name", "") or "").strip().casefold()
+                    if key in seen_teams:
+                        continue
+                    seen_teams.add(key)
+                    rows.append(
+                        item.model_dump(mode="json")
+                        | {"value": item.name, "scope": row_scope(registry, item)}
+                    )
                 if name:
                     current = dataclasses.asdict(
                         resolve_org(name, teams=registry, agents=remote.agent_registry)
