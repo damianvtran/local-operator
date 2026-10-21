@@ -107,10 +107,8 @@ def _origin_ask(
     return str(outcome["details"]["ask_id"])
 
 
-def _relay(
-    watch: AskQueue, origin_ask: str, *, origin: str = ORIGIN, note: str = ""
-) -> dict[str, Any]:
-    return watch.enqueue_relay(f"{origin}/{origin_ask}", note=note)
+def _relay(watch: AskQueue, origin_ask: str, *, origin: str = ORIGIN) -> dict[str, Any]:
+    return watch.enqueue_relay(f"{origin}/{origin_ask}")
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +119,7 @@ def _relay(
 def test_a_relay_writes_one_row_in_each_log(tmp_path: Path):
     origin, watch, _, _ = _pair(tmp_path)
     origin_ask = _origin_ask(origin)
-    outcome = _relay(watch, origin_ask, note="also raised in the watcher")
+    outcome = _relay(watch, origin_ask)
     assert outcome["ok"] is True
     assert outcome["details"]["relay"] == {
         "session_id": ORIGIN,
@@ -141,7 +139,6 @@ def test_a_relay_writes_one_row_in_each_log(tmp_path: Path):
     surfaced = origin_events[-1]
     assert surfaced["ask_id"] == origin_ask
     assert surfaced["by"] == {"session_id": WATCH, "ask_id": relay_id}
-    assert surfaced["note"] == "also raised in the watcher"
 
 
 def test_a_relay_row_derives_the_origin_questions_verbatim_and_its_deadline(tmp_path: Path):
@@ -169,7 +166,6 @@ def test_a_relay_row_derives_the_origin_questions_verbatim_and_its_deadline(tmp_
             "session_id": WATCH,
             "ask_id": relay_id,
             "at": BASE,
-            "note": "",
         }
     ]
 
@@ -181,7 +177,6 @@ def test_ordinary_ask_rows_carry_no_relay_keys(tmp_path: Path):
     before = store.pending_row(origin.find(origin_ask) or {})
     assert "relay" not in before
     assert "surfaced_in" not in before
-    assert "relay_note" not in before
     _relay(watch, origin_ask)
     after = store.pending_row(origin.find(origin_ask) or {})
     assert "relay" not in after
@@ -248,6 +243,43 @@ def test_a_second_answer_on_either_copy_is_refused(tmp_path: Path):
     assert [event["kind"] for event in events].count(store.EVENT_ANSWERED) == 1
 
 
+def test_declining_the_relay_settles_the_origin(tmp_path: Path):
+    """Decline is the other TERMINAL settle (#2673, R1-1).
+
+    It must land on the ORIGIN's log like an answer does: a local ``declined``
+    row is re-derived away on the next fold, so the card would come back and the
+    user's decision would be silently dropped.
+    """
+    origin, watch, _, _ = _pair(tmp_path)
+    origin_ask = _origin_ask(origin)
+    relay_id = str(_relay(watch, origin_ask)["details"]["ask_id"])
+    assert watch.decline(relay_id, by="terminal")["ok"] is True
+    origin_record = origin.find(origin_ask)
+    relay_record = watch.find(relay_id)
+    assert origin_record is not None and relay_record is not None
+    assert origin_record["status"] == store.STATUS_DECLINED
+    assert relay_record["status"] == store.STATUS_DECLINED
+    # One decision, one row, in the log that owns it — the watcher's log holds
+    # the pointer and nothing else.
+    assert [event["kind"] for event in store.read_events(watch.session_dir)] == [
+        store.EVENT_RELAYED
+    ]
+    assert [
+        event["kind"] for event in store.read_events(origin.session_dir)
+    ].count(store.EVENT_DECLINED) == 1
+
+
+def test_declining_a_settled_origin_through_the_relay_keeps_its_words(tmp_path: Path):
+    origin, watch, _, _ = _pair(tmp_path)
+    origin_ask = _origin_ask(origin)
+    relay_id = str(_relay(watch, origin_ask)["details"]["ask_id"])
+    assert watch.respond(relay_id, {"q0": ["yes"]}, by="desktop")["ok"] is True
+    outcome = watch.decline(relay_id, by="terminal")
+    assert outcome["ok"] is False
+    assert "already answered by desktop" in outcome["error"]
+    assert f"ask {origin_ask} in session {ORIGIN}" in outcome["error"]
+
+
 # ---------------------------------------------------------------------------
 # Withdrawal, timeout, and the origin vanishing
 # ---------------------------------------------------------------------------
@@ -277,6 +309,51 @@ def test_a_watcher_withdrawal_leaves_the_origin_log_byte_identical(tmp_path: Pat
     assert relay_record["status"] == store.STATUS_WITHDRAWN
     assert watch.find(relay_id)["relay_withdrawn_at"] == BASE  # type: ignore[index]
     assert origin.find(origin_ask)["status"] == store.STATUS_OPEN  # type: ignore[index]
+
+
+def test_a_watcher_withdrawal_folds_cold_as_withdrawn(tmp_path: Path):
+    """R1-3: the withdrawn row is folded, not just stamped (#2673).
+
+    Every reader that is not the live queue — the cleanup probe, the cold
+    dismissal door — sees the status the watcher's own log states. Without the
+    fold a retracted relay reads ``open`` forever and its session directory is
+    never prunable.
+    """
+    origin, watch, _, _ = _pair(tmp_path)
+    origin_ask = _origin_ask(origin)
+    relay_id = str(_relay(watch, origin_ask)["details"]["ask_id"])
+    from local_operator.session.cleanup import _has_open_asks
+
+    # Before: the pointer is outstanding, and the probe is honest about it.
+    assert _has_open_asks(watch.session_dir) is True
+    assert watch.withdraw(relay_id, reason="moot")["ok"] is True
+    cold = store.fold(store.read_events(watch.session_dir), BASE, session_id=WATCH)
+    assert [(row["ask_id"], row["status"]) for row in cold] == [
+        (relay_id, store.STATUS_WITHDRAWN)
+    ]
+    assert _has_open_asks(watch.session_dir) is False
+
+
+def test_a_watcher_dismissal_of_a_lapsed_relay_sticks_on_both_doors(tmp_path: Path):
+    """R1-2: a dismissal is a LOCAL view act, and the closed card stays closed.
+
+    The live door accepts the tap on a lapsed relay (its derived status is
+    ``timed_out``); the fold then applies the ``dismissed`` row, so the same card
+    does not return — and the cold door reads that row from the same log, not a
+    re-opened relay.
+    """
+    origin, watch, _, _ = _pair(tmp_path)
+    origin_ask = _origin_ask(origin, timeout=120)
+    relay_id = str(_relay(watch, origin_ask)["details"]["ask_id"])
+    _set_now(origin, watch, BASE + 300_000)
+    assert watch.find(relay_id)["status"] == store.STATUS_TIMED_OUT  # type: ignore[index]
+    assert watch.dismiss(relay_id, by="terminal")["ok"] is True
+    assert watch.find(relay_id)["status"] == store.STATUS_DISMISSED  # type: ignore[index]
+    cold = store.fold(store.read_events(watch.session_dir), BASE + 300_000, session_id=WATCH)
+    assert [row["status"] for row in cold] == [store.STATUS_DISMISSED]
+    assert render.dismiss_refusal(cold[0]) == render.DISMISS_ALREADY_DISMISSED
+    # The origin is untouched: a dismissal is a view act on the watcher's card.
+    assert origin.find(origin_ask)["status"] == store.STATUS_TIMED_OUT  # type: ignore[index]
 
 
 def test_an_origin_timeout_and_a_late_relay_answer_settle_both_as_late(tmp_path: Path):
@@ -320,6 +397,30 @@ def test_an_origin_log_that_disappears_settles_the_relay(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
+
+
+def test_relaying_the_same_origin_ask_twice_is_refused(tmp_path: Path):
+    """R1-4: one ref, one card, one surfaced note.
+
+    A second relay of the same origin ask used to mint a second pointer — two
+    cards for one question, both settling from the same log. A relay the user
+    CLOSED locally is not held any more, so a deliberate re-raise still works.
+    """
+    origin, watch, _, _ = _pair(tmp_path)
+    origin_ask = _origin_ask(origin)
+    first = _relay(watch, origin_ask)
+    assert first["ok"] is True
+    second = _relay(watch, origin_ask)
+    assert second["ok"] is False
+    assert second["error"] == render.RELAY_ALREADY_HELD
+    assert len([row for row in watch.records() if row.get("relay")]) == 1
+    assert [
+        event["kind"] for event in store.read_events(origin.session_dir)
+    ].count(store.EVENT_RELAY_SURFACED) == 1
+    # Closed locally, the ref is free again: the held check reads derived status.
+    first_id = str(first["details"]["ask_id"])
+    assert watch.withdraw(first_id, reason="moot")["ok"] is True
+    assert _relay(watch, origin_ask)["ok"] is True
 
 
 @pytest.mark.parametrize("ref", ["", "not-a-ref", "a/b/c", "/a-bc12", "s-origin/", " / "])
@@ -463,7 +564,7 @@ def test_revising_through_a_relay_is_refused(tmp_path: Path):
 def test_the_wire_carries_the_relay_provenance(tmp_path: Path):
     origin, watch, _, _ = _pair(tmp_path)
     origin_ask = _origin_ask(origin)
-    relay_id = str(_relay(watch, origin_ask, note="for the board")["details"]["ask_id"])
+    relay_id = str(_relay(watch, origin_ask)["details"]["ask_id"])
     rows = {row["ask_id"]: row for row in watch.projection()}
     row = rows[relay_id]
     assert row["relay"] == {
@@ -471,7 +572,6 @@ def test_the_wire_carries_the_relay_provenance(tmp_path: Path):
         "ask_id": origin_ask,
         "origin_status": store.STATUS_OPEN,
     }
-    assert row["relay_note"] == "for the board"
     # No second wire shape: the relay row is a PendingAsk like any other.
     assert set(row) <= {
         "ask_id",
@@ -487,7 +587,6 @@ def test_the_wire_carries_the_relay_provenance(tmp_path: Path):
         "answered_by",
         "answered_at",
         "relay",
-        "relay_note",
         "surfaced_in",
         "draft_question_ids",
     }

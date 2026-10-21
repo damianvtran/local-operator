@@ -236,9 +236,9 @@ _WALK_DEPTH_CAP = 2
 # 1001 -> 1063 (#2520, ask relay): the ``AskParams.relay`` property and the
 # queued tail's one relay clause are the whole move, and BOTH ledgers were
 # re-measured in the same pass — ``scripts/bench_context_budget.py``'s top arm
-# moves 86,183 -> 86,473 chars (+290 = +104 billed) and its ceiling with it,
+# moves 88,825 -> 89,094 chars (+269 = ~+97 billed) and its ceiling with it,
 # while every other entry here is byte-identical. The field is mode-independent,
-# so the blocking arm's bench number moved by the same +290 chars and still
+# so the blocking arm's bench number moved by the same +269 chars and still
 # passes under that ceiling.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 804,

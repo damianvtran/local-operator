@@ -541,6 +541,15 @@ RELAY_SELF = (
     "relaying it to itself."
 )
 
+#: This session already holds a live relay for that origin ask (#2673, R1-4).
+#: Its own asks already refuse a duplicate, and a second relay of one origin
+#: would mint a second card for the same question — two rows that both settle
+#: from one log, so the human would be asked twice.
+RELAY_ALREADY_HELD = (
+    "this session already relays that ask — answer it on the card it already "
+    "shows, or withdraw that relay before relaying the ask again."
+)
+
 #: The per-watcher bound. ``{cap}`` is ``policy.RELAY_CAP`` at the call site so
 #: the sentence and the constant cannot drift.
 RELAY_CAP_REFUSAL = (
@@ -583,25 +592,19 @@ def relay_receipt(
     origin_ask: str,
     *,
     reach: str | None,
-    note: str = "",
 ) -> str:
     """The tool result a successful relay returns (#2520).
 
     The reachable/unreachable split is the queued ask's own (``receipt_text``):
-    presentation is MEASURED, never claimed as notice-delivery. ``note`` is the
-    caller's one-line context, carried as its own sentence so the receipt's
-    facts stay readable when the note is long.
+    presentation is MEASURED, never claimed as notice-delivery.
     """
     reach_note = f"; showing on {reach}" if reach else ""
-    text = RELAY_RECEIPT.format(
+    return RELAY_RECEIPT.format(
         relay_id=relay_id,
         origin_ask=origin_ask,
         origin_session=origin_session,
         reach_note=reach_note,
     )
-    if note:
-        text = f"{text}\nNote: {note}"
-    return text
 
 
 def relay_refused_by_origin(origin_session: str, origin_ask: str, copy: str) -> str:

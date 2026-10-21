@@ -995,7 +995,6 @@ def _relayed(
         "ask_id": ask_id,
         "at": at,
         "relay": {"session_id": origin, "ask_id": "a-1"},
-        "note": "also raised here",
     }
 
 
@@ -1012,7 +1011,6 @@ def test_a_relay_row_folds_without_a_queued_event():
     assert record["ask_id"] == "a-r"
     assert record["session_id"] == "s-watch"
     assert record["relay"] == {"session_id": "s-other", "ask_id": "a-1"}
-    assert record["relay_note"] == "also raised here"
     assert record["questions"] == []
     assert record["status"] == store.STATUS_OPEN
     # No deadline of its own: the origin owns it.
@@ -1030,6 +1028,36 @@ def test_a_relay_row_carries_the_watchers_withdrawal_stamp():
     }
     records = store.fold([_relayed(), withdrawn], 1_001_000, session_id="s-watch")
     assert records[0]["relay_withdrawn_at"] == 1_000_500
+    # FOLDED, not just stamped (#2673, R1-3): every COLD reader — the cleanup
+    # probe, the cold dismissal door — sees a settled relay, so the session is
+    # prunable and the doors agree without reading the origin.
+    assert records[0]["status"] == store.STATUS_WITHDRAWN
+
+
+def test_a_relay_row_folds_a_local_dismissal_over_a_withdrawal():
+    """A dismissed relay reads dismissed, and outranks a withdrawal (§12)."""
+    dismissed = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": "a-r",
+        "at": 1_000_600,
+        "by": {"surface": "terminal"},
+    }
+    withdrawn = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_WITHDRAWN,
+        "ask_id": "a-r",
+        "at": 1_000_500,
+        "by": {"surface": "agent"},
+    }
+    assert store.fold([_relayed(), dismissed], 1_001_000, session_id="s-watch")[0][
+        "status"
+    ] == store.STATUS_DISMISSED
+    both = store.fold([_relayed(), withdrawn, dismissed], 1_001_000, session_id="s-watch")
+    assert both[0]["status"] == store.STATUS_DISMISSED
+    assert both[0]["relay_dismissed_at"] == 1_000_600
+    # The wire row must not leak the fold's internal stamps.
+    assert "relay_dismissed_at" not in store.pending_row(both[0])
 
 
 def test_an_old_shaped_log_folds_byte_identically_and_ignores_unknown_kinds():
@@ -1053,7 +1081,6 @@ def test_an_old_shaped_log_folds_byte_identically_and_ignores_unknown_kinds():
     assert with_unknown == baseline
     assert json.dumps(with_unknown, sort_keys=True) == json.dumps(baseline, sort_keys=True)
     assert "relay" not in baseline[0]
-    assert "relay_note" not in baseline[0]
     assert "surfaced_in" not in baseline[0]
     # And the WIRE row for an ordinary ask carries none of the relay keys either.
     row = store.pending_row(baseline[0])
@@ -1076,10 +1103,18 @@ def test_a_relay_wire_row_carries_its_provenance_and_nothing_empty():
     record = store.fold([_relayed()], 1_000_000, session_id="s-watch")[0]
     row = store.pending_row(record)
     assert row["relay"] == {"session_id": "s-other", "ask_id": "a-1"}
-    assert row["relay_note"] == "also raised here"
-    # An un-noted relay omits the note rather than carrying an empty string.
-    bare = store.fold([_relayed() | {"note": ""}], 1_000_000, session_id="s-watch")[0]
-    assert "relay_note" not in store.pending_row(bare)
+    # Nothing empty rides beside it: the reference is the whole provenance.
+    assert set(row) == {
+        "ask_id",
+        "created_at",
+        "expires_at",
+        "timeout_s",
+        "urgent",
+        "status",
+        "delivered",
+        "questions",
+        "relay",
+    }
 
 
 def test_surfaced_rows_attach_to_the_origin_record_only():
@@ -1089,7 +1124,6 @@ def test_surfaced_rows_attach_to_the_origin_record_only():
         "ask_id": "a-1",
         "at": 1_000_050,
         "by": {"session_id": "s-watch", "ask_id": "a-r"},
-        "note": "also raised here",
     }
     records = store.fold([_queued(), surfaced], 1_000_100, session_id="s1")
     assert records[0]["surfaced_in"] == [
@@ -1097,7 +1131,6 @@ def test_surfaced_rows_attach_to_the_origin_record_only():
             "session_id": "s-watch",
             "ask_id": "a-r",
             "at": 1_000_050,
-            "note": "also raised here",
         }
     ]
     # The surfaced row is NOT a status event: the origin's own precedence decides.

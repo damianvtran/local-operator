@@ -581,7 +581,6 @@ def fold(
                 "session_id": str(by.get("session_id") or ""),
                 "ask_id": str(by.get("ask_id") or ""),
                 "at": int(event.get("at") or 0),
-                "note": str(event.get("note") or ""),
             }
         )
     records: list[dict[str, Any]] = []
@@ -758,11 +757,17 @@ def _relay_record(
     replaces it from the origin's fold, so an unresolvable reference settles
     rather than lingering as a question nobody can answer.
 
-    ``relay_withdrawn_at`` is the watcher's own ``withdrawn`` row: retracting a
-    relay is local to W (the origin is untouched). The fold carries the stamp;
-    the USER-ACT CARVE-OUT (design §12: a user's answered/declined/dismissed
-    outranks the asker's retraction) is applied in the derivation, where the
-    origin's status is known.
+    THE WATCHER'S OWN SETTLES ARE FOLDED HERE (#2673, R1-2/R1-3), for every
+    reader and not just the queue: ``withdrawn`` is the asker retracting its
+    relay, ``dismissed`` the user closing a lapsed card. They are LOCAL and are
+    the only status this log can state about a relay — ``store.fold`` never
+    reads the origin — so without them ``_has_open_asks`` would see a settled
+    relay as permanently open and the session directory would never be prunable,
+    while ``asks/dismiss.py``'s cold door would disagree with the live one about
+    a card the user had already closed. A DISMISSAL OUTRANKS A WITHDRAWAL, the
+    same order §12 fixes for an ordinary ask. Both are only the BASE: the
+    queue's derivation re-reads the origin on every fold, where a USER ACT
+    ORIGIN-side outranks them (``_RELAY_USER_ACT_TERMINALS``).
 
     A malformed ``relay`` reference contributes no row: the same tolerance the
     module promises every reader, and the honest answer for a hand-edited line.
@@ -789,11 +794,16 @@ def _relay_record(
         "status": STATUS_OPEN,
         "delivered": False,
         "relay": {"session_id": origin_session, "ask_id": origin_ask},
-        "relay_note": str(relayed.get("note") or ""),
     }
+    dismissed = _first(events, ask_id, EVENT_DISMISSED)
     withdrawn = _first(events, ask_id, EVENT_WITHDRAWN)
+    if dismissed is not None:
+        record["relay_dismissed_at"] = int(dismissed.get("at") or 0)
+        record["status"] = STATUS_DISMISSED
     if withdrawn is not None:
         record["relay_withdrawn_at"] = int(withdrawn.get("at") or 0)
+        if dismissed is None:
+            record["status"] = STATUS_WITHDRAWN
     return record
 
 
@@ -911,9 +921,6 @@ def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -
             for key in ("session_id", "ask_id", "origin_status", "origin_gone")
             if key in relay
         }
-        note = str(record.get("relay_note") or "")
-        if note:
-            row["relay_note"] = note
     surfaced = record.get("surfaced_in")
     if surfaced:
         row["surfaced_in"] = [dict(item) for item in surfaced]

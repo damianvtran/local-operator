@@ -254,19 +254,37 @@ class AskQueue:
         The ORIGIN'S RULES DECIDE, not the watcher's: questions are copied
         VERBATIM (``AskQueue.respond``'s whole-ask contract means the watcher
         cannot reword what the human is answering), the deadline and urgency are
-        the origin's, and the status is the origin's. The one local override is
-        the watcher's own ``withdrawn`` row, under the fold's §12 carve-out
-        applied across the pair: a user act on the origin (answered, declined,
-        dismissed, late) outranks the watcher's retraction in either order.
+        the origin's, and the status is the origin's. The LOCAL OVERRIDES are
+        the watcher's own settles — a ``withdrawn`` row (the asker retracting
+        its relay) and a ``dismissed`` row (the user closing a lapsed card) —
+        under the fold's §12 carve-out applied across the pair: a user act on
+        the origin (answered, declined, dismissed, late) outranks them in either
+        order.
 
         An unresolvable origin SETTLES the relay (``origin_gone``, ``expired``):
         a pointer with nothing behind it is not outstanding work, and leaving it
         open would make the watcher's list show a question no one can answer.
+        A local settle already on the row is kept over that ``expired``: the
+        card was closed before the pointer broke, and re-opening it to say the
+        origin is gone would be the same dropped decision R1-1 fixed.
         """
         for record in records:
             ref = record.get("relay")
             if not isinstance(ref, Mapping):
                 continue
+            # THE WATCHER'S OWN SETTLES (#2673, R1-2/R1-3), read off the stamps
+            # ``store._relay_record`` puts on the base row: a dismissal is the
+            # user's view act, a withdrawal the asker's retraction, and a
+            # dismissal outranks it (§12's order, applied across the pair). They
+            # are LOCAL and view-only — nothing here is written — but they must
+            # survive the origin's status or the card silently re-opens.
+            local_settle = (
+                store.STATUS_DISMISSED
+                if record.get("relay_dismissed_at")
+                else store.STATUS_WITHDRAWN
+                if record.get("relay_withdrawn_at")
+                else ""
+            )
             origin_session = str(ref.get("session_id") or "")
             origin_ask = str(ref.get("ask_id") or "")
             relay: dict[str, Any] = {"session_id": origin_session, "ask_id": origin_ask}
@@ -289,7 +307,7 @@ class AskQueue:
                 relay["origin_gone"] = True
                 relay["origin_status"] = "missing"
                 record["relay"] = relay
-                record["status"] = store.STATUS_EXPIRED
+                record["status"] = local_settle or store.STATUS_EXPIRED
                 continue
             record["questions"] = [
                 dict(question)
@@ -310,8 +328,13 @@ class AskQueue:
             relay["origin_status"] = origin_status
             record["relay"] = relay
             record["status"] = origin_status
-            if record.get("relay_withdrawn_at") and origin_status not in _RELAY_USER_ACT_TERMINALS:
-                record["status"] = store.STATUS_WITHDRAWN
+            if local_settle and origin_status not in _RELAY_USER_ACT_TERMINALS:
+                # A USER ACT ON THE ORIGIN WINS (design §12, across the pair): an
+                # answer, decline, dismissal or late answer there is what
+                # happened to the QUESTION, so the watcher's own closed card must
+                # not hide it. Anything else — the origin merely lapsed, expired
+                # or still open — leaves the local settle standing.
+                record["status"] = local_settle
 
     def records(self, now_ms: int | None = None) -> list[dict[str, Any]]:
         """The folded queue, newest-last, each with its ``delivered`` flag."""
@@ -602,9 +625,7 @@ class AskQueue:
         self.arm()
         return {"ok": True, "text": receipt, "details": details}
 
-    def enqueue_relay(
-        self, relay_ref: str, *, note: str = "", tool_call_id: str = ""
-    ) -> dict[str, Any]:
+    def enqueue_relay(self, relay_ref: str, *, tool_call_id: str = "") -> dict[str, Any]:
         """Record a RELAY of another session's pending ask (#2520).
 
         A relay is a POINTER, not a copy: this session's log gets one
@@ -617,8 +638,9 @@ class AskQueue:
 
         REFUSAL ORDER is the order a model can act on: shape (correctable),
         self (answer it here), unknown (wrong id), chain (follow the one hop),
-        settled (nothing left), secret (a boundary), cap (wait). Each is its own
-        sentence in ``render``; a generic failure teaches nothing and is retried.
+        settled (nothing left), secret (a boundary), held (already relayed from
+        here), cap (wait). Each is its own sentence in ``render``; a generic
+        failure teaches nothing and is retried.
 
         The origin's append is BEST-EFFORT (logged, not fatal): the relay is the
         durable fact and works from this session's log alone, while the surfaced
@@ -663,6 +685,20 @@ class AskQueue:
             # SECURITY, not a preference: a credential may only be typed on the
             # card of the session that asked for it. See ``RELAY_SECRET_ORIGIN``.
             return {"ok": False, "error": render.RELAY_SECRET_ORIGIN}
+        # IDEMPOTENCE (#2673, R1-4): a ref this session already relays would
+        # otherwise be minted twice — two pointers, two cards, two ``relayed``
+        # rows and two surfaced notes for ONE question. The ordinary asks above
+        # refuse a duplicate too; the held row's derived status is read here
+        # (``records`` is the derivation), so a relay the user closed locally
+        # does not block a deliberate re-raise.
+        if any(
+            record.get("relay")
+            and str((record.get("relay") or {}).get("session_id") or "") == origin_session
+            and str((record.get("relay") or {}).get("ask_id") or "") == origin_ask
+            and record["status"] in (store.STATUS_OPEN, store.STATUS_TIMED_OUT)
+            for record in records
+        ):
+            return {"ok": False, "error": render.RELAY_ALREADY_HELD}
         open_relays = [
             record
             for record in records
@@ -674,14 +710,12 @@ class AskQueue:
                 "error": render.RELAY_CAP_REFUSAL.format(cap=policy.RELAY_CAP),
             }
         ask_id = self._mint_ask_id({record["ask_id"] for record in records})
-        text_note = str(note or "").strip()
         event = {
             "v": store.EVENT_SCHEMA,
             "kind": store.EVENT_RELAYED,
             "ask_id": ask_id,
             "at": now,
             "relay": {"session_id": origin_session, "ask_id": origin_ask},
-            "note": text_note,
         }
         if not store.append_event(self.session_dir, event):
             return {
@@ -694,7 +728,6 @@ class AskQueue:
             "ask_id": origin_ask,
             "at": now,
             "by": {"session_id": self._session_id, "ask_id": ask_id},
-            "note": text_note,
         }
         try:
             surfaced_ok = store.append_event(
@@ -717,7 +750,6 @@ class AskQueue:
                 origin_session,
                 origin_ask,
                 reach=self._reach(),
-                note=text_note,
             ),
             "details": {
                 "ask_id": ask_id,
@@ -727,7 +759,6 @@ class AskQueue:
                     "ask_id": origin_ask,
                     "origin_status": origin_status,
                 },
-                "note": text_note,
                 "reach": self._reach(),
             },
         }
@@ -780,6 +811,37 @@ class AskQueue:
         # the origin on the next fold, and the settle note is owed once. The
         # origin's own write already refreshed the origin's index inside
         # ``respond`` -> ``_settled``.
+        self._refresh(self._now())
+        self._kick()
+        return result
+
+    def _relay_decline(self, record: Mapping[str, Any], *, by: str) -> dict[str, Any]:
+        """Route a DECLINE on a relay row to the ORIGIN's log (#2673, R1-1).
+
+        Decline is the other TERMINAL settle, so it takes the same route an
+        answer does: the origin's ``decline`` decides and writes, and nothing is
+        appended here — the relay's status is derived from the origin on every
+        fold, so a local ``declined`` row would be a second winner the origin
+        never learns about (and would re-derive back to ``open``).
+
+        A refusal comes back labelled by ``relay_refused_by_origin`` for the
+        reason :meth:`_relay_respond` gives.
+        """
+        relay = record.get("relay") or {}
+        origin_session = str(relay.get("session_id") or "")
+        origin_ask = str(relay.get("ask_id") or "")
+        origin = AskQueue(
+            None,
+            config_dir=self._config_dir,
+            session_id=origin_session,
+            clock=self._now,
+        )
+        result = origin.decline(origin_ask, by=by)
+        if not result.get("ok"):
+            result["error"] = render.relay_refused_by_origin(
+                origin_session, origin_ask, str(result.get("error") or "")
+            )
+            return result
         self._refresh(self._now())
         self._kick()
         return result
@@ -1312,11 +1374,20 @@ class AskQueue:
         return sorted(self._drafts.get(str(ask_id), {}))
 
     def decline(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """Terminal-on-write: append ``declined`` (today's Esc, made explicit)."""
+        """Terminal-on-write: append ``declined`` (today's Esc, made explicit).
+
+        A RELAY takes the origin's route instead (#2673, R1-1): its status is
+        derived from the ORIGIN's log, so a local ``declined`` row would be
+        silently re-derived away and the user's terminal decision would come
+        back as a still-open card. Before the refusal ladder, for the reason
+        :meth:`respond` gives — every rule on it is stated about the origin.
+        """
         now = self._now()
         record = self._find(ask_id, now)
         if record is None:
             return {"ok": False, "error": render.refusal_copy(None)}
+        if isinstance(record.get("relay"), Mapping):
+            return self._relay_decline(record, by=by)
         refusal = render.refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -1340,6 +1411,14 @@ class AskQueue:
         reconcile :meth:`_settled` schedules delivers that like any other row. The
         refusal comes from :func:`asks.render.dismiss_refusal`, shared with the cold
         door (``asks/dismiss.py``), so a surface cannot tell which one answered it.
+
+        A RELAY'S DISMISSAL IS LOCAL (#2673, R1-2): the dismissal is a view act on
+        this session's card, so the row written here is the whole fact — the
+        fold's relay record applies it (``store._relay_record``) and the
+        derivation keeps it over a merely lapsed origin. The COLD door cannot
+        know the origin lapsed (only the live derivation may read it), so the
+        state it reads after this tap is the same ``dismissed`` row, not a
+        silently re-opened card.
         """
         now = self._now()
         record = self._find(ask_id, now)
