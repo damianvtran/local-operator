@@ -736,6 +736,11 @@ class AwsProvider:
         # episode that only survived because the watchdog revived the server
         # must not look like one whose server never died.
         self._supervisor_watchdog: dict[str, Any] | None = None
+        # Once a recovery was VERIFIED, a later watchdog-only change must not
+        # overwrite that snapshot with a ``verified_none`` observation: the
+        # episode did restart, and the evidence of it is the more important
+        # fact. The flag is per-episode, like the evidence file.
+        self._supervisor_recovery_verified = False
         # The provider's OWN secret values, for the exact-value half of the
         # console scrub (``guest_loss``): console text is the one guest-authored
         # artifact this module persists, and the AWS credentials, the session
@@ -1007,10 +1012,16 @@ class AwsProvider:
                 # episode that needed three revivals must not read like one that
                 # needed none. Between interventions the summary is unchanged,
                 # so a healthy episode writes no extra evidence.
-                watchdog_changed = watchdog != self._supervisor_watchdog
+                # The FIRST read is a silent baseline: it establishes what the
+                # watchdog had done before this action, and writing it would
+                # create a ``recovered: false`` file for an episode that has
+                # nothing to recover from. Only a CHANGE is evidence.
+                watchdog_changed = (
+                    self._supervisor_watchdog is not None and watchdog != self._supervisor_watchdog
+                )
                 self._supervisor_watchdog = watchdog
                 if not records or records[-1]["restart"] == self._supervisor_restart:
-                    if watchdog_changed:
+                    if watchdog_changed and not self._supervisor_recovery_verified:
                         self._write_supervisor_evidence(
                             "guest-supervisor-recovery.json",
                             {
@@ -1061,6 +1072,7 @@ class AwsProvider:
                 # this, the next poll would read the same record as a second
                 # restart and bounce a healthy server in a loop.
                 self._supervisor_restart = verification["latest_restart"]
+                self._supervisor_recovery_verified = True
                 self._write_supervisor_evidence(
                     "guest-supervisor-recovery.json",
                     {
