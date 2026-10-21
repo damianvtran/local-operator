@@ -16998,6 +16998,13 @@ class Session:
                 redact_tool_result=(
                     self._redact_tool_result_text if self._variables is not None else None
                 ),
+                # Tool-call ARGUMENTS take a separate, higher-confidence pass: they
+                # are code the harness executes and the model reads back, so a
+                # name-driven guess must not rewrite them (session 6ccea512c372).
+                # Wired from the same store; None only when there is no store.
+                redact_tool_arguments=(
+                    self._redact_tool_arguments_text if self._variables is not None else None
+                ),
                 # Tool-call outcomes into the shared ledger, so /session can
                 # report this model's tool-call validity. Supplied as a closure
                 # for the same reason redact_tool_result is: the harness has no
@@ -18897,6 +18904,25 @@ class Session:
         # shows nothing after a restart. Mirrors the transient model-switch
         # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
+
+    def _redact_tool_arguments_text(self, text: str) -> str:
+        """``LoopConfig.redact_tool_arguments``. Mask, never register.
+
+        :meth:`VariableStore.redact_arguments` runs the exact-value pass and then
+        the shape pass with a value-level confidence floor. Nothing it matches is
+        promoted to a session redaction: arguments are CODE, the least trustworthy
+        place to decide a value is a credential, and registration is what turned one
+        false positive into a session-wide rewrite (session 6ccea512c372).
+
+        No report is filed either. The incident path for a shape hit is a TOOL
+        RESULT — that is where a credential the session never knew about actually
+        reaches the model — and the result pass reports it with the tool and label.
+        A hit here is masked for containment only.
+        """
+        # The caller wires this only when a store exists (see the LoopConfig site),
+        # so the empty case keeps the loop's fallback to ``redact_tool_result``.
+        assert self._variables is not None
+        return self._variables.redact_arguments(text)
 
     def _redact_tool_result_text(self, text: str) -> str:
         """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.
