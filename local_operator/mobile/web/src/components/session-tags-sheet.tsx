@@ -209,6 +209,17 @@ export function SessionTagsSheet({
 		submit(next, ids);
 	};
 
+	/* ONE PRE-MOUNTED LIVE REGION. A region created already populated is not
+	   announced (the same rule the save-error alert follows below), and one
+	   status node per row would put eight empty regions in the accessibility
+	   tree. This region exists before either state changes, then reports the
+	   loading or saving sentence as it becomes true. */
+	const announced = pending !== null
+		? messageRuntime.t("relay.session.tags.saving")
+		: catalogue === null && !loadError
+			? messageRuntime.t("relay.session.tags.loading")
+			: "";
+
 	return (
 		<Sheet
 			open={open}
@@ -217,6 +228,7 @@ export function SessionTagsSheet({
 			returnFocusRef={returnFocusRef}
 		>
 			<div className="flex flex-col p-2">
+				<p className="sr-only" role="status" aria-live="polite">{announced}</p>
 				{loadError ? (
 					<div className="flex flex-col items-start gap-2 px-2 py-1">
 						<p role="alert" className="text-body-sm text-danger">
@@ -231,7 +243,7 @@ export function SessionTagsSheet({
 						</button>
 					</div>
 				) : catalogue === null ? (
-					<p role="status" aria-live="polite" className="px-2 py-1 text-body-sm text-ink-dim">
+					<p className="px-2 py-1 text-body-sm text-ink-dim">
 						{messageRuntime.t("relay.session.tags.loading")}
 					</p>
 				) : rows.length === 0 ? (
@@ -343,11 +355,7 @@ export function SessionTagsSheet({
 										    56px cell spills left across the 44px radio column; min-w-14 is
 										    a floor and whitespace-nowrap lets the cell take its max-content
 										    width while the flex-1 tag label absorbs the difference. */}
-										<span
-											role={rowPending ? "status" : undefined}
-											aria-live={rowPending ? "polite" : undefined}
-											className="min-w-14 shrink-0 whitespace-nowrap text-right text-meta text-ink-dim"
-										>
+										<span className="min-w-14 shrink-0 whitespace-nowrap text-right text-meta text-ink-dim">
 											{rowPending
 												? messageRuntime.t("relay.session.tags.saving")
 												: ""}

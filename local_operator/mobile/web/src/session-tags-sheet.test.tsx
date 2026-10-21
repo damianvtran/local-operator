@@ -86,7 +86,7 @@ describe("the catalogue's states", () => {
 	it("says it is loading while the registry read is in flight", () => {
 		getTags.mockReturnValue(new Promise(() => {}));
 		renderSheet();
-		expect(screen.getByText("loading…")).toBeTruthy();
+		expect(screen.getAllByText("loading…").length).toBeGreaterThan(0);
 		expect(screen.getAllByRole("status").some((node) =>
 			node.textContent?.includes("loading…"),
 		)).toBe(true);
@@ -188,7 +188,7 @@ describe("assignment writes", () => {
 		renderSheet();
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
-		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
 		expect(screen.getAllByRole("status").some((node) =>
 			node.textContent?.includes("saving…"),
 		)).toBe(true);
@@ -317,7 +317,7 @@ describe("a target change while a write is in flight", () => {
 		const view = render(<SessionTagsSheet {...props()} />);
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
-		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
 
 		await openB(view);
 		/* A's answer lands only now: it must not set B's draft or B's error. */
@@ -352,7 +352,7 @@ describe("a target change while a write is in flight", () => {
 		const view = render(<SessionTagsSheet {...props()} />);
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
-		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
 
 		await openB(view);
 		await act(async () => {
