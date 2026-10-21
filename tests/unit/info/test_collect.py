@@ -383,6 +383,54 @@ def test_a_stored_row_carries_its_own_exit_record(monkeypatch: Any, tmp_path: Pa
     assert row["stop_requested"] is False
 
 
+def test_a_hostile_pressure_reading_does_not_take_the_listing_down(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A corrupt reading refuses the ROW, never the command (review round 3, R3-1).
+
+    ``collect`` reads the record on the listing path, and its own guard covers
+    only ``json.loads``. A 400-digit integer literal therefore escaped the reader
+    through ``math.isfinite`` — which coerces to float — and
+    ``lop sessions --all`` died. The row must read unknown here, and this call
+    must return.
+    """
+    import json
+
+    _stored(monkeypatch, [_StoredRow("dead00000003", "old work", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000003"
+    directory.mkdir(parents=True)
+    (directory / "runtime-exit.json").write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "kind": "runtime-exit",
+                "session_id": "dead00000003",
+                "pid": 4242,
+                "started_at": 900.0,
+                "at": 950.0,
+                "reason": "idle-exit",
+                "detail": "",
+                "requested": False,
+                "build": "",
+                "pressure": {"free_disk_bytes": int("9" * 400), "load_1m": 1e400},
+            }
+        )
+    )
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=1000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stopped_at_s is None
+    assert stored.stop_reason == ""
+    assert stored.stop_requested is None
+
+
 def test_a_stored_row_without_a_record_reports_unknown(monkeypatch: Any, tmp_path: Path) -> None:
     """No exit record is UNKNOWN — a SIGKILLed runtime writes none.
 
