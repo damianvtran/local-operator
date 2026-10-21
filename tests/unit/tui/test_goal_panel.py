@@ -709,6 +709,42 @@ async def test_a_resize_refits_the_card_from_the_dock_without_the_debounce(
             raise AssertionError(f"the card never re-fit: {panel._fit()!r}")
 
 
+@pytest.mark.asyncio
+async def test_a_height_only_resize_refits_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bottom-docked composer MOVES without resizing; the card must follow.
+
+    QA round 1, Q-1: at 100x40 -> 100x12 the dock stays 75x5 and only its `y`
+    changes, so Textual sends ONE `Resize` — before the arrange pass — and no
+    later event exists. A seam that keys on the dock's size therefore cannot
+    see this resize at all.
+
+    The debounce is neutralised so only the arrange-following ground watcher
+    can repair the stale ceiling; on the previous head this failed with the
+    recorded `card bottom is 22 over the composer at 6`.
+    """
+    monkeypatch.setattr(app_module, "RESIZE_REFIT_DELAY_S", 30.0)
+    session = _armed()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _open_card(pilot, app, session)
+        shell = app.query_one("#input-shell")
+        await pilot.resize_terminal(100, 12)
+        for _ in range(100):
+            await pilot.pause()
+            bottom = panel.region.y + panel.region.height
+            assert bottom <= shell.region.y, (
+                "height-only resize: the card bottom is "
+                f"{bottom} over the composer at {shell.region.y}"
+            )
+            if panel.has_class("-squeezed") and app.size == (100, 12):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(f"the card never re-fit: {panel._fit()!r}")
+
+
 async def _adopted(pilot, app: OperatorApp, session: object) -> None:  # noqa: ANN001
     """Wait until the app has ADOPTED ``session``, not merely booted.
 
