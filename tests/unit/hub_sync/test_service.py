@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +14,7 @@ from typing import Any
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.config import ConfigManager
+from local_operator.config import ConfigManager, read_config_values
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
@@ -1650,3 +1652,50 @@ def test_a_roster_merge_keeps_an_override_edited_during_the_merge(env, monkeypat
     assert [m.role for m in after.members] == ["coder", "qa"]
     coder = next(m for m in after.members if m.role == "coder")
     assert coder.tier == "hi", "the edit made inside the merge window must survive the write"
+
+
+def test_a_refresh_cannot_clobber_a_concurrent_config_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh reads AND assigns under the config write lock (review B2).
+
+    ``set_config_value`` holds ``config_write_lock`` across its read-merge-write
+    AND its ``self.config = candidate``. A refresh that parses the file outside
+    that lock and assigns inside it can publish the OLDER snapshot after a
+    concurrent writer published the newer one, leaving the process behind disk for
+    any config key -- the class of bug the refresh exists to remove.
+
+    The probe opens the assign-side gap on purpose (the read happens first, then
+    the assignment is delayed): the writer must not be able to complete inside
+    it. Without the lock the writer lands in the gap and the delayed assignment
+    resurrects the old value; with it the writer waits for the refresh.
+    """
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("theme", "light")
+    ctx = svc.HubSyncContext(
+        config_dir=tmp_path, config_manager=manager, client_for_tenant=lambda _tenant: None
+    )
+    entered = threading.Event()
+
+    def delayed_assign(self: ConfigManager) -> None:
+        fresh = self._load_config()
+        if not entered.is_set():
+            # Only the refresh thread stalls: the writer's own reload (inside
+            # ``set_config_value``) must stay fast, or it would outlast the gap
+            # and the race this test is about could not be observed at all.
+            entered.set()
+            time.sleep(0.5)
+        self.config = fresh
+
+    monkeypatch.setattr(ConfigManager, "reload", delayed_assign)
+
+    refresher = threading.Thread(target=svc._refresh_config, args=(ctx,), daemon=True)
+    refresher.start()
+    assert entered.wait(5.0), "the refresh never started"
+    manager.set_config_value("theme", "dark")
+    refresher.join(10.0)
+
+    assert not refresher.is_alive()
+    assert manager.get_config_value("theme") == "dark", "memory fell behind a newer write"
+    assert (read_config_values(tmp_path) or {})["theme"] == "dark"
