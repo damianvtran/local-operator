@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,10 @@ from lop_osworld_v2_adapter.guest_disk import CommandResult
 from lop_osworld_v2_adapter.providers import aws as aws_mod
 from lop_osworld_v2_adapter.providers.aws import GuestExecutionError
 
+from tests.unit.evaluation.adapters.osworld.test_aws_provider import (
+    CREDS,
+    REGION,
+)
 from tests.unit.evaluation.adapters.osworld.test_guest_loss import (
     _closed_port,
     _CountingTransport,
@@ -95,7 +100,13 @@ def test_diagnostics_transport_failure_is_recorded_without_exception_text(tmp_pa
 
     record = guest_loss.capture_guest_health(Ec2(), "i-synthetic", tmp_path, broken)
     assert record["guest_probe"] == "error"
-    assert record["cause"] == "instance running; guest unreachable"
+    # A bare RuntimeError is not evidence the guest was unreachable: the request
+    # may have been delivered. "unreachable" is reserved for a connect-class
+    # verdict, which this exception cannot produce.
+    assert record["cause"] == (
+        "instance running; guest probe outcome unknown (the request may have been delivered)"
+    )
+    assert "unreachable" not in record["cause"]
     assert "private task data" not in (tmp_path / "guest-health-execute.json").read_text()
 
 
@@ -163,6 +174,66 @@ async def test_real_execute_retains_delivery_outcome_and_records_instance_loss(
         assert provider._cache_root is not None
         record = json.loads((provider._cache_root / "guest-health-execute.json").read_text())
         assert record["instance_state"] == "terminated"
+
+
+@pytest.mark.asyncio
+async def test_the_health_evidence_names_the_answer_not_an_unreachable_guest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A REAL 503 listener answers both the readiness probes and the health POST.
+
+    This is the branch whose cause reaches the terminal message and
+    ``guest-health-execute.json``. It used to write "instance running; guest
+    unreachable" for EVERY non-ok probe -- including this one -- and the message
+    test could not catch it because its EC2 stub had no ``describe_instances``,
+    so the capture failed before the clause was built. Here the stub answers the
+    instance read and the server answers with a status, so the clause is
+    actually rendered and the assertion can fail.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(503)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(503)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path)
+            provider._supervisor_unit = "action-server.service"
+            real_clients = aws_mod.build_clients(CREDS, REGION)
+            provider._clients.http_get = real_clients.http_get
+            provider._clients.http_post_json = real_clients.http_post_json
+            ec2 = _NoConsoleEc2()
+            ec2.describe_instances = Ec2("running").describe_instances  # type: ignore[attr-defined]
+            provider._clients.ec2 = ec2
+            with pytest.raises(GuestExecutionError) as raised:
+                await provider.execute(["first()"])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    message = str(raised.value)
+    assert "guest probe answered, not ready (status=503)" in message, message
+    assert "unreachable" not in message, message
+    assert provider._cache_root is not None
+    record = json.loads((provider._cache_root / "guest-health-execute.json").read_text())
+    assert record["instance_state"] == "running"
+    assert record["guest_probe"] == "error", "the probe branch must actually run"
+    assert record["cause"] == "instance running; guest probe answered, not ready (status=503)"
+    assert "unreachable" not in record["cause"]
 
 
 @pytest.mark.parametrize(

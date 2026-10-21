@@ -1169,22 +1169,48 @@ async def test_the_refusal_message_claims_no_cause_it_cannot_know(
     ambiguous probe or a failed restart verification, so naming an unreachable
     control server would be false in every case that gets here -- and a false
     cause in a terminal message is exactly what sent an earlier investigation to
-    the wrong layer. A genuinely unreachable path takes the ATTEMPT branch
-    instead (``test_a_pre_action_path_failure_attempts_the_action_instead_of_dying``),
-    so neither branch may claim more than was observed.
+    the wrong layer.
+
+    The health clause is rendered HERE, not swallowed: the EC2 stub answers
+    ``describe_instances`` (``_NoConsoleEc2`` does not, which is how the false
+    wording stayed green) and the guest POST answers 503, so the branch that
+    builds ``guest down: <cause>`` actually runs.
     """
 
-    posted: list[str] = []
+    action_posts: list[str] = []
+    response = requests.Response()
+    response.status_code = 503
+    refusal = requests.HTTPError("guest answered 503", response=response)
+
+    class _RunningEc2(_NoConsoleEc2):
+        def describe_instances(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": kwargs["InstanceIds"][0],
+                                "State": {"Name": "running"},
+                            }
+                        ]
+                    }
+                ]
+            }
 
     def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-        posted.append(url)
-        return {"returncode": 0, "output": "", "error": ""}
+        try:
+            decoded = base64.b64decode("".join(payload["command"][3:])).decode("utf-8")
+        except Exception:
+            decoded = ""
+        if decoded:
+            action_posts.append(decoded)
+        raise refusal
 
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path, post=post)
         provider._supervisor_unit = "action-server.service"
         provider._clients.http_get = lambda url, timeout: 503
-        provider._clients.ec2 = _NoConsoleEc2()
+        provider._clients.ec2 = _RunningEc2()
         with pytest.raises(GuestExecutionError) as raised:
             await provider.execute(["first()"])
 
@@ -1196,9 +1222,15 @@ async def test_the_refusal_message_claims_no_cause_it_cannot_know(
     assert "connection could not be established" not in message
     assert "connection refused" not in message
     assert "supervisor recovery budget exhausted" in message
-    assert "guest down" in message
-    assert posted == [], "a reachable-but-unhealthy server must not receive the action"
+    # The health clause is the branch this test exists to keep honest.
+    assert "guest probe answered, not ready (status=503)" in message, message
+    assert action_posts == [], "a reachable-but-unhealthy server must not receive the action"
     assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    assert provider._cache_root is not None
+    record = json.loads((provider._cache_root / "guest-health-execute.json").read_text())
+    assert record["instance_state"] == "running"
+    assert record["guest_probe"] == "error", "the probe branch must actually run"
+    assert record["cause"] == ("instance running; guest probe answered, not ready (status=503)")
 
 
 @pytest.mark.asyncio

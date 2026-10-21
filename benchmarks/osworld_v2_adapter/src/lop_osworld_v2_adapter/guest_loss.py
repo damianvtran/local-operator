@@ -659,6 +659,33 @@ _HEALTH_FIELDS = frozenset(
 )
 
 
+def _guest_probe_cause(outcome: tuple[str, Any], *, origin: str | None) -> str:
+    """Name what the HEALTH PROBE observed, never what was assumed about it.
+
+    The probe is an ordinary command POST through the same transport as an
+    action, so its failures are distinguishable: the server ANSWERED (a non-200
+    status, or a command failure it reported itself), it never connected
+    (connect-class), or the outcome is unknown (a lost response, a shared
+    deadline expiring with the request possibly delivered). "guest unreachable"
+    used to be written for all of them -- including a 503 answer -- and it is
+    the label a post-mortem acts on, so ``unreachable`` is reserved for the
+    connect-class verdict and every other branch says only what it saw.
+    """
+
+    state, value = outcome
+    if state == "timeout":
+        return "guest probe did not answer within the deadline"
+    if state != "error":
+        return "guest probe answered, not ready"
+    status = getattr(getattr(value, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return f"guest probe answered, not ready (status={status})"
+    verdict = classify_transport_failure(value, origin=origin)
+    if verdict.delivery == DELIVERY_NOT_SENT:
+        return f"guest probe unreachable ({verdict.kind or 'connect_failed'})"
+    return "guest probe outcome unknown (the request may have been delivered)"
+
+
 def capture_guest_health(
     ec2: Any,
     instance_id: str,
@@ -666,14 +693,21 @@ def capture_guest_health(
     run_command: Callable[..., Any],
     *,
     budget_s: float = 4.0,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     """Capture one bounded, read-only health snapshot after failed readiness.
 
     The command uses the existing guest transport, not an invented SSH or SSM
-    credential. A dead action server therefore yields ``guest-unreachable``;
-    that is not evidence that the VM died or that a restart is possible. AWS
-    state and each probe status survive separately so missing permissions or a
-    broken diagnostics channel never replace the original execution failure.
+    credential. Its OUTCOME is named, not assumed: an answered 503 is recorded
+    as an answer with its status, and only a connect-class verdict is called
+    ``unreachable`` (see ``_guest_probe_cause``) -- the cause is the line a
+    post-mortem reads before choosing a layer to investigate. AWS state and each
+    probe status survive separately so missing permissions or a broken
+    diagnostics channel never replace the original execution failure.
+
+    ``origin`` is the guest's ``scheme://host:port``; without it the classifier
+    cannot vouch for a connect-phase failure and the cause says the outcome is
+    unknown rather than claiming unreachability.
     """
     record: dict[str, Any] = {"schema_version": 1, "cause": "readiness check failed"}
     try:
@@ -721,10 +755,17 @@ def capture_guest_health(
                     remaining,
                 )["guest"]
                 record["guest_probe"] = probe[0]
-                record["cause"] = "instance running; guest unreachable"
+                if probe[0] != "ok":
+                    record["cause"] = (
+                        f"instance running; {_guest_probe_cause(probe, origin=origin)}"
+                    )
                 if probe[0] == "ok" and probe[1].returncode != 0:
                     record["guest_probe"] = "command_failed"
+                    record["cause"] = "instance running; guest probe answered, command failed"
                 if probe[0] == "ok" and probe[1].returncode == 0:
+                    # Answered but not yet understood: the parse below may fail,
+                    # and the cause must still say the server ANSWERED.
+                    record["cause"] = "instance running; guest probe answered"
                     data = json.loads(probe[1].stdout)
                     # No arbitrary guest strings are persisted, even on malformed output.
                     counters = {
