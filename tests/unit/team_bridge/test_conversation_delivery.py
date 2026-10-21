@@ -35,10 +35,7 @@ from local_operator.team_bridge.connector.conversation import (
 from local_operator.team_bridge.events import plan_feed_refs
 from local_operator.team_bridge.screening import ScreenResult
 from local_operator.team_bridge.store import OwnerReceipt, Store
-from local_operator.team_bridge.types import (
-    OwnerSnapshot,
-    project_events_batch,
-)
+from local_operator.team_bridge.types import OwnerSnapshot, project_events_batch
 
 CONVERSATION_ID = "bcv_abcdefgh"
 MESSAGE_ID = "bcmsg_abcdef01"
