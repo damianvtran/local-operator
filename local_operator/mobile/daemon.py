@@ -5916,7 +5916,7 @@ def build_app(daemon: MobileDaemon):
         relay's half of ``POST /v1/desktop/sessions/{session_id}/transfer``:
         same body (``{to, keep?, wait_s?, request_id?}``, ``to`` a device id or
         ``"local"``), same receipt (``phases``, ``locality``, ``owner_device``,
-        ``source_retired``, ``session_id``, ``new_session_id``, ``mode``,
+        ``state``, ``source_retired``, ``session_id``, ``new_session_id``, ``mode``,
         ``replayed``), and — where the two planes differ — this plane's
         vocabulary: refusals carry the move's own sentence in ``error`` and its
         machine ``code`` beside it, which is what ``web/src/api.ts`` reads, and

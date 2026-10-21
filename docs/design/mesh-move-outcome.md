@@ -84,10 +84,16 @@ answering, and an offload to a peer that does not answer, both **refuse**:
 nothing was changed. The refusal does not come from a timeout dressed as
 progress: the requester reports it as soon as it knows.
 
-The TUI additionally **checks the target before it leaves** the session it is in.
-The old order (leave, then ask) meant an unreachable recall put the user back on
-the same remote conversation with a notice that was easy to miss — the reported
-experience. A move never leaves until the first step has been accepted.
+The TUI additionally **checks the target before it leaves** the session it is in,
+and it does **not** leave for a target KNOWN to be unreachable — the reported
+experience, where the leave happened first and the unreachable notice arrived over
+a conversation the user had already been put back on. That check is a PRE-CHECK,
+not an acceptance: acceptance belongs to the CLI's own first step (the move's
+`prepared` answer), and a peer that answers the pre-check and then refuses the
+move — `busy`, `viewed_elsewhere`, `relay_unavailable` — is handled by the failure
+path, which reopens the conversation where it still lives and says so. What this
+clause rules out is leaving for a target the device already knows cannot take it;
+it does not claim the TUI never leaves before acceptance.
 
 ### Clause 3: interruption is survivable
 
@@ -130,7 +136,10 @@ moving rather than merely existing.
 * `lop sessions move` prints "Moved …" only for `completed`; a queued receipt
   prints "Queued … nothing has moved yet" with the cancel verb.
 * The TUI's initial line says the request is being made, not that the move has
-  started, and only `completed` reopens the session at its new home.
+  started, and only `completed` reopens the session at its new home. Its pre-check
+  keeps it from LEAVING for a target known to be unreachable; a target that
+  answers and then refuses is handled by the move's refusal path, which reopens
+  the conversation where it lives (acceptance itself is the CLI's first step).
 * `TransferReceipt` (desktop/phone) gains `state`; `source_retired` is true only
   for a completed move, so no surface can say "the copy here is gone" about a
   queued one.

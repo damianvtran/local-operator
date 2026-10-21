@@ -98,6 +98,56 @@ def _own_session_with_wake_and_cwd(server: Any, cwd: str, *, session_id: str = S
     return directory
 
 
+def _own_session_with_wake_index_cwd(server: Any, cwd: str, *, session_id: str = SESSION) -> Path:
+    """A session with a wake INDEX cwd and NO ``desktop.json`` — a TUI-created one.
+
+    This is the shape the owner reported: the transcript carries the wake schedule
+    (so the destination's rebuild has an index to write), the index this device's
+    supervisor reads names the working directory, and the session has no marker of
+    its own for the copy set to carry.
+    """
+    from local_operator.wakes import store as wake_store
+
+    directory = _owned_session(server, session_id)
+    with directory.joinpath("transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(_custom_entry("wake_schedules", {"schedules": [_WAKE_ROW]}) + "\n")
+    wake_store.write_entry(Path(server.root), session_id, cwd=cwd, schedules=[dict(_WAKE_ROW)])
+    assert not (directory / "desktop.json").exists(), "this cell needs a marker-less session"
+    return directory
+
+
+def _losing_ready_ask(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """Let the owner REALLY commit, then lose its answer — a lost reply, not a refusal.
+
+    ``LinkTransport.ask`` raises ``Moved('unreachable')`` when the reply never
+    arrives (a timeout, a peer that died mid-answer). The deterministic spelling is
+    to deliver the frame to the real transport first — so the source takes its
+    directory out of the store and writes its tombstone, exactly as it does in the
+    field — and then raise the timeout's own exception once.
+    """
+    real_ask = mobility.LinkTransport.ask
+    state = {"lost": False}
+
+    def losing_ask(self: Any, frame: dict[str, Any], *, timeout: float | None = None):
+        if str(frame.get("phase") or "") == "ready" and not state["lost"]:
+            real_ask(self, frame, timeout=timeout)
+            state["lost"] = True
+            raise mobility.Moved("unreachable", "the reply was lost after the commit")
+        return real_ask(self, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", losing_ask)
+    return state
+
+
+def _holders(root_a: Path, root_b: Path, session_id: str) -> list[Path]:
+    """Every device holding a TRANSCRIPT for ``session_id`` — INV-1's own count."""
+    return [
+        root / "sessions" / session_id
+        for root in (root_a, root_b)
+        if (root / "sessions" / session_id / "transcript.jsonl").is_file()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 1 — completed means verified, and exactly one holder
 # ---------------------------------------------------------------------------
@@ -147,7 +197,9 @@ def test_a_source_that_cannot_hand_the_directory_away_refuses_and_changes_nothin
     monkeypatch.setattr(
         cleanup_mod,
         "hand_off_session_dir",
-        lambda target, **kwargs: False,  # the directory is still there
+        lambda target, **kwargs: cleanup_mod.HandOffOutcome(
+            False, "the store guard refused: patched by the test"
+        ),
     )
 
     refused = _move(server_b, SESSION, monkeypatch=monkeypatch)
@@ -155,6 +207,8 @@ def test_a_source_that_cannot_hand_the_directory_away_refuses_and_changes_nothin
     assert refused["ok"] is False, refused
     assert refused["code"] == "cleanup_refused", refused
     assert refused["changed"] is False, refused
+    # THE CAUSE IS IN THE SENTENCE (QA round 1, Q-4), not only in the relay log.
+    assert "the store guard refused: patched by the test" in refused["message"], refused
     # NOTHING MOVED: no tombstone, the source's directory and transcript intact.
     assert SESSION not in read_tombstones(server_a.root)
     assert source.is_dir()
@@ -235,8 +289,8 @@ def test_a_committed_source_whose_owner_still_lists_it_is_not_a_success(
 def test_a_queued_receipt_is_in_progress_not_completed() -> None:
     from local_operator import cli
 
-    from_block = {"device_id": "d_here", "name": "here"}
-    to_block = {"device_id": "d_peer", "name": "pixel-8"}
+    from_block = mobility.MoveDevice(device_id="d_here", name="here")
+    to_block = mobility.MoveDevice(device_id="d_peer", name="pixel-8")
     queued = mobility._queued_receipt(
         SESSION, {"phase": "queued"}, keep=False, from_block=from_block, to_block=to_block
     )
@@ -264,7 +318,11 @@ def test_a_queued_receipt_is_in_progress_not_completed() -> None:
     in_flight["phase"] = "handing_off"
     in_flight_lines = cli._sessions_move_words(in_flight, session_id=SESSION, to="pixel-8")
     assert not any("Moved" in line for line in in_flight_lines), in_flight_lines
-    assert "nothing has moved yet" in in_flight_lines[0], in_flight_lines
+    # NOT A QUEUED MOVE EITHER (QA round 1, Q-3): no queue block means no queue, and
+    # the sentence names the step it is actually at.
+    assert "still in progress" in in_flight_lines[0], in_flight_lines
+    assert "nothing has landed yet" in in_flight_lines[0], in_flight_lines
+    assert "Queued" not in " ".join(in_flight_lines), in_flight_lines
 
     # AND THE DESKTOP/PHONE PLANE AGREES: a queued receipt never retires the source,
     # and the model accepts the shape it produces (the brief was "no surface can say
@@ -398,3 +456,229 @@ def test_offload_to_a_dead_peer_fails_and_changes_nothing(
     assert SESSION not in read_tombstones(server_a.root)
     assert read_handoff_journal(server_a.root) == {}
     assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+# ---------------------------------------------------------------------------
+# 8 — a lost reply is not a refusal: the verified copy survives
+# ---------------------------------------------------------------------------
+
+
+def test_a_lost_ready_reply_keeps_the_verified_copy_and_reports_unconfirmed(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1-2 / QA Q-1: a lost ``ready`` reply must not delete the only copy.
+
+    With the new commit order the owner takes its directory out of the store and
+    deletes the quarantine BEFORE it answers, so a reply that never arrives is not a
+    refusal: the source has already committed. The old branch treated any ``Moved``
+    as a refusal, cleared the destination's entry and swept the verified staging —
+    zero copies, reported as ``changed: false``. This cell drives the owner's real
+    commit and then loses the answer, which is the deterministic spelling of a
+    timeout.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    staging = sync.staging_dir(server_b.root, SESSION)
+
+    state = _losing_ready_ask(monkeypatch)
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert state["lost"] is True, "the ready frame never reached the owner"
+    assert result["ok"] is False, result
+    assert result["code"] == "unconfirmed", result
+    # A FAILED MOVE THAT CHANGED EVERYTHING IS STILL ``changed: True``: a caller must
+    # not retry as though nothing had happened.
+    assert result["changed"] is True, result
+    assert result["phase_reached"] == "handing_off", result
+    # THE SENTENCE NAMES WHERE THE ONLY COPY IS and says not to retry blindly.
+    assert str(staging) in result["message"], result
+    assert "Do not retry as though nothing happened" in result["message"], result
+
+    # THE SOURCE REALLY COMMITTED: out of the store, tombstoned to this device.
+    assert not source.exists()
+    assert read_tombstones(server_a.root)[SESSION]["device_id"] == server_b.identity.device_id
+    assert read_handoff_journal(server_a.root) == {}
+    # ... and NOTHING live holds the transcript at this instant: the staging copy is
+    # the only one left, which is exactly why it must not be swept.
+    assert _holders(server_a.root, server_b.root, SESSION) == []
+    # THE DESTINATION KEPT IT, and kept the journal entry that describes it.
+    assert (staging / "ready.json").is_file()
+    entry = read_handoff_journal(server_b.root)[SESSION]
+    assert entry["role"] == "destination", entry
+    assert entry["phase"] == "handing-off", entry
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+    # THE RECOVERY THE SENTENCE PROMISES: a later relay reconciles this device
+    # against the owner's own record, and the verified copy is adopted.
+    report = mobility.reconcile(server_b.root, server=server_b, own_instance="restarted-instance-b")
+    assert [row["action"] for row in report] == ["promoted"], report
+    assert _holders(server_a.root, server_b.root, SESSION) == [server_b.root / "sessions" / SESSION]
+    assert _transcript(server_b.root, SESSION) == before
+    assert read_handoff_journal(server_b.root) == {}
+    assert not (server_b.root / "sessions" / SESSION / "ready.json").exists()
+    assert not staging.exists()
+
+
+def test_the_tombstone_path_checks_the_contradiction_before_promoting(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1-5: the contradiction check must run BEFORE the promote.
+
+    The startup path adopts from the owner's tombstone — the owner's own statement
+    that the id left — so an owner that still answers ``owner: true`` is
+    contradicting the record being acted on. Checking after the promote minted the
+    second live copy this refusal reports, and cleared the entry for a handoff that
+    had not finished. Here nothing is promoted, the staging and the entry survive,
+    and the refusal says which phase it stopped at.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    staging = sync.staging_dir(server_b.root, SESSION)
+    _losing_ready_ask(monkeypatch)
+    assert _move(server_b, SESSION, monkeypatch=monkeypatch)["code"] == "unconfirmed"
+
+    real_ask = mobility.LinkTransport.ask
+
+    def owner_still_lists(self: Any, frame: dict[str, Any], *, timeout: float | None = None):
+        if str(frame.get("phase") or "") == "status":
+            return {
+                "result": "state",
+                "owner": True,
+                "busy": False,
+                "archived": False,
+                "pending": None,
+                "queue": None,
+                "session_id": SESSION,
+            }
+        return real_ask(self, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", owner_still_lists)
+
+    result, refusal, _target = mobility._finish_from_tombstone(
+        server_b, SESSION, owner_device=server_a.identity.device_id
+    )
+
+    assert result is None, result
+    assert refusal is not None, "the contradiction was not reported"
+    assert refusal["code"] == "duplicate", refusal
+    assert refusal["phase_reached"] == "handing_off", refusal
+    assert refusal["changed"] is True, refusal
+    # NOTHING WAS PROMOTED, and both artefacts of the unfinished handoff survive.
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    assert (staging / "ready.json").is_file()
+    assert read_handoff_journal(server_b.root)[SESSION]["role"] == "destination"
+
+    # THE NORMAL TOMBSTONE PATH STILL PROMOTES the same copy once the owner answers
+    # its own record, and leaves exactly one holder holding the same bytes.
+    monkeypatch.setattr(mobility.LinkTransport, "ask", real_ask)
+    report = mobility.reconcile(server_b.root, server=server_b, own_instance="restarted-instance-b")
+    assert [row["action"] for row in report] == ["promoted"], report
+    assert _holders(server_a.root, server_b.root, SESSION) == [server_b.root / "sessions" / SESSION]
+    assert _transcript(server_b.root, SESSION) == before
+
+
+# ---------------------------------------------------------------------------
+# 9 — the cwd a marker-less session has nowhere else to record
+# ---------------------------------------------------------------------------
+
+
+def test_a_marker_less_session_carries_the_cwd_its_wake_index_records(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's clause 4: a TUI-created session has no ``desktop.json``.
+
+    Its cwd lives in this device's wake index, which the destination cannot see and
+    the copy set does not carry. Without the prepare's additive ``cwd`` the moved
+    conversation opened at the session directory — a path that exists everywhere and
+    means nothing.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    remote_cwd = f"/home/ec2-user/lop-wake-{uuid.uuid4().hex[:8]}"
+    _own_session_with_wake_index_cwd(server_a, remote_cwd)
+    before = _transcript(server_a.root, SESSION)
+    # THE MAPPING'S FIRST STEP, made available: the same trailing component under
+    # this user's home (the isolated HOME every unit test runs with).
+    mapped = Path(os.path.expanduser("~")) / Path(remote_cwd).name
+    mapped.mkdir(parents=True, exist_ok=True)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert result["state"] == "completed", result
+    landed = server_b.root / "sessions" / SESSION
+    # THE MARKER IS INVENTED FROM THE SOURCE'S RECORD, at the mapped local path.
+    marker = json.loads((landed / "desktop.json").read_text(encoding="utf-8"))
+    assert marker["cwd"] == str(mapped), marker
+    # ... and the index the supervisor reads agrees with it, because the marker was
+    # written before the rebuild.
+    index = json.loads((server_b.root / "wakes" / f"{SESSION}.json").read_text(encoding="utf-8"))
+    assert index["cwd"] == str(mapped), index
+    # THE CONVERSATION IS UNTOUCHED: a cwd is host state, not transcript content.
+    assert _transcript(server_b.root, SESSION) == before
+    assert (result.get("carry") or {}).get("cwd") == {"from": remote_cwd, "to": str(mapped)}, result
+
+
+def test_a_move_with_no_known_cwd_invents_no_marker(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is known, so nothing is written — and the move still completes."""
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert result["state"] == "completed", result
+    landed = server_b.root / "sessions" / SESSION
+    assert not (landed / "desktop.json").exists(), "a marker was invented for an unknown cwd"
+    assert "cwd" not in (result.get("carry") or {}), result
+    assert _transcript(server_b.root, SESSION) == before
+    assert not source.exists()
+
+
+def test_an_explicit_refusal_after_the_copy_still_rolls_the_staging_back(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the lost-reply branch: a real refusal is still a refusal.
+
+    An owner that ANSWERS ``ready`` with a refusal has not committed — it still holds
+    its directory — so the destination must sweep its verified staging and release the
+    id, exactly as before. Keeping the bytes here would leave a copy that describes a
+    handoff nobody will make, and a retry would resume against a plan the source has
+    already abandoned.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    staging = sync.staging_dir(server_b.root, SESSION)
+    real_ask = mobility.LinkTransport.ask
+
+    def refusing_ask(self: Any, frame: dict[str, Any], *, timeout: float | None = None):
+        if str(frame.get("phase") or "") == "ready":
+            # NOT DELEGATED: the owner never commits, it refuses the commit.
+            raise mobility.Moved("busy", "another front end is attached to this conversation")
+        return real_ask(self, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", refusing_ask)
+
+    refused = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert refused["ok"] is False, refused
+    assert refused["code"] == "busy", refused
+    assert refused["changed"] is False, refused
+    # THE SOURCE IS UNTOUCHED, because it never committed.
+    assert source.is_dir()
+    assert _transcript(server_a.root, SESSION) == before
+    assert SESSION not in read_tombstones(server_a.root)
+    # ... AND THE DESTINATION ROLLED BACK, which is what a retry relies on.
+    assert not staging.exists()
+    assert read_handoff_journal(server_b.root) == {}
+    assert _holders(server_a.root, server_b.root, SESSION) == [source]

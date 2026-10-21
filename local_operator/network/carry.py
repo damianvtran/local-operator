@@ -222,7 +222,9 @@ def _write_marker(marker: Path, document: Mapping[str, Any]) -> None:
     os.replace(temporary, marker)
 
 
-def rewrite_host_cwd(target: Path, session_id: str, *, config_dir: Path) -> dict[str, str]:
+def rewrite_host_cwd(
+    target: Path, session_id: str, *, config_dir: Path, source_cwd: str = ""
+) -> dict[str, str]:
     """Map a moved session's recorded cwd onto a path that exists on THIS host.
 
     WHY AT THE PROMOTE, before :func:`rebuild_indexes` reads it: the wake and monitor
@@ -241,38 +243,60 @@ def rewrite_host_cwd(target: Path, session_id: str, *, config_dir: Path) -> dict
     lives beside the rest of the carry policy and a future writer has the root it
     needs — this function reads only the session's own marker.
 
+    ``source_cwd`` IS THE MARKER-LESS CASE (the owner's report, clause 4): a session
+    the TUI created may carry no ``desktop.json`` at all, so the source sends the cwd
+    it knows on the wire instead (``_source_prepare``'s additive key, carried in
+    ``ready.json``). When the marker is absent, unreadable or empty, that value is
+    the recorded one — mapped by the SAME three steps and then WRITTEN as this
+    host's ``desktop.json`` (0600, atomic), so the marker, the rebuilt wake index and
+    the monitor index all carry one path. A marker that already records a cwd wins,
+    and no ``source_cwd`` at all leaves the session exactly as before.
+
     Returns ``{"from": old, "to": new}`` when it rewrote, ``{}`` when it did not,
-    which is what the receipt's ``carry.cwd`` reports. Never raises: a promote of
+    which is what the receipt's ``carry.cwd`` reports. Creating the marker from
+    ``source_cwd`` counts as a rewrite even when the mapped path equals the recorded
+    one: the file did not exist before and does now. Never raises: a promote of
     verified bytes must not fail over a mapping it could not compute (the marker's
     reader tolerates the old value; the index self-heals on the next open).
     """
     marker_path = Path(target) / DESKTOP_MARKER_NAME
+    marker: dict[str, Any] = {}
     try:
-        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        loaded = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    if not isinstance(marker, dict):
-        return {}
+        loaded = None
+    if isinstance(loaded, dict):
+        marker = loaded
     recorded = marker.get("cwd")
-    if not isinstance(recorded, str) or not recorded.strip():
+    recorded_value = recorded if isinstance(recorded, str) and recorded.strip() else ""
+    # True when this session never recorded a cwd of its own — the case the
+    # ``source_cwd`` parameter exists for. No marker at all is the same statement.
+    from_source = not recorded_value
+    if from_source:
+        recorded_value = source_cwd if source_cwd.strip() else ""
+    if not recorded_value:
         return {}
-    if not os.path.isabs(recorded) or os.path.exists(recorded):
-        return {}
+    if not from_source:
+        # AN EXISTING VALUE IS ONLY REWRITTEN WHEN IT DOES NOT FIT HERE: a relative
+        # path was resolved by its writer, and one that exists is already usable.
+        if not os.path.isabs(recorded_value) or os.path.exists(recorded_value):
+            return {}
     home = os.path.expanduser("~")
-    mapped = ""
-    same_basename = os.path.join(home, os.path.basename(recorded))
-    if os.path.exists(same_basename):
-        mapped = same_basename
-    else:
-        tail = _home_relative_tail(recorded)
-        if tail and os.path.exists(os.path.join(home, tail)):
-            mapped = os.path.join(home, tail)
+    mapped = recorded_value
+    if os.path.isabs(recorded_value) and not os.path.exists(recorded_value):
+        same_basename = os.path.join(home, os.path.basename(recorded_value))
+        if os.path.exists(same_basename):
+            mapped = same_basename
         else:
-            # THE FALLBACK THAT ALWAYS SUCCEEDS: home exists wherever a runtime does,
-            # and a session opened at home is usable — a path that does not exist is
-            # not. Nothing records that the mapping gave up beyond the receipt's two
-            # paths.
-            mapped = home
+            tail = _home_relative_tail(recorded_value)
+            if tail and os.path.exists(os.path.join(home, tail)):
+                mapped = os.path.join(home, tail)
+            else:
+                # THE FALLBACK THAT ALWAYS SUCCEEDS: home exists wherever a runtime
+                # does, and a session opened at home is usable — a path that does not
+                # exist is not. Nothing records that the mapping gave up beyond the
+                # receipt's two paths.
+                mapped = home
     try:
         marker["cwd"] = mapped
         _write_marker(marker_path, marker)
@@ -283,10 +307,10 @@ def rewrite_host_cwd(target: Path, session_id: str, *, config_dir: Path) -> dict
         "carry: rewrote %s's cwd for this host (%s): %s -> %s",
         session_id,
         config_dir,
-        recorded,
+        recorded_value,
         mapped,
     )
-    return {"from": recorded, "to": mapped}
+    return {"from": recorded_value, "to": mapped}
 
 
 def _monitor_index_rows(specs: list[Any]) -> list[dict[str, Any]]:
