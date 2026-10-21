@@ -782,3 +782,113 @@ def test_a_receipt_that_does_not_cover_the_run_falls_back(tmp_path: Path, alive:
 
     assert _verdict(tmp_path, sid) == "fire"
     assert rescue.read_signal_receipt(tmp_path, sid) is not None
+
+
+# --- G. the exit record (a policy departure is not a death) ------------------
+
+
+def _exit_record(
+    root: Path,
+    session_id: str,
+    *,
+    pid: int,
+    started_at: float,
+    reason: str,
+    requested: bool = False,
+) -> None:
+    """A schema-valid ``runtime-exit.json`` for the run the pass will classify."""
+    _session_dir(root, session_id).joinpath("runtime-exit.json").write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "kind": "runtime-exit",
+                "session_id": session_id,
+                "pid": pid,
+                "started_at": started_at,
+                "at": started_at + 4000.0,
+                "reason": reason,
+                "detail": "",
+                "requested": requested,
+                "build": "0.84.4@abc1234",
+                "pressure": {"free_disk_bytes": None, "load_1m": None},
+            }
+        )
+    )
+
+
+def _dead_with_disposed(tmp_path: Path, alive: set[int], sid: str) -> None:
+    """The strongest FIRE control: a completed ``error/disposed`` row, no lever.
+
+    Used deliberately as the baseline for every exit-record cell below, because
+    the rung must be what changes the verdict — not a softer death class that
+    would have refused anyway.
+    """
+    _one_dead(tmp_path, alive, session_id=sid)
+    _completions(tmp_path, [(f"session/{sid}", "error", "disposed", "the session was disposed")])
+
+
+def test_an_idle_exit_record_explains_the_death(tmp_path: Path, alive: set[int]) -> None:
+    """A policy departure is a completed exit, not a loss to re-engage.
+
+    BEFORE THIS RUNG every idle exit was invisible to the pass: the runtime left,
+    wrote no stop marker and no receipt, so its death read exactly like a
+    SIGKILL's. Re-engaging it would fight the residency policy that ended it —
+    every idle session on the machine would come back seconds after it left.
+    """
+    sid = "999900001111"
+    _dead_with_disposed(tmp_path, alive, sid)
+    _exit_record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, reason="idle-exit")
+
+    report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+    decision = next(d for d in report.decisions if d.session_id == sid)
+    assert decision.verdict == rescue.SKIP
+    assert decision.tag == "exit-record:idle-exit"
+    assert report.fire() == []
+    assert report.to_engage == []
+
+
+def test_a_retirement_record_explains_the_death(tmp_path: Path, alive: set[int]) -> None:
+    """A build retirement is the other policy reason, and it is named in the tag."""
+    sid = "999900002222"
+    _dead_with_disposed(tmp_path, alive, sid)
+    reason = "retiring for 0.85.0@abc1234"
+    _exit_record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, reason=reason)
+
+    report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+    decision = next(d for d in report.decisions if d.session_id == sid)
+    assert decision.verdict == rescue.SKIP
+    assert decision.tag == f"exit-record:{reason}"
+    assert report.fire() == []
+
+
+def test_a_record_from_an_earlier_run_does_not_explain_this_death(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """The same run-key rule the stop marker uses: a resume resets the record.
+
+    A session that idled out, was resumed, and then died involuntarily leaves a
+    ``runtime-exit.json`` naming the PREVIOUS run. Reading it as this death's
+    explanation would hide a crash behind an old clean exit.
+    """
+    sid = "999900003333"
+    _dead_with_disposed(tmp_path, alive, sid)
+    _exit_record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED - 5000.0, reason="idle-exit")
+
+    assert _verdict(tmp_path, sid) == "fire"
+
+
+def test_a_requested_record_is_not_this_rung(tmp_path: Path, alive: set[int]) -> None:
+    """``requested`` True is the stop marker's business, not this rung's.
+
+    The rung exists for departures NOBODY asked for. A record claiming a request
+    with no marker behind it is partial evidence, and the ladder's existing
+    answer — FIRE for an unattributed ``error/disposed`` — is the conservative
+    one where the evidence disagrees.
+    """
+    sid = "999900004444"
+    _dead_with_disposed(tmp_path, alive, sid)
+    _exit_record(
+        tmp_path, sid, pid=DEAD_PID, started_at=STARTED, reason="idle-exit", requested=True
+    )
+
+    assert _verdict(tmp_path, sid) == "fire"

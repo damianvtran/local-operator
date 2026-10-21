@@ -1235,7 +1235,9 @@ def _should_exit(handle: object, runtime: object) -> bool:
     return True
 
 
-async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-exit") -> None:
+async def _clean_exit(
+    handle: object, runtime: object, *, reason: str = "idle-exit", detail: str = ""
+) -> None:
     """Dispose the quiescent session, then unpublish its owner record.
 
     The reaper reaches this only after ordinary gate timeouts and all resumed
@@ -1249,10 +1251,28 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
     exiting runtime logged nothing about itself and no exit record survived
     (design §1.6/§5.3).
 
+    ``detail`` is the human sentence the calling path already computed — "no
+    work, no viewer, no wake within 90s", the retirement's why-now, the signal
+    that drained to the end of its turn. It is PASSED IN rather than re-derived
+    here because the caller is the only place that knows it, and a second
+    derivation in this module would be a second vocabulary for the same fact.
+    It is durable now (``journal.write_exit_record``) as well as logged, which is
+    what answers "when did it stop, and was it asked to" after the process is
+    gone: the boot record's withdrawal can only say the exit ordering ran, not
+    why it ran (2026-10-21 idle-exit left a session indistinguishable from a
+    crash).
+
     The turn journal is told the same fact before the boot record is withdrawn,
     and in that order: a row left OPEN by a runtime that leaves anyway is the
     evidence a successor reads, and withdrawing the boot record first would
     strip the half that says which build the row's pid was running.
+
+    THE EXIT RECORD IS WRITTEN BEFORE THE DISPOSE, not after it. Dispose is the
+    step that can take minutes (it awaits every viewer's writer), so a runtime
+    killed during it would otherwise leave a surviving boot record and nothing
+    saying it was already on its way out — the exact ambiguity this record
+    exists to remove. It is best-effort and never raises, like every instrument
+    here.
     """
     boot = getattr(runtime, "_boot_build", None)
     logger.info(
@@ -1262,6 +1282,7 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
         boot.label() if boot is not None else "<unknown>",
     )
     _note_journal_exit(handle, reason)
+    _note_exit_record(handle, runtime, reason=reason, detail=detail)
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -1477,6 +1498,78 @@ def _note_journal_exit(handle: object, cause: str) -> None:
     note = getattr(writer, "note_exit", None)
     if callable(note):
         note(cause)
+
+
+def _note_exit_record(handle: object, runtime: object, *, reason: str, detail: str) -> None:
+    """Write this run's durable exit record. Best-effort, never raises.
+
+    THE SAME SHAPE AS ``_note_journal_exit``, one rung stronger: the journal is
+    the statement about the TURN, this is the statement about the PROCESS, and
+    it is the one that answers the question a ``stored`` row raises — when did it
+    stop, and did anybody ask. ``journal.write_exit_record`` owns the artifact,
+    its staging and its schema; this function only collects the four facts the
+    runtime itself holds and refuses to write a record it cannot qualify.
+
+    NO IDENTITY, NO RECORD. An in-process session, a reduced test handle, or a
+    runtime whose transcript has no directory has no conversation to report
+    about, and inventing one would put a stop row on a session that never had a
+    runtime. That guard is also what keeps the 40 ms exit-path timing tests
+    untouched: they run against handles with no ``_session`` at all.
+
+    ``requested`` IS READ HERE rather than in the writer, because only this
+    process holds the run key (its own pid and its record's start), and the
+    marker's coverage rule is a session-plane rule this module already lives on
+    the far side of. A marker naming a PREVIOUS run of the same session must not
+    brand this departure as the user's own act — the wrong-verdict hole QA round
+    1 found in the attribution path.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        session = getattr(handle, "_session", None)
+        directory = getattr(getattr(session, "_transcript", None), "directory", None)
+        record = getattr(runtime, "_record", None)
+        session_id = str(
+            getattr(session, "session_id", "") or getattr(record, "session_id", "") or ""
+        )
+        if not session_id or directory is None:
+            return
+        started_raw = getattr(record, "started_at", 0.0)
+        started_at = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+        boot = getattr(runtime, "_boot_build", None)
+        journal.write_exit_record(
+            session_id,
+            conversation_dir=Path(directory),
+            started_at=started_at,
+            reason=reason,
+            detail=detail,
+            requested=_deliberate_stop_covers(Path(directory), started_at),
+            build=boot.label() if boot is not None else "",
+        )
+    except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
+        logger.debug("session runtime: could not write its exit record", exc_info=True)
+
+
+def _deliberate_stop_covers(directory: Path, started_at: float) -> bool:
+    """Whether a durable stop marker attests to THIS run of this session.
+
+    The coverage RULE is ``attention._stop_marker_covers_run``'s, imported
+    lazily rather than restated: it is the rule that decides whether a stop
+    marker may narrate a death as deliberate, and a second copy here is free to
+    drift into the wrong-verdict direction. The carrier is a plain namespace
+    because that function reads exactly ``pid`` and ``started_at``.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.attention import _stop_marker_covers_run
+    from local_operator.session.runtime import registry
+
+    marker = registry.read_stop_marker(directory)
+    if marker is None:
+        return False
+    return _stop_marker_covers_run(
+        marker, directory, SimpleNamespace(pid=os.getpid(), started_at=started_at)
+    )
 
 
 def _clear_boot_record() -> None:
@@ -1753,6 +1846,11 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         # THE REASON NAMES THE TERM THAT ACTUALLY HELD; see ``_idle_exit_reason``.
         reason = _idle_exit_reason()
+        # THE SENTENCE THE EXIT PATH ALREADY COMPUTES, hoisted to a name so the
+        # log line and the durable exit record cannot drift: the record carries
+        # what the runtime SAID, not a re-rendering of the reason token (agent's
+        # rule — pass the detail in, never re-derive it in a reader).
+        detail = f"no work, no viewer, no wake within {WARM_WINDOW_S:.0f}s"
         # WHAT WAS MEASURED, not what was allowed (review round 1, F4). On the
         # ordinary path the two agree — the drain ran its window to the end — so
         # this prints the window. On a preemption (the LRU gave the slot up) the
@@ -1770,7 +1868,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             WARM_WINDOW_S,
             reason,
         )
-        await _clean_exit(handle, runtime, reason=reason)
+        await _clean_exit(handle, runtime, reason=reason, detail=detail)
         stop.set()  # amain's wait() returns; exit code stays 0
         return True
 
@@ -2085,7 +2183,17 @@ async def _refresh_for(
         # promise is what gets withdrawn instead. Its own docstring says why this leg
         # takes the total-duration form rather than the heartbeat's.
         exit_task = asyncio.ensure_future(
-            _clean_exit(handle, runtime, reason="retiring for " + newer.label())
+            _clean_exit(
+                handle,
+                runtime,
+                reason="retiring for " + newer.label(),
+                # THE WHY-NOW, composed once here from the pair this path is
+                # acting on (``_build_pair``) and carried into the durable
+                # record: a retirement that says only "retiring for 0.85.0"
+                # leaves the reader unable to tell a moved install from a
+                # deleted tree, and this path knew which at the latch.
+                detail=_build_pair(boot, newer),
+            )
         )
         try:
             await _await_live_window(exit_task, handle, bound, heartbeated=False)
@@ -3600,7 +3708,11 @@ async def _drain_for(
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
     await _hand_wakes_to_successor(handle)
-    await _clean_exit(handle, runtime, reason=drain.reason)
+    # THE EXIT'S OWN WHY-NOW, re-read at the exit rather than replayed from the
+    # latch: ``_drain_detail_at_exit`` is already this path's answer, and the
+    # durable record now carries it so a later reader does not have to find the
+    # log line to learn why the build handover happened.
+    await _clean_exit(handle, runtime, reason=drain.reason, detail=_drain_detail_at_exit(drain))
     stop.set()  # amain's wait() returns; exit code stays 0
     return True
 
@@ -5425,6 +5537,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # direct-dispose triggers (a signal, or the graceful ``stop`` op).
         boot = getattr(runtime, "_boot_build", None)
         receipt_line = ""
+        # ``described`` is read by the exit record below, so it is bound on BOTH
+        # arms — an unbound name here would raise on the exit path of every
+        # runtime that exited without a signal receipt, which is most of them.
+        described = ""
         if routing.receipts and routing.receipts[-1]:
             from local_operator.session.runtime import signal_receipt as _receipt
 
@@ -5442,6 +5558,21 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # about itself (a signal name, the socket stop, "unknown") is the one
         # fact a successor cannot reconstruct from a corpse.
         _note_journal_exit(handle, trigger.get("why") or "unknown")
+        # THE DURABLE HALF OF THE SAME FACT, and it has to be written on THIS
+        # path too: a SIGTERM or the socket ``stop`` op converges on ``stop``
+        # without ever entering ``_clean_exit`` (the reaper's clean ordering is
+        # skipped as already-run), so without this line the two most common
+        # deliberate departures would leave no exit record at all — silently
+        # narrower than the contract that every planned exit is recorded.
+        # ``reason`` is the trigger's own token (``SIGTERM``/``SIGINT``/
+        # ``socket-stop``); ``detail`` is the receipt's sentence, which is the
+        # only human explanation this path computed.
+        _note_exit_record(
+            handle,
+            runtime,
+            reason=trigger.get("why") or "unknown",
+            detail=described,
+        )
         try:
             handle._deny_pending_gates()
         except Exception:  # noqa: BLE001 — shutdown must proceed
