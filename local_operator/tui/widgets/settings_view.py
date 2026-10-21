@@ -318,10 +318,16 @@ def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style")
     from local_operator.i18n.text import tr
 
     scope_token = tr("tui.authoring")(author_keys.scope_conversation())
-    suffix = f" · {scope_token}"
-    if not facts.endswith(suffix) or cell_len(facts) <= room:
+    # THE TOKEN IS LIFTED FROM WHEREVER IT SITS (round 2, D1): a configured role
+    # renders `role · proactive · this conversation · <model> · effort high`, so
+    # the scope fact is NOT last and a suffix-only test left exactly the rows
+    # with model/effort pins clipped. Parts are ` · `-delimited by construction in
+    # ``agent_listing_rows``; removing the token's own part keeps the rest of the
+    # line byte-identical to what the caller assembled.
+    parts = facts.split(" · ")
+    if scope_token not in parts or cell_len(facts) <= room:
         return [_paint_facts(facts, room, muted=muted, faint=faint)]
-    head = facts[: -len(suffix)]
+    head = " · ".join(part for part in parts if part != scope_token)
     return [
         _paint_facts(head, room, muted=muted, faint=faint),
         [(f"    {truncate_cells(scope_token, room)}", muted)],

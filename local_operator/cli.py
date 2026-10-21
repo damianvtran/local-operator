@@ -1393,23 +1393,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     # THE ROLE-DEFINITION GATE'S OPT-OUT (LOH-9 S2). A conversation with session
     # roles refuses a move by default because v1 does not carry them; this flag is
-    # the explicit "move it anyway, leave the definitions here" — never silent,
-    # because the move's receipt states the count that stayed.
-    # THE HELP IS ENGLISH ONLY, AND THAT IS A DISCLOSED GAP — not a category this
-    # flag joins. ``cli.sessions_help`` is carried by fr alone: a new English key
-    # there may not be added to the coverage allowance for es/hi/ru/vi (the
-    # shrink-only gate refuses new English in an active locale), and a partial
-    # catalogue fails check.py's key-parity pass. Admitting one means translating
-    # the whole namespace for four locales, which this slice does not do. The
-    # flag's refusal and its receipt still state a consequence, so the gap is in
-    # the help text alone.
-    # i18n: ignore operator CLI help — `cli.sessions_help` is fr-only, the allowance may
-    # not grow for es/hi/ru/vi and a partial catalogue is rejected (LOH-9 S2 PR discloses it)
-    move_parser.add_argument(
-        "--drop-session-roles",
-        action="store_true",
-        help="Move anyway, leaving this conversation's roles behind (v1 does not carry them).",
-    )
+    # the explicit "move it anyway, stash the definitions on this device" — never
+    # silent, because the move's receipt and its refusal name the count and path.
+    #
+    # NO `help=` STRING, DELIBERATELY. Every key in ``cli.sessions_help`` is
+    # already recorded as missing for four ACTIVE locales (es/hi/ru/vi); a new
+    # English key would GROW that coverage allowance, which the shrink-only gate
+    # forbids, and translating the 48-key namespace for four locales is a review
+    # wave of its own. The flag is still listed by argparse and its consequences
+    # are stated by the refusal and the receipt, so the gap is the one-line
+    # description only (disclosed in the LOH-9 S2 PR).
+    move_parser.add_argument("--drop-session-roles", action="store_true")
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
@@ -6482,6 +6476,9 @@ def _sessions_move_words(
         # pre-safe-point reading).
         queue = result["queue"]
         phase = str(result.get("phase") or queue.get("phase") or "queued")
+        # A queued DROP still owes the user its stash promise (QA round 2): the
+        # same carry line the finished move prints, from the record-backed carry.
+        stay_lines = _carry_lines(result)
         to_block_q = result.get("to_device") or {}
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
@@ -6500,11 +6497,12 @@ def _sessions_move_words(
         head = f"Queued a move of {session_id} to {target}"
         head += f" — {note}." if note else "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device."]
+            return [head, "It is no longer running on this device.", *stay_lines]
         if shape == "running":
             return [
                 head,
                 f"It can no longer be cancelled; the conversation continues on {target}.",
+                *stay_lines,
             ]
         return [
             head,
@@ -6512,6 +6510,7 @@ def _sessions_move_words(
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
             f"`lop sessions move --cancel-queued {session_id}`.",
+            *stay_lines,
         ]
 
     to_block = result.get("to_device") or {}

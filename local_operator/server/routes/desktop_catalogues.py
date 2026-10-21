@@ -852,11 +852,20 @@ async def entities(
 
                 # The team rows bypass ``team_catalogue`` here, so the additive
                 # scope fact has to be added in this assembly too (LOH-9 S2).
-                rows = [
-                    item.model_dump(mode="json")
-                    | {"value": item.name, "scope": row_scope(registry, item)}
-                    for item in registry.list_teams()
-                ]
+                # AND they dedupe like the agent path (QA round 2): a session
+                # team racing an account team of the same name is ONE row, and
+                # the composite lists the session one first — the row in force.
+                seen_teams: set[str] = set()
+                rows = []
+                for item in registry.list_teams():
+                    key = str(getattr(item, "name", "") or "").strip().casefold()
+                    if key in seen_teams:
+                        continue
+                    seen_teams.add(key)
+                    rows.append(
+                        item.model_dump(mode="json")
+                        | {"value": item.name, "scope": row_scope(registry, item)}
+                    )
                 if name:
                     current = dataclasses.asdict(
                         resolve_org(name, teams=registry, agents=remote.agent_registry)

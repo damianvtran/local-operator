@@ -113,6 +113,37 @@ def scope_store(registry: Any, scope: Scope) -> Any:
     )
 
 
+def tool_write_scope(registry: Any, requested: "Scope | None") -> Scope:
+    """The store a TOOL write lands in when the caller named none.
+
+    A host WITH a conversation store defaults to ``session`` (design §3.4: the
+    agent-authored default is ephemeral). A host WITHOUT one — an embedder, a
+    bare ``--agent`` run, a test rig with a plain global registry — keeps the
+    behaviour it had before this slice: the omission writes the ACCOUNT store,
+    because there is no conversation scope to default into. That is not a
+    silent downgrade of a request; nothing was requested. An EXPLICIT
+    ``scope='session'`` on such a host is still refused by :func:`scope_store`.
+    """
+    if requested is not None:
+        return requested
+    return "session" if getattr(registry, "session_registry", None) is not None else "global"
+
+
+def needs_durable_consent(registry: Any, requested: "Scope | None") -> bool:
+    """Whether this tool call must ask the host before it mutates the account.
+
+    Two cases, both model-initiated account writes: an EXPLICIT ``scope='global'``
+    on any host, and any write that lands on an account row of a SCOPED host
+    (create defaulting global cannot happen there, but update/delete of an
+    existing account row can). A host with NO conversation store has no seam and
+    no alternative store — its tool writes are the pre-S2 behaviour and are not
+    gated, or every role-management tool on an embedder would become read-only.
+    """
+    if requested is not None:
+        return True
+    return getattr(registry, "session_registry", None) is not None
+
+
 #: How long a role/team write waits for the cross-store lock before refusing.
 #: A create checks the OTHER store and then writes, so the two steps must be one
 #: critical section; a holder that dies or blocks forever must not freeze the

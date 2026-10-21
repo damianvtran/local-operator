@@ -445,14 +445,16 @@ async def _op_write(
     from local_operator.profile_scope import (
         durable_write_decision,
         durable_write_refusal,
+        needs_durable_consent,
         row_scope,
         scope_store,
         scope_words,
         shadow_in_other_store,
         shadow_refusal,
+        tool_write_scope,
     )
 
-    scope = params.scope or "session"
+    scope = tool_write_scope(registry, params.scope)
     # THE COLLISION RUNS BEFORE THE CONSENT ASK (agent review round 1, M1): a
     # create over an account name must answer "that name exists", not ask for an
     # account write the model cannot authorize. Case-folded and ALIAS-aware (the
@@ -494,7 +496,7 @@ async def _op_write(
             "use op='update' to change it.",
         )
     authorized_by: str | None = None
-    if context is not None and target == "global":
+    if context is not None and target == "global" and needs_durable_consent(registry, params.scope):
         intent = DurableWriteIntent(
             kind="team", operation="update" if not creating else "create", name=name
         )
@@ -643,7 +645,11 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     # own confirmation. A plain registry (no scopes) reads as global, so a
     # headless tool cannot delete one either.
     target = row_scope(registry, team)
-    if target != "session":
+    # A host with NO conversation store keeps pre-S2 behaviour: its plain
+    # registry IS the account, and team deletion was a working tool there. The
+    # account-row refusal only protects a SCOPED host, where the row the user
+    # saved for every conversation is not the model's to remove.
+    if target != "session" and getattr(registry, "session_registry", None) is not None:
         return _error(
             tool_call_id,
             "team_delete",

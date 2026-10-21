@@ -936,13 +936,17 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
 
 
 async def _op_install(
-    context: ToolContext | None, tool_call_id: str, name: str, *, scope: Scope
+    context: ToolContext | None, tool_call_id: str, name: str, *, scope: Scope | None
 ) -> ToolResult:
     registry = _registry(context)
     if registry is None:
         return _error(
             tool_call_id, "agent", "no agent registry attached to this session; cannot install."
         )
+    requested = scope
+    from local_operator.profile_scope import needs_durable_consent, tool_write_scope
+
+    scope = tool_write_scope(registry, requested)
     if load_seed(name) is None:
         return _error(
             tool_call_id,
@@ -951,9 +955,11 @@ async def _op_install(
             f"starters: {', '.join(list_seeds())}",
         )
     # THE CALLER'S SCOPE, NEVER SILENTLY DOWNGRADED (agent review round 1, M2).
-    # The default (no scope) is the conversation; an explicit 'global' is a
-    # model-initiated account write and needs the same consent as any other.
-    if scope == "global" and context is not None:
+    # On a scoped host the default (no scope) is the conversation; an explicit
+    # 'global' is a model-initiated account write and needs the same consent as
+    # any other. A host with NO conversation store keeps pre-S2 behaviour: its
+    # omitted-scope install lands in the account store without a consent ask.
+    if scope == "global" and context is not None and needs_durable_consent(registry, requested):
         from local_operator.profile_scope import (
             durable_write_decision,
             durable_write_refusal,
@@ -1022,7 +1028,7 @@ async def _op_install(
 
 
 async def _op_reset(
-    context: ToolContext | None, tool_call_id: str, name: str, *, scope: Scope
+    context: ToolContext | None, tool_call_id: str, name: str, *, scope: Scope | None
 ) -> ToolResult:
     """Restore a packaged seed over an installed role, echoing what it replaced.
 
@@ -1042,6 +1048,10 @@ async def _op_reset(
         return _error(
             tool_call_id, "agent", "no agent registry attached to this session; cannot reset."
         )
+    requested = scope
+    from local_operator.profile_scope import needs_durable_consent, tool_write_scope
+
+    scope = tool_write_scope(registry, requested)
     seed = load_seed(name)
     if seed is None:
         # A role with no packaged counterpart has nothing to be restored TO, so
@@ -1111,7 +1121,7 @@ async def _op_reset(
     )
 
     target: Scope = row_scope(registry, existing) if existing is not None else scope
-    if context is not None and target == "global":
+    if context is not None and target == "global" and needs_durable_consent(registry, requested):
         # RESET IS A WRITE, not a read (routing note from the manager): a model
         # reset of an account row is account mutation and needs the same consent.
         intent = DurableWriteIntent(kind="agent", operation="reset", name=seed.name)
@@ -1284,14 +1294,32 @@ async def _op_sync(
     )
 
     def _global_updates() -> list[str]:
+        """Account rows the apply would rewrite, classified PER ROW.
+
+        The dry verdicts are keyed by seed NAME, and on a composite
+        ``get_agent_by_name`` resolves the session row first — so a session row
+        shadowing an account row of the same seed made an account rewrite look
+        conversation-local (review round 2, MAJOR). Walk the actual rows the
+        apply will touch (``is_role`` + a seed origin), classify EACH, and gate
+        on any row that lives in the account.
+        """
+        from local_operator.agent_profiles import is_role, seed_origin
+
         dry = sync_installed_seeds(registry, names=names, force=False, apply=False)
+        outdated = {
+            str(verdict.name).strip().lower()
+            for verdict in dry
+            if verdict.verdict == "outdated-clean"
+        }
         found: list[str] = []
-        for verdict in dry:
-            if verdict.verdict != "outdated-clean":
+        for row in registry.list_agents():
+            if not is_role(row):
                 continue
-            row = registry.get_agent_by_name(verdict.name)
-            if row is not None and row_scope(registry, row) == "global":
-                found.append(verdict.name)
+            origin = seed_origin(row)
+            if origin is None or str(origin).strip().lower() not in outdated:
+                continue
+            if row_scope(registry, row) == "global":
+                found.append(str(getattr(row, "name", "") or origin))
         return found
 
     global_updates = await asyncio.to_thread(_global_updates)
@@ -1301,7 +1329,11 @@ async def _op_sync(
     # config dir present it would write account rows. The refusal is OUTRIGHT
     # only when a seed update would rewrite an account row; otherwise an
     # unconsented run proceeds with the session arm and SKIPS the hub arm.
-    needs_consent = bool(global_updates) or config_dir is not None
+    # A host with NO conversation store keeps pre-S2 behaviour here too: its
+    # sync wrote account rows before this slice, and there is no session store
+    # for the gate to protect.
+    scoped_host = getattr(registry, "session_registry", None) is not None
+    needs_consent = bool(global_updates) or (config_dir is not None and scoped_host)
     if needs_consent and context is not None:
         intent = DurableWriteIntent(
             kind="agent",
@@ -1388,6 +1420,7 @@ def write_profile(
     authorized_by: str | None = None,
     expected_definition_revision: str | None = None,
     context: ToolContext | None = None,
+    consent_checked: bool = False,
 ) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
@@ -1406,6 +1439,11 @@ def write_profile(
     name.
 
     ``authorized_by`` is the host consent seam's AUDIT origin, not authority.
+    ``consent_checked`` is the tool layer saying it has ALREADY run the decision
+    for this write: either it holds an origin, or the host has no conversation
+    store and this global create is its pre-S2 behaviour. Every user adapter
+    leaves it False and passes no context, so the re-check below only ever fires
+    for a caller that skipped the ask.
     The async ask happens in the tool layer (this function is sync and runs in a
     worker); this is where the rule is ENFORCED, because it is the one place the
     target's owner is known under the write lock. A tool-issued write (any call
@@ -1697,7 +1735,7 @@ def write_profile(
     # goes to the row's owner. The export layer and the TUI both rely on this
     # being the same answer the composite's update uses.
     target: str = row_scope(registry, existing) if existing is not None else scope
-    if context is not None and target == "global" and not authorized_by:
+    if context is not None and target == "global" and not authorized_by and not consent_checked:
         # THE TOOL-ISSUED ACCOUNT WRITE. Applies to update AND create: a create
         # only lands global when the caller passed scope='global', which the
         # tool layer has already asked the user about; an update lands global
@@ -1758,9 +1796,11 @@ async def _op_write(
     from local_operator.profile_scope import (
         durable_write_decision,
         durable_write_refusal,
+        needs_durable_consent,
         row_scope,
         shadow_in_other_store,
         shadow_refusal,
+        tool_write_scope,
     )
 
     registry = _registry(context)
@@ -1769,7 +1809,7 @@ async def _op_write(
             tool_call_id, "agent", "no agent registry attached to this session; cannot save roles."
         )
     name = (params.name or "").strip()
-    scope = params.scope or "session"
+    scope = tool_write_scope(registry, params.scope)
     try:
         existing = registry.get_agent_by_name(name)
     except Exception:  # noqa: BLE001 — an unreadable owner is treated as the account
@@ -1797,7 +1837,7 @@ async def _op_write(
     # and cannot act on.
     writable_here = existing is None or is_role(existing) or is_specialist(existing)
     authorized_by: str | None = None
-    if target == "global" and writable_here:
+    if target == "global" and writable_here and needs_durable_consent(registry, params.scope):
         # THE ASK HAPPENS HERE, before any mutation, and only where the target is
         # known. ``write_profile`` re-checks the RESULT of this answer under the
         # write lock, so a row that changed owner between the two calls cannot
@@ -1816,6 +1856,10 @@ async def _op_write(
             scope=scope,  # type: ignore[arg-type]
             authorized_by=authorized_by,
             context=context,
+            # The tool layer already ran the decision: it either got an origin or
+            # the host has no conversation store, where an omitted scope is the
+            # pre-S2 account write the seam must not turn into a refusal.
+            consent_checked=not needs_durable_consent(registry, params.scope),
         )
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
@@ -1959,13 +2003,9 @@ async def execute_agent(
     if params.op == "search":
         return await _op_search(context, tool_call_id, str(params.query))
     if params.op == "install":
-        return await _op_install(
-            context, tool_call_id, str(params.name), scope=params.scope or "session"
-        )
+        return await _op_install(context, tool_call_id, str(params.name), scope=params.scope)
     if params.op == "reset":
-        return await _op_reset(
-            context, tool_call_id, str(params.name), scope=params.scope or "session"
-        )
+        return await _op_reset(context, tool_call_id, str(params.name), scope=params.scope)
     if params.op == "delete":
         return await _op_delete(context, tool_call_id, str(params.name))
     if params.op == "sync":

@@ -670,7 +670,21 @@ class _QueuedFake:
         queue: bool = False,
         drop_session_roles: bool = False,
     ) -> dict[str, Any]:
-        self.calls.append({"session_id": session_id, "to": to, "keep": keep, "queue": queue})
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "to": to,
+                "keep": keep,
+                "queue": queue,
+                "drop_session_roles": drop_session_roles,
+            }
+        )
+        notice = (
+            "1 session role/team definition stayed on laptop at "
+            "/tmp/config/dropped-session-roles/other1 — a mesh move does not "
+            "carry them in this version"
+        )
+        carry = {"session_roles": 1, "session_roles_notice": notice} if drop_session_roles else {}
         return {
             "ok": True,
             "session_id": session_id,
@@ -689,7 +703,11 @@ class _QueuedFake:
                 "code": "",
                 "request_id": "cli-rq-1",
                 "updated_at": 0.0,
+                "drop_session_roles": drop_session_roles,
+                "session_roles": 1 if drop_session_roles else 0,
+                "session_roles_notice": notice if drop_session_roles else "",
             },
+            **({"carry": carry} if carry else {}),
         }
 
 
@@ -718,7 +736,13 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
             if any("Queued a move" in n for n in _notices(app)):
                 break
         assert fake.calls == [
-            {"session_id": "other1", "to": "pixel-8", "keep": False, "queue": True}
+            {
+                "session_id": "other1",
+                "to": "pixel-8",
+                "keep": False,
+                "queue": True,
+                "drop_session_roles": False,
+            }
         ]
         shown = " ".join(_notices(app))
         assert "Queued a move of other1 to pixel-8 — waiting for a safe point." in shown, shown
@@ -741,6 +765,30 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
         assert reopened == []
         # No phase row: a queued move has walked no move phase yet.
         assert not any(n.startswith("moving other1") for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_drop_move_reports_the_stash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M4/QA round 2: a queued DROP receipts its stash, like the run will.
+
+    The flag travels on the call, and the receipt prints the carry line the run
+    will honour — a queued drop that said nothing left the user with no
+    statement about definitions they are about to lose from this conversation.
+    """
+    fake = _QueuedFake()
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move other1 --to pixel-8 --queue --drop-session-roles")
+        for _ in range(30):
+            await pilot.pause()
+            if any("Queued a move" in n for n in _notices(app)):
+                break
+        assert fake.calls[0]["drop_session_roles"] is True, fake.calls
+        shown = " ".join(_notices(app))
+        assert "dropped-session-roles/other1" in shown, shown
+        assert "stayed on laptop" in shown, shown
 
 
 @pytest.mark.asyncio
@@ -776,7 +824,13 @@ async def test_a_queued_move_stands_the_live_turn_guard_down(
         # from under this viewer) — the guard stood down, the leave did not.
         assert order == ["leave"], order
         assert fake.calls == [
-            {"session_id": "sess1", "to": "pixel-8", "keep": False, "queue": True}
+            {
+                "session_id": "sess1",
+                "to": "pixel-8",
+                "keep": False,
+                "queue": True,
+                "drop_session_roles": False,
+            }
         ]
         assert not any("a turn is still running" in n for n in _notices(app)), _notices(app)
 
@@ -809,7 +863,13 @@ async def test_a_queued_move_stands_the_sidebar_hold_guard_down(
             if fake.calls:
                 break
         assert fake.calls == [
-            {"session_id": "held1", "to": "pixel-8", "keep": False, "queue": True}
+            {
+                "session_id": "held1",
+                "to": "pixel-8",
+                "keep": False,
+                "queue": True,
+                "drop_session_roles": False,
+            }
         ]
         assert any("Queued a move of held1" in n for n in _notices(app)), _notices(app)
 

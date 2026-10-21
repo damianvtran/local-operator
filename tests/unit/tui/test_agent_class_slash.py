@@ -450,3 +450,20 @@ def test_the_scope_token_takes_a_second_facts_row_when_it_cannot_fit() -> None:
     assert "".join(part for part, _style in narrow[0]) == "    specialist · proactive"
     assert ("proactive", muted) in narrow[0], "the class marker must survive"
     assert narrow[1] == [("    this conversation", muted)], "the token is whole and muted"
+
+    # THE REAL CONFIGURED-ROLE STRING (round 2, D1): `agent_listing_rows` puts
+    # model/effort facts AFTER the scope token, so the token is mid-string. A
+    # suffix-only lift left this — the commonest populated role — clipped.
+    # 52 cells: the full line is 68, and the head WITHOUT the token is 47 plus
+    # the 4-cell indent — so this pins the lift, not a truncation (at the pane's
+    # 27 the head itself must truncate, which is correct and is the case above).
+    configured = _paint_facts_lines(
+        "role · proactive · this conversation · claude-opus-5 · effort high",
+        52,
+        muted=muted,
+        faint=faint,
+    )
+    assert len(configured) == 2
+    assert "this conversation" not in "".join(part for part, _style in configured[0])
+    assert "effort high" in "".join(part for part, _style in configured[0])
+    assert configured[1] == [("    this conversation", muted)]

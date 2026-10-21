@@ -409,6 +409,15 @@ def payload(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "code": str(record.get("code") or ""),
         "request_id": str(record.get("request_id") or ""),
         "updated_at": float(record.get("updated_at") or 0.0),
+        # LOH-9 S2 (QA round 2): a queued DROP must be legible from the record —
+        # the flag decides what the resume does with the role definitions, and a
+        # reader that only saw ``phase`` could not tell a carry from a drop. The
+        # count and notice are stamped by the source when the queue is written
+        # and refreshed by the resume, so a receipt can print the same promise
+        # the run will honour.
+        "drop_session_roles": bool(record.get("drop_session_roles") or False),
+        "session_roles": int(record.get("session_roles") or 0),
+        "session_roles_notice": str(record.get("session_roles_notice") or ""),
     }
 
 

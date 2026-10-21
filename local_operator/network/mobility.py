@@ -1283,6 +1283,7 @@ def _queued_receipt(
     keep: bool,
     from_block: MoveDevice,
     to_block: MoveDevice,
+    root: str | Path | None = None,
 ) -> SessionMoveResult:
     """A queued accept as a receipt — SUCCESS, carrying the queue's own phase.
 
@@ -1301,20 +1302,41 @@ def _queued_receipt(
         if isinstance(history, list) and history
         else [{"phase": "queued", "at": time.time()}]
     )
-    return cast(
-        SessionMoveResult,
-        {
-            "ok": True,
-            "session_id": session_id,
-            "new_session_id": session_id,
-            "mode": "keep" if keep else "move",
-            "from_device": from_block,
-            "to_device": to_block,
-            "phase": phase,
-            "phases": stamps,
-            "queue": queue,
-        },
-    )
+    result: dict[str, Any] = {
+        "ok": True,
+        "session_id": session_id,
+        "new_session_id": session_id,
+        "mode": "keep" if keep else "move",
+        "from_device": from_block,
+        "to_device": to_block,
+        "phase": phase,
+        "phases": stamps,
+        "queue": queue,
+    }
+    # THE QUEUED DROP PROMISES ITS STASH UP FRONT (QA round 2). The record knows
+    # the flag; the source still holds the definitions, so the receipt can name
+    # the path the run will move them to and the count it will move. Without
+    # this, a queued drop said nothing about the definitions until (or unless)
+    # the resume ran.
+    if bool(queue.get("drop_session_roles") or False) and root is not None:
+        try:
+            names = _session_role_definitions(root, session_id)
+        except _SessionRolesUnreadable:
+            names = []
+        notice = str(queue.get("session_roles_notice") or "").strip()
+        if not notice and names:
+            notice = _session_roles_notice(
+                len(names),
+                device_name=str(from_block.get("name") or "this device"),
+                stash=session_roles_stash_path(root, session_id),
+                kept=False,
+            )
+        if notice:
+            result["carry"] = {
+                "session_roles": len(names),
+                "session_roles_notice": notice,
+            }
+    return cast(SessionMoveResult, result)
 
 
 def _destination_move(
@@ -1509,6 +1531,7 @@ def _destination_move(
                     keep=keep,
                     from_block=_device_block(server, owner_device, owner_name),
                     to_block=_own_block(server),
+                    root=server.root,
                 ),
                 None,
                 "",
@@ -4741,6 +4764,7 @@ def _offload(
             keep=keep,
             from_block=_own_block(server),
             to_block=_device_block(server, target_device, target_name),
+            root=server.root,
         )
     if outcome == "done":
         phases = _move_phases(server, session_id)
