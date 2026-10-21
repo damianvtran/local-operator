@@ -27823,6 +27823,42 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
+def _not_applied_note(entry: Mapping[str, Any]) -> str:
+    """Say so when a tier or model this call passed was NOT applied.
+
+    A role whose own pin is the inherit sentinel states an ABSOLUTE decision
+    ("always run on the launching session's model"), and it outranks anything
+    the delegating model passed. The launch still names the model the child will
+    run on, but a caller whose ``effort=`` or ``model=`` was dropped has to be
+    told: a silent substitution is the very thing this rule exists to prevent,
+    and a receipt that reads as though the pick took effect IS the substitution
+    by another name. The note is therefore appended to the launch line rather
+    than left in the model's head, and it names the value that was passed so
+    the reader can see which one was ignored. Both launch surfaces call it —
+    ``task``'s launch line and ``hub op='resume'``'s receipt — because a resume
+    re-resolves the model and is therefore a launch too.
+    """
+    if entry.get("model_selection_source") != "role_inherit":
+        return ""
+    passed: list[str] = []
+    if entry.get("effort"):
+        passed.append(f"effort={entry['effort']!r}")  # i18n: ignore model-facing tool output
+    # ``model='inherit'`` is NOT a pick this machine failed to apply: it is the
+    # wire's "no specific model" (see ``_validate_task_model``), and a role that
+    # pins the session's model produces exactly the inheritance it asked for.
+    # Reporting it as dropped would invent a substitution, which is the same
+    # class of lie in the other direction.
+    if entry.get("model_pick") and entry["model_pick"] != "inherit":
+        passed.append(f"model={entry['model_pick']!r}")  # i18n: ignore model-facing tool output
+    if not passed:
+        return ""
+    verb = "was" if len(passed) == 1 else "were"
+    return (
+        f" [the {' and '.join(passed)} you passed {verb} NOT applied: "
+        "this role pins the launching session's model]"
+    )
+
+
 def _model_clause(model: str, owns: bool | None, session_model: str) -> str:
     """``on <model>`` or ``on this session's model (<model>)``.
 
@@ -28012,6 +28048,12 @@ async def execute_task(
                     if context and context.jobs
                     else ""
                 ),
+                # WHAT THIS CALL ASKED FOR, kept beside what the launch
+                # decided: the two can differ now, and only the pair says
+                # whether the caller's pick was applied (see
+                # ``_not_applied_note``).
+                "effort": item.effort,
+                "model_pick": item.model,
             }
         )
     if not launched:
@@ -28024,6 +28066,7 @@ async def execute_task(
             if entry.get("model_selection_source")
             else ""
         )
+        + _not_applied_note(entry)
         for entry in launched
     ]
     body = (
@@ -29852,6 +29895,13 @@ async def _execute_hub_parent(
                 # Each success carries the NEW job id it was resumed as; the
                 # transcript-replay guidance is stated once in the footer
                 # rather than repeated on every line.
+                # The resume follows the LAUNCH model rule, so a role that pins
+                # the inherit sentinel ignores a ``model=`` passed here exactly
+                # as it ignores one passed to ``task``. The task path says so on
+                # its receipt; a resume that stayed silent would be the one
+                # surface where a dropped pick reads as honoured, and a resume
+                # is a launch that costs money.
+                source = str(getattr(comms.job(new_job_id), "model_selection_source", "") or "")
                 lines.append(
                     _resumed_line(
                         comms,
@@ -29861,11 +29911,9 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + (
-                        " [selection: "
-                        f"{getattr(comms.job(new_job_id), 'model_selection_source', '')}]"
-                        if getattr(comms.job(new_job_id), "model_selection_source", "")
-                        else ""
+                    + (f" [selection: {source}]" if source else "")
+                    + _not_applied_note(
+                        {"model_selection_source": source, "model_pick": params.model}
                     )
                 )
             else:
