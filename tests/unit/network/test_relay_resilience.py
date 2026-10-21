@@ -298,3 +298,133 @@ def test_a_dropped_link_reports_reconnecting_with_a_real_last_seen_then_recovers
         assert row["redial"] == {"state": redial.CONNECTED, "attempts": 0}
     finally:
         revived.stop()
+
+
+def test_backoff_remains_finite_after_massive_attempt_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for attempt in (1024, 1100, 10**100):
+        assert redial.backoff_s(attempt, rand=lambda: 0.5) == wire.RECONNECT_MAX_S
+    clock = _Clock()
+    tracker = redial.RedialTracker(clock=clock, rand=lambda: 0.5)
+    tracker.lost("d_long", cause="timeout")
+    # Continue well beyond the formerly fatal 1024th failed retry.
+    for _ in range(1100):
+        clock.now += wire.RECONNECT_MAX_S
+        tracker.failed("d_long", cause="timeout")
+    assert tracker.snapshot("d_long")["attempts"] == 1100
+    clock.now += wire.RECONNECT_MAX_S
+    assert tracker.due() == ["d_long"]
+    # The real loop's failed() call used to escape with OverflowError, killing
+    # its thread. Drive two ticks after saturation and prove both are served.
+    server: Any = object.__new__(relay.RelayServer)
+    server.root = None
+    server.redial = tracker
+    ticks: list[int] = []
+
+    def tick(_delay: float) -> bool:
+        ticks.append(1)
+        clock.now += wire.RECONNECT_MAX_S
+        return len(ticks) > 2
+
+    server._stop = SimpleNamespace(wait=tick, is_set=lambda: False)
+    server._link_for = lambda device: None
+    server._members_named = lambda device: []
+    monkeypatch.setattr(store, "list_networks", lambda root: [])
+    server._redial_loop()
+    assert tracker.snapshot("d_long")["attempts"] == 1102
+    assert len(ticks) == 3
+
+
+def test_reader_close_during_admission_keeps_its_newer_loss_schedule() -> None:
+    """Actual admission/close methods, with a reader released by start().
+
+    Pause admission's persistence after its ownership section so the reader can
+    close before admission returns. The old connected reset was outside that
+    section and ran AFTER close, erasing its loss.
+    """
+    server: Any = object.__new__(relay.RelayServer)
+    server._links_lock = threading.RLock()
+    server._streams_lock = threading.Lock()
+    server.links = {}
+    server._streams = {}
+    server._stop = threading.Event()
+    server.redial = redial.RedialTracker()
+    server._refusal_reason = lambda network: ""
+    server.fail_replies = lambda link: 0
+    server.identity_use = SimpleNamespace(released=lambda *args: None)
+    server.audit = SimpleNamespace(record=lambda event: None)
+    closed = threading.Event()
+    failures: list[BaseException] = []
+    reader: list[threading.Thread] = []
+    connected = server.redial.connected
+
+    def connected_after_close_when_unlocked(device: str) -> None:
+        # Reproduce the old unlocked gap deterministically: let the actual reader
+        # close finish before the unlocked reset. Under the fix this transition
+        # owns the RLock, so the reader cannot interleave and no barrier is needed.
+        if not server._links_lock._is_owned():
+            assert closed.wait(5), "reader did not reach the unlocked admission gap"
+        connected(device)
+
+    server.redial.connected = connected_after_close_when_unlocked
+
+    def persist(link: Any, *, force: bool = False) -> None:
+        if threading.current_thread().name != "synthetic-reader":
+            assert closed.wait(5), "the reader did not close"
+
+    server.note_link_activity = persist
+    link: Any = SimpleNamespace(
+        link_id="l_synthetic",
+        device_id="d_synthetic",
+        network_id="n_synthetic",
+        last_frame_at=time.time(),
+        alive=False,
+        epoch=1,
+        frames_in=0,
+        frames_out=0,
+    )
+
+    def close_reader() -> None:
+        try:
+            server.link_closed(link, "timeout")
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            closed.set()
+
+    def start() -> None:
+        thread = threading.Thread(target=close_reader, name="synthetic-reader")
+        reader.append(thread)
+        thread.start()
+
+    link.start = start
+    assert server._admit_link(link) == ""
+    reader[0].join(5)
+    assert not reader[0].is_alive() and not failures, failures
+    assert not server.links
+    assert server.redial.snapshot(link.device_id)["state"] == redial.RECONNECTING
+    assert server.redial.tracked() == [link.device_id]
+
+
+def test_refusal_coalescing_keeps_proof_and_mode_transitions(tmp_path: Any) -> None:
+    server: Any = object.__new__(relay.RelayServer)
+    server.audit = audit_mod.AuditLog(tmp_path)
+    server._refusal_rows = redial.RefusalCoalescer()
+    refusal = relay.MeshRefusal("malformed_frame", "invalid frame")
+    for verified, mode in ((False, "member"), (True, "member"), (True, "invite")):
+        # Identical repeats fold; a materially different proof/mode does not.
+        for _ in range(2):
+            server._audit_handshake_refusal(
+                refusal,
+                "n_synthetic",
+                "192.0.2.1:1234",
+                mode,
+                declared_device="d_synthetic",
+                verified=verified,
+            )
+    server.audit.flush()
+    rows = [r for r in server.audit.tail(20) if r["event"] == "handshake_refused"]
+    assert len(rows) == 3
+    assert [r["actor"] for r in rows] == ["unknown", "d_synthetic", "d_synthetic"]
+    assert [r["detail"]["mode"] for r in rows] == ["member", "member", "invite"]

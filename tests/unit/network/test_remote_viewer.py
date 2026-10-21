@@ -1216,7 +1216,9 @@ async def test_a_remote_viewer_reattaches_after_its_link_drops_and_returns(
                     )
 
             assert await _wait(reattached, timeout_s=30.0), "the viewer never re-attached"
-            assert not viewer.is_cold, viewer.cold_reason
+            # Stream registration precedes the viewer's canonical sync. Wait for
+            # that real warm state, not an arbitrary sleep (review C4 / QA Q1).
+            assert await _wait(lambda: not viewer.is_cold, timeout_s=30.0), viewer.cold_reason
             await viewer.prompt("after the restore")
             assert await _wait(
                 lambda: any("after the restore" in t for t in _user_texts(created))

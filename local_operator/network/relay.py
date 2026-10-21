@@ -5983,12 +5983,22 @@ class RelayServer:
                 )
             else:
                 unidentified = "refused before any device id was presented"
+        # Proof state and mode are part of the identity: a pre-proof claim must
+        # never suppress a later refusal naming a verified actor (review C3).
         # COALESCED BY (code, network, claimed device, source HOST): the source port
         # is ephemeral, so keying on it would make every repeat look new. 460
         # ``unknown_network`` rows on the operator's mac were one LAN neighbour
         # retrying networks this device is not in; one row per window says that.
         write, repeats = self._refusal_rows.admit(
-            (refusal.code, network_id, declared_device, expected_device, _host_only(peer_addr))
+            (
+                refusal.code,
+                network_id,
+                declared_device,
+                expected_device,
+                _host_only(peer_addr),
+                mode,
+                "verified" if verified else "unverified",
+            )
         )
         if not write:
             return
@@ -6069,6 +6079,11 @@ class RelayServer:
             refusal = self._refusal_reason(link.network_id)
             if not refusal:
                 self.links[link.link_id] = link
+                # Publish the connected transition BEFORE starting the reader and
+                # while holding the same lock link_closed uses for its loss. A
+                # reader may close immediately; admission must not erase that newer
+                # loss after dropping the lock (review C2).
+                self.redial.connected(link.device_id)
                 try:
                     link.start()
                 except BaseException:
@@ -6081,7 +6096,6 @@ class RelayServer:
         else:
             # A LINK IS UP: the redial schedule for this device resets, and its
             # surfaces stop saying "reconnecting" (``redial.RedialTracker``).
-            self.redial.connected(link.device_id)
             self.note_link_activity(link, force=True)
         return refusal
 
@@ -6286,6 +6300,11 @@ class RelayServer:
     def link_closed(self, link: PeerLink, reason: str) -> None:
         with self._links_lock:
             self.links.pop(link.link_id, None)
+            # Last-live-link selection and the transition are ONE ownership
+            # decision: admission of a replacement cannot interleave and then be
+            # overwritten by a delayed loss for the old link.
+            if not self._stop.is_set() and self._link_for(link.device_id) is None:
+                self.redial.lost(link.device_id, cause=reason, last_frame_at=link.last_frame_at)
         # THE LAST FRAME TIME SURVIVES THE LINK (see ``note_link_activity``): the
         # throttle may have skipped up to LAST_SEEN_PERSIST_S of it, and this is the
         # moment a reader starts depending on the stamp.
@@ -6304,8 +6323,6 @@ class RelayServer:
         # ONLY A DEVICE WITH NO OTHER LIVE LINK IS "LOST": a duplicate or replaced
         # link closing beside a healthy one must not start a reconnect story, and
         # a relay that is stopping redials nothing.
-        if not self._stop.is_set() and self._link_for(link.device_id) is None:
-            self.redial.lost(link.device_id, cause=reason, last_frame_at=link.last_frame_at)
         # BEFORE THE AUDIT ROW, because this is the answer a caller is blocked on: the
         # link is out of the table and nothing will route a reply to its waiters any
         # more, so they are resolved here rather than left to time out (``fail_replies``).
@@ -11011,7 +11028,7 @@ class RelayServer:
         # redialled on the backoff, and every attempt is the same fact. The first row
         # in each window is written; the next one carries how many were folded in.
         write, repeats = self._refusal_rows.admit(
-            ("peer_closed_silently", network_id, expected_device, _host_only(host))
+            ("peer_closed_silently", network_id, expected_device, _host_only(host), mode)
         )
         if write:
             self._record_silent_refusal(network_id, host, mode, expected_device, repeats)

@@ -29,6 +29,7 @@ while its redial loop and listing threads read.
 
 from __future__ import annotations
 
+import math
 import random
 import threading
 import time
@@ -83,7 +84,11 @@ def backoff_s(attempt: int, *, rand: Callable[[], float] = random.random) -> flo
     rather than everyone retrying in lock-step at exactly 60 s), and the result is
     never below ``RECONNECT_MIN_S * (1 - jitter)``.
     """
-    base = min(wire.RECONNECT_MAX_S, wire.RECONNECT_MIN_S * (2 ** max(0, attempt)))
+    # Saturate BEFORE exponentiation: an overnight outage can exceed 1024
+    # failures, where converting 2**attempt to float raises and kills the worker.
+    ceiling_attempt = max(0, math.ceil(math.log2(wire.RECONNECT_MAX_S / wire.RECONNECT_MIN_S)))
+    exponent = min(ceiling_attempt, max(0, attempt))
+    base = min(wire.RECONNECT_MAX_S, wire.RECONNECT_MIN_S * (2**exponent))
     spread = wire.RECONNECT_JITTER * (2.0 * rand() - 1.0)
     return max(0.0, base * (1.0 + spread))
 
