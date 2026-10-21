@@ -433,7 +433,7 @@ describe("a refused pin (U2)", () => {
 		const { getByRole } = render(<SessionScreen sessionId="s1" />);
 
 		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
-		const star = getByRole("button", { name: "pin this session" });
+		const star = getByRole("button", { name: "Pin session" });
 		fireEvent.click(star);
 
 		await waitFor(() =>
@@ -441,9 +441,15 @@ describe("a refused pin (U2)", () => {
 				"Could not save the pin: no saved messages yet — pin it after you send one",
 			),
 		);
-		// The optimistic mark went back with the refusal — the button offers the
-		// press again rather than showing a ★ the daemon never accepted.
-		expect(screen.getByRole("button", { name: "pin this session" })).toBeTruthy();
+		// R1-3/U2: the refusal closed the sheet, so the in-flow receipt is the
+		// visible thing. The optimistic mark went back with it — reopening the
+		// menu offers the press again rather than showing a state the daemon
+		// never accepted.
+		expect(screen.queryByRole("dialog")).toBeNull();
+		/* The sheet restores the header's inert/aria-hidden in its cleanup,
+		   which lands a tick after the close; poll the accessible name. */
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
+		expect(await screen.findByRole("button", { name: "Pin session" })).toBeTruthy();
 	});
 });
 
@@ -455,7 +461,7 @@ describe("the refused pin's own exit (U17)", () => {
 		const { rerender } = render(<SessionScreen sessionId="s1" />);
 
 		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
-		fireEvent.click(await screen.findByRole("button", { name: "pin this session" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin session" }));
 		const refusal = await waitFor(() => screen.getByRole("alert"));
 		expect(refusal.textContent).toContain("pin it after you send one");
 

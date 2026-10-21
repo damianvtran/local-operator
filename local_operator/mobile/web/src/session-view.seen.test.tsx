@@ -141,17 +141,17 @@ describe("SessionScreen seen handshake", () => {
 		vi.mocked(setSessionPin).mockResolvedValueOnce({ ok: true, pinned: false });		render(<SessionScreen sessionId="s1" />);
 
 		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
-		fireEvent.click(screen.getByRole("button", { name: "pin this session" }));
+		fireEvent.click(screen.getByRole("button", { name: "Pin session" }));
 		// The optimistic half: the menu row's state is on in the commit that handled
 		// the press, which is the whole reason the handshake is split.
 		expect(
-			screen.getByRole("button", { name: "unpin this session" }).getAttribute("aria-pressed"),
+			screen.getByRole("button", { name: "Unpin session" }).getAttribute("aria-pressed"),
 		).toBe("true");
 
 		// And the POST's own read-back takes it back, with no frame needed.
 		await waitFor(() =>
 			expect(
-				screen.getByRole("button", { name: "pin this session" }).getAttribute("aria-pressed"),
+				screen.getByRole("button", { name: "Pin session" }).getAttribute("aria-pressed"),
 			).toBe("false"),
 		);
 	});

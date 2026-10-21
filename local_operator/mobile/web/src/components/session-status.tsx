@@ -81,8 +81,20 @@ const RUNG_CLASS: Record<ContextRung, string> = {
 };
 
 /** The disclosure's chevron: one fixed 16px box either way, so the control
-    cannot resize (and the spend figure cannot shift) when the glyph changes. */
+    cannot resize (and the figure cannot shift) when the glyph changes. */
 const CHEVRON_BOX = "grid size-4 shrink-0 place-items-center text-ink-dim";
+
+/** Keys a reader uses to scroll a page, each a deliberate move away from the
+    reading. Text entry is excluded below so typing `End` in the composer does
+    not close a panel the reader never left. */
+const DISMISS_KEYS = new Set(["PageDown", "PageUp", "Home", "End", "ArrowUp", "ArrowDown"]);
+
+function isTextEntry(target: EventTarget | null): boolean {
+	return (
+		target instanceof HTMLElement &&
+		(target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+	);
+}
 
 export function SessionStatus({ projection }: { projection: SessionProjection }) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
@@ -104,7 +116,8 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 	const hasBreakdown =
 		breakdown !== null &&
 		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || breakdown.untrackedNotice);
-	const hasRow = Boolean(spend.text || context.spelling);
+	const hasReading = Boolean(spend.text || context.spelling);
+	const hasRow = hasReading || hasBreakdown;
 	/* The disclosure is user state, not wire state: the runtime never says
 	   whether a reader has opened the chips, and the next projection must not
 	   re-open what they closed. */
@@ -112,24 +125,39 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 	const panelId = useId();
 	/* A reading is only a door when there is a panel behind it, and a control
 	   with nothing behind it is the dead control this row must not ship. */
-	const canExpand = hasBreakdown && Boolean(spend.text);
+	const canExpand = hasBreakdown;
 	useEffect(() => {
 		if (!expanded) return;
-		/* ANY SCROLL COLLAPSES THE PANEL. The reader has moved on to the
-		   transcript; leaving the chips pinned above it would keep a pushed-down
-		   column for a reading they are no longer looking at. Window CAPTURE
-		   because `scroll` does not bubble and the transcript's scroller is a
-		   descendant; the listener exists only while the panel does. */
+		/* USER INTENT ONLY — NEVER `scroll`. This listener used to collapse on
+		   every scroll event, and at the bottom of a long transcript the panel's
+		   own 61px insertion shrank the scroll extent, so the browser's tail-follow
+		   and anchor correction fired `scroll` with no reader input: measured as
+		   scrollTop 3449 -> 3510 -> 3449 inside 20-100ms, the panel opening and
+		   closing before it could be read. A layout-driven scroll is not the
+		   reader scrolling away, so dismissal is keyed to gestures that can only
+		   come from a person: wheel, touch drag, and the page-scroll keys.
+
+		   Capture phase because these events may be targeted at the transcript's
+		   scroller; the listeners exist only while the panel does. */
 		const collapse = () => setExpanded(false);
-		window.addEventListener("scroll", collapse, true);
-		return () => window.removeEventListener("scroll", collapse, true);
+		const onKey = (event: KeyboardEvent) => {
+			if (!DISMISS_KEYS.has(event.key) || isTextEntry(event.target)) return;
+			collapse();
+		};
+		window.addEventListener("wheel", collapse, { capture: true, passive: true });
+		window.addEventListener("touchmove", collapse, { capture: true, passive: true });
+		window.addEventListener("keydown", onKey, true);
+		return () => {
+			window.removeEventListener("wheel", collapse, true);
+			window.removeEventListener("touchmove", collapse, true);
+			window.removeEventListener("keydown", onKey, true);
+		};
 	}, [expanded]);
-	if (!hasRow && !hasBreakdown) return null;
-	/* Collapsed means ABSENT, with the one exception of a breakdown that has no
-	   spend figure to tap: there is then no control to place it behind, so the
-	   facts stay visible rather than becoming unreachable. The collapsed
-	   contract governs the case that has a reading to open. */
-	const showPanel = hasBreakdown && (expanded || !spend.text);
+	if (!hasRow) return null;
+	/* Collapsed means ABSENT, including the no-figure case: a breakdown whose
+	   total cannot be spelled keeps its facts behind the `cost detail` control
+	   rather than spending a permanent second line. */
+	const showPanel = hasBreakdown && expanded;
 	return (
 		<>
 			{hasRow ? (
@@ -168,7 +196,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 								type="button"
 								data-testid="session-status-spend"
 								aria-expanded={expanded}
-								aria-controls={panelId}
+								aria-controls={expanded ? panelId : undefined}
 								/* The visible figure is the first thing a screen reader
 								   should hear; the suffix names what the press opens. */
 								aria-label={`${spend.text} spend breakdown`}
@@ -181,6 +209,9 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 								</span>
 							</button>
 						) : (
+							/* No panel exists, so the figure is a reading, not a door:
+							   the plain span keeps the legacy spelling and adds no
+							   dead control. */
 							<span
 								data-testid="session-status-spend"
 								className="ml-auto min-w-0 truncate text-ink-muted"
@@ -188,6 +219,26 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 								{spend.text}
 							</span>
 						)
+					) : hasBreakdown ? (
+						/* A session with channel facts but no spend figure to print — a
+						   zero total, or rows whose amounts could not be stated with no
+						   billed tokens beside them. The facts still need a door, and the
+						   door cannot be an amount that does not exist; `cost detail` names
+						   what it opens and stays absent from the default row. */
+						<button
+							type="button"
+							data-testid="session-status-cost-detail"
+							aria-expanded={expanded}
+							aria-controls={expanded ? panelId : undefined}
+							aria-label="cost detail"
+							onClick={() => setExpanded((open) => !open)}
+							className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+						>
+							<span className="truncate">cost detail</span>
+							<span aria-hidden className={CHEVRON_BOX}>
+								{expanded ? "\u25b4" : "\u25be"}
+							</span>
+						</button>
 					) : null}
 				</div>
 			) : null}

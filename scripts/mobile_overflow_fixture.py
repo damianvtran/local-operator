@@ -1443,6 +1443,67 @@ def _operator_spend_projection() -> SessionProjection:
     return projection
 
 
+def _operator_spend_long_projection() -> SessionProjection:
+    """The operator's published object on a transcript long enough to tail-follow.
+
+    R1-1/U3/Q1 is a scroll-position defect: at the bottom of a long transcript
+    the spend panel's 61px insertion changes the scroll extent, the browser
+    anchors/tail-follows, and the old catch-all `scroll` listener closed the
+    panel in 20-100ms. Sixty entries give the screen somewhere to be "at the
+    bottom"; the spend object is the operator's own, so the frame also shows
+    the qualified chips once the panel survives.
+    """
+    projection = _operator_spend_projection()
+    projection.session_id = "operator-spend-long"
+    projection.pid = 900022
+    projection.conversation_name = "Operator spend long"
+    projection.transcript = [
+        TranscriptEntry(
+            id=f"osl-{index:02d}",
+            kind="user" if index % 2 == 0 else "assistant",
+            text=(
+                f"Transcript line {index:02d}: the panel must survive the "
+                "browser's own tail-follow at the bottom of this conversation, "
+                "because a layout-driven scroll is not the reader scrolling away."
+            ),
+        )
+        for index in range(60)
+    ]
+    return projection
+
+
+def _operator_spend_zero_projection() -> SessionProjection:
+    """A published breakdown with NO spend figure to print (R1-2/U1).
+
+    A zero total with one zero-amount image row, and no context reading either:
+    the status row's only content is the `cost detail` disclosure, and the
+    panel must be absent until that control is pressed.
+    """
+    projection = _spend_projection(
+        "operator-spend-zero",
+        900023,
+        tracked=True,
+        knowledge="exact",
+        total_micro=0,
+        rows=[
+            {
+                "channel": "image",
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "amount_micro": 0,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            }
+        ],
+    )
+    projection.conversation_name = "Operator spend zero"
+    projection.context_tokens = None
+    projection.context_window = 200_000
+    projection.context_is_estimate = False
+    return projection
+
+
 def _asks_stacked_projection() -> SessionProjection:
     """Queued asks in the BUSIEST column: todos, a running subagent roster, a
     pending approval card AND the minimized ask chip in one stack.
@@ -1637,6 +1698,10 @@ async def main() -> None:
         # `· +N more` — so the collapse is photographed against the shape that
         # caused it rather than a tidy invented one.
         _operator_spend_projection(),
+        # THE LONG-TAIL REPRO (R1-1/U3/Q1) and the no-figure `cost detail`
+        # state (R1-2/U1), both from the operator's own published object.
+        _operator_spend_long_projection(),
+        _operator_spend_zero_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial

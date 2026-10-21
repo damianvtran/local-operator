@@ -172,7 +172,10 @@ function Header({
 	const pinMarks = usePinMarks();
 	const row = sessions.find((r) => r.session_id === sessionId);
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
-	const togglePin = async () => {
+	/** True when the daemon accepted the pin, false when it refused — the menu
+	    uses that answer to step aside so this header's refusal strip is visible
+	    instead of sitting behind the open sheet. */
+	const togglePin = async (): Promise<boolean> => {
 		const next = !pinned;
 		setPinRefusal(null);
 		/* Optimistic mark, then confirmed: the ★ flips at once and the daemon's
@@ -186,6 +189,7 @@ function Header({
 			   so a disagreeing one never settles and the ★ would stay on a row the
 			   daemon never pinned. */
 			if (saved.pinned !== next) clearSessionPinMark(sessionId);
+			return true;
 		} catch (error) {
 			/* A refusal takes the mark back with it AND says why, in the strip
 			   under this header: the list already renders the daemon's reason for
@@ -198,6 +202,7 @@ function Header({
 				text: pinRefusalText(error),
 				empty: projection.transcript.length === 0,
 			});
+			return false;
 		}
 	};
 	/* The 409's own exit, taken as soon as it is true (U17): the next projection
@@ -228,7 +233,7 @@ function Header({
 				<button
 					type="button"
 					onClick={() => setGateOpen(true)}
-					aria-label="approvals in this session"
+					aria-label="needs you — approvals in this session"
 					className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
 				>
 					needs you
@@ -252,7 +257,7 @@ function Header({
 				open={menuOpen}
 				onClose={() => setMenuOpen(false)}
 				pinned={pinned}
-				onTogglePin={() => void togglePin()}
+				onTogglePin={() => togglePin()}
 				onOpenApprovals={() => setGateOpen(true)}
 				returnFocusRef={menuButtonRef}
 			/>

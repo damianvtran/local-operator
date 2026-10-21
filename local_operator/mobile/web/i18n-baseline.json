@@ -76,9 +76,9 @@
       "[\"jsx:title\",\"untitled\"]": 1
     },
     "src/screens/session-view.tsx": {
-      "[\"jsx:aria-label\",\"approvals in this session\"]": 1,
+      "[\"jsx:aria-label\",\"needs you — approvals in this session\"]": 1,
       "[\"jsx:aria-label\",\"session menu\"]": 1,
-      "[\"jsx:expression\",\"approvals in this session\"]": 1,
+      "[\"jsx:expression\",\"needs you — approvals in this session\"]": 1,
       "[\"jsx:expression\",\"needs you\"]": 1,
       "[\"jsx:expression\",\"not answering — showing its last synced view\"]": 2,
       "[\"jsx:expression\",\"reconnecting — showing the last synced view\"]": 2,

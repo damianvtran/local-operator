@@ -45,8 +45,10 @@ export function SessionMenu({
 	    session list. */
 	pinned: boolean;
 	/** The header's own optimistic mark/refusal path — this row does not own
-	    a second pin implementation. */
-	onTogglePin: () => void;
+	    a second pin implementation. Resolves false when the daemon refused the
+	    pin, so this sheet can step aside and let the header's refusal receipt
+	    be the thing the reader sees. */
+	onTogglePin: () => Promise<boolean>;
 	/** Summon the existing gate sheet. The menu closes first. */
 	onOpenApprovals: () => void;
 	/** The ⋮ button, so closing returns focus to the control that opened it. */
@@ -64,11 +66,18 @@ export function SessionMenu({
 			<div className="flex flex-col gap-1 p-2">
 				<button
 					type="button"
-					onClick={onTogglePin}
+					onClick={async () => {
+						const accepted = await onTogglePin();
+						/* A REFUSAL MUST BE VISIBLE. The receipt is an in-flow strip on
+						   the header, which this modal sheet covers and marks inert; leaving
+						   the sheet open delivered the daemon's sentence behind it. On
+						   success the sheet stays, so the flipped state is the answer. */
+						if (!accepted) onClose();
+					}}
 					aria-pressed={pinned}
-					/* The old ★ control's exact labels, kept so the pin's accessible
-					   name did not change when the control moved. */
-					aria-label={pinned ? "unpin this session" : "pin this session"}
+					/* The accessible name IS the visible label (R1-5); `aria-pressed`
+					   carries the state, so the name need not repeat it. */
+					aria-label={pinned ? "Unpin session" : "Pin session"}
 					className={MENU_ROW}
 				>
 					<span className="min-w-0 flex-1 truncate">
