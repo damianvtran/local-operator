@@ -528,6 +528,23 @@ def is_ask_gate_divert_row(row: Any) -> bool:
     return is_ask_gate_divert_details(provider_payload.get("details"))
 
 
+def is_binding_notice_row(row: Any) -> bool:
+    """Credential-change notices are diagnostics, not desktop conversation rows.
+
+    Filter at the backend so older desktop reducers cannot paint legacy floods
+    as ``<wire type>: <text>``. This is display projection only: the original
+    journal and the separate binding audit metadata stay intact and accessible.
+    Both message/custom envelopes occur in historical journals.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+
+    payload = row.get("payload") if isinstance(row, Mapping) else None
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    )
+
+
 def visible_transcript_rows(rows: list[Any]) -> list[Any]:
     """Drop the rows a human transcript must never serve.
 
@@ -554,6 +571,8 @@ def visible_transcript_rows(rows: list[Any]) -> list[Any]:
     """
     out: list[Any] = []
     for row in rows:
+        if is_binding_notice_row(row):
+            continue
         payload = row.get("payload") if isinstance(row, Mapping) else None
         if isinstance(payload, Mapping) and is_hidden_wake_delivery(payload):
             continue

@@ -117,13 +117,10 @@ async def test_the_upgrade_edge_records_identity_without_a_notice(tmp_path: Path
     await transcript.append_custom(SESSION_BINDING_CUSTOM_TYPE, legacy.to_details())
     transcript = Transcript(transcript.directory)
     changes: list[Any] = []
-    recorder = _recorder(transcript, {10: _copy_row(10)}, changes)
+    recorder = _recorder(transcript, {9: _copy_row(9), 10: _copy_row(10)}, changes)
     recorder.observe_local(provider=PROVIDER, credential_id=10)
     await recorder.drain()
-    assert [row.get("account", "") for row in _rows(transcript)] == [
-        "",
-        f"mesh:{OWNER}:{PROVIDER}",
-    ]
+    assert len(_rows(transcript)) == 1, "proven same-account replacement appends nothing"
     assert changes == [], "the first identity-bearing row is not an account switch"
 
 
@@ -137,7 +134,7 @@ def test_is_same_account_is_the_notice_gate() -> None:
 
     same = _b(acct=account)
     assert is_same_account(same, _b(credential_id=2, acct=account))
-    assert is_same_account(_b(), same)
+    assert not is_same_account(_b(), same)
     assert not is_same_account(same, _b(acct="mesh:x:y"))
     assert not is_same_account(_b(), _b())
     assert not is_same_account(same, _b(owner=OWNER, acct=account))
@@ -185,3 +182,24 @@ async def test_notice_and_binding_rows_never_reach_the_provider_payload(tmp_path
     assert "session credential" not in wire
     assert SESSION_BINDING_NOTICE_MESSAGE_TYPE not in wire
     assert SESSION_BINDING_CUSTOM_TYPE not in wire
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_readable", [True, False])
+async def test_local_to_mesh_or_unknown_upgrade_is_a_real_signal(
+    tmp_path: Path, prior_readable: bool
+) -> None:
+    transcript = Transcript(tmp_path / "sess")
+    changes: list[Any] = []
+    rows = {10: SimpleNamespace(data={"type": "api_key", "key": "local-key"}), 11: _copy_row(11)}
+    recorder = _recorder(transcript, rows, changes)
+    recorder.observe_local(provider=PROVIDER, credential_id=10)
+    await recorder.drain()
+    if not prior_readable:
+        rows.pop(10)  # A swept/missing old row is not positive provenance.
+    recorder.observe_local(provider=PROVIDER, credential_id=11)
+    await recorder.drain()
+    recorder.observe_local(provider=PROVIDER, credential_id=11)
+    await recorder.drain()
+    assert [row["credential_id"] for row in _rows(transcript)] == [10, 11]
+    assert len(changes) == 2 and changes[1][1].credential_id == 10

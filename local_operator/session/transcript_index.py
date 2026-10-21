@@ -1336,9 +1336,15 @@ def _row_is_invisible(entry: dict[str, Any]) -> bool:
     silently, which is how the first version of this check came to count every
     hidden row it was written to exclude.
     """
-    from local_operator.harness.rows import is_ask_gate_divert_row, is_hidden_tool_row
+    from local_operator.harness.rows import (
+        is_ask_gate_divert_row,
+        is_binding_notice_row,
+        is_hidden_tool_row,
+    )
 
-    return is_hidden_tool_row(entry) or is_ask_gate_divert_row(entry)
+    return (
+        is_hidden_tool_row(entry) or is_ask_gate_divert_row(entry) or is_binding_notice_row(entry)
+    )
 
 
 def _carries_send_marker(pieces: list[bytes]) -> bool:

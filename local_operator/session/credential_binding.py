@@ -362,18 +362,14 @@ def _binding_changed(previous: CredentialBinding, candidate: CredentialBinding) 
 def is_same_account(previous: CredentialBinding, candidate: CredentialBinding) -> bool:
     """Whether an appended change row still names the SAME account (no notice due).
 
-    True when the owner device is unchanged and the candidate is a mesh copy
-    whose stable ``account`` either equals the previous one or the previous row
-    predates the field. The second arm is the upgrade edge: a session recorded
-    by an older build holds a row with no ``account``, and the first row this
-    build writes for the same copy differs from it only by row id — recording
-    the identity is worth one row, but announcing it as a switch is the very
-    notice this exists to stop. A different owner device is always a real
-    switch and always notices.
+    Both snapshots must carry a positive, equal stable identity on the same
+    recording device. An empty historical account may be an ordinary local
+    login, not a pre-upgrade mesh copy. The recorder resolves that old row's
+    provenance when available; absence alone must never suppress a real switch.
     """
     if previous.owner_device != candidate.owner_device or not candidate.account:
         return False
-    return not previous.account or previous.account == candidate.account
+    return bool(previous.account) and previous.account == candidate.account
 
 
 def mesh_copy_account(row: Any) -> str:
@@ -623,6 +619,13 @@ class CredentialBindingRecorder:
                 else:
                     previous = recall_for(self._transcript, provider)
                 if previous is not None:
+                    if not previous.account:
+                        # An empty historical field proves NOTHING about account
+                        # identity. Only upgrade it when its actual store row is
+                        # still readable and carries the same stable provenance.
+                        # If sync already swept that row, prefer one honest
+                        # change signal to silently swallowing a local→mesh switch.
+                        previous = replace(previous, account=self._account(previous.credential_id))
                     # Replacement state: the new snapshot carries the existing
                     # policy forward. This build cannot EMIT ``owner`` (D2); it
                     # must not DROP one a mixed fleet wrote.
