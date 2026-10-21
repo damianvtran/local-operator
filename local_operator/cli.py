@@ -1463,11 +1463,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # i18n gate refuses brand-new English in an active locale by design
     # (`check.py`'s allowance-growth rule), and a coder must not translate and
     # audit their own contribution. Until that wave lands, the three commands
-    # are hidden from `lop sessions --help` the way `resume-click` is: for a
-    # SUBPARSER, `help=argparse.SUPPRESS` is not the hide idiom (argparse
-    # renders the sentinel verbatim), so the kwarg is OMITTED. The semantics are
-    # documented on the handlers and in `session/cleanup.py`'s holds block, and
-    # the commands work in full. Follow-up: one help-tranche key per command.
+    # are hidden from the DESCRIPTION list in `lop sessions --help` the way
+    # `resume-click` is: for a SUBPARSER, `help=argparse.SUPPRESS` is not the
+    # hide idiom (argparse renders the sentinel verbatim), so the kwarg is
+    # OMITTED. Their names still appear in the usage choices line because
+    # argparse registers them — the omission hides descriptions, not the verbs.
+    # Command-local syntax is therefore documented where it can be read without
+    # a catalogue: the "Value holds and the store audit" section of
+    # `guides/configuration/GUIDE.md` names every argument and its meaning. The
+    # handlers and `session/cleanup.py`'s holds block carry the semantics for a
+    # code reader. Follow-up: one help-tranche key per command.
     hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
     hold_parser.add_argument("session", help=argparse.SUPPRESS)
     hold_parser.add_argument("--reason", required=True, help=argparse.SUPPRESS)
@@ -6705,12 +6710,24 @@ def sessions_hold_command(args: argparse.Namespace) -> int:
     """
     from local_operator.session.cleanup import resolve_session_reference, set_hold
 
+    # An empty reason is refused BEFORE anything is read or written, with the
+    # same rule `set_hold` enforces (UX round 1, U1). The API check is the
+    # backstop; this one exists so the operator gets an actionable sentence
+    # rather than a logged ERROR plus a generic failure.
+    if not str(args.reason).strip():
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            "hold: --reason must be non-empty: it records why this conversation must survive.",
+            file=sys.stderr,
+        )
+        return 2
     sessions_dir = config_dir() / "sessions"
     requested = str(args.session)
     session_id, candidates = resolve_session_reference(sessions_dir, requested)
     if session_id is None:
         if candidates:
             print(
+                # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
                 f"{requested!r} is ambiguous: {len(candidates)} stored sessions match "
                 "(pass the full id):",
                 file=sys.stderr,
@@ -6718,14 +6735,20 @@ def sessions_hold_command(args: argparse.Namespace) -> int:
             for name in candidates[:20]:
                 print(f"  {name}", file=sys.stderr)
         else:
-            print(f"no session {requested!r} in this store", file=sys.stderr)
+            print(
+                f"no session {requested!r} in this store", file=sys.stderr
+            )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 1
     if not set_hold(
         sessions_dir, session_id, reason=str(args.reason), by="operator", kind=str(args.kind)
     ):
-        print(f"could not record the hold on {session_id}", file=sys.stderr)
+        print(
+            f"could not record the hold on {session_id}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 1
-    print(f"Held {session_id} ({args.kind}): {str(args.reason).strip()}")
+    print(
+        f"Held {session_id} ({args.kind}): {str(args.reason).strip()}"
+    )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
     return 0
 
 
@@ -6744,13 +6767,17 @@ def sessions_holds_command(args: argparse.Namespace) -> int:
     try:
         holds = read_holds(sessions_dir)
     except HoldsUnreadable as exc:
-        print(f"cannot read the value holds: {exc}", file=sys.stderr)
+        print(
+            f"cannot read the value holds: {exc}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 1
     if getattr(args, "json", False):
         print(_json.dumps({"holds": holds}, indent=2, sort_keys=True))
         return 0
     if not holds:
-        print("no value holds recorded for this store.")
+        print(
+            "no value holds recorded for this store."
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 0
     for session_id in sorted(holds):
         entry = holds[session_id]
@@ -6758,7 +6785,9 @@ def sessions_holds_command(args: argparse.Namespace) -> int:
             f"  {session_id}  {entry.get('kind', '?')}  {entry.get('reason', '')}"
             f"  ({entry.get('by', '?')}, {entry.get('at', '?')})"
         )
-    print(f"{len(holds)} value hold(s).")
+    print(
+        f"{len(holds)} value hold(s)."
+    )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
     return 0
 
 
@@ -6778,11 +6807,24 @@ def sessions_unhold_command(args: argparse.Namespace) -> int:
         resolve_session_reference,
     )
 
+    # THE RELEASE DECISION NEEDS A WHY (UX round 1, U1). A blank reason used to
+    # clear an evidence/source-of-truth hold and write a `hold-release` row
+    # with `"reason": ""` — a decision no later reader can evaluate, made by
+    # the one act that authorizes reaping. Refused before any read or write;
+    # `release_hold` refuses it too, for callers that never come through here.
+    if not str(args.reason).strip():
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            "unhold: --reason must be non-empty: it is the recorded decision to release the hold.",
+            file=sys.stderr,
+        )
+        return 2
     sessions_dir = config_dir() / "sessions"
     requested = str(args.session)
     session_id, candidates = resolve_session_reference(sessions_dir, requested)
     if candidates:
         print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
             f"{requested!r} is ambiguous: {len(candidates)} stored sessions match "
             "(pass the full id):",
             file=sys.stderr,
@@ -6795,7 +6837,9 @@ def sessions_unhold_command(args: argparse.Namespace) -> int:
         # session that is gone. Anything path-shaped is refused by the same
         # rule the resolver applies.
         if not requested or requested in (".", "..") or Path(requested).name != requested:
-            print(f"not a session id: {requested!r}", file=sys.stderr)
+            print(
+                f"not a session id: {requested!r}", file=sys.stderr
+            )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
             return 1
         target = requested
     else:
@@ -6803,18 +6847,36 @@ def sessions_unhold_command(args: argparse.Namespace) -> int:
     try:
         holds = read_holds(sessions_dir)
     except HoldsUnreadable as exc:
-        print(f"cannot read the value holds: {exc}", file=sys.stderr)
+        print(
+            f"cannot read the value holds: {exc}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 1
     if target not in holds:
-        print(f"no hold was recorded for {target}", file=sys.stderr)
+        print(
+            f"no hold was recorded for {target}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 1
     if not release_hold(sessions_dir, target, reason=str(args.reason), actor="cli"):
-        print(f"could not release the hold on {target}", file=sys.stderr)
+        print(
+            f"could not release the hold on {target}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
         return 1
+    # STATE THE CONSEQUENCE, NOT JUST THE EVENT (UX round 1, U3): a release
+    # does not delete anything now, but it removes the reason cleanup and
+    # retention refused this conversation. Say exactly that, and say nothing
+    # stronger (the other guards still apply).
     if session_id is None:
-        print(f"Released the hold on {target}; the session directory is gone.")
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            f"Released the hold on {target}; the session directory is gone, "
+            "so nothing remains to retain."
+        )
     else:
-        print(f"Released the hold on {target}.")
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            f"Released the hold on {target}. Cleanup and retention may now apply "
+            "to this conversation; its other protections still do."
+        )
     return 0
 
 

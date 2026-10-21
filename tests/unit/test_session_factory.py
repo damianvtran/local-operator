@@ -5334,9 +5334,13 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
     )
     assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
-    assert calls == ["census", "cleanup", "groups", "origins", "titles"], (
-        "a pass ran after the stop"
-    )
+    assert calls == [
+        "census",
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+    ], "a pass ran after the stop"
 
     # No stamp means the next run re-derives the worklist rather than trusting
     # a completion record — the resume cost is bounded by the sentinels the

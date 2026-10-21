@@ -769,6 +769,15 @@ def release_hold(sessions_dir: Path, session_id: str, *, reason: str, actor: str
     Releasing an id that is not held is a no-op returning False: the CLI says
     "no hold was recorded" rather than pretending to have cleared one.
     """
+    # THE DECISION NEEDS A WHY, SYMMETRIC WITH set_hold (UX round 1, U1). A
+    # blank release reason is not a decision a later reader can evaluate, and a
+    # hold is the operator's safety statement: releasing one is itself a
+    # consequential act (retention may now reap the conversation), so an empty
+    # string is refused here as well as at the CLI. The API check matters most
+    # for non-CLI callers, which have no argparse layer to lean on.
+    if not reason.strip():
+        logger.error("session cleanup: refusing to release a hold with no reason (%s)", session_id)
+        return False
     try:
         holds = read_holds(sessions_dir)
     except HoldsUnreadable as exc:
@@ -1521,6 +1530,20 @@ _GUARD_REFUSALS: dict[str, str] = {
         "cancel the monitor, or delete its {monitor_file} entry, before "
         "deleting it."
     ),
+    # A HOLD IS NOT AN UNKNOWN (review round 1, M6): the fallback says "could
+    # not be checked", which is false — it was checked and the operator's own
+    # record is the answer. The remedy is the one command that clears it,
+    # resolved to this session id so the door is addressable.
+    "held by the operator": (
+        "That conversation is held as a value you asked to keep. Release the hold "
+        "with `lop sessions unhold {session_id} --reason ...` before deleting it."
+    ),
+    # The index itself is the thing to repair; deleting it would silently drop
+    # every hold, and nothing removes a session while it cannot be read.
+    "operator holds unreadable": (
+        "The value-hold index could not be read, so nothing was deleted. Repair "
+        "or restore the store's .session-holds.json file, then try again."
+    ),
 }
 
 #: Used for a guard reason with no sentence of its own, INCLUDING a guard that
@@ -2250,8 +2273,10 @@ def _guard_refusal(reason: str, session_id: str) -> str:
     template = _GUARD_REFUSALS.get(reason)
     if template is None:
         return _GUARD_REFUSAL_FALLBACK
-    return template.replace("{wake_file}", f"wakes/{session_id}.json").replace(
-        "{monitor_file}", f"monitors/{session_id}.json"
+    return (
+        template.replace("{wake_file}", f"wakes/{session_id}.json")
+        .replace("{monitor_file}", f"monitors/{session_id}.json")
+        .replace("{session_id}", session_id)
     )
 
 
@@ -2304,13 +2329,17 @@ def measure_session_dir(
     produces the total — a second walk of the pad would double the cost of the
     largest part of a session for no extra fact), ``bytes``/``entries`` (the
     whole directory), ``origin`` (origin.json's value), ``last_activity_at``
-    (retention's ONE clock, rendered UTC ISO 8601) and ``contents_complete``
-    (False when the walk hit ``max_entries``, making every size a lower bound).
+    (retention's ONE clock, rendered UTC ISO 8601), ``contents_complete`` (False
+    when the walk was CAPPED at ``max_entries`` **or** any entry could not be
+    read — both make every size a lower bound) and ``skipped_entries``.
 
-    Never raises for a filesystem problem: an unreadable entry is skipped, and
-    the caller records what was measurable. The measurement's job is to make a
-    loss describable, never to decide whether the loss may happen — that is
-    the guards' and the receipt's job.
+    NEVER RAISES for a filesystem problem, and an unreadable subtree is NOT
+    zero bytes: an ``OSError`` on a directory or an entry is counted in
+    ``skipped_entries`` and clears ``contents_complete``. The census relies on
+    that flag to refuse a size comparison — a 0000 pad read as "0 bytes" made
+    it report a 2 MB content loss that was still on disk (review round 1, M1) —
+    and a removal receipt that cannot see a subtree says so rather than
+    understating the loss.
     """
     pad_root = os.path.join(os.fspath(directory), PAD_DIRNAME)
     contents: dict[str, Any] = {
@@ -2322,6 +2351,7 @@ def measure_session_dir(
         "origin": "",
         "last_activity_at": None,
         "contents_complete": True,
+        "skipped_entries": 0,
     }
     try:
         contents["transcript_bytes"] = (directory / TRANSCRIPT_FILENAME).stat().st_size
@@ -2333,6 +2363,7 @@ def measure_session_dir(
     pad_entries = 0
     seen = 0
     complete = True
+    skipped = 0
     stack: list[tuple[str, bool]] = [(os.fspath(directory), False)]
     while stack:
         current, in_pad = stack.pop()
@@ -2357,14 +2388,21 @@ def measure_session_dir(
                             if in_pad:
                                 pad_bytes += size
                     except OSError:
+                        # The entry exists (scandir listed it) but cannot be
+                        # read: its bytes are unknown, not absent.
+                        skipped += 1
                         continue
         except OSError:
+            # The DIRECTORY itself could not be scanned. Count it so the
+            # measurement cannot pass a partial walk off as complete.
+            skipped += 1
             continue
     contents["bytes"] = total
     contents["entries"] = entries
     contents["pad_bytes"] = pad_bytes
     contents["pad_entries"] = pad_entries
-    contents["contents_complete"] = complete
+    contents["skipped_entries"] = skipped
+    contents["contents_complete"] = complete and skipped == 0
     try:
         from local_operator.resume import session_origin
 
@@ -2373,9 +2411,7 @@ def measure_session_dir(
         contents["origin"] = ""
     activity = session_activity(directory)
     if activity is not None:
-        contents["last_activity_at"] = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(activity)
-        )
+        contents["last_activity_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(activity))
     return contents
 
 
