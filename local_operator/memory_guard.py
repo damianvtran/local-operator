@@ -1311,9 +1311,9 @@ def admission_check(
     swap_words = f"{swap} MB of free swap" if swap is not None else "no measurable swap"
     reason = (
         f"not starting {what}: this device has {available} MB of memory available"
-        f" and {swap_words}, below the {floor} MB admission floor. Starting it now risks the kernel OOM killer"
-        " ending other sessions or the mesh relay. Finish or stop other sessions or"
-        " commands and try again, or add RAM/swap to this device"
+        f" and {swap_words}, below the {floor} MB admission floor. Starting it now"
+        " risks the kernel OOM killer ending other sessions or the mesh relay."
+        " Finish or stop other sessions or commands and try again, or add RAM/swap to this device"
         f" ({ADMISSION_FLOOR_ENV}=0 disables this check)."
     )
     return Admission(False, available, swap, floor, reason)
