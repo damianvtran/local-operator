@@ -1631,6 +1631,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "boot records under <config>/run/host only; fixed dirname + one-level "
         "'*.json' glob, never a session path",
     ),
+    (
+        "local_operator/session/runtime/journal.py::clear_run_record",
+        "<path>.unlink",
+        "one run record FILE at <session_dir>/runtime-run.json, and only when its "
+        "own run key matches the caller's; never a directory and never the transcript",
+    ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
     # and reaching sessions/ no more than that one does.
