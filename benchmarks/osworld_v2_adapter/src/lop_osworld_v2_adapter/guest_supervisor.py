@@ -231,19 +231,25 @@ persist()
 #:                                -> verified all-process restart (attempt);
 #:                                   RESTART_SOURCE owns the reset, the
 #:                                   generation rebase, the kill and the start
-#:   active/activating/... with a listener that does not answer
-#:                                -> verified restart only after TWO consecutive
-#:                                   observations (attempt on the second)
+#:   active/activating/reloading/deactivating, with or without a listener
+#:                                -> NONE, whatever the probe said; observed as
+#:                                   ``unresponsive``/``no-listener`` only
 #:   any state, listener that answers -> none; observed as ``serving``
-#:   active/activating/reloading/deactivating, no listener
-#:                                -> none; observed as ``no-listener`` only
+#:   a state systemd will not report -> none; observed as ``unknown``
 #:
-#: WHY THE ACTIVE WEDGE IS REPAIRED HERE. The host's only channel is the same
-#: listener: its recovery probe fails against a wedged server and
-#: ``_restart_supervisor_unit`` runs only after a SUCCESSFUL probe, so a
-#: permanent wedge is repaired by neither side. Two consecutive unresponsive
-#: observations are required before acting, so a single slow response is never
-#: mistaken for death.
+#: ``ActiveState`` IS THE ONLY DESTRUCTIVE GATE, AND IT MUST BE. ``failed`` or
+#: ``inactive`` is systemd's own statement that no process is left to lose;
+#: anything else is a server that owns processes the kill would take away. A
+#: listener that does not answer while the unit is ``active`` is therefore a
+#: BUSY or wedged server, never a dead one: a 1280x720 screenshot or a long page
+#: load can outlast any probe, and a probe bound is a guess about scheduling,
+#: not evidence about life. Earlier revisions treated two consecutive silences
+#: as death and were measured killing healthy servers mid-episode -- the
+#: adapter's in-flight action then dies with a transport error and the episode
+#: is lost, so a missed repair (one episode) is always the cheaper error than a
+#: kill (every episode). The observation is still recorded, so a genuinely
+#: wedged-but-active server is visible in the host's evidence rather than
+#: silently indistinguishable from a healthy one.
 #:
 #: THE VERDICT IS DERIVED FROM THE PAYLOAD, NEVER FROM A FIELD THE SCRIPT DOES
 #: NOT WRITE. ``RESTART_SOURCE`` reports observations (pids, start ticks,
@@ -291,9 +297,19 @@ MAX_ATTEMPTS = 5
 MAX_INEFFECTIVE = 2
 ABSENT_GRACE_S = 30.0
 EVENT_CAP = 8
-PROBE_TIMEOUT_S = 2.0
+#: The liveness probe's bound, and NOTHING ELSE. It is far longer than one
+#: action (a screenshot, a page load) so ordinary work is never mislabelled as
+#: silence -- but even a mislabel cannot cost anything: the probe only chooses
+#: between the ``serving`` and ``unresponsive`` OBSERVATIONS, and only
+#: ``ActiveState`` can authorise a dispatch.
+PROBE_TIMEOUT_S = 30.0
 RESTART_TIMEOUT_S = 15.0
 
+#: ``unresponsive`` is RETIRED as a trigger and retained in the vocabulary so
+#: an event ring written by an older watchdog still seeds; the cycle can no
+#: longer emit it from a silent probe. It is still recorded for a unit systemd
+#: reports as ``failed``/``inactive`` whose port is held by a socket that does
+#: not answer -- there the trigger word names the unit state, not the silence.
 TRIGGERS = ('failed', 'inactive', 'unresponsive')
 #: ``reset-failed+start`` is RETIRED but retained so an event ring written by
 #: an older watchdog still seeds; the cycle only ever issues ``verified-restart``.
@@ -303,7 +319,6 @@ OUTCOMES = ('started', 'start-failed', 'reset-failed-error', 'no-effect',
 OBSERVATIONS = ('none', 'serving', 'no-listener', 'unresponsive', 'unknown')
 
 absent_since = None
-unresponsive_streak = 0
 #: The throttle compares against the last DISPATCH's clock value, not the
 #: record's microsecond stamp: a legitimate intervention at monotonic 0 would
 #: otherwise read as "never attempted" and defeat the minimum interval.
@@ -342,10 +357,10 @@ def answers():
     # A LISTEN socket is not a serving server, and an exit code is not proof of
     # one either. The rule is deliberately one-sided: ANY complete HTTP status
     # line means the server is answering (a 404/500 is still a live app, and
-    # this probe is not a health endpoint), so a slow-but-alive server is never
-    # restarted. Only silence -- connect refused, or no status line inside the
-    # bound -- is "unresponsive". Both families are tried because the scan
-    # above accepts a v6-only listener.
+    # this probe is not a health endpoint). Only silence -- connect refused, or
+    # no status line inside the bound -- is "unresponsive", and "unresponsive"
+    # is an OBSERVATION: it never dispatches anything by itself. Both families
+    # are tried because the scan above accepts a v6-only listener.
     connection = None
     for host in ('127.0.0.1', '::1'):
         try:
@@ -626,7 +641,7 @@ def observe(word):
     persist()
 
 def cycle():
-    global absent_since, unresponsive_streak
+    global absent_since
     now = time.monotonic()
     recent[:] = [stamp for stamp in recent if now - stamp < WINDOW_S]
     ineffective[:] = [stamp for stamp in ineffective if now - stamp < WINDOW_S]
@@ -640,19 +655,18 @@ def cycle():
         if answers():
             # A serving port is the whole healthy-path shortcut: no unit query,
             # no verb, not even a state read.
-            unresponsive_streak = 0
             observe('serving')
             return
-        unresponsive_streak += 1
         observe('unresponsive')
         observed = active_state()
-        if observed not in ('failed', 'inactive') and unresponsive_streak < 2:
-            # One slow response is not death. The second consecutive silence is
-            # a wedged server the host cannot reach either.
+        if observed not in ('failed', 'inactive'):
+            # THE UNIT IS STILL RUNNING, so the silence is the server's, not the
+            # process's: it is busy, or wedged with its work in flight. Killing
+            # it would destroy whatever the adapter is waiting on -- the exact
+            # failure this branch exists to avoid. Record and take no action.
             return
         trigger = 'unresponsive'
     else:
-        unresponsive_streak = 0
         observed = active_state()
         if observed in ('failed', 'inactive'):
             observe('no-listener')
@@ -2343,6 +2357,9 @@ def _receipt_records_value(value: object) -> list[dict[str, Any]]:
 #: lockstep with the literals in ``WATCHDOG_SOURCE``. A guest that
 #: prints arbitrary text cannot smuggle it into the evidence through a field
 #: the adapter reads as an enum; anything outside these sets becomes neutral.
+#: ``unresponsive`` stays in the trigger set because guests that predate the
+#: ActiveState-only gate can still have written it; the shipped watchdog
+#: emits it only for a unit systemd reports as ``failed``/``inactive``.
 _WATCHDOG_TRIGGERS = frozenset({"none", "failed", "inactive", "unresponsive"})
 _WATCHDOG_ACTIONS = frozenset({"none", "reset-failed+start", "verified-restart"})
 _WATCHDOG_OUTCOMES = frozenset(

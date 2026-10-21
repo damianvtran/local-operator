@@ -3559,13 +3559,16 @@ def _execute_watchdog(
     target_unit: str = "action-server.service",
     probe_log: list[tuple[str, int, float]] | None = None,
     probe_status: bytes = b"HTTP/1.0 200 OK\r\n",
+    probe_timeouts: bool = False,
 ) -> tuple[dict[str, Any], list[Any], float]:
     """Run the shipped WATCHDOG_SOURCE against a redirected /proc and fake manager.
 
     The fake clock advances one ``INTERVAL_S`` per cycle, so the rate limits are
     exercised as real elapsed time instead of patched thresholds. ``answering``
     drives the one-shot HTTP liveness probe (a wedged listener accepts at the
-    kernel level and then returns nothing). ``failures`` makes the named cycle's
+    kernel level and then returns nothing); ``probe_timeouts`` makes that probe
+    raise the ``TimeoutError`` a BUSY server produces, which is the shape that
+    must never be mistaken for death. ``failures`` makes the named cycle's
     ``systemctl`` raise; ``failures_on`` targets one verb.
 
     ``restart_effect`` chooses what the transient restart does on the fake
@@ -3602,13 +3605,20 @@ def _execute_watchdog(
             (net / "tcp6").write_text(header)
 
     class _Connection:
-        def __init__(self, ok: bool) -> None:
+        def __init__(self, ok: bool, slow: bool = False) -> None:
             self.ok = ok
+            self.slow = slow
 
         def sendall(self, payload: bytes) -> None:
             pass
 
         def recv(self, size: int) -> bytes:
+            if self.slow:
+                # A server busy with an action: the socket is connected and
+                # nothing arrives before the probe bound. ``socket.timeout`` is
+                # ``TimeoutError`` since 3.10 and is an ``OSError``, exactly
+                # what ``answers()`` catches.
+                raise TimeoutError("timed out")
             return probe_status if self.ok else b""
 
         def close(self) -> None:
@@ -3618,7 +3628,7 @@ def _execute_watchdog(
         probes.append((address[0], address[1], timeout))
         if address[0] != reachable_host:
             raise OSError("no route to host")
-        return _Connection(answers[min(clock["cycle"], len(answers) - 1)])
+        return _Connection(answers[min(clock["cycle"], len(answers) - 1)], probe_timeouts)
 
     def check_output(args: Any, **kwargs: Any) -> str:
         calls.append(args)
@@ -3898,30 +3908,53 @@ def test_one_unresponsive_observation_is_not_death(tmp_path: Path) -> None:
     assert record["last_observation"] == "unresponsive"
 
 
-def test_an_active_wedge_is_repaired_after_two_consecutive_observations(
-    tmp_path: Path,
-) -> None:
-    """The host cannot reach a wedged listener either, so the guest must act.
+def test_a_busy_but_active_server_is_never_touched(tmp_path: Path) -> None:
+    """A HEALTHY server too slow for any probe must never be killed.
 
-    ``_recover_guest_supervisor`` only probes before a restart, and its probe
-    fails against the wedge; two consecutive silences are the evidence that
-    this is a dead server rather than a slow one.
+    Production shape: a 1280x720 screenshot or a long page load outlives the
+    probe bound, and the retired two-consecutive-silence rule killed exactly
+    such a server mid-action -- the adapter's in-flight request then died with
+    a transport error at step 2 and the episode was lost. ``ActiveState=active``
+    is systemd's statement that the process is still there, so silence is an
+    OBSERVATION: over a sustained window no kill, start, reset, stop or
+    dispatch may be issued, and no attempt may be spent.
     """
-    record, calls, _ = _execute_watchdog(
-        tmp_path,
+    record, calls, elapsed = _execute_watchdog(
+        tmp_path / "busy",
         active_states=["active"],
         listening=[True],
         answering=[False],
-        cycles=3,
+        probe_timeouts=True,
+        cycles=30,
         clock_start=1000.0,
     )
-    assert record["attempts"] == 1
-    assert record["last_trigger"] == "unresponsive"
-    assert record["last_action"] == "verified-restart"
-    # last_outcome reflects the most recent DECISION, and the cycle after a
-    # repair is legitimately throttled; the dispatch itself is the event.
-    assert record["events"][0]["outcome"] == "restarted"
+    assert _dispatches(calls) == []
+    assert not any(
+        len(args) > 1 and args[1] in {"kill", "start", "stop", "restart", "reset-failed"}
+        for args in calls
+    ), "the watchdog issued a destructive verb against a live unit"
+    assert record["attempts"] == 0
+    assert record["intervened"] is False
+    assert record["events"] == []
     assert record["last_observation"] == "unresponsive"
+    # Sustained, not one lucky sample: the shipped interval across the window.
+    assert elapsed >= guest_supervisor.WATCHDOG_INTERVAL_S * 25
+
+    # NEGATIVE CONTROL: the SAME silence with the unit not running must
+    # still dispatch, so the test above cannot pass on a dead harness -- and
+    # the discriminating variable is the unit state, not the probe.
+    control, control_calls, _ = _execute_watchdog(
+        tmp_path / "control",
+        active_states=["failed"],
+        listening=[True],
+        answering=[False],
+        probe_timeouts=True,
+        cycles=1,
+        clock_start=1000.0,
+    )
+    assert len(_dispatches(control_calls)) == 1
+    assert control["attempts"] == 1
+    assert control["last_trigger"] == "unresponsive"
 
 
 def test_an_active_unit_with_no_listener_is_observed_not_touched(
