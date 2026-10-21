@@ -451,6 +451,34 @@ def postdated(owners, new_main, new_main_start, kill_ticks):
             return False
     return True
 
+def receipt_reconciles(receipt):
+    # The host's _receipt_records_value, restated guest-side. A REBASED
+    # generation (after reset-failed) has zero captures and zero records, so
+    # "records must not be empty" cannot be part of the rule; the counters and
+    # the timestamp relation are what prove the envelope belongs to the
+    # systemd generation the payload reports.
+    if not isinstance(receipt, dict) or receipt.get('schema_version') != 1:
+        return False
+    records = receipt.get('records')
+    if not isinstance(records, list):
+        return False
+    for key in ('baseline_nrestarts', 'captured_exits', 'systemd_nrestarts'):
+        if type(receipt.get(key)) is not int or receipt[key] < 0:
+            return False
+    for key in ('baseline_active_enter', 'systemd_active_enter'):
+        if type(receipt.get(key)) is not int or receipt[key] <= 0:
+            return False
+    captured = receipt['captured_exits']
+    if receipt['systemd_nrestarts'] - receipt['baseline_nrestarts'] != captured:
+        return False
+    if len(records) != min(captured, 4):
+        return False
+    if ((receipt['systemd_active_enter'] == receipt['baseline_active_enter'])
+            != (captured == 0)):
+        return False
+    return all(isinstance(record, dict) and type(record.get('restart')) is int
+               for record in records)
+
 def verified_verdict(verdict, token):
     # The host's restart_record rule, applied to the script's raw payload.
     # RESTART_SOURCE writes observations; ``status`` is a HOST-derived field.
@@ -489,14 +517,11 @@ def verified_verdict(verdict, token):
         return False
     if not postdated(owners, new_main, new_main_start, kill_ticks):
         return False
-    receipt = verdict.get('receipt')
-    if not isinstance(receipt, dict) or receipt.get('schema_version') != 1:
-        return False
-    records = receipt.get('records')
-    if not isinstance(records, list) or not records:
-        return False
-    latest = records[-1]
-    return isinstance(latest, dict) and type(latest.get('restart')) is int
+    # A NON-NULL, RECONCILED receipt. After a latched recovery the reset starts
+    # a new generation with no captures, so requiring a crash record here would
+    # report every successful revival as a failure -- the exact blocker this
+    # rule exists to prevent.
+    return receipt_reconciles(verdict.get('receipt'))
 
 def start_outcome():
     # ``systemctl start`` exits 0 when the JOB completes, even if the service
@@ -538,7 +563,11 @@ def verified_restart():
         verdict = json.loads(result_path.read_text())
     except (OSError, ValueError):
         return 'restart-failed'
-    if isinstance(verdict, dict) and verdict.get('start_limit_cleared') is False:
+    if not isinstance(verdict, dict) or verdict.get('token') != token:
+        # A stale file from an earlier dispatch is not this dispatch's answer,
+        # whatever it says -- including about a refused reset.
+        return 'restart-failed'
+    if verdict.get('start_limit_cleared') is False:
         # The latch was never cleared, so the start could not have been
         # accepted: a distinct outcome from a restart that ran and failed.
         return 'reset-failed-error'
@@ -802,7 +831,15 @@ hook = '+/usr/bin/python3 ' + str(capture) + ' ' + unit
 content = ('[Unit]\nStartLimitIntervalSec=3600\nStartLimitBurst=3\n'
            '[Service]\nRestart=always\nRestartSec=1\nKillMode=process\n'
            'ExecStopPost=' + hook + '\n')
+watchdog_path = pathlib.Path('/etc/systemd/system') / 'lop-action-watchdog.service'
+watchdog_script = root / 'watchdog.py'
+# The watchdog dispatches the SAME restart script the host uses (argv[4]), as
+# the same transient service. One implementation of the all-process restart,
+# two dispatchers: a bare ``start`` here would fail to bind beside a survivor.
+restart_script = root / 'restart.py'
+receipt = root / (unit + '.json')
 created = not path.exists()
+watchdog_created = not watchdog_path.exists()
 # Set only when THIS attempt issued the start: a unit that was already
 # running is not ours to stop, and one we started must not survive a refusal.
 watchdog_started = False
@@ -811,58 +848,103 @@ watchdog_started = False
 # earlier refused one, and a pre-existing file is never ours to delete.
 capture_created = watchdog_script_created = restart_script_created = False
 receipt_created = False
-if not created:
-    if path.read_text() != content or capture.read_text() != sys.argv[1]:
-        raise RuntimeError('supervisor installation conflict')
-else:
-    if any(props.get(k) for k in ('ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost')):
-        raise RuntimeError('service hooks could mutate desktop state')
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if capture.exists() and capture.read_text() != sys.argv[1]:
-        raise RuntimeError('supervisor capture conflict')
-    capture_created = not capture.exists()
-    capture.write_text(sys.argv[1])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('x') as out:
-        out.write(content)
-# THE WATCHDOG IS A SEPARATE UNIT, and that is the whole mechanism: it must
-# outlive the unit it repairs, so it can never share its cgroup. ``Restart=always``
-# is its own, and its start limit is DISABLED: this is the recovery of last
-# resort, and a watchdog that latches ``failed`` is the one failure nothing
-# else in the system can repair. Its restart cost is bounded by RestartSec.
-watchdog_path = pathlib.Path('/etc/systemd/system') / 'lop-action-watchdog.service'
-watchdog_script = root / 'watchdog.py'
-# The watchdog dispatches the SAME restart script the host uses (argv[4]), as
-# the same transient service. One implementation of the all-process restart,
-# two dispatchers: a bare ``start`` here would fail to bind beside a survivor.
-restart_script = root / 'restart.py'
-watchdog_content = ('[Unit]\nDescription=Local Operator action-server watchdog\n'
-                    'StartLimitIntervalSec=0\n'
-                    '[Service]\nType=simple\n'
-                    'ExecStart=/usr/bin/python3 ' + str(watchdog_script) + ' '
-                    + unit + ' ' + str(port) + ' '
-                    + str(root / 'watchdog.json') + ' '
-                    + str(restart_script) + ' '
-                    + str(root / 'restart-result.json') + '\n'
-                    'Restart=always\nRestartSec=5\n'
-                    '[Install]\nWantedBy=multi-user.target\n')
-watchdog_created = not watchdog_path.exists()
-if not watchdog_created:
-    if (watchdog_path.read_text() != watchdog_content
-            or watchdog_script.read_text() != sys.argv[3]
-            or restart_script.read_text() != sys.argv[4]):
-        raise RuntimeError('watchdog installation conflict')
-else:
-    if watchdog_script.exists() and watchdog_script.read_text() != sys.argv[3]:
-        raise RuntimeError('watchdog script conflict')
-    if restart_script.exists() and restart_script.read_text() != sys.argv[4]:
-        raise RuntimeError('watchdog restart script conflict')
-    watchdog_script_created = not watchdog_script.exists()
-    restart_script_created = not restart_script.exists()
-    watchdog_script.write_text(sys.argv[3])
-    restart_script.write_text(sys.argv[4])
-    with watchdog_path.open('x') as out:
-        out.write(watchdog_content)
+def rollback():
+    # Undo everything THIS attempt created, including a started watchdog.
+    # Called from BOTH creation and verification failures: a conflict while
+    # writing the drop-in or the watchdog leaves files behind even though no
+    # verification ever ran, and a later install of a changed version must not
+    # trip over them. Every step is best-effort: a rollback failure must not
+    # replace the refusal that caused it.
+    if watchdog_started:
+        for verb in ('disable', 'stop'):
+            try:
+                run('systemctl', verb, 'lop-action-watchdog.service')
+            except Exception:
+                pass
+        try:
+            left = dict(line.split('=', 1) for line in run('systemctl', 'show',
+                'lop-action-watchdog.service', '-p', 'ActiveState',
+                '-p', 'ControlGroup').splitlines())
+            if left.get('ActiveState') == 'active' or left.get('ControlGroup'):
+                run('systemctl', 'kill', '--kill-whom=all', 'lop-action-watchdog.service')
+        except Exception:
+            pass
+    removed = False
+    for owned in (
+        (capture_created, capture),
+        (watchdog_script_created, watchdog_script),
+        (restart_script_created, restart_script),
+        (receipt_created, receipt),
+    ):
+        if owned[0]:
+            try:
+                owned[1].unlink()
+                removed = True
+            except OSError:
+                pass
+    for owned_unit in ((created, path), (watchdog_created, watchdog_path)):
+        if owned_unit[0]:
+            try:
+                owned_unit[1].unlink()
+                removed = True
+            except OSError:
+                pass
+    # A refusal that never wrote anything must not touch the manager.
+    if removed:
+        try:
+            run('systemctl', 'daemon-reload')
+        except Exception:
+            pass
+
+try:
+    if not created:
+        if path.read_text() != content or capture.read_text() != sys.argv[1]:
+            raise RuntimeError('supervisor installation conflict')
+    else:
+        if any(props.get(k) for k in ('ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost')):
+            raise RuntimeError('service hooks could mutate desktop state')
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if capture.exists() and capture.read_text() != sys.argv[1]:
+            raise RuntimeError('supervisor capture conflict')
+        capture_created = not capture.exists()
+        capture.write_text(sys.argv[1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('x') as out:
+            out.write(content)
+    # THE WATCHDOG IS A SEPARATE UNIT, and that is the whole mechanism: it must
+    # outlive the unit it repairs, so it can never share its cgroup. ``Restart=always``
+    # is its own, and its start limit is DISABLED: this is the recovery of last
+    # resort, and a watchdog that latches ``failed`` is the one failure nothing
+    # else in the system can repair. Its restart cost is bounded by RestartSec.
+    watchdog_content = ('[Unit]\nDescription=Local Operator action-server watchdog\n'
+                        'StartLimitIntervalSec=0\n'
+                        '[Service]\nType=simple\n'
+                        'ExecStart=/usr/bin/python3 ' + str(watchdog_script) + ' '
+                        + unit + ' ' + str(port) + ' '
+                        + str(root / 'watchdog.json') + ' '
+                        + str(restart_script) + ' '
+                        + str(root / 'restart-result.json') + '\n'
+                        'Restart=always\nRestartSec=5\n'
+                        '[Install]\nWantedBy=multi-user.target\n')
+    if not watchdog_created:
+        if (watchdog_path.read_text() != watchdog_content
+                or watchdog_script.read_text() != sys.argv[3]
+                or restart_script.read_text() != sys.argv[4]):
+            raise RuntimeError('watchdog installation conflict')
+    else:
+        if watchdog_script.exists() and watchdog_script.read_text() != sys.argv[3]:
+            raise RuntimeError('watchdog script conflict')
+        if restart_script.exists() and restart_script.read_text() != sys.argv[4]:
+            raise RuntimeError('watchdog restart script conflict')
+        watchdog_script_created = not watchdog_script.exists()
+        restart_script_created = not restart_script.exists()
+        watchdog_script.write_text(sys.argv[3])
+        restart_script.write_text(sys.argv[4])
+        with watchdog_path.open('x') as out:
+            out.write(watchdog_content)
+except Exception:
+    rollback()
+    raise
 # An initialized empty envelope is distinct from a missing/corrupt receipt.
 # Never let a failed read become evidence that no restart happened.
 receipt = root / (unit + '.json')
@@ -927,47 +1009,9 @@ try:
             watchdog_group.startswith(control_group.rstrip('/') + '/')):
         raise RuntimeError('watchdog unit shares the action-server cgroup')
 except Exception:
-    # Roll back only the units this attempt created, never a pre-existing
+    # Roll back only what this attempt created, never a pre-existing
     # installation. Re-entry MUST verify effective config, not trust bytes.
-    # A watchdog that was STARTED before the refusal keeps repairing the
-    # server while the host records ``installed: false``, so stop and disable
-    # it before the file goes away. The VERBS are not the proof: a bounded
-    # state read must show it gone, and a survivor is killed. Every rollback
-    # step is best-effort: a failure here must not replace the refusal.
-    if watchdog_started:
-        for verb in ('disable', 'stop'):
-            try:
-                run('systemctl', verb, 'lop-action-watchdog.service')
-            except Exception:
-                pass
-        try:
-            left = dict(line.split('=', 1) for line in run('systemctl', 'show',
-                'lop-action-watchdog.service', '-p', 'ActiveState',
-                '-p', 'ControlGroup').splitlines())
-            if left.get('ActiveState') == 'active' or left.get('ControlGroup'):
-                run('systemctl', 'kill', '--kill-whom=all', 'lop-action-watchdog.service')
-        except Exception:
-            pass
-    for owned in (
-        (capture_created, capture),
-        (watchdog_script_created, watchdog_script),
-        (restart_script_created, restart_script),
-        (receipt_created, receipt),
-    ):
-        if owned[0]:
-            try:
-                owned[1].unlink()
-            except OSError:
-                pass
-    if created:
-        path.unlink()
-    if watchdog_created:
-        watchdog_path.unlink()
-    if created or watchdog_created:
-        try:
-            run('systemctl', 'daemon-reload')
-        except Exception:
-            pass
+    rollback()
     raise
 print(json.dumps({'unit': unit, 'installed': True,
                   'watchdog': {'installed': True, 'status': 'active',
@@ -1129,6 +1173,67 @@ def acceptable(pid, new_main, new_main_start):
         return False
     return pid == new_main or new_main in ancestors(ppid)
 
+def receipt_snapshot():
+    try:
+        value = json.loads(RECEIPT.read_text())
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+def write_receipt(value):
+    tmp = RECEIPT.with_suffix('.tmp')
+    tmp.write_text(json.dumps(value))
+    tmp.replace(RECEIPT)
+
+def active_enter():
+    try:
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT,
+            '-p', 'ActiveEnterTimestampMonotonic').splitlines())
+        return int(props['ActiveEnterTimestampMonotonic'])
+    except Exception:
+        return 0
+
+def rebase_receipt():
+    # reset-failed ZEROES NRestarts (measured on 255), while captured_exits
+    # keeps the crash count. The host reconciles
+    # ``systemd_nrestarts - baseline_nrestarts == captured_exits``; leaving the
+    # old accounting behind makes every later report a GenerationMismatch, and
+    # the host answers a mismatch by dropping the batch and rebinding -- a
+    # silent, permanent action blackout. The reset therefore starts a NEW
+    # generation atomically: counters and records are rebased in one
+    # write-and-replace, so no reader can see half of it.
+    value = receipt_snapshot()
+    if value is None:
+        return
+    try:
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT, '-p', 'NRestarts').splitlines())
+        baseline = int(props['NRestarts'])
+    except Exception:
+        baseline = 0
+    enter = active_enter()
+    value['schema_version'] = 1
+    value['records'] = []
+    value['captured_exits'] = 0
+    value['baseline_nrestarts'] = baseline
+    if enter > 0:
+        value['baseline_active_enter'] = enter
+    write_receipt(value)
+
+def rebase_active_enter():
+    # The start that followed the reset moved the activation stamp. The
+    # receipt rule ``(active_enter == baseline) == (captured == 0)`` then
+    # rejects the new generation until the baseline follows it. A capture that
+    # already wrote accounting owns the envelope: never overwrite it.
+    value = receipt_snapshot()
+    if value is None or value.get('captured_exits') != 0:
+        return
+    enter = active_enter()
+    if enter > 0 and enter != value.get('baseline_active_enter'):
+        value['baseline_active_enter'] = enter
+        write_receipt(value)
+
 # A result left by an earlier dispatch must not be read as this one.
 try:
     RESULT.unlink()
@@ -1169,11 +1274,17 @@ if pre_complete:
         unit_state = props.get('ActiveState', '')
     except Exception:
         unit_state = ''
-    if unit_state == 'failed':
+    # ``inactive`` matters too: measured on 255, a KillMode=process unit with
+    # survivors goes inactive after two starts+stops and the third start is
+    # refused start-limit-hit; reset-failed while inactive clears it. The
+    # live-unit exclusion stays, because a reset there also zeroes NRestarts.
+    if unit_state in ('failed', 'inactive'):
         try:
             run('systemctl', 'reset-failed', UNIT)
         except Exception:
             start_limit_cleared = False
+        else:
+            rebase_receipt()
     # The stamp is taken IMMEDIATELY before the signal. Freshness is then a
     # start time at or after it, not merely a pid absent from the pre set: a
     # holder that forks a worker while dying produces a pid the pre scan could
@@ -1193,6 +1304,8 @@ if pre_complete:
         run('systemctl', 'start', UNIT)
     except Exception:
         pass
+    if start_limit_cleared:
+        rebase_active_enter()
     # post_complete starts False: a loop that never runs must not claim a scan
     # it did not perform.
     post, post_complete = [], False
@@ -2457,9 +2570,10 @@ def restart_record(output: str) -> dict[str, Any]:
         raise ValueError("invalid restart kill stamp")
     try:
         records = _receipt_records_value(value.get("receipt"))
+        reconciled = True
         latest = records[-1]["restart"] if records else None
     except (ValueError, GenerationMismatch):
-        records, latest = [], None
+        records, latest, reconciled = [], None, False
     incomplete = (
         value["pre_scan_complete"] is not True
         or value["post_scan_complete"] is not True
@@ -2478,9 +2592,13 @@ def restart_record(output: str) -> dict[str, Any]:
         status = "verification_timeout"
     elif not fresh:
         status = "stale_listener"
-    elif latest is None:
+    elif not reconciled:
         status = "receipt_unavailable"
     else:
+        # A RECONCILED EMPTY GENERATION IS VALID: reset-failed starts one with
+        # captured_exits=0, and refusing it would reject exactly the latched
+        # recovery this path exists for. ``latest`` stays None, so the next
+        # report reads the empty record set as verified_none and never bounces.
         status = "verified"
     owner = post[0] if post else None
     return {

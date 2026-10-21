@@ -2677,18 +2677,29 @@ def _execute_restart_script(
     if seed_receipt:
         (root / "action-server.service.json").write_text(json.dumps(_installer_receipt()))
     calls: list[Any] = []
-    state = {"main": 9000, "now": 0.0}
+    # The fake manager owns the observable systemd state, including the two
+    # facts the real one measured on 255: reset-failed ZEROES NRestarts, and a
+    # start moves ActiveEnterTimestampMonotonic to a new value.
+    state = {"main": 9000, "now": 0.0, "nrestarts": 1, "enter": 200}
 
     def check_output(args: Any, **kwargs: Any) -> str:
         calls.append(args)
-        if args[1] == "show":
-            if "NRestarts" in args:
-                return "NRestarts=1\nActiveEnterTimestampMonotonic=200"
-            if "ActiveState" in args:
-                return "ActiveState=" + ("failed" if unit_failed else "active")
-            return "MainPID=%d" % state["main"]
         if args[1] == "reset-failed" and not reset_ok:
             raise OSError("start limit not cleared")
+        if args[1] == "show":
+            props = {}
+            if "NRestarts" in args:
+                props["NRestarts"] = str(state["nrestarts"])
+            if "ActiveEnterTimestampMonotonic" in args:
+                props["ActiveEnterTimestampMonotonic"] = str(state["enter"])
+            if "ActiveState" in args:
+                props["ActiveState"] = "failed" if unit_failed else "active"
+            if not props:
+                props["MainPID"] = str(state["main"])
+            return "\n".join(k + "=" + v for k, v in props.items())
+        if args[1] == "reset-failed":
+            state["nrestarts"] = 0
+            return ""
         if args[1] == "kill":
             if hang_kill:
                 # Consume the whole per-call bound, then fail as a hung
@@ -2702,6 +2713,7 @@ def _execute_restart_script(
             if on_start is not None:
                 on_start(proc)
             state["main"] = main_pid_after
+            state["enter"] += 1000
         return ""
 
     def sleep(seconds: float) -> None:
@@ -2782,7 +2794,17 @@ def test_the_restart_clears_the_start_limit_between_the_scan_and_the_kill(
     assert order == ["reset-failed", "kill", "start"], "the latch clears before the start"
     assert payload["start_limit_cleared"] is True
     assert payload["new_main_pid"] == 9100
-    assert guest_supervisor.restart_record(json.dumps(payload))["status"] == "verified"
+    # The manager fake ZEROED NRestarts on reset, exactly as systemd 255 does,
+    # so the receipt must have been rebased in the same breath: counters and
+    # records cleared, activation baseline moved to the new entry stamp.
+    receipt = payload["receipt"]
+    assert receipt["captured_exits"] == 0 and receipt["records"] == []
+    assert receipt["baseline_nrestarts"] == 0
+    assert receipt["systemd_nrestarts"] == 0
+    assert receipt["systemd_active_enter"] == receipt["baseline_active_enter"] == 1200
+    # The host's REPORT path must consume this generation without a mismatch;
+    # that is the difference between "the unit is alive" and "input can post".
+    assert guest_supervisor._receipt_records_value(receipt) == []
 
 
 def test_restart_script_kills_all_then_starts_and_reports_a_fresh_mainpid(
@@ -2860,14 +2882,17 @@ def test_restart_result_validates_the_receipt_the_installer_actually_writes(
         "baseline_active_enter",
     }
     assert on_disk["captured_exits"] == 1
+    # A LIVE unit: the host's ordinary bounce never resets, so the installer's
+    # crash accounting survives and the restart only adds the report-only keys.
     payload, _, _ = _execute_restart_script(
         tmp_path,
         seed_receipt=False,
+        unit_failed=False,
         on_kill=lambda proc: _write_listeners(proc, {}),
         on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
     )
     assert payload["receipt"]["systemd_nrestarts"] == 1
-    assert payload["receipt"]["systemd_active_enter"] == 200
+    assert payload["receipt"]["systemd_active_enter"] == 1200
     record = guest_supervisor.restart_record("escalation=agentless\n" + json.dumps(payload))
     assert record["status"] == "verified"
     assert record["latest_restart"] == on_disk["records"][-1]["restart"]
@@ -3993,13 +4018,21 @@ def test_a_start_that_takes_effect_is_recorded_as_started(tmp_path: Path) -> Non
     assert record["last_outcome"] == "started"
 
 
-def _execute_report(tmp_path: Path, *, watchdog_text: str | None) -> str:
+def _execute_report(
+    tmp_path: Path,
+    *,
+    watchdog_text: str | None,
+    receipt: dict[str, Any] | None = None,
+    nrestarts: int = 0,
+    active_enter: int = 100,
+) -> str:
     """Run the shipped REPORT_SOURCE against a redirected /var and fake systemd."""
     root = tmp_path / "var/lib/lop-action-supervisor"
     root.mkdir(parents=True, exist_ok=True)
     (root / "action-server.service.json").write_text(
         json.dumps(
-            {
+            receipt
+            or {
                 "schema_version": 1,
                 "records": [],
                 "captured_exits": 0,
@@ -4013,7 +4046,9 @@ def _execute_report(tmp_path: Path, *, watchdog_text: str | None) -> str:
     modules = {
         "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
         "subprocess": SimpleNamespace(
-            check_output=lambda *args, **kwargs: ("NRestarts=0\nActiveEnterTimestampMonotonic=100")
+            check_output=lambda *args, **kwargs: (
+                f"NRestarts={nrestarts}\n" f"ActiveEnterTimestampMonotonic={active_enter}"
+            )
         ),
         "sys": SimpleNamespace(argv=["-c", "action-server.service"]),
     }
@@ -4575,6 +4610,57 @@ async def test_a_changed_watchdog_summary_is_written_without_a_recovery(
         # The next action sees the same summary and writes nothing new.
         assert provider._recover_guest_supervisor().state == "verified_none"
         assert writes == ["guest-supervisor-recovery.json"]
+
+
+@pytest.mark.asyncio
+async def test_a_latched_recovery_leaves_a_receipt_the_host_can_post_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blocker's full chain, at the seams that carried it.
+
+    A real restart-script run against a latched unit rebases the receipt; the
+    real REPORT_SOURCE reads that receipt on the guest; the host's recovery
+    must then return ``verified_none`` (NOT ``read_failed``, which becomes
+    GuestServerRecovered and silently drops every later batch) and its next
+    execute must actually reach the guest.
+    """
+    payload, _, _ = _execute_restart_script(
+        tmp_path / "guest",
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
+    )
+    receipt = payload["receipt"]
+    assert receipt["captured_exits"] == 0 and receipt["records"] == []
+    report = _execute_report(
+        tmp_path / "report",
+        watchdog_text=None,
+        receipt=receipt,
+        nrestarts=receipt["systemd_nrestarts"],
+        active_enter=receipt["systemd_active_enter"],
+    )
+    # The host's report parser must not raise GenerationMismatch here.
+    assert guest_supervisor.receipt_records(report) == []
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        posted: list[str] = []
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            text = " ".join(str(part) for part in argv)
+            if "systemctl" in text:
+                return guest_disk.CommandResult(0, report, "")
+            posted.append(text)
+            return guest_disk.CommandResult(0, "", "")
+
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        assert provider._recover_guest_supervisor().state == "verified_none"
+        await provider.execute(["rebased_action()"])
+        assert posted, "the action was silently dropped after the recovery"
+        # The statement rides base64-encoded in the argv, exactly as upstream's
+        # controller sends it.
+        assert base64.b64encode(b"rebased_action()").decode() in posted[0]
 
 
 @pytest.mark.asyncio
