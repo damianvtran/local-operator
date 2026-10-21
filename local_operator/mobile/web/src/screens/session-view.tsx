@@ -29,7 +29,7 @@ import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer, ComposerFrame } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
-import { WideViewButton } from "../components/wide-view-button";
+import { SessionMenu } from "../components/session-menu";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -56,7 +56,7 @@ import {
 	useRouteTitle,
 	useSessions,
 } from "../store";
-import { blockingPending, outstandingAsks, questionTally } from "../lib/asks";
+import { blockingPending, outstandingAsks } from "../lib/asks";
 import { askOpenPolicy, namesEveryOutstanding, readQueue } from "../lib/ask-open-policy";
 import type { SessionProjection } from "../types";
 
@@ -107,21 +107,15 @@ const HEADER_CONTROL =
 function Header({
 	projection,
 	sessionId,
-	onOpenAsks,
-	askTally,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
-	/** Summon the asks sheet. The header entry is the SECOND way into the
-	    EXPANDED state (§5.0's "explicit /asks / header action"); the minimized
-	    bar above the composer is the first. */
-	onOpenAsks: () => void;
-	/** The session's outstanding questions, derived ONCE by the screen and handed
-	    to both doors (the header entry and the minimized bar), so the two cannot
-	    state one queue two ways. */
-	askTally: { waiting: number; lapsed: number };
 }) {
 	const [gateOpen, setGateOpen] = useState(false);
+	const [menuOpen, setMenuOpen] = useState(false);
+	/* The opener the menu's sheet returns focus to. Held here because the ⋮
+	   button lives here and the sheet is the only consumer that needs it. */
+	const menuButtonRef = useRef<HTMLButtonElement>(null);
 	/* THE LOOSENING RECEIPT, held HERE rather than in the sheet (design round 6,
 	   D2). The sheet unmounts the moment it closes, and a report set inside it was
 	   never painted — measured: panel gone, header still "needs you", the user told
@@ -178,7 +172,10 @@ function Header({
 	const pinMarks = usePinMarks();
 	const row = sessions.find((r) => r.session_id === sessionId);
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
-	const togglePin = async () => {
+	/** True when the daemon accepted the pin, false when it refused — the menu
+	    uses that answer to step aside so this header's refusal strip is visible
+	    instead of sitting behind the open sheet. */
+	const togglePin = async (): Promise<boolean> => {
 		const next = !pinned;
 		setPinRefusal(null);
 		/* Optimistic mark, then confirmed: the ★ flips at once and the daemon's
@@ -192,6 +189,7 @@ function Header({
 			   so a disagreeing one never settles and the ★ would stay on a row the
 			   daemon never pinned. */
 			if (saved.pinned !== next) clearSessionPinMark(sessionId);
+			return true;
 		} catch (error) {
 			/* A refusal takes the mark back with it AND says why, in the strip
 			   under this header: the list already renders the daemon's reason for
@@ -204,6 +202,7 @@ function Header({
 				text: pinRefusalText(error),
 				empty: projection.transcript.length === 0,
 			});
+			return false;
 		}
 	};
 	/* The 409's own exit, taken as soon as it is true (U17): the next projection
@@ -225,83 +224,43 @@ function Header({
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
-			{/* THE DISCOVERABLE PIN. The list also pins on a long-press, but a gesture
-			    with no affordance is undiscoverable on its own — this header control is
-			    where a reader finds the feature, and it is the SAME shared store, so
-			    pinning here moves the list's ★ Pinned section too. `★`/`☆` rather than a
-			    word: the header is width-starved and the star is the mark the section
-			    heading already uses, so the two cannot be read as different things. */}
-			<button
-				type="button"
-				onClick={() => void togglePin()}
-				aria-label={pinned ? "unpin this session" : "pin this session"}
-				aria-pressed={pinned}
-				className={cn(
-					HEADER_CONTROL,
-					pinned ? "text-accent" : "text-ink-muted",
-				)}
-			>
-				{pinned ? "★" : "☆"}
-			</button>
-			{/* THE ASKS ENTRY (§5.0). Present only while this conversation has
-			    something waiting, so the header never grows chrome for a state the
-			    session is not in — and absent at zero, exactly like the minimized
-			    bar. The COUNT is here rather than on the gate control because the
-			    two are different promises: a gate holds the turn, an ask does not.
-
-			    THE NUMBER IS VISIBLE, and it is the bar's own number (design round
-			    1, N3; agent review round 1, R3): it used to live only in the
-			    aria-label, so the eye saw "? asks" while the bar beside it said
-			    "4 questions waiting" — one screen stating one queue two ways. Both
-			    now read the outstanding set in questions.
-
-			    A LAPSED-ONLY QUEUE KEEPS A QUIET ENTRY (design round 1, D1): the sheet
-			    behind it is where Dismiss lives, so the door stays, in the dim register
-			    and labelled for what it holds rather than as a question waiting. */}
-			{askTally.waiting > 0 || askTally.lapsed > 0 ? (
+			{/* THE GATE ENTRY stays in the header, and only while it is a STATE:
+			    `needs you` appears when a gate actually blocks the turn, and its
+			    press opens the gate sheet that the menu's Approvals row also
+			    opens. The generic `approvals` word was a permanent noun where a
+			    state belongs; at rest it is menu content, not header chrome. */}
+			{blockingPending(projection.pending, projection.asks) ? (
 				<button
 					type="button"
-					onClick={onOpenAsks}
-					aria-label={`queued asks in this session (${
-						askTally.waiting > 0
-							? `${askTally.waiting} question${askTally.waiting === 1 ? "" : "s"} waiting)`
-							: `${askTally.lapsed} timed out)`
-					}`}
-					className={cn(
-						HEADER_CONTROL,
-						"!min-w-0 px-2 text-meta",
-						askTally.waiting > 0 ? "text-accent" : "text-ink-dim",
-					)}
+					onClick={() => setGateOpen(true)}
+					aria-label="needs you — approvals in this session"
+					className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
 				>
-					? {askTally.waiting > 0 ? askTally.waiting : askTally.lapsed}
+					needs you
 				</button>
 			) : null}
-			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
-			    `/approvals auto` is authority-increasing, so it asks the runtime for a
-			    per-action challenge and signs it with this phone's non-extractable key.
-			    Before the redesign a phone could not loosen in ANY session, and the
-			    refusal told the reader to find "the window that started this session" —
-			    a window a phone cannot become. The label says what the control is about
-			    (approvals) rather than naming the command; the sheet names the command.
-
-			    `blockingPending`, not `projection.pending`: once the runtime publishes
-			    `asks`, a mirrored ask is not a gate and must not make the approvals
-			    control claim this session "needs you" (design §4, client rule N3). */}
-			{/* THE READING WIDTH, where the reading happens (design round 1, D2).
-			    The toggle used to exist only on the conversation list, so a reader who
-			    noticed the narrow column had to leave the session, toggle it, and
-			    reopen — the state that motivated issue #1870 is discovered HERE. It is
-			    the same `WideViewButton` the list footer renders, so the two cannot
-			    disagree about the label or the pressed state. */}
-			<WideViewButton className="px-1.5" />
+			{/* THE OVERFLOW. Pin, wide view and approvals all have labelled rows in
+			    one sheet now: the `★`, `? N` and `[wide]` controls were each a
+			    second unlabelled door on a width-starved row. The ask dock above
+			    the composer is the labelled ask door and is always present when
+			    asks exist, so the `? N` duplicate is gone rather than moved. */}
 			<button
+				ref={menuButtonRef}
 				type="button"
-				onClick={() => setGateOpen(true)}
-				aria-label="approvals in this session"
-				className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
+				onClick={() => setMenuOpen(true)}
+				aria-label="session menu"
+				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
-				{blockingPending(projection.pending, projection.asks) ? "needs you" : "approvals"}
+				⋮
 			</button>
+			<SessionMenu
+				open={menuOpen}
+				onClose={() => setMenuOpen(false)}
+				pinned={pinned}
+				onTogglePin={() => togglePin()}
+				onOpenApprovals={() => setGateOpen(true)}
+				returnFocusRef={menuButtonRef}
+			/>
 			<GateSheet
 				open={gateOpen}
 				onClose={() => setGateOpen(false)}
@@ -495,14 +454,11 @@ export function SessionScreen({
 	   header say "needs you", and must not be rendered as a second copy of a row
 	   the queued surface already shows. */
 	const blocking = blockingPending(projection?.pending, projection?.asks);
-	/* ONE NUMBER FOR THE WHOLE SCREEN: the header entry and the minimized bar are
-	   two doors to one sheet, so they state the same population in the same unit
-	   (QUESTIONS, which is what §5.0's own bar copy counts), split the same way
-	   (`questionTally`: offered questions are waiting, lapsed ones are not — design
-	   round 1, D1). `answerableAsks` stays the whole outstanding set: it is what
-	   the open policy's dismissal memory records. */
+	/* ONE DOOR FOR THE WHOLE SCREEN: the minimized bar above the composer is the
+	   labelled ask entry (`? N` in the header was the same queue stated a second
+	   time, without a word to learn it from). `answerableAsks` is the whole
+	   outstanding set: it is what the open policy's dismissal memory records. */
 	const answerableAsks = outstandingAsks(projection?.asks);
-	const askTally = questionTally(projection?.asks);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	/* THE ONE-SHOT FOCUS INTENT (see ``lib/pending-focus.ts``). Consumed at MOUNT
@@ -856,12 +812,7 @@ export function SessionScreen({
 			    (the ended strip's resume) opts back in with `pointer-events-auto`.
 			    Sheets are `fixed z-50`; this overlay sits at `z-10`, under them. */}
 			<div className="relative">
-				<Header
-					projection={projection}
-					sessionId={sessionId}
-					onOpenAsks={openAsks}
-					askTally={askTally}
-				/>
+				<Header projection={projection} sessionId={sessionId} />
 				{/* The spend + context glance (phase 1), read-only and self-hiding:
 				    it renders nothing until either reading has something to state. */}
 				<SessionStatus projection={projection} />
