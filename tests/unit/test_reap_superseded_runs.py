@@ -311,9 +311,15 @@ def _old(hours: int) -> str:
 def _cancel_stub(status: int):
     """A gh_api that answers the pre-read then fails the cancel with `status`."""
 
+    detail = (
+        "Cannot cancel a workflow run that has not been queued yet."
+        if status == 409
+        else f"HTTP {status}"
+    )
+
     def fake(path: str, *, method: str = "GET"):
         if method == "POST":
-            raise reaper.ApiError(f"HTTP {status}", status)
+            raise reaper.ApiError(detail, status)
         return {"status": "queued"}
 
     return fake
@@ -449,3 +455,59 @@ def test_a_403_on_the_cancel_is_still_a_refusal(monkeypatch, capsys):
     assert rc == 0
     assert "REFUSE" in out
     assert "ghosts 0" in out
+
+
+def test_the_status_parser_reads_the_real_gh_409_stderr(monkeypatch):
+    """The test that would have caught the round-1 BLOCKER.
+
+    Both earlier 409 tests injected `ApiError(status=409)` straight into
+    `gh_api`'s replacement, so they passed while the PARSER -- which turned the
+    real stderr into `status=None` -- was never exercised. The change was
+    inert in production. These are the exact stderr strings `gh` prints.
+    """
+    cases = [
+        ("gh: Cannot cancel a workflow run that has not been queued yet. (HTTP 409)", 409),
+        ("gh: Not Found (HTTP 404)", 404),
+        ("gh: Resource not accessible by integration (HTTP 403)", 403),
+        ("gh: Server Error (HTTP 502)", 502),
+        ("some unexpected failure with no status at all", None),
+    ]
+    for stderr_text, expected in cases:
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = stderr_text
+
+        monkeypatch.setattr(reaper.subprocess, "run", lambda *a, **k: _Proc())
+        try:
+            reaper.gh_api("repos/o/r/actions/runs/1/cancel", method="POST")
+        except reaper.ApiError as exc:
+            assert exc.status == expected, f"{stderr_text!r} -> {exc.status!r}"
+        else:
+            raise AssertionError("expected ApiError")
+
+
+def test_a_409_for_a_COMPLETED_run_is_not_labelled_a_ghost(monkeypatch, capsys):
+    """409 has two meanings; only "never queued" is the ghost.
+
+    GitHub returns 409 both for a run that was never scheduled and for one that
+    is already completed. The second must not claim it "holds no runner slot",
+    so the label is gated on the message.
+    """
+    run = _run(id=97, head_branch="feat/z", created_at=_old(48), updated_at=_old(48))
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [run])
+    monkeypatch.setattr(reaper, "decide", lambda *a, **k: (True, "unresolvable"))
+
+    def fake(path, *, method="GET"):
+        if method == "POST":
+            raise reaper.ApiError("Cannot cancel a workflow run that is completed.", 409)
+        return {"status": "queued"}
+
+    monkeypatch.setattr(reaper, "gh_api", fake)
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+    rc = reaper.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "GHOST" not in out
+    assert "REFUSE" in out
