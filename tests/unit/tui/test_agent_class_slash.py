@@ -423,29 +423,30 @@ async def test_the_class_verb_shows_no_switch_hint(tmp_path: Path) -> None:
     assert not hint_shown, notice
 
 
-def test_the_scope_token_is_painted_muted_and_dropped_whole_when_it_cannot_fit() -> None:
-    """LOH-9 S2: a conversation row's scope token shares the class marker's ink.
+def test_the_scope_token_takes_a_second_facts_row_when_it_cannot_fit() -> None:
+    """LOH-9 S2 round 2 (D1/U2): the class marker AND the full scope survive.
 
     At the pane's 27-cell facts budget ``specialist · proactive · this
-    conversation`` is 42 cells, so keeping the tail would clip it mid-word — the
-    exact "reads as breakage" failure the badge constraint names. The token is
-    therefore dropped as ONE part (never truncated), which also keeps the class
-    marker design round 1 (D1) requires to survive.
+    conversation`` is 42 cells. Dropping the token kept the class but erased the
+    one fact saying the row exists only here; clipping it mid-word read as
+    breakage. The bound is a second facts line in the same ink, so both facts
+    are readable at the narrowest width.
     """
     from rich.style import Style
 
-    from local_operator.tui.widgets.settings_view import _paint_facts
+    from local_operator.tui.widgets.settings_view import _paint_facts_lines
 
     muted = Style(color="red")
     faint = Style(color="blue")
 
-    fits = _paint_facts("role · this conversation", 27, muted=muted, faint=faint)
-    assert ("this conversation", muted) in fits
+    fits = _paint_facts_lines("role · this conversation", 27, muted=muted, faint=faint)
+    assert len(fits) == 1
+    assert ("this conversation", muted) in fits[0]
 
-    crowded = _paint_facts(
+    narrow = _paint_facts_lines(
         "specialist · proactive · this conversation", 27, muted=muted, faint=faint
     )
-    plain = "".join(part for part, _style in crowded)
-    assert plain == "    specialist · proactive"
-    assert "conversation" not in plain, "the scope token must be dropped whole"
-    assert ("proactive", muted) in crowded, "the class marker must survive"
+    assert len(narrow) == 2
+    assert "".join(part for part, _style in narrow[0]) == "    specialist · proactive"
+    assert ("proactive", muted) in narrow[0], "the class marker must survive"
+    assert narrow[1] == [("    this conversation", muted)], "the token is whole and muted"

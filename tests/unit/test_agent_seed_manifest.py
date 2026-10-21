@@ -292,7 +292,7 @@ def test_the_packaged_coder_seed_carries_the_inherit_pin(manifest, tmp_path):
     # And it survives the install: the row a pull produces carries the pin, so
     # the rule is in force for the installed role and not only for the file.
     registry = AgentRegistry(tmp_path / "agents")
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
     row = registry.get_agent_by_name("coder")
     assert row is not None
     assert "effort:default" in [str(tag) for tag in (row.tags or [])]

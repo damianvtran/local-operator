@@ -1271,3 +1271,36 @@ def test_drop_session_roles_moves_and_reports_what_stayed_behind(
     landed = server_b.root / "sessions" / SESSION
     assert (landed / "transcript.jsonl").is_file()
     assert not (landed / "roles").exists(), "v1 must not invent definitions on the target"
+
+    # THE DEFINITIONS SURVIVE THE COMMIT (blocker Q-2). The source directory is
+    # gone, so the only copy is the device-level stash the notice names.
+    stash = server_a.root / mobility.DROPPED_ROLES_DIRNAME / SESSION
+    assert str(stash) in notice, notice
+    assert (stash / "agents").is_dir(), "the agents tree was not stashed"
+    record = json.loads((stash / "stash.json").read_text(encoding="utf-8"))
+    assert record["definitions"] == ["reviewer"], record
+    assert not (server_a.root / "sessions" / SESSION).exists(), "the source directory is gone"
+
+
+def test_an_unreadable_roles_tree_refuses_the_move_instead_of_failing_open(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """M5/R-M5: a gate that answers "no definitions" for a tree it could not read
+    is worse than no gate — the commit would delete what it never saw."""
+    import os
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    roles = directory / "roles"
+    (roles / "agents").mkdir(parents=True)
+    (roles / "teams").mkdir()
+    os.chmod(roles / "agents", 0)
+    try:
+        result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    finally:
+        os.chmod(roles / "agents", 0o700)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "session_roles_unreadable", result
+    assert directory.is_dir(), "the refusal changed nothing on the source"

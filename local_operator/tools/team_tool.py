@@ -345,7 +345,23 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "instance owns a product) the project brief. Read guide://teams first."
         )
         return _text(tool_call_id, "team", body)
-    body = "registered teams:\n" + "\n".join(_row(team, context=context) for team in teams)
+    # GROUP BY STORE (AC13 / U1): a conversation team and an account team have
+    # different lifetimes, and a model choosing a roster must see which it is.
+    from local_operator.profile_scope import row_scope
+
+    here = [team for team in teams if row_scope(registry, team) == "session"]
+    everywhere = [team for team in teams if row_scope(registry, team) != "session"]
+    body = ""
+    if here:
+        body += "teams in this conversation:\n" + "\n".join(
+            _row(team, context=context) for team in here
+        )
+    if everywhere:
+        if body:
+            body += "\n\n"
+        body += "teams saved everywhere (your account):\n" + "\n".join(
+            _row(team, context=context) for team in everywhere
+        )
     body += "\n\nlaunch with /team <name> <request>, or op='show' name='<name>'."
     text, spill = spill_truncate(body, "team", context)
     return _text(tool_call_id, "team", text, details=spill or None)
@@ -363,11 +379,16 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         return _error(
             tool_call_id,
             "team",
-            f"no team named {identifier_text(context, repr(name))} (try op='list')",
+            f"no team named {identifier_text(context, repr(name))} in this conversation "
+            "or your account (try op='list'). A team can be conversation-local, so one "
+            "created in another conversation is not visible here.",
         )
+    from local_operator.profile_scope import row_scope, scope_words
+
     header = [
         f"{identifier_text(context, display_form(team.name, team.label))}. "
         f"Led by {identifier_text(context, team.manager)}",
+        f"scope: {scope_words(row_scope(registry, team))}",
         f"description: {team.description or '(unstated)'}",
     ]
     if team.aliases:
@@ -422,27 +443,37 @@ async def _op_write(
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
     from local_operator.profile_scope import (
-        durable_write_origin,
+        durable_write_decision,
         durable_write_refusal,
         row_scope,
         scope_store,
         scope_words,
+        shadow_in_other_store,
+        shadow_refusal,
     )
 
     scope = params.scope or "session"
+    # THE COLLISION RUNS BEFORE THE CONSENT ASK (agent review round 1, M1): a
+    # create over an account name must answer "that name exists", not ask for an
+    # account write the model cannot authorize. Case-folded and ALIAS-aware (the
+    # helper), because `/team release` resolves an alias exactly like a name.
+    if creating:
+        collides = shadow_in_other_store(registry, scope, name, kind="team")
+        if collides is not None:
+            return _error(
+                tool_call_id,
+                "team",
+                shadow_refusal(
+                    "team",
+                    name,
+                    existing_scope="global" if scope == "session" else "session",
+                ),
+            )
     # WHERE THIS WRITE LANDS: a create goes where the caller asked, an update to
     # the row's owner. The consent question is asked for the ACCOUNT store only,
     # and only for a tool call — the TUI/desktop hand a plain registry and no
     # context because the user is the actor there.
     target = row_scope(registry, existing) if existing is not None else scope
-    authorized_by: str | None = None
-    if context is not None and target == "global":
-        intent = DurableWriteIntent(
-            kind="team", operation="update" if not creating else "create", name=name
-        )
-        authorized_by = await durable_write_origin(context, intent)
-        if authorized_by is None:
-            return _error(tool_call_id, "team", durable_write_refusal(intent))
     if creating and existing is not None:
         # Q1: a create whose name collides with an ALIAS must say so in the
         # registry's own words -- "already exists" sends the model looking
@@ -462,11 +493,21 @@ async def _op_write(
             f"team {identifier_text(context, repr(name))} already exists; "
             "use op='update' to change it.",
         )
+    authorized_by: str | None = None
+    if context is not None and target == "global":
+        intent = DurableWriteIntent(
+            kind="team", operation="update" if not creating else "create", name=name
+        )
+        authorized_by, reason = await durable_write_decision(context, intent)
+        if authorized_by is None:
+            return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
     if not creating and existing is None:
         return _error(
             tool_call_id,
             "team",
-            f"no team named {identifier_text(context, repr(name))} to update.",
+            f"no team named {identifier_text(context, repr(name))} to update in this "
+            "conversation or your account (a team can be conversation-local; try "
+            "op='list').",
         )
     if params.overrides:
         # The operator gate (design §6): a roster-level pin is the operator's
@@ -590,7 +631,9 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
         return _error(
             tool_call_id,
             "team_delete",
-            f"no team named {identifier_text(context, repr(name))} to delete.",
+            f"no team named {identifier_text(context, repr(name))} to delete in this "
+            "conversation or your account (a team can be conversation-local; try "
+            "op='list').",
         )
     from local_operator.profile_scope import row_scope, scope_words
 

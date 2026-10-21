@@ -356,9 +356,12 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         "unlisted_content",
         # LOH-9 S2: the conversation owns role/team definitions and a mesh move
         # does not carry them. A data-integrity refusal like ``unlisted_content``
-        # — the remedy is promote/delete or the explicit ``--drop-session-roles``,
-        # never a retry.
+        # — the remedy is recreating them at the destination or the explicit
+        # ``--drop-session-roles`` stash, never a retry.
         "session_roles",
+        # The fail-closed arm: the roles tree exists but cannot be read, so the
+        # gate cannot say whether a move would drop definitions.
+        "session_roles_unreadable",
         # PR #1756 round 1 (design finding D1), and it exists for the SENTENCE
         # discipline rather than the wire: split off ``unreachable`` so a consumer
         # can tell "a peer stopped answering" (its remedy is time) from "no row
@@ -1517,6 +1520,8 @@ def _destination_move(
         # (it read the store before its commit deleted the directory); this side
         # only carries it into the receipt. Absent on an older peer => 0.
         session_roles_left = int(prepared.get("session_roles") or 0)
+        stash_raw = str(prepared.get("session_roles_stash") or "")
+        roles_stash = Path(stash_raw) if stash_raw else None
         note("prepared")
         break
 
@@ -1747,7 +1752,7 @@ def _destination_move(
         carried = dict(carry_block or {})
         carried["session_roles"] = session_roles_left
         carried["session_roles_notice"] = _session_roles_notice(
-            session_roles_left, owner_name or owner_device
+            session_roles_left, owner_name or owner_device, roles_stash, kept=keep
         )
         carry_block = carried
     note("committed")
@@ -2592,16 +2597,24 @@ def _source_status(
     }
 
 
+class _SessionRolesUnreadable(RuntimeError):
+    """The conversation's ``roles`` tree exists but cannot be read.
+
+    FAIL CLOSED (agent/QA round 1, M5/R-M5): a check that answers "no roles" for
+    an unreadable tree lets the commit delete definitions it never saw. The
+    refusal says which store failed; the remedy is to make it readable, or to
+    take the explicit ``--drop-session-roles`` path (which stashes it).
+    """
+
+
 def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
     """The human names of the conversation's role/team definitions, sorted.
 
     Read through the SAME scoped registries a session builds (``profile_scope``),
-    so a row this version can create is a row this check can see, and a staging
-    or lock artifact under ``roles/`` is not counted as a definition. Any read
-    failure degrades to "no definitions": the check's job is to refuse a move
-    that would drop them, and a registry that cannot answer must not block a
-    conversation that has no roles at all — the copy path's own digest and
-    completeness checks remain the authority on the bytes.
+    so a row this version can create is a row this check can see. A tree that
+    exists but cannot be read RAISES ``_SessionRolesUnreadable``: the alternative
+    (an empty answer) is a gate that fails open on exactly the condition that
+    hides definitions.
     """
     from local_operator.agents import AgentRegistry
     from local_operator.profile_scope import SESSION_ROLES_DIRNAME
@@ -2612,30 +2625,122 @@ def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
         return []
     names: list[str] = []
     try:
-        names.extend(
-            str(row.name)
-            for row in AgentRegistry(base, initialize=False, migrate=False).list_agents()
-        )
-    except Exception:  # noqa: BLE001 — see the docstring
-        pass
+        store = AgentRegistry(base, initialize=False, migrate=False)
+        names.extend(str(row.name) for row in store.list_agents())
+    except Exception as exc:  # noqa: BLE001 — turned into a refusal, never a pass
+        raise _SessionRolesUnreadable(
+            f"the role store at {base / 'agents'} could not be read ({exc})"
+        ) from exc
     try:
         names.extend(str(team.name) for team in TeamRegistry(base).list_teams())
-    except Exception:  # noqa: BLE001 — see the docstring
+    except Exception as exc:  # noqa: BLE001 — turned into a refusal, never a pass
+        raise _SessionRolesUnreadable(
+            f"the team store at {base / 'teams'} could not be read ({exc})"
+        ) from exc
+    return sorted(name for name in names if name)
+
+
+#: Where a ``--drop-session-roles`` move puts the definitions it cannot carry.
+#: DEVICE-LEVEL, outside every session directory: the commit deletes the session
+#: tree, and nothing (sync, retention, cleanup) owns or walks this root. It holds
+#: user-authored definitions, so the only removal path is the user's own.
+DROPPED_ROLES_DIRNAME = "dropped-session-roles"
+
+
+def session_roles_stash_path(root: str | Path, session_id: str) -> Path:
+    """The directory a dropped move stashes this conversation's definitions in.
+
+    Deterministic from the device root and the session id, with a numeric suffix
+    when a previous drop already used the name (a conversation can be moved back
+    and dropped again; overwriting a stash would delete earlier definitions).
+    Nothing else for the same id can race it: one handoff per session at a time.
+    """
+    base = Path(root) / DROPPED_ROLES_DIRNAME
+    candidate = base / session_id
+    suffix = 2
+    while candidate.exists():
+        candidate = base / f"{session_id}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _role_names_in(store_dir: Path) -> list[str]:
+    """The definition names inside one ``roles`` tree, by the same registries.
+
+    Used for the stash record; a failure degrades to no names rather than
+    blocking the move, because the directory itself is what was preserved.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamRegistry
+
+    names: list[str] = []
+    try:
+        store = AgentRegistry(store_dir, initialize=False, migrate=False)
+        names.extend(str(row.name) for row in store.list_agents())
+    except Exception:  # noqa: BLE001 — the record is advisory
+        pass
+    try:
+        names.extend(str(team.name) for team in TeamRegistry(store_dir).list_teams())
+    except Exception:  # noqa: BLE001 — the record is advisory
         pass
     return sorted(name for name in names if name)
 
 
-def _session_roles_notice(count: int, device_name: str) -> str:
-    """The receipt sentence for definitions a ``--drop-session-roles`` move left.
+def _stash_session_roles(root: str | Path, session_id: str) -> Path | None:
+    """Move ``<session>/roles`` to the device stash BEFORE the tree is deleted.
 
-    States the count, the DEVICE they remain on, and the v1 limitation in one
-    line, so a reader who later wonders why a moved conversation lost its roles
-    has the answer in the move's own receipt rather than in a design doc.
+    THE COMMIT DELETES THE SESSION DIRECTORY (``_remove_handed_away``), and v1
+    does not carry ``roles/`` in the copy set — so a drop move that did not stash
+    first would delete definitions no other device holds, while the notice said
+    they "stayed". A directory RENAME on one filesystem leaves them in exactly
+    one of the two places even if the process dies mid-commit; a write failure
+    RAISES so the caller treats the commit as not-cleaned instead of deleting
+    past it.
+    """
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+
+    source = Path(root) / "sessions" / session_id / SESSION_ROLES_DIRNAME
+    if not source.is_dir():
+        return None
+    target = session_roles_stash_path(root, session_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(str(source), str(target))
+    (target / "stash.json").write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "at": time.time(),
+                "reason": "mesh move with --drop-session-roles: v1 does not carry roles",
+                "definitions": _role_names_in(target),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def _session_roles_notice(
+    count: int, device_name: str, stash: Path | None, *, kept: bool = False
+) -> str:
+    """The receipt sentence for definitions a drop move left behind.
+
+    States the count, the DEVICE, and where they are: the EXACT stash path for a
+    deleting move, the still-running source conversation for ``--keep``. The
+    location is what makes the promise checkable — without it "stayed on this
+    device" is unfalsifiable, and the failure this finding measured was exactly
+    that the words were true of nothing.
     """
     noun = "definition" if count == 1 else "definitions"
+    if kept:
+        where = f"in the source conversation on {device_name} (--keep leaves it running)"
+    else:
+        where = f"at {stash}" if stash is not None else "under dropped-session-roles"
     return (
-        f"{count} session role/team {noun} stayed on {device_name} — a mesh move does "
-        "not carry them in this version"
+        f"{count} session role/team {noun} stayed on {device_name} {where} — a mesh "
+        "move does not carry them in this version"
     )
 
 
@@ -2651,7 +2756,7 @@ def _session_roles_refusal(
     the two ways forward, including the explicit opt-out.
     """
     listed = ", ".join(repr(name) for name in names)
-    from local_operator.profile_scope import scope_words
+    stash = session_roles_stash_path(server.root, session_id)
 
     return {
         "result": "refused",
@@ -2660,10 +2765,9 @@ def _session_roles_refusal(
             f"this conversation owns {len(names)} session definition(s) ({listed}), and a "
             "mesh move does not carry them in this version: moving it would leave them "
             f"on {server._own_label()} with nothing on the destination. "  # noqa: SLF001
-            "Promote or delete them first (delete one with the `agent` tool's op='delete' "
-            "or `team_delete`), "
-            "or re-run with --drop-session-roles to move the conversation anyway — the "
-            f"definitions stay in {scope_words('session')} on this device."
+            "To take them along, recreate them in the destination conversation first. "
+            "To move the conversation without them, re-run with --drop-session-roles: "
+            f"the definitions are then moved to {stash} on this device, not deleted."
         ),
         "session_id": session_id,
     }
@@ -2702,9 +2806,32 @@ def _source_prepare(
     # would arrive without them too) and after ownership, so a third device's
     # ask still answers ``not_owner``.
     drop_session_roles = bool(frame.get("drop_session_roles") or False)
-    session_roles = _session_role_definitions(server.root, session_id)
+    try:
+        session_roles = _session_role_definitions(server.root, session_id)
+    except _SessionRolesUnreadable as unreadable:
+        return {
+            "result": "refused",
+            "code": "session_roles_unreadable",
+            "message": (
+                "this conversation's session roles could not be read, so this device "
+                f"cannot tell whether moving it would lose them: {unreadable}. Nothing "
+                "was moved. Make that directory readable, or re-run with "
+                "--drop-session-roles to move the conversation and stash the tree under "
+                "this device's dropped-session-roles directory."
+            ),
+            "session_id": session_id,
+        }
     if session_roles and not drop_session_roles:
         return _session_roles_refusal(server, session_id, session_roles)
+    # THE STASH PATH IS PART OF THE PROMISE. The commit runs on THIS device after
+    # the copy verifies, so the path is computed here and carried to the
+    # destination's receipt — deterministic, because one handoff per session is
+    # in flight at a time (the journal refuses a second).
+    roles_stash = (
+        str(session_roles_stash_path(server.root, session_id))
+        if (session_roles and drop_session_roles and not keep)
+        else ""
+    )
     try:
         existing = handoff_in_flight(server.root, session_id)
     except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
@@ -2842,6 +2969,7 @@ def _source_prepare(
             # (see ``MoveCarryBlock.session_roles``); 0 means none, which is every
             # ordinary move.
             "session_roles": len(session_roles),
+            "session_roles_stash": roles_stash,
             "session_id": session_id,
         }
     # BEFORE ANY WORK AND BEFORE THE RETIRE: does this directory hold anything the
@@ -2905,6 +3033,7 @@ def _source_prepare(
                     request_id=request_id or f"move-{session_id}-{int(time.time() * 1000)}",
                     requested_by=str(frame.get("requester") or link.device_id),
                     engage_on_arrival=bool(frame.get("engage_on_arrival") or False),
+                    drop_session_roles=drop_session_roles,
                 )
             except Exception as exc:  # noqa: BLE001 — a record that cannot be written is a refusal
                 return {
@@ -2931,12 +3060,27 @@ def _source_prepare(
             move_queue.start_driver(server, session_id)
             progress_for(server).note(session_id, "queued")
             _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="queue")
-            return {
+            queued_receipt: dict[str, Any] = {
                 "result": "queued",
                 "phase": str(record.get("phase") or "queued"),
                 "queue": move_queue.payload(record),
                 "session_id": session_id,
             }
+            if session_roles and drop_session_roles:
+                # THE PROMISE THE QUEUED MOVE MAKES (M3): the very line the run
+                # will print later, in the tense that is true NOW — the stash does
+                # not exist yet, but the path is deterministic and the flag is
+                # durable on the record.
+                queued_receipt["carry"] = {
+                    "session_roles": len(session_roles),
+                    "session_roles_notice": (
+                        f"{len(session_roles)} session role/team definition(s) will stay on "
+                        f"{server._own_label()} at "  # noqa: SLF001
+                        f"{session_roles_stash_path(server.root, session_id)} when this "
+                        "queued move runs — a mesh move does not carry them"
+                    ),
+                }
+            return queued_receipt
         return {
             "result": "refused",
             # THE REFUSAL TAXONOMY SPLIT (scout-state-ui Q3): ``viewed_elsewhere`` is
@@ -3019,6 +3163,7 @@ def _source_prepare(
         "mode": "move",
         "manifest": manifest,
         "session_roles": len(session_roles),
+        "session_roles_stash": roles_stash,
         "session_id": session_id,
     }
 
@@ -3054,6 +3199,20 @@ def _remove_handed_away(root: Path, session_id: str, to_device: str) -> bool:
 
     directory = Path(root) / "sessions" / session_id
     mark_store(directory.parent)
+    # NEVER DELETE DEFINITIONS THIS MOVE DOES NOT CARRY. The stash runs for every
+    # removing commit, not only the drop-flagged ones: recovery paths (a crashed
+    # prepare, a reconcile) have no frame to read the flag from, and an older
+    # peer never sent it at all. A failure leaves the directory in place, which
+    # is the existing ``cleanup_pending`` outcome — never a delete past it.
+    try:
+        _stash_session_roles(root, session_id)
+    except OSError:
+        logger.warning(
+            "mobility: could not stash %s's session roles; leaving the directory",
+            session_id,
+            exc_info=True,
+        )
+        return False
     return remove_session_dir(
         directory,
         config_dir=root,

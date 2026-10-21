@@ -749,13 +749,23 @@ def test_a_bad_override_word_is_refused_on_every_write_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+async def _account_consent(_intent: Any) -> str:
+    """A host that approves account writes.
+
+    These tests exercise MODEL/EFFORT semantics on the account team store, not
+    the consent seam (which has its own tests); after LOH-9 S2 a tool write into
+    the account needs the host's consent, so the rig supplies it explicitly.
+    """
+    return "test-consent"
+
+
 @pytest.mark.asyncio
 async def test_a_members_update_keeps_the_overrides_and_inherit_clears_one(tmp_path, monkeypatch):
     """Plan A.8. ``members=`` replaces the roster wholesale, so a roster edit
     that silently dropped the overrides would put that child back on the model
     the operator moved it off. ``inherit`` is the way to take one off."""
     registry = TeamRegistry(tmp_path)
-    context = ToolContext(cwd=".", team_registry=registry)
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=_account_consent)
     write_config(tmp_path, model_choice="model", models={"lo": LO, "hi": HI})
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
@@ -765,6 +775,7 @@ async def test_a_members_update_keeps_the_overrides_and_inherit_clears_one(tmp_p
             "op": "create",
             "name": "teamwork",
             "manager": "manager",
+            "scope": "global",
             "members": ["coder", "reviewer"],
             "overrides": [
                 {"member": "coder", "tier": "hi", "effort": "xhigh"},
@@ -779,7 +790,12 @@ async def test_a_members_update_keeps_the_overrides_and_inherit_clears_one(tmp_p
 
     updated = await execute_team(
         "tc",
-        {"op": "update", "name": "teamwork", "members": ["coder", "reviewer", "scout"]},
+        {
+            "op": "update",
+            "name": "teamwork",
+            "scope": "global",
+            "members": ["coder", "reviewer", "scout"],
+        },
         None,
         None,
         context,
@@ -843,11 +859,12 @@ async def test_the_team_tool_refuses_overrides_until_the_operator_delegates(tmp_
     shipped ``operator`` default a model cannot pin a member's model, and the
     refusal says who can."""
     registry = TeamRegistry(tmp_path)
-    context = ToolContext(cwd=".", team_registry=registry)
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=_account_consent)
     args = {
         "op": "create",
         "name": "teamwork",
         "manager": "manager",
+        "scope": "global",
         "members": ["coder"],
         "overrides": [{"member": "coder", "tier": "hi"}],
     }
@@ -1013,12 +1030,12 @@ async def test_the_team_tool_refuses_a_bad_override_word_on_both_ops(tmp_path, m
     something absurd.
     """
     registry = TeamRegistry(tmp_path)
-    context = ToolContext(cwd=".", team_registry=registry)
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=_account_consent)
     write_config(tmp_path, model_choice="model", models={"hi": HI})
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
     async def call(**args: Any) -> Any:
-        return await execute_team("tc", args, None, None, context)
+        return await execute_team("tc", {**args, "scope": "global"}, None, None, context)
 
     created = await call(op="create", name="clean", manager="m", members=["worker"])
     assert not created.is_error, created.text
@@ -1254,7 +1271,7 @@ async def test_a_roster_slot_tier_does_not_move_a_role_that_pins_the_session_mod
     agents = AgentRegistry(tmp_path / "agents")
     # The PACKAGED seed is where the pin travels: the published definition of
     # the role, and the only channel a teammate pulling it gets.
-    assert install_seed("coder", registry=agents) is not None
+    assert install_seed("coder", registry=agents, scope="global") is not None
     registry = TeamRegistry(config)
     make_team(registry, "pinned", [TeamMember(role="coder", tier="hi")])
 
@@ -1287,7 +1304,7 @@ async def test_the_receipt_names_the_role_not_the_team_for_an_inherit_pinned_slo
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     write_config(config, model_choice="model", models={"hi": HI})
     agents = AgentRegistry(tmp_path / "agents")
-    assert install_seed("coder", registry=agents) is not None
+    assert install_seed("coder", registry=agents, scope="global") is not None
     registry = TeamRegistry(config)
     make_team(registry, "pinned", [TeamMember(role="coder", tier="hi")])
 

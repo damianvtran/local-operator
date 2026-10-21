@@ -25,7 +25,7 @@ ever. The operator wants:
 | Storage/scope | Session scope is `<session_dir>/roles/{agents,teams}` — same on-disk formats as global, no schema change, no migration |
 | Visibility | Global readers walk only `<config>/{agents,teams}`, so exclusion is structural; session pickers read a composite registry and mark rows `scope: "session"` |
 | Creation policy | Agent-tool writes default to **session**; a tool may write global only with a host-recorded user grant (never on its own initiative); user surfaces write global directly; session create refuses to shadow a global name |
-| Lifecycle | Survives turns, restart, resume, fork (copied, independent); dies with the conversation (delete/retention), survives archive; a mesh move refuses by default and can leave roles behind only with explicit confirmation plus a notice |
+| Lifecycle | Survives turns, restart, resume, fork (copied, independent); dies with the conversation (delete/retention), survives archive; a mesh move refuses by default, and a `--drop-session-roles` move stashes the definitions at a named device-level path rather than deleting them |
 | Promotion | Explicit, user-authorized `promote` op/desktop action, copy-not-move, all-or-nothing, collision-safe, team promotion copies its session-scoped members (or refuses), provenance recorded |
 | Guidance | Reuse → ephemeral → durable in tool docs + both guides; recommender indexes only the session's own composite |
 | Audit | Receipts name scope; `agent/team list` groups by scope; no new journal record type |
@@ -297,7 +297,7 @@ description; the decision ladder and rationale go in `tool://agent`, `tool://tea
 | Session delete | removed with the session dir (`cleanup.remove_session_dir`) — and only the addressed session's dir |
 | Retention sweep | an unarchived old session is removed with its roles; an **archived** session is protected (archive hides, it does not declare disposable — `cleanup.py` already lists archived sessions in the recent-N guard) |
 | Archive / unarchive | kept; the directory and its `roles/` are untouched |
-| Mesh move to another device | **v1 does not carry role definitions.** The move path detects `<session>/roles`; by default it **refuses** and names the roles, telling the user to promote or delete them first. `lop sessions move --drop-session-roles` proceeds, leaves the definitions behind, and the target records a notice (`N session roles stayed on <device>`) so they are never silently lost and never recreated globally. Follow-up filed for mesh-synced role definitions. |
+| Mesh move to another device | **v1 does not carry role definitions.** The move path detects `<session>/roles`; by default it **refuses** and names the roles, with the two real ways forward: recreate them at the destination, or drop them. `--drop-session-roles` proceeds and — because the commit deletes the session directory — **moves the tree to a device-level stash** at `<config>/dropped-session-roles/<session_id>/` (suffixed `-2`… on a collision) with a `stash.json` naming the definitions. Nothing walks that root (no sync, retention or cleanup ownership), and the receipt/queued receipt names the exact path; the failure this replaced promised the roles "stayed" while deleting them. Follow-up filed for mesh-synced role definitions. |
 | Global hub/mesh push | never includes session rows |
 
 **Invariant: no cleanup of existing user definitions.** This change never migrates, rewrites,
@@ -472,9 +472,38 @@ retry. AC6's tool branch therefore moves to S4 with promotion, the first flow th
 an explicit "make this durable" answer; that slice should build the non-rememberable
 confirmation and only then install the seam.
 
+**Round-1 remediation (2026-10-20).** Review/QA/design/UX measured four behaviours the
+first S2 head got wrong, folded in here as the contract now:
+- **The drop path stashes, never deletes.** `_remove_handed_away` runs the stash for every
+  removing commit (not only flagged ones — recovery paths have no frame); a stash failure
+  leaves the directory in place (`cleanup_pending`) rather than deleting past it. The
+  refusal, the receipt and the queued receipt all name the path.
+- **`agent op='sync'` is gated on the same consent as any other account write.** It first
+  classifies with `apply=False`; a seed update that would rewrite an account row is refused
+  without consent. The hub arm is account-only, so it runs only under that consent and
+  otherwise reports that it was skipped (the session-scoped arm still runs). `install` and
+  `reset` take the caller's scope: an explicit `global` without consent is refused, never
+  silently downgraded, and both receipts name the store.
+- **A name collision is answered before the consent question.** A create whose name already
+  exists in the other store is refused with reuse/delete guidance (case-insensitive, and
+  team **aliases** count), so "retry without scope" can never loop around an occupied name.
+- **Both pickers dedupe.** `agent_listing_rows` and the team picker drop a later duplicate
+  of a name (session rows are listed first, so the row in force wins), and `list`/`show`
+  group and label by store ("this conversation" / "your account").
+- **The mesh gate fails closed.** An unreadable `roles` tree refuses with
+  `session_roles_unreadable`; it never answers "no definitions".
+- **The scope fact fits the pane.** When the 27-cell facts line cannot hold both, the
+  settings pane paints a SECOND facts row carrying the full scope token in the existing
+  `muted` ink — dropping or clipping it was measured as the failure (D1/U2).
+- **`scope` also rides the team catalogue/detail routes** (`/v1/desktop/teams`), which stay
+  account-only; the field is `"global"` there and the session composite remains behind
+  `/command-entities` only.
+- The consent refusal distinguishes **no seam** from **declined**, names ONE concrete next
+  action, and no refusal offers "promote" — that capability is S4.
+
 ### S3 — Lifecycle integration
 - Fork copies `roles/` (independent; no global writes); mesh move detects roles and refuses
-  by default, `--drop-session-roles` leaves them with a target-side notice; delete/retention/
+  by default, `--drop-session-roles` stashes them at a named path the receipt carries; delete/retention/
   archive/resume/restart tests; attach_team manager from a session row; `task(agent=<session
   role>)` and `task(agent="team:<session team>")`; subagent inheritance and the
   concurrent-create lock.
@@ -599,7 +628,7 @@ checks when available.
 | Promotion overwrites a user row | `replace` requires explicit user instruction + confirmation + receipt naming the row |
 | Agent self-authorizes a global write | the tool has no path to global without a host-recorded grant; refusal is tested with no grant and with a forged/expired one |
 | Fork creates a global row or diverges silently | fork copy is directory-only, never writes the global roots; independence is tested both directions |
-| Mesh move silently loses roles | default refusal + `--drop-session-roles` confirmation + target notice; tested |
+| Mesh move silently loses roles | default refusal + `--drop-session-roles` + device-level stash whose path the receipt names; tested (stash holds the definitions after the source is gone) |
 | Scope grows unbounded in a long session | `agent list` shows the count; optional soft cap (e.g. 50 rows) with a clear refusal — decide with the tracker owner |
 
 ## 9. Harness / remote-node notes (cloud-node-1)

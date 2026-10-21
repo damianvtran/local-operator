@@ -1480,7 +1480,10 @@ class DurableWriteIntent:
     """
 
     kind: Literal["agent", "team"]
-    operation: Literal["create", "update", "delete", "install", "reset"]
+    #: ``sync`` is here because syncing rewrites installed account rows and its
+    #: hub arm fetches account definitions — both are account mutations the
+    #: seam is asked about, even though the tool's own verb is a different one.
+    operation: Literal["create", "update", "delete", "install", "reset", "sync"]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
     #: explicit so a future scope cannot be read as "no consent needed" by

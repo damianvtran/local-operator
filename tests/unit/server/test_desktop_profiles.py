@@ -1018,7 +1018,7 @@ async def test_a_slot_whose_role_pins_the_session_model_reports_the_session_mode
 
     client, root = api
     _write_tiers(root, hi={"model": "anthropic/claude-opus-4-5", "effort": "max"})
-    assert install_seed("coder", registry=AgentRegistry(root)) is not None
+    assert install_seed("coder", registry=AgentRegistry(root), scope="global") is not None
     created = await client.post(
         "/v1/desktop/teams",
         json=mutation(
@@ -1037,3 +1037,22 @@ async def test_a_slot_whose_role_pins_the_session_model_reports_the_session_mode
     assert row["tier"] == {"value": None, "source": "row"}
     assert row["model"] == {"value": None, "source": "session"}
     assert row["available"] is True and row["reason"] == ""
+
+
+async def test_team_catalogue_and_detail_carry_the_additive_scope(api) -> None:
+    """Design §3.3 (LOH-9 S2): the team catalogue and detail rows carry ``scope``.
+
+    These routes stay ACCOUNT-ONLY — they are handed the plain global registry,
+    and the session composite is only behind ``/command-entities`` — so the fact
+    here is always ``global``. The field rides the shared projection so a client
+    renders a team badge without a second row shape.
+    """
+    client, _root = api
+    created = await client.post("/v1/desktop/teams", json=mutation(name="audit", manager="manager"))
+    assert created.status_code == 200, created.text
+
+    listed = (await client.get("/v1/desktop/teams")).json()["result"]["teams"]
+    assert [row["scope"] for row in listed if row.get("name") == "audit"] == ["global"]
+
+    detail = (await client.get("/v1/desktop/teams/audit")).json()["result"]
+    assert detail["scope"] == "global"

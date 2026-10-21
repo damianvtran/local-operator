@@ -126,8 +126,16 @@ def profile_catalogue(registry: Any) -> list[dict[str, Any]]:
 
 
 def team_catalogue(registry: Any) -> list[dict[str, Any]]:
+    """The account's teams, with the additive ``scope`` fact (LOH-9 S2).
+
+    This projection backs the ACCOUNT routes (``/v1/desktop/teams`` and its
+    detail), which stay global-only by design: they are handed the plain global
+    registry, and the session composite is only behind ``/command-entities``.
+    The field is still carried here because design §3.3 promises it on team
+    catalogue rows, and a client must not need two row shapes to render a badge.
+    """
     return [
-        row.model_dump(mode="json", exclude={"instructions", "project"})
+        row.model_dump(mode="json", exclude={"instructions", "project"}) | {"scope": "global"}
         for row in sorted(registry.list_teams(), key=lambda row: (row.name.casefold(), row.name))
     ]
 

@@ -1265,7 +1265,7 @@ def install_coder_seed(registry) -> None:
     """
     from local_operator.agent_profiles import install_seed
 
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
 
 
 def test_a_role_pinning_the_session_model_runs_on_it_even_when_the_launch_passes_a_tier(

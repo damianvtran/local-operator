@@ -495,7 +495,9 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
-from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
+from local_operator.tui.widgets.status_line import (
+    AGENT_PROFILE_CELLS,
+)
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -4531,6 +4533,17 @@ def _is_bridge_ask_row(row: Any) -> bool:
         if str(question.get("question_id") or "").strip():
             return True
     return False
+
+
+def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
+    """``result["carry"]`` as a mapping, whatever a peer's frame put there.
+
+    The carry block is optional and produced by the remote side, so a malformed
+    one must read as "no carry" rather than crash a receipt's rendering (LOH-9
+    S2, M4 — the stash notice rides this block).
+    """
+    raw = result.get("carry")
+    return raw if isinstance(raw, dict) else {}
 
 
 class OperatorApp(App[None]):
@@ -19955,7 +19968,18 @@ class OperatorApp(App[None]):
         except Exception:
             return []
         choices: list[ArgumentChoice] = []
+        # ONE ROW PER NAME (agent/QA round 1, Q-5). The composite lists session
+        # rows first, so a tolerated race (an account team created after a
+        # session team of the same name, or a name that is an alias in one store)
+        # keeps the row in force and drops the shadowed one — the rule the agent
+        # picker already applied. Aliases are deliberately NOT merged: two
+        # different names are two different keys to type.
+        seen_names: set[str] = set()
         for team in teams:
+            key = str(getattr(team, "name", "") or "").strip().casefold()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
             # The COUNT is assembled by ``_team_facts`` (D2): ``member_count()``,
             # never ``len(members) + 1``, the same number `org_chart.py`, the
             # listing and `lop teams` paint.
@@ -34767,6 +34791,13 @@ class OperatorApp(App[None]):
                     f"{target}. It can still be cancelled before it starts — ask Local Operator "
                     "to cancel the queued move."
                 )
+            # WHAT STAYED BEHIND (agent review round 1, M4): the queued receipt
+            # carries the same stash promise the run will honour; a TUI that did
+            # not print it left the user with no statement about their roles.
+            carry = _carry_dict(result)
+            stay_note = str(carry.get("session_roles_notice") or "")
+            if stay_note:
+                text += f" {stay_note}."
             if phase_notice.is_attached:
                 self._transcript_view().remove_block(phase_notice)
             # `note`, not `info` (design review round 1, D2): these are multi-line
@@ -34798,6 +34829,13 @@ class OperatorApp(App[None]):
             )
         else:
             receipt = f"Moved {session_id} to {target}. It runs there now."
+        # THE STASH NOTICE ON A FINISHED MOVE (M4): the CLI printed this from
+        # ``_carry_lines``; the TUI read only the phase row, so a drop move was
+        # silent about where its definitions went.
+        carry = _carry_dict(result)
+        stay_note = str(carry.get("session_roles_notice") or "")
+        if stay_note:
+            receipt += f" {stay_note}."
         self._system_notice(receipt, "info")
         if str(result.get("phase") or "") not in ("committed", "done"):
             return

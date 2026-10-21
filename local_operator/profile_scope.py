@@ -35,7 +35,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -112,66 +113,169 @@ def scope_store(registry: Any, scope: Scope) -> Any:
     )
 
 
-def _shadow_refusal(kind: str, name: str) -> str:
-    """Refuse a conversation-only row whose name already exists in the account.
+#: How long a role/team write waits for the cross-store lock before refusing.
+#: A create checks the OTHER store and then writes, so the two steps must be one
+#: critical section; a holder that dies or blocks forever must not freeze the
+#: tool that is waiting (the team tool has the same bound for the same reason).
+WRITE_LOCK_TIMEOUT_S = 10.0
 
-    A session row SHADOWS the account's row with the same name, so allowing this
-    create would silently change what `task(agent=<name>)` or `/team <name>`
-    launches in this conversation — the reuse-first ladder inverted. The caller
-    is told both ways forward: use the row that already exists, or pick a name
-    that says what makes this version different.
+
+@contextmanager
+def _write_section(owner: Any) -> Iterator[None]:
+    """Take the composite's write lock with a BOUND, or refuse in words.
+
+    The tool entry points call the registry synchronously from an async tool
+    body, so an unbounded wait would block the session's event loop with no
+    output. A timeout is a clear refusal the caller can act on ("retry"), and the
+    measured contention this lock exists for (two subagents creating one name) is
+    a sub-millisecond critical section, so a 10 s wait is already pathological.
     """
-    launch = f"/team {name}" if kind == "team" else f"task(agent={name!r})"
+    lock = owner.write_lock
+    if not lock.acquire(timeout=WRITE_LOCK_TIMEOUT_S):
+        raise TimeoutError(
+            "timed out waiting for the role write lock, so nothing was written; "
+            "another write is still running — retry in a moment"
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def shadow_refusal(kind: str, name: str, *, existing_scope: Scope) -> str:
+    """Refuse a create whose name already resolves in the OTHER store.
+
+    A session row SHADOWS the account's row with the same name, so allowing one
+    would silently change what `task(agent=<name>)` or `/team <name>` launches in
+    this conversation — the reuse-first ladder inverted. The reverse is just as
+    confusing: an account row created while this conversation already has one is
+    unreachable HERE. Each case names the one action that resolves it.
+    """
+    if existing_scope == "global":
+        launch = f"/team {name}" if kind == "team" else f"task(agent={name!r})"
+        return (
+            f"a {kind} named {name!r} already exists in your account, and this "
+            f"conversation uses it: launch it as it is ({launch}). Choose a different "
+            "name for the conversation-only version."
+        )
+    delete = "team_delete" if kind == "team" else "the agent tool's op='delete'"
     return (
-        f"a {kind} named {name!r} already exists in your account, so this conversation "
-        f"already has it: launch it as it is ({launch}). Choose a different name for "
-        "the conversation-only version; copying one into your account is a separate step."
+        f"this conversation already has a {kind} named {name!r}, so an account row of "
+        "that name would be hidden here. Delete the conversation one first "
+        f"({delete}), or choose another name."
     )
 
 
-async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> str | None:
+def shadow_in_other_store(registry: Any, scope: Scope, name: str, *, kind: str) -> Any | None:
+    """The row in the OTHER store that ``name`` would collide with, or ``None``.
+
+    Case-insensitive, and for teams ALIASES count: ``/team release`` resolves an
+    alias, so a session team named "release" shadows an account team that answers
+    to that key exactly as a name collision would. A plain registry has one store,
+    so nothing can collide across scopes.
+    """
+    other = getattr(registry, "session_registry" if scope == "global" else "global_registry", None)
+    if other is None:
+        return None
+    wanted = name.strip().casefold()
+    if not wanted:
+        return None
+    if kind == "team":
+        for team in other.list_teams():
+            keys = [str(getattr(team, "name", "") or "")]
+            keys.extend(str(alias) for alias in (getattr(team, "aliases", ()) or ()))
+            if any(key.strip().casefold() == wanted for key in keys if key):
+                return team
+        return None
+    from local_operator.agent_profiles import is_role, is_specialist
+
+    for agent in other.list_agents():
+        # ONLY the rows a create would shadow as a ROLE. An ordinary
+        # conversational agent of the same name is refused by ``write_profile``'s
+        # own "not a role" sentence, which is the more useful answer (it says the
+        # name is taken by something that is not a role at all).
+        if not (is_role(agent) or is_specialist(agent)):
+            continue
+        if str(getattr(agent, "name", "") or "").strip().casefold() == wanted:
+            return agent
+    return None
+
+
+async def durable_write_decision(
+    context: Any, intent: "DurableWriteIntent"
+) -> tuple[str | None, str]:
     """Ask the HOST to approve a write into the account's shared store.
 
     THE ONE CONSENT SEAM (LOH-9 S2). The decision is the host's: a model must not
     be able to stamp its own provenance, so there is no grant field on any tool
-    parameter and no value in this module authorizes anything. ``None`` means
-    "no seam here" or "the user said no" and is a REFUSAL; a non-empty string is
-    the host's audit origin for a write it approved, and is recorded, never
-    re-read as authority.
+    parameter and no value in this module authorizes anything. A non-empty string
+    is the host's AUDIT origin for a write it approved, recorded and never re-read
+    as authority. A seam that raises is a refusal: an ask that could not be
+    delivered is not a yes, and failing open here would let a broken host silently
+    grant account-wide writes.
 
-    A seam that raises is also a refusal: an ask that could not be delivered is
-    not a yes, and failing open here would let a broken host silently grant
-    account-wide writes.
+    Returns ``(origin, reason)`` where reason is ``granted``, ``no_seam`` (this
+    host has no approval channel — desktop/headless today), ``declined`` (the
+    callback answered None: the user said no) or ``error`` (the channel failed).
+    The distinction is the refusal's subject: "this run cannot ask" and "the user
+    declined" are different facts, and conflating them told the model to re-ask a
+    question the user had already answered.
     """
     callback = getattr(context, "authorize_durable_write", None) if context is not None else None
     if callback is None:
-        return None
+        return None, "no_seam"
     try:
         origin = await callback(intent)
     except Exception:  # noqa: BLE001 — an unavailable consent seam is a refusal
         logger.warning("durable-write consent seam failed; refusing", exc_info=True)
-        return None
-    return str(origin) if origin else None
+        return None, "error"
+    return (str(origin), "granted") if origin else (None, "declined")
 
 
-def durable_write_refusal(intent: "DurableWriteIntent") -> str:
-    """Why a tool-issued account write was refused, and the two ways forward.
+async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> str | None:
+    """The origin-only form of :func:`durable_write_decision` (existing callers)."""
+    origin, _reason = await durable_write_decision(context, intent)
+    return origin
 
-    Names the user surfaces that ARE the user's own act (desktop editor, TUI form,
-    CLI) and the retry path that needs no consent at all (the conversation-only
-    default), because a refusal that does not say what to do next is how a model
-    starts guessing at scope values.
+
+def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam") -> str:
+    """Why a tool-issued account write was refused, and the ONE next action.
+
+    The reason is named rather than folded into "cannot ask": a host without an
+    approval channel and a user who declined are different facts, and the second
+    must not invite a retry of the same question. The remedy is ONE concrete
+    surface for this intent — a menu of three vague ones made the model pick.
+    The conversation-only retry stays, because it is the path that needs no
+    consent at all and it is what the scope default does.
     """
-    kind = intent.kind
-    if kind == "team":
-        surface = "the desktop Teams editor, the TUI /team form, or `lop teams`"
+    article = "an" if intent.kind == "agent" else "a"
+    if reason == "declined":
+        opening = (
+            f"the user declined to save this {intent.kind} for every conversation, so "
+            "nothing in their account was changed."
+            if intent.operation != "sync"
+            else "the user declined the account updates, so no role saved in their "
+            "account was changed."
+        )
+    elif reason == "error":
+        opening = (
+            "the confirmation channel failed before the user could answer, so nothing "
+            "in their account was changed."
+        )
     else:
-        surface = "the desktop Profiles editor, the TUI /agent form, or `lop agents`"
+        opening = (
+            f"saving {article} {intent.kind} for every conversation needs the user's "
+            "confirmation, and this run has no way to ask."
+        )
+    if intent.kind == "team":
+        action = "the TUI `/team` form"
+    elif intent.operation == "sync":
+        action = "`lop agents sync`"
+    else:
+        action = "the TUI `/agent` form"
     return (
-        f"saving a {kind} for every conversation needs the user's confirmation, and "
-        "this run cannot ask for it. To keep it for THIS conversation only, retry "
-        "without scope (or with scope='session'). To add it to the user's account "
-        f"yourself, use {surface}."
+        f"{opening} To keep it for THIS conversation only, retry without scope (or with "
+        f"scope='session'). To change the user's account, ask them to use {action}."
     )
 
 
@@ -212,11 +316,11 @@ class _ScopedAgentWrites:
 
     # -- writes --------------------------------------------------------------
     def set_agent_system_prompt(self, agent_id: str, system_prompt: str) -> None:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             self._store.set_agent_system_prompt(agent_id, system_prompt)
 
     def create_agent(self, fields: Any) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             if self.scope == "session":
                 # A conversation row SHADOWS the account's row of the same name,
                 # so this create would silently change what `task(agent=<name>)`
@@ -226,23 +330,23 @@ class _ScopedAgentWrites:
                 name = str(getattr(fields, "name", "") or "").strip()
                 shadow = self._owner.global_registry.get_agent_by_name(name)
                 if shadow is not None:
-                    raise ValueError(_shadow_refusal("agent", name))
+                    raise ValueError(shadow_refusal("agent", name, existing_scope="global"))
             return self._store.create_agent(fields)
 
     def save_agent(self, metadata: Any) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             return self._store.save_agent(metadata)
 
     def update_agent(self, agent_id: str, fields: Any, *, precondition: Any = None) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             return self._store.update_agent(agent_id, fields, precondition=precondition)
 
     def delete_agent(self, agent_id: str) -> None:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             self._store.delete_agent(agent_id)
 
     def clone_agent(self, agent_id: str, new_name: str) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             return self._store.clone_agent(agent_id, new_name)
 
 
@@ -264,24 +368,24 @@ class _ScopedTeamWrites:
         return self._store.get_team_by_name(name, recovery_wait=recovery_wait)
 
     def create_team(self, fields: Any) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             if self.scope == "session":
                 name = str(getattr(fields, "name", "") or "").strip()
                 shadow = self._owner.global_registry.get_team_by_name(name)
                 if shadow is not None:
-                    raise ValueError(_shadow_refusal("team", name))
+                    raise ValueError(shadow_refusal("team", name, existing_scope="global"))
             return self._store.create_team(fields)
 
     def save_team(self, team: Any) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             return self._store.save_team(team)
 
     def update_team(self, team_id: str, fields: Any, *, precondition: Any = None) -> Any:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             return self._store.update_team(team_id, fields, precondition=precondition)
 
     def delete_team(self, team_id: str) -> None:
-        with self._owner.write_lock:
+        with _write_section(self._owner):
             self._store.delete_team(team_id)
 
 

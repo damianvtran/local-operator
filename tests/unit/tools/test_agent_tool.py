@@ -444,11 +444,15 @@ async def test_the_tool_cannot_clear_a_role_that_pins_the_launching_session_mode
 
     # The seed is the only door the sentinel comes in through; the validator
     # above refuses it from this tool.
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
     installed = resolve_profile("coder", registry=registry)
     assert installed is not None and installed.effort == "default"
 
-    body = await call(context, op="update", name="coder", effort="inherit")
+    # The account-write gate is satisfied first (LOH-9 S2): this test's subject
+    # is the PIN refusal the write would otherwise reach, so it must be a
+    # consented account edit rather than the consent refusal itself.
+    consenting, _seen = _consenting(registry)
+    body = await call(consenting, op="update", name="coder", effort="inherit")
 
     assert "that pin is absolute" in body
     kept = resolve_profile("coder", registry=registry)
@@ -1664,9 +1668,10 @@ async def test_a_bad_class_spelling_is_refused_by_the_schema(context) -> None:
 
 @pytest.mark.asyncio
 async def test_sync_degrades_the_hub_arm_per_row_and_never_fails_the_run(
-    context, registry, monkeypatch
+    registry, monkeypatch
 ) -> None:
     """A public row is checked anonymously (design Q3); a failed fetch is a per-row verdict."""
+    context, _ = _consenting(registry)
 
     monkeypatch.delenv("RADIENT_API_KEY", raising=False)
 
@@ -1686,10 +1691,9 @@ async def test_sync_degrades_the_hub_arm_per_row_and_never_fails_the_run(
 
 
 @pytest.mark.asyncio
-async def test_sync_reports_no_credential_for_an_organization_row(
-    context, registry, monkeypatch
-) -> None:
+async def test_sync_reports_no_credential_for_an_organization_row(registry, monkeypatch) -> None:
     """An org row needs the signed-in person; without a login it says so, not '404'."""
+    context, _ = _consenting(registry)
 
     from local_operator.hub_sync import provenance as prov
 
@@ -1912,7 +1916,7 @@ async def test_a_tool_cannot_create_in_the_account_without_the_host(context, reg
     body = await call(context, op="create", name="durable", scope="global", instructions="x")
 
     assert "needs the user's confirmation" in body
-    assert "desktop Profiles editor" in body
+    assert "TUI `/agent` form" in body
     assert "retry without scope" in body
     assert registry.global_registry.get_agent_by_name("durable") is None
     assert registry.store_for("session").get_agent_by_name("durable") is None
@@ -2003,3 +2007,134 @@ def test_delete_is_write_tier_and_every_other_op_stays_read(context) -> None:
     assert tool.call_approval_tier({"op": "delete"}) == "write"
     assert tool.call_approval_tier({"op": "create"}) == "read"
     assert tool.call_approval_tier({"op": "list"}) == "read"
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation — collisions before consent, install scope, sync consent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_create_over_an_account_name_refuses_before_asking_for_consent(
+    registry,
+) -> None:
+    """M1/Q-3: the shadow answer is reachable. Before this, the tool resolved the
+    account row, asked for an account write, and "retry without scope" resolved the
+    SAME row again — a loop around the real answer, which is "that name exists"."""
+    registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="account role", tags=["role"])
+    )
+    context, seen = _consenting(registry)
+
+    body = await call(context, op="create", name="reviewer", description="d", instructions="i")
+
+    assert "already exists in your account" in body
+    assert "Choose a different name" in body
+    assert seen == [], "a name collision must not reach the consent question"
+
+
+@pytest.mark.asyncio
+async def test_a_case_variant_account_name_is_still_a_collision(registry) -> None:
+    """R-m2: names resolve case-insensitively, so a session row named `Reviewer`
+    shadows an account `reviewer` exactly as an identical spelling would."""
+    registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="account role", tags=["role"])
+    )
+    context, _ = _consenting(registry)
+
+    body = await call(context, op="create", name="Reviewer", description="d", instructions="i")
+
+    assert "already exists in your account" in body
+
+
+@pytest.mark.asyncio
+async def test_install_scope_global_is_refused_without_consent(registry) -> None:
+    """M2/Q-1: an explicit global install must not be silently downgraded."""
+    context = _context(agent_registry=registry)
+
+    result = await execute_agent(
+        "tc", {"op": "install", "name": "reviewer", "scope": "global"}, None, None, context
+    )
+
+    assert result.is_error
+    assert "confirmation" in result.text
+    assert registry.global_registry.get_agent_by_name("reviewer") is None
+
+
+@pytest.mark.asyncio
+async def test_install_scope_global_with_consent_lands_in_the_account(registry) -> None:
+    context, _ = _consenting(registry)
+
+    body = await call(context, op="install", name="reviewer", scope="global")
+
+    assert "in your account" in body
+    assert registry.global_registry.get_agent_by_name("reviewer") is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_refuses_an_account_seed_update_without_consent(registry) -> None:
+    """R-B1: `sync` rewrites installed starters, and an account row is a write."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agent_sync import SeedSyncVerdict
+
+    install_seed("reviewer", registry=registry, scope="global")
+
+    def fake_sync(_inner, *, names=None, force=False, apply=True):
+        return [SeedSyncVerdict(name="reviewer", verdict="outdated-clean", applied=False)]
+
+    context = _context(agent_registry=registry)
+    import local_operator.agent_profiles as profiles
+
+    real = profiles.sync_installed_seeds
+    profiles.sync_installed_seeds = fake_sync  # type: ignore[assignment]
+    try:
+        result = await execute_agent("tc", {"op": "sync", "name": "reviewer"}, None, None, context)
+    finally:
+        profiles.sync_installed_seeds = real  # type: ignore[assignment]
+
+    assert result.is_error
+    assert "confirmation" in result.text
+
+
+@pytest.mark.asyncio
+async def test_agent_list_groups_by_scope_and_show_names_it(context, registry) -> None:
+    """U1/AC13: the listing says which rows are this conversation's, and `show`
+    repeats it for one row. The missing-name answer names the conversation-local
+    case, because that is the ordinary reason a known role is not found here."""
+    await call(context, op="create", name="here-role", description="d", instructions="i")
+    registry.global_registry.create_agent(
+        _edit_fields(name="account-role", description="d", tags=["role"])
+    )
+
+    listed = await call(context, op="list")
+
+    assert "roles in this conversation:" in listed
+    assert "roles saved everywhere (your account):" in listed
+    shown = await call(context, op="show", name="here-role")
+    assert "scope: this conversation" in shown
+    missing = await call(context, op="show", name="not-here")
+    assert "conversation-local" in missing
+
+
+@pytest.mark.asyncio
+async def test_reset_of_an_account_row_needs_the_same_consent_as_a_create(registry) -> None:
+    """R-M2: reset rewrites an installed row, and on a GLOBAL row that is an
+    account write like any other. The tool must pass the seam, not merely name
+    the row; a consenting host lands the reset and its receipt names the store."""
+    from local_operator.agent_profiles import install_seed
+
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
+    row = registry.global_registry.get_agent_by_name("reviewer")
+    assert row is not None
+    # An EDIT is what gives the reset something to restore; without one the op
+    # is a no-op and would say so (which is the honest answer, not a write).
+    registry.global_registry.set_agent_system_prompt(row.id, "an edited prompt")
+    context = _context(agent_registry=registry)
+
+    refused = await execute_agent("tc", {"op": "reset", "name": "reviewer"}, None, None, context)
+    assert "confirmation" in refused.text, refused.text
+
+    consenting, seen = _consenting(registry)
+    applied = await execute_agent("tc", {"op": "reset", "name": "reviewer"}, None, None, consenting)
+    assert "account" in applied.text, applied.text
+    assert seen and seen[0].operation == "reset"

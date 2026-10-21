@@ -372,7 +372,9 @@ async def team(name: str, request: Request):
         found = registries(request)[1].get_team_by_name(name)
         if found is None:
             raise KeyError(name)
-        data = found.model_dump(mode="json")
+        # The detail route is account-only too; the additive fact comes from the
+        # same place the catalogue puts it (design §3.3, LOH-9 S2).
+        data = found.model_dump(mode="json") | {"scope": "global"}
         data["definition_revision"] = definition_revision(
             "team", str(found.id), found.model_dump(mode="json")
         )

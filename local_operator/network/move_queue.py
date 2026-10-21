@@ -249,6 +249,7 @@ def enqueue(
     request_id: str,
     requested_by: str,
     engage_on_arrival: bool = False,
+    drop_session_roles: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """Create (or return the existing) queue record for ``session_id``.
 
@@ -272,6 +273,11 @@ def enqueue(
             "requested_by": requested_by,
             "mode": "move",
             "engage_on_arrival": bool(engage_on_arrival),
+            # THE ROLE-GATE'S OPT-OUT RIDES THE INTENT (agent review round 1, M3):
+            # the resume prepare runs on the SOURCE, long after this frame is
+            # gone, and without the stored flag the gate would refuse the move it
+            # was queued to perform.
+            "drop_session_roles": bool(drop_session_roles),
             "phase": QUEUE_PHASE_QUEUED,
             "phases": [{"phase": QUEUE_PHASE_QUEUED, "at": time.time()}],
             "detail": "",
@@ -813,6 +819,9 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 # deliberately False — the queueing is DONE; this is the move.
                 "request_id": str(record.get("request_id") or ""),
                 "resume_queued": True,
+                # Stored when the move was queued; the prepare this invite starts
+                # is on the SOURCE, which cannot see the original request.
+                "drop_session_roles": bool(record.get("drop_session_roles") or False),
             }
         )
     except Exception as refusal:  # noqa: BLE001 — a Moved carries the sentence

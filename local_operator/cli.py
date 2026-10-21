@@ -1395,14 +1395,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # roles refuses a move by default because v1 does not carry them; this flag is
     # the explicit "move it anyway, leave the definitions here" — never silent,
     # because the move's receipt states the count that stayed.
-    # THE HELP IS ENGLISH ONLY, and deliberately not a new ``cli.sessions_help``
-    # key: that namespace is carried by fr alone, and a new English key there may
-    # not be laundered through the coverage allowance for es/hi/ru/vi (the
-    # shrink-only gate refuses new English in an active locale), while a partial
-    # catalogue is rejected by check.py's key-parity pass. The flag is still
-    # discoverable and its receipt states what stayed behind; the copy joins the
-    # operator CLI's existing English-only surface (`sessions cleanup`).
-    move_parser.add_argument(  # i18n: ignore operator CLI help, English-only; see comment above
+    # THE HELP IS ENGLISH ONLY, AND THAT IS A DISCLOSED GAP — not a category this
+    # flag joins. ``cli.sessions_help`` is carried by fr alone: a new English key
+    # there may not be added to the coverage allowance for es/hi/ru/vi (the
+    # shrink-only gate refuses new English in an active locale), and a partial
+    # catalogue fails check.py's key-parity pass. Admitting one means translating
+    # the whole namespace for four locales, which this slice does not do. The
+    # flag's refusal and its receipt still state a consequence, so the gap is in
+    # the help text alone.
+    # i18n: ignore operator CLI help — `cli.sessions_help` is fr-only, the allowance may
+    # not grow for es/hi/ru/vi and a partial catalogue is rejected (LOH-9 S2 PR discloses it)
+    move_parser.add_argument(
         "--drop-session-roles",
         action="store_true",
         help="Move anyway, leaving this conversation's roles behind (v1 does not carry them).",

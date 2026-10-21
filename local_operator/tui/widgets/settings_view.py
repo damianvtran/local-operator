@@ -272,23 +272,11 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
     the ink has to carry them once they do). Whole-token matching only: a
     ``proactive`` inside another word would be a coincidence, not a class.
     """
-    # THE SCOPE TOKEN IS DROPPED AS A WHOLE TOKEN, never clipped. The pane's
-    # facts budget is 27 cells; `specialist · proactive · this conversation` is 42,
-    # and at that width the old raw truncation cut the last word mid-word
-    # ("this conversati…"), which reads as breakage rather than as a shorter list.
-    # Dropping only the TRAILING token keeps the class marker design round 1 (D1)
-    # requires to survive, and the remaining parts still truncate as before.
     from local_operator.i18n.keys import tui_authoring as author_keys
     from local_operator.i18n.text import tr
 
     scope_token = tr("tui.authoring")(author_keys.scope_conversation())
-    text = facts
-    if cell_len(text) > room:
-        parts = text.split(" · ")
-        if parts and parts[-1] == scope_token:
-            parts = parts[:-1]
-        text = " · ".join(parts)
-    text = truncate_cells(text, room)
+    text = truncate_cells(facts, room)
     parts = text.split(" · ")
     # The scope token shares the class marker's ink: both answer "what is this and
     # where does it live" and both must survive a narrow container. No new style,
@@ -308,6 +296,36 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
         # 28→36 cells with `high` clipped on a populated 4-part facts line.
         pending_indent = ""
     return line
+
+
+def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style") -> list[_PaneLine]:
+    """The facts line, plus a SECOND line for the scope token when it cannot fit.
+
+    Design round 1 (D1) requires the class marker to survive; round 2 (D1/U2)
+    measured that DROPPING the scope token to achieve that made the one fact
+    saying "this exists only here" vanish on exactly the rows that also carry
+    ``proactive`` — and left ``role · proactive · this co…`` on others. The
+    designer's bounded suggestion is taken: when the whole facts line exceeds
+    ``room``, line one keeps the class marker (and whatever else fits) and line
+    two carries the FULL token at the same indent, in the same ``muted`` ink.
+    A row with no scope token still costs exactly one line, so the layout is
+    unchanged for every account row.
+
+    ``room`` is the caller's ``room - 4``; the 4-cell indent rides inside each
+    line, as it does for the single-line painter.
+    """
+    from local_operator.i18n.keys import tui_authoring as author_keys
+    from local_operator.i18n.text import tr
+
+    scope_token = tr("tui.authoring")(author_keys.scope_conversation())
+    suffix = f" · {scope_token}"
+    if not facts.endswith(suffix) or cell_len(facts) <= room:
+        return [_paint_facts(facts, room, muted=muted, faint=faint)]
+    head = facts[: -len(suffix)]
+    return [
+        _paint_facts(head, room, muted=muted, faint=faint),
+        [(f"    {truncate_cells(scope_token, room)}", muted)],
+    ]
 
 
 def _wrap_cells(text: str, width: int, *, max_lines: int = 2) -> list[str] | None:
@@ -5169,7 +5187,7 @@ class SettingsView(Vertical):
             shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
                 entry: list[_PaneLine] = [[(f"  {truncate_cells(name, room - 2)}", muted)]]
-                entry.append(_paint_facts(facts, room - 4, muted=muted, faint=faint))
+                entry.extend(_paint_facts_lines(facts, room - 4, muted=muted, faint=faint))
                 if summary:
                     entry.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
                 entries.append(entry)

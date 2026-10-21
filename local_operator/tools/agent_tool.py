@@ -603,7 +603,25 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     registry = _registry(context)
     installed = _registered_profiles(registry) if registry is not None else []
     installed_names = {profile.name.lower() for profile in installed}
-    lines = [_profile_line(profile, installed=True, context=context) for profile in installed]
+    # GROUP BY STORE (AC13, agent/QA round 1, U1). A model that lists roles to
+    # pick one must be able to tell a hat that exists for this turn from one
+    # saved for every conversation: the two have different lifetimes, and the
+    # conversation-local one will not be there tomorrow. The scope comes from the
+    # row the profile was built from; a plain registry has only the account.
+    from local_operator.profile_scope import row_scope
+
+    here: list[str] = []
+    everywhere: list[str] = []
+    for profile in installed:
+        line = _profile_line(profile, installed=True, context=context)
+        scope = "global"
+        try:
+            row = registry.get_agent_by_name(profile.name) if registry is not None else None
+            if row is not None:
+                scope = row_scope(registry, row)
+        except Exception:  # noqa: BLE001 — a listing must not fail on one row
+            scope = "global"
+        (here if scope == "session" else everywhere).append(line)
     specialists: list[Any] = []
     if registry is not None:
         try:
@@ -619,8 +637,12 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
         if profile is not None and profile.name.lower() not in installed_names
     ]
     body = ""
-    if lines:
-        body += "registered roles:\n" + "\n".join(lines)
+    if here:
+        body += "roles in this conversation:\n" + "\n".join(here)
+    if everywhere:
+        if body:
+            body += "\n\n"
+        body += "roles saved everywhere (your account):\n" + "\n".join(everywhere)
     if specialists:
         if body:
             body += "\n\n"
@@ -658,8 +680,11 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             specialist = None
         if specialist is not None and is_specialist(specialist):
             instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
+            from local_operator.profile_scope import row_scope, scope_words
+
             body = (
                 f"{identifier_text(context, specialist.name)} — registered specialist\n"
+                f"scope: {scope_words(row_scope(registry, specialist))}\n"
                 f"when to use: {specialist.description or '(unstated)'}\n"
                 "tools: full inventory\n\n"
                 f"instructions:\n{instructions}\n\n"
@@ -672,17 +697,33 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         return _error(
             tool_call_id,
             "agent",
-            f"no role or specialist named {identifier_text(context, repr(name))} (try op='list')",
+            f"no role or specialist named {identifier_text(context, repr(name))} in this "
+            "conversation or your account (try op='list'). A definition can be "
+            "conversation-local, so one created in another conversation is not visible "
+            "here.",
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
+    scope_line = ""
+    if profile.agent_id and registry is not None:
+        from local_operator.profile_scope import row_scope, scope_words
+
+        try:
+            row = registry.get_agent(profile.agent_id)
+            scope_line = f"scope: {scope_words(row_scope(registry, row))}\n"
+        except Exception:  # noqa: BLE001 — the scope line is enrichment only
+            scope_line = ""
     # Identifier fields: the role name and label head the body; both are
     # marked spans so redaction leaves the delegation name readable.
-    header = [
-        f"{identifier_text(context, profile.name)} — {origin}",
-        f"when to use: {profile.when_to_use or profile.description or '(unstated)'}",
-        f"tools: {', '.join(profile.tools) if profile.tools else 'full inventory'}",
-        f"class: {_class_label(profile.action_class)}",
-    ]
+    header = [f"{identifier_text(context, profile.name)} — {origin}"]
+    if scope_line:
+        header.append(scope_line.rstrip("\n"))
+    header.extend(
+        [
+            f"when to use: {profile.when_to_use or profile.description or '(unstated)'}",
+            f"tools: {', '.join(profile.tools) if profile.tools else 'full inventory'}",
+            f"class: {_class_label(profile.action_class)}",
+        ]
+    )
     if profile.effort:
         header.append(f"effort: {profile.effort}")
     body = "\n".join(header) + "\n\ninstructions:\n" + (profile.instructions or "(none)")
@@ -894,7 +935,9 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
     )
 
 
-async def _op_install(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+async def _op_install(
+    context: ToolContext | None, tool_call_id: str, name: str, *, scope: Scope
+) -> ToolResult:
     registry = _registry(context)
     if registry is None:
         return _error(
@@ -907,11 +950,21 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
             f"no packaged starter named {identifier_text(context, repr(name))}; "
             f"starters: {', '.join(list_seeds())}",
         )
+    # THE CALLER'S SCOPE, NEVER SILENTLY DOWNGRADED (agent review round 1, M2).
+    # The default (no scope) is the conversation; an explicit 'global' is a
+    # model-initiated account write and needs the same consent as any other.
+    if scope == "global" and context is not None:
+        from local_operator.profile_scope import (
+            durable_write_decision,
+            durable_write_refusal,
+        )
+
+        intent = DurableWriteIntent(kind="agent", operation="install", name=name)
+        authorized, reason = await durable_write_decision(context, intent)
+        if authorized is None:
+            return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:
-        # A TOOL INSTALL IS THE MODEL'S OWN ACT, so it lands in THIS
-        # conversation (design §3.4). The account store is reachable only through
-        # a user surface, or through op='reset' of a row that is already there.
-        installed = install_seed(name, registry=registry, scope="session")
+        installed = install_seed(name, registry=registry, scope=scope)
     except NameTakenError:
         return _error(
             tool_call_id,
@@ -957,11 +1010,14 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
             "(it prints the packaged version too when yours has diverged), "
             f"{restore}op='update' name={shown_name} to change it.",
         )
+    from local_operator.profile_scope import scope_words
+
     return _text(
         tool_call_id,
         "agent",
-        f"installed role {shown_name}: launch with task(agent={shown_name}), "
-        f"or change what it is told with op='update' name={shown_name}.",
+        f"installed role {shown_name} in {scope_words(scope)}: launch with "
+        f"task(agent={shown_name}), or change what it is told with op='update' "
+        f"name={shown_name}.",
     )
 
 
@@ -1049,16 +1105,19 @@ async def _op_reset(
     # it needs the same host consent as any other account write — reset is a
     # WRITE, not a read, exactly like update/delete.
     from local_operator.profile_scope import (
-        durable_write_origin,
+        durable_write_decision,
         durable_write_refusal,
         row_scope,
     )
 
     target: Scope = row_scope(registry, existing) if existing is not None else scope
     if context is not None and target == "global":
+        # RESET IS A WRITE, not a read (routing note from the manager): a model
+        # reset of an account row is account mutation and needs the same consent.
         intent = DurableWriteIntent(kind="agent", operation="reset", name=seed.name)
-        if await durable_write_origin(context, intent) is None:
-            return _error(tool_call_id, "agent", durable_write_refusal(intent))
+        authorized, reason = await durable_write_decision(context, intent)
+        if authorized is None:
+            return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
 
     previous = profile_from_agent(registry, existing) if existing is not None else None
     diverged = seed_divergence(previous, seed) if previous is not None else ()
@@ -1137,9 +1196,11 @@ async def _op_reset(
         # Reset on a starter that was never installed is not an error: the end
         # state the caller asked for (registry holds the packaged text) is the
         # one they got. Saying which of the two happened keeps the report true.
+        from local_operator.profile_scope import scope_words
+
         body = (
             f"role {shown_name} was not installed; installed the packaged "
-            f"version. launch with task(agent={shown_name})."
+            f"version in {scope_words(target)}. launch with task(agent={shown_name})."
         )
         return _text(tool_call_id, "agent", body)
     # Echo EVERY field that was replaced, not just the prose. The restore is
@@ -1150,7 +1211,9 @@ async def _op_reset(
     # divergence actually reaches the overwrite, silence here would start
     # discarding tool restrictions the old short-circuit happened to leave
     # alone, so the report has to widen with the fix.
-    body = f"reset role {shown_name} to the packaged version ("
+    from local_operator.profile_scope import scope_words
+
+    body = f"reset role {shown_name} to the packaged version in {scope_words(target)} ("
     body += ", ".join(diverged) + " replaced).\n"
     if "instructions" in diverged:
         body += f"\nyour instructions were:\n{(previous.instructions or '(none)').strip()}\n"
@@ -1199,7 +1262,6 @@ async def _op_sync(
         return _error(
             tool_call_id, "agent", "no agent registry attached to this session; cannot sync."
         )
-    from local_operator.agent_profiles import sync_installed_seeds
     from local_operator.agent_sync import SyncReport
     from local_operator.hub_sync import service as svc
     from local_operator.hub_sync.report import render_report
@@ -1207,12 +1269,65 @@ async def _op_sync(
     names = [name] if name and name.strip() else None
     config_dir = getattr(registry, "config_dir", None)
 
+    # THE ACCOUNT ARM IS A WRITE (agent review round 1, R-B1). Syncing installed
+    # starters rewrites the rows the install fingerprint proves unedited, and on
+    # a composite the seed arm reaches BOTH stores: session rows are this
+    # conversation's own, account rows are shared state. Classify first (the
+    # ``apply=False`` mode writes nothing), and require the host's consent when
+    # any row that WOULD be rewritten lives in the account. The hub arm is
+    # account-only, so it runs only under that same consent.
+    from local_operator.agent_profiles import sync_installed_seeds
+    from local_operator.profile_scope import (
+        durable_write_decision,
+        durable_write_refusal,
+        row_scope,
+    )
+
+    def _global_updates() -> list[str]:
+        dry = sync_installed_seeds(registry, names=names, force=False, apply=False)
+        found: list[str] = []
+        for verdict in dry:
+            if verdict.verdict != "outdated-clean":
+                continue
+            row = registry.get_agent_by_name(verdict.name)
+            if row is not None and row_scope(registry, row) == "global":
+                found.append(verdict.name)
+        return found
+
+    global_updates = await asyncio.to_thread(_global_updates)
+    authorized_by: str | None = None
+    # The HUB arm is account-only and cannot be classified before it runs (it
+    # reads the marketplace), so its availability also needs consent: with a
+    # config dir present it would write account rows. The refusal is OUTRIGHT
+    # only when a seed update would rewrite an account row; otherwise an
+    # unconsented run proceeds with the session arm and SKIPS the hub arm.
+    needs_consent = bool(global_updates) or config_dir is not None
+    if needs_consent and context is not None:
+        intent = DurableWriteIntent(
+            kind="agent",
+            operation="sync",
+            name=", ".join(global_updates) or (name or "installed starters"),
+        )
+        authorized_by, reason = await durable_write_decision(context, intent)
+        if authorized_by is None and global_updates:
+            return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
+
     def run() -> str:
         # The registry and the hub both do blocking I/O; this whole body runs off
         # the loop so a slow marketplace listing cannot stall the session.
         seed = SyncReport(entries=tuple(sync_installed_seeds(registry, names=names, force=False)))
         if config_dir is None:
             return seed.render()
+        if authorized_by is None:
+            # NO CONSENT => NO ACCOUNT ARM. The hub rows are account rows by
+            # definition; skipping them (and saying so) is the only honest
+            # outcome, and it keeps the tool's promise that a session can never
+            # write the account on its own.
+            return seed.render() + (
+                "\n\nHub updates were not applied: they change roles saved in the "
+                "user's account, which needs their confirmation. The user can run "
+                "`lop agents sync` to apply them."
+            )
         from local_operator.config import ConfigManager
 
         # ``resolve`` is the model's ONLY conflict lever, and it maps to ``prefer`` --
@@ -1641,9 +1756,11 @@ async def _op_write(
     creating: bool,
 ) -> ToolResult:
     from local_operator.profile_scope import (
-        durable_write_origin,
+        durable_write_decision,
         durable_write_refusal,
         row_scope,
+        shadow_in_other_store,
+        shadow_refusal,
     )
 
     registry = _registry(context)
@@ -1657,6 +1774,22 @@ async def _op_write(
         existing = registry.get_agent_by_name(name)
     except Exception:  # noqa: BLE001 — an unreadable owner is treated as the account
         existing = None
+    # THE COLLISION IS CHECKED BEFORE THE CONSENT ASK (agent review round 1, M1).
+    # Otherwise a create over an account name resolved the EXISTING row, asked for
+    # an account write, and an unclear "retry without scope" re-resolved the same
+    # row — a loop where the actual answer is "that name already exists".
+    if creating:
+        collides = shadow_in_other_store(registry, scope, name, kind="agent")
+        if collides is not None:
+            return _error(
+                tool_call_id,
+                "agent",
+                shadow_refusal(
+                    "agent",
+                    name,
+                    existing_scope="global" if scope == "session" else "session",
+                ),
+            )
     target = row_scope(registry, existing) if existing is not None else scope
     # A row that is not a role/specialist is refused by ``write_profile`` with its
     # own specific sentence ("... is not a role"); asking for durable consent
@@ -1672,9 +1805,9 @@ async def _op_write(
         intent = DurableWriteIntent(
             kind="agent", operation="update" if not creating else "create", name=name
         )
-        authorized_by = await durable_write_origin(context, intent)
+        authorized_by, reason = await durable_write_decision(context, intent)
         if authorized_by is None:
-            return _error(tool_call_id, "agent", durable_write_refusal(intent))
+            return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:
         name, kind, action_class = write_profile(
             registry,
@@ -1826,7 +1959,9 @@ async def execute_agent(
     if params.op == "search":
         return await _op_search(context, tool_call_id, str(params.query))
     if params.op == "install":
-        return await _op_install(context, tool_call_id, str(params.name))
+        return await _op_install(
+            context, tool_call_id, str(params.name), scope=params.scope or "session"
+        )
     if params.op == "reset":
         return await _op_reset(
             context, tool_call_id, str(params.name), scope=params.scope or "session"
