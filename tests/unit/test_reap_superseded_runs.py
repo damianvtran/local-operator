@@ -7,11 +7,15 @@ the ones in `scripts/reap_superseded_runs.py`'s docstring:
 * only `queued` runs are touched -- a started run is doing work;
 * protected branches (`main`, `release-next-*`) are never touched -- a gate
   that can be cancelled is not a gate;
-* a PR run is cancelled only when BOTH the PR head and the branch tip agree
-  that it has been superseded;
+* the pull request's head is authoritative for a PR run: a current head keeps
+  the run at ANY age (the fork-PR case), and a moved head makes it
+  superseded, with the branch tip only corroborating;
+* an UNKNOWN read failure (5xx, network) keeps the run, while a CONFIRMED
+  absence (404) is what may put it past the abandonment bound;
 * an unresolvable branch or PR is a reason to KEEP, never to cancel;
 * the grace period protects a run whose head is mid-move.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -71,7 +75,7 @@ def test_a_running_job_is_never_touched(api):
 
 @pytest.mark.parametrize("branch", ["main", "release-next", "release-next-0-83-0"])
 def test_protected_branches_are_never_touched(api, branch):
-    api["tip"][branch] = "b" * 40          # tip HAS moved
+    api["tip"][branch] = "b" * 40  # tip HAS moved
     should, reason = reaper.decide("o/r", _run(head_branch=branch), 5.0)
     assert not should
     assert "protected branch" in reason
@@ -126,7 +130,7 @@ def test_a_pr_run_is_kept_when_the_two_readings_disagree(api):
     the one that is about to be current, and cancelling it would delete live
     CI on a guess.
     """
-    api["pr"][7] = "b" * 40    # PR says moved
+    api["pr"][7] = "b" * 40  # PR says moved
     api["tip"]["feat/x"] = "a" * 40  # but the branch tip still IS this commit
     should, reason = reaper.decide(
         "o/r", _run(event="pull_request", pull_requests=[{"number": 7}]), 5.0
@@ -160,7 +164,7 @@ def test_a_pr_run_whose_head_moved_is_cancelled_even_when_the_branch_is_gone(api
     run's commit, the run is superseded, and the tip only corroborates. If it
     has NOT moved, the run is kept at any age (the test above).
     """
-    api["pr"][7] = "b" * 40          # PR head moved past the run's commit
+    api["pr"][7] = "b" * 40  # PR head moved past the run's commit
     # no tip registered -> the branch does not resolve, as for a fork PR
     should, reason = reaper.decide(
         "o/r", _run(event="pull_request", pull_requests=[{"number": 7}]), 5.0
@@ -180,11 +184,15 @@ def test_a_pr_run_is_kept_at_any_age_when_its_head_is_still_current(api):
     ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    api["pr"][7] = "a" * 40          # PR head IS the run's commit
+    api["pr"][7] = "a" * 40  # PR head IS the run's commit
     should, reason = reaper.decide(
         "o/r",
-        _run(event="pull_request", created_at=ancient, updated_at=ancient,
-             pull_requests=[{"number": 7}]),
+        _run(
+            event="pull_request",
+            created_at=ancient,
+            updated_at=ancient,
+            pull_requests=[{"number": 7}],
+        ),
         5.0,
     )
     assert not should
@@ -209,9 +217,7 @@ def test_a_run_queued_past_the_abandonment_bound_is_cancelled_even_if_unresolvab
     ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    should, reason = reaper.decide(
-        "o/r", _run(event="pull_request", created_at=ancient), 5.0, 24.0
-    )
+    should, reason = reaper.decide("o/r", _run(event="pull_request", created_at=ancient), 5.0, 24.0)
     assert should
     assert "abandonment bound" in reason
 
@@ -220,7 +226,7 @@ def test_a_run_just_under_the_abandonment_bound_still_uses_the_normal_rules(api)
     nearly = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=23)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    api["tip"]["feat/x"] = "a" * 40          # tip is current
+    api["tip"]["feat/x"] = "a" * 40  # tip is current
     should, reason = reaper.decide("o/r", _run(created_at=nearly), 5.0, 24.0)
     assert not should
     assert "current" in reason
@@ -290,8 +296,52 @@ def test_a_rerun_of_an_old_run_is_protected_by_the_grace_period(api):
     now = datetime.datetime.now(datetime.timezone.utc)
     long_ago = (now - datetime.timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     just_now = (now - datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    should, reason = reaper.decide(
-        "o/r", _run(created_at=long_ago, updated_at=just_now), 5.0, 24.0
-    )
+    should, reason = reaper.decide("o/r", _run(created_at=long_ago, updated_at=just_now), 5.0, 24.0)
     assert not should
     assert "grace period" in reason
+
+
+def test_a_transient_read_failure_keeps_the_run(api, monkeypatch):
+    """Q2: an outage is not evidence that anything is gone.
+
+    The bound may act on a CONFIRMED absence (404). A 5xx, a rate limit or a
+    network failure says nothing about whether the branch still exists, so the
+    run is kept rather than cancelled on an unknown.
+    """
+    ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    def boom(repo, branch):
+        raise reaper.ApiError("HTTP 502", 502)
+
+    monkeypatch.setattr(reaper, "branch_tip", boom)
+    should, reason = reaper.decide("o/r", _run(created_at=ancient, updated_at=ancient), 5.0, 24.0)
+    assert not should
+    assert "transient" in reason
+
+
+def test_a_confirmed_absence_still_reaches_the_abandonment_bound(api, monkeypatch):
+    """The other half: a 404 IS evidence, so the bound may act on it."""
+    ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    monkeypatch.setattr(reaper, "branch_tip", lambda repo, branch: None)  # 404 -> gone
+    should, reason = reaper.decide("o/r", _run(created_at=ancient, updated_at=ancient), 5.0, 24.0)
+    assert should
+    assert "abandonment bound" in reason
+
+
+def test_a_transient_failure_on_the_corroborating_tip_read_keeps_a_pr_run(api, monkeypatch):
+    """A moved PR head plus a failed tip read is two signals short of a cancel."""
+    api["pr"][7] = "b" * 40  # PR head says moved
+
+    def boom(repo, branch):
+        raise reaper.ApiError("HTTP 500", 500)
+
+    monkeypatch.setattr(reaper, "branch_tip", boom)
+    should, reason = reaper.decide(
+        "o/r", _run(event="pull_request", pull_requests=[{"number": 7}]), 5.0
+    )
+    assert not should
+    assert "transient" in reason

@@ -13,11 +13,14 @@
 # deliberately narrow.
 #
 # WHAT THIS DELIBERATELY DOES NOT DO. It never cancels a run that has STARTED
-# (`status: queued` only), never touches `main` or `release-next-*` (a gate
-# that can be cancelled is not a gate), and for a pull-request run it requires
-# BOTH the PR head and the branch tip to have moved past the run's commit --
-# if either still points at it, the run may be the one about to be current and
-# is kept. Every rule, and the measurement behind it, is in
+# (`status: queued` only, re-read immediately before the write), and never
+# touches `main` or `release-next-*` (a gate that can be cancelled is not a
+# gate). For a pull-request run the PULL REQUEST's head is authoritative: if it
+# still points at the run's commit the run is kept at any age -- that is the
+# fork-PR case, where the fork's branch 404s here forever. A moved head makes
+# the run superseded, with the branch tip only corroborating. An UNKNOWN read
+# failure (5xx, network) keeps the run; only a CONFIRMED absence (404) may put
+# it past the abandonment bound. Every rule, and the measurement behind it, is in
 # `scripts/reap_superseded_runs.py`'s docstring; the safety rules each have a
 # test in `tests/unit/test_reap_superseded_runs.py`.
 #

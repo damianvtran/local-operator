@@ -63,6 +63,7 @@ nothing the second time.
 Usage:
     python scripts/reap_superseded_runs.py --repo OWNER/NAME [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -72,12 +73,24 @@ import subprocess
 import sys
 from typing import Any
 
-PROTECTED_PREFIXES = ("main", "release-next")
+PROTECTED_BRANCHES = ("main",)
+PROTECTED_PREFIXES = ("release-next",)
 SEARCH_LIMIT = 100
 
 
 class ApiError(RuntimeError):
-    """A read the sweep depends on could not be performed."""
+    """A read the sweep depends on could not be performed.
+
+    `status` distinguishes a CONFIRMED absence (404 -- the branch or PR really
+    is gone, which is what makes a run unresolvable) from an UNKNOWN failure
+    (5xx, network, rate limit). The abandonment bound may act on the first and
+    must never act on the second, because a transient outage is not evidence
+    that anything is gone.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def gh_api(path: str, *, method: str = "GET") -> Any:
@@ -96,7 +109,12 @@ def gh_api(path: str, *, method: str = "GET") -> Any:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         detail = proc.stderr.strip()[:200]
-        raise ApiError(f"{method} {path} failed rc={proc.returncode}: {detail}")
+        status = None
+        for code in (404, 403, 422, 500, 502, 503, 504):
+            if f"HTTP {code}" in detail or f"({code})" in detail:
+                status = code
+                break
+        raise ApiError(f"{method} {path} failed rc={proc.returncode}: {detail}", status)
     body = (proc.stdout or "").strip()
     if not body:
         return None
@@ -123,17 +141,33 @@ def queued_runs(repo: str) -> list[dict[str, Any]]:
         if len(batch) < SEARCH_LIMIT:
             return out
         page += 1
-        if page > 20:          # a queue deeper than 2000 is not this script's problem
+        if page > 20:  # a queue deeper than 2000 is not this script's problem
             return out
 
 
 def pr_head_sha(repo: str, number: int) -> str | None:
-    data = gh_api(f"repos/{repo}/pulls/{number}")
+    """The PR's current head, or None when the PR CONFIRMED does not exist."""
+    try:
+        data = gh_api(f"repos/{repo}/pulls/{number}")
+    except ApiError as exc:
+        if exc.status == 404:
+            return None
+        raise
     return ((data or {}).get("head") or {}).get("sha")
 
 
 def branch_tip(repo: str, branch: str) -> str | None:
-    data = gh_api(f"repos/{repo}/branches/{branch}")
+    """The branch's tip, or None when the branch CONFIRMED does not exist.
+
+    A 404 is the only thing that means "gone". Any other failure raises, so the
+    caller can keep the run instead of treating an outage as a deletion (Q2).
+    """
+    try:
+        data = gh_api(f"repos/{repo}/branches/{branch}")
+    except ApiError as exc:
+        if exc.status == 404:
+            return None
+        raise
     return ((data or {}).get("commit") or {}).get("sha")
 
 
@@ -161,12 +195,14 @@ def age_minutes(run: dict[str, Any]) -> float:
                 continue
             now = datetime.datetime.now(datetime.timezone.utc)
             return (now - stamp).total_seconds() / 60.0
-    raise ValueError(f"no readable timestamp: updated_at={run.get('updated_at')!r} "
-                     f"created_at={run.get('created_at')!r}")
+    raise ValueError(
+        f"no readable timestamp: updated_at={run.get('updated_at')!r} "
+        f"created_at={run.get('created_at')!r}"
+    )
 
 
 def is_protected(branch: str) -> bool:
-    return branch == "main" or branch.startswith(PROTECTED_PREFIXES[1])
+    return branch in PROTECTED_BRANCHES or branch.startswith(PROTECTED_PREFIXES)
 
 
 def _abandoned_or(age: float, max_queue_hours: float, unresolved: str) -> tuple[bool, str]:
@@ -180,14 +216,17 @@ def _abandoned_or(age: float, max_queue_hours: float, unresolved: str) -> tuple[
     genuinely unresolvable, then age decides.
     """
     if age > max_queue_hours * 60:
-        return True, (f"queued {age / 60:.1f} h past the {max_queue_hours:g}-h abandonment "
-                      f"bound and unresolvable ({unresolved}) -- nothing queues for a day "
-                      f"and then runs")
+        return True, (
+            f"queued {age / 60:.1f} h past the {max_queue_hours:g}-h abandonment "
+            f"bound and unresolvable ({unresolved}) -- nothing queues for a day "
+            f"and then runs"
+        )
     return False, f"unresolvable ({unresolved}) -- kept, inside the abandonment bound"
 
 
-def decide(repo: str, run: dict[str, Any], min_age: float,
-           max_queue_hours: float = 24.0) -> tuple[bool, str]:
+def decide(
+    repo: str, run: dict[str, Any], min_age: float, max_queue_hours: float = 24.0
+) -> tuple[bool, str]:
     """(should_cancel, reason) for one queued run. Pure: makes no writes.
 
     The order is the safety argument. Status, protection and the grace period
@@ -226,34 +265,35 @@ def decide(repo: str, run: dict[str, Any], min_age: float,
     if event == "pull_request":
         prs = run.get("pull_requests") or []
         if not prs:
-            return _abandoned_or(age, max_queue_hours,
-                                 "PR run carries no pull_requests entry")
+            return _abandoned_or(age, max_queue_hours, "PR run carries no pull_requests entry")
         number = prs[0].get("number")
         try:
             current = pr_head_sha(repo, number) if isinstance(number, int) else None
         except ApiError as exc:
-            return _abandoned_or(age, max_queue_hours, f"API read failed: {exc}")
+            return False, f"transient read failure ({exc.status or 'unknown'}) -- kept, not guessed"
         if not current:
-            return _abandoned_or(age, max_queue_hours,
-                                 f"cannot read PR #{number}'s current head")
+            return _abandoned_or(age, max_queue_hours, f"cannot read PR #{number}'s current head")
         if head == current:
             # Authoritative: the run is about to be current. Never cancellable,
             # at any age, and independent of whether the branch resolves.
             return False, f"PR #{number} head is current"
         try:
             tip = branch_tip(repo, branch) if branch else None
-        except ApiError:
-            tip = None
+        except ApiError as exc:
+            # The PR head already said "moved", but a transient failure on the
+            # corroborating read is not permission to cancel on one signal.
+            return False, f"transient tip read failure ({exc.status or 'unknown'}) -- kept"
         if tip == head:
-            return False, (f"branch tip still points at {str(head)[:9]} -- "
-                           f"one reading says current")
+            return False, (
+                f"branch tip still points at {str(head)[:9]} -- " f"one reading says current"
+            )
         return True, f"PR #{number} moved past {str(head)[:9]} (head {current[:9]})"
 
     if event == "push":
         try:
             tip = branch_tip(repo, branch) if branch else None
         except ApiError as exc:
-            return _abandoned_or(age, max_queue_hours, f"API read failed: {exc}")
+            return False, f"transient read failure ({exc.status or 'unknown'}) -- kept, not guessed"
         if not tip:
             return _abandoned_or(age, max_queue_hours, f"branch {branch!r} is gone")
         if head != tip:
@@ -268,8 +308,12 @@ def main() -> int:
     ap.add_argument("--repo", required=True, help="OWNER/NAME")
     ap.add_argument("--dry-run", action="store_true", help="report decisions, cancel nothing")
     ap.add_argument("--min-age-minutes", type=float, default=5.0)
-    ap.add_argument("--max-queue-hours", type=float, default=24.0,
-                    help="cancel a run queued longer than this, unresolvable or not")
+    ap.add_argument(
+        "--max-queue-hours",
+        type=float,
+        default=24.0,
+        help="cancel a run queued longer than this that no reading can resolve",
+    )
     args = ap.parse_args()
 
     try:
@@ -281,7 +325,7 @@ def main() -> int:
     if not runs:
         return 0
 
-    cancelled = kept = 0
+    cancelled = kept = refused = 0
     for run in runs:
         run_id = run.get("id")
         should, reason = decide(args.repo, run, args.min_age_minutes, args.max_queue_hours)
@@ -309,15 +353,15 @@ def main() -> int:
             continue
         try:
             gh_api(f"repos/{args.repo}/actions/runs/{run_id}/cancel", method="POST")
-            ok = True
         except ApiError as exc:
-            ok = False
-            print(f"         cancel refused: {exc}", flush=True)
+            refused += 1
+            print(f"  REFUSE {label}: {reason} -> {exc}", flush=True)
+            continue
         cancelled += 1
-        print(f"  CANCEL {label}: {reason} -> {'ok' if ok else 'refused'}", flush=True)
+        print(f"  CANCEL {label}: {reason} -> ok", flush=True)
 
     verb = "would cancel" if args.dry_run else "cancelled"
-    print(f"{verb} {cancelled}, kept {kept}", flush=True)
+    print(f"{verb} {cancelled}, kept {kept}, refused {refused}", flush=True)
     return 0
 
 
