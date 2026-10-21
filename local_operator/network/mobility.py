@@ -1790,16 +1790,16 @@ def _destination_move(
         # conversation: that is what makes a retry safe, and why the source's own
         # journal may need its relay restarted before it can be re-prepared.
         _roll_back_destination(server, session_id, staging)
+        dest = str(server._own_label())  # noqa: SLF001
         holder = owner_name or owner_device or "the source"
         return (
             None,
             _move_refusal(
                 session_id,
                 refusal.code or "unreachable",
-                f"{refusal.message}. This device rolled its partial copy back; "
-                f"{holder} still holds the conversation, so nothing was lost. If a "
-                f"retry reports a prepared handoff on {holder}, restart the relay "
-                f"on {holder} (`lop network restart`) first.",
+                f"{refusal.message}. {dest} discarded its partial copy; {holder} "
+                "still has the conversation, paused for this move. Restart the relay "
+                f"on {holder} (`lop network restart`), then run the move again.",
                 phase_reached="prepared",
                 changed=False,
             ),
@@ -3447,7 +3447,6 @@ def _source_prepare(
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_PREPARED,
-        clear_handoff_entry,
         handoff_in_flight,
         write_handoff_entry,
     )
@@ -3508,34 +3507,6 @@ def _source_prepare(
         except Exception:  # noqa: BLE001
             existing = None
         if existing:
-            phase = str(existing.get("phase") or "")
-            asking = _asking_device(link, frame)
-            # A PREPARED HANDOFF NEVER COMMITTED, SO THE SAME DESTINATION ASKING
-            # AGAIN IS A RETRY, NOT A SECOND MOVER (live defect, 2026-10-21).
-            # The copy phase can fail after this device journaled the plan — a
-            # dead peer link raised ``Moved`` on the destination — and a
-            # destination that retries then found its OWN entry refusing it
-            # ``in_progress`` until this relay restarted, because reconcile
-            # skips an entry written by the live instance. ``prepared`` means
-            # only that the source stopped its runtime and wrote a plan; no
-            # byte was committed anywhere, so clearing the entry rolls nothing
-            # back. The tombstone check keeps a committed handoff refused: an
-            # entry plus a tombstone is not a retry, it is a disagreement.
-            same_destination = (
-                bool(asking)
-                and str(existing.get("to_device") or "") == asking
-                and not _tombstone(server.root, session_id)
-            )
-            if phase == HANDOFF_PHASE_PREPARED and same_destination:
-                logger.warning(
-                    "mobility: clearing a prepared handoff of %s to %s left by a "
-                    "failed copy; the same destination is asking again",
-                    session_id,
-                    asking,
-                )
-                clear_handoff_entry(server.root, session_id)
-                existing = None
-        if existing:
             # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
             # this device is holding may be a handoff that is genuinely under way, or
             # one whose destination died — and until it is settled, every route to
@@ -3575,8 +3546,8 @@ def _source_prepare(
                 "message": (
                     "a handoff of that conversation is already in progress on "
                     f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    f"changed; if it is stuck, restart the relay on {holder} "
-                    "(`lop network restart`) and try the move again"
+                    "changed; if the other device has stopped answering, restart the "
+                    f"relay on {holder} (`lop network restart`) and try the move again"
                 ),
                 "session_id": session_id,
             }
