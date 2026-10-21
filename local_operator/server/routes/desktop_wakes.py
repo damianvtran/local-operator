@@ -42,7 +42,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -959,20 +958,22 @@ def _rollback_created(config_dir: Path, session_id: str) -> bool:
     Anything else — including a failure during the removal itself — leaves the
     directory alone and returns False.
 
-    **Why this is not ``cleanup.remove_session_dir``**, which is otherwise the
-    one remover of a session directory in this tree, and why the call is
-    allow-listed by name in ``tests/unit/session/test_no_session_deletion.py``
-    (reviewers: the row records the same argument): that remover refuses any
-    target in a store without the cleanup STORE MARKER, and ``mark_store``'s
-    own contract forbids cleanup from marking its own target. The identity proof
-    above is strictly narrower than the marker — it removes one directory, this
-    request's own, and only while it is still empty of everything — and it is
-    the half that carries the decision; the missing marker would merely make the
-    other route a no-op in the store a fresh desktop draft lives in (review
-    round 1, N3: the argument leads with the proof, not with the marker).
+    The removal itself goes through
+    :func:`local_operator.session.cleanup.remove_fresh_session_dir`, which
+    writes the store's cleanup-log receipt (policy ``wake-rollback``) BEFORE it
+    removes anything, and refuses when the receipt cannot be written or a
+    transcript appeared in the meantime. That primitive exists precisely for
+    this shape: ``remove_session_dir`` refuses a store without the cleanup
+    STORE MARKER, and ``mark_store``'s own contract forbids cleanup from
+    marking its own target — the store a fresh desktop draft lives in may never
+    have built a session, so the marker is absent exactly where this is needed.
+    The identity proof above stays here (it knows what THIS request wrote); the
+    primitive adds the no-transcript proof, the receipt and the bounded
+    removal.
     """
     from local_operator.mobile.attach_client import find_runtime_record
     from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session.cleanup import remove_fresh_session_dir
     from local_operator.wakes.store import read_entry
 
     path = Path(config_dir) / "sessions" / session_id
@@ -987,8 +988,13 @@ def _rollback_created(config_dir: Path, session_id: str) -> bool:
             return False
         if find_runtime_record(Path(config_dir), session_id)[1] is not None:
             return False
-        shutil.rmtree(path)
-        return True
+        return remove_fresh_session_dir(
+            path,
+            config_dir=Path(config_dir),
+            policy="wake-rollback",
+            reason="the wake arm failed after this request created the session",
+            actor="desktop-wakes",
+        )
     except Exception:  # noqa: BLE001 — a failed cleanup must not mask the arm error
         logger.warning("could not roll back the session created for a wake", exc_info=True)
         return False

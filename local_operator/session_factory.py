@@ -3924,9 +3924,18 @@ _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS = 1.0
 _STORE_MAINTENANCE_LOCK_NAME = ".store-maintenance.lock"
 _STORE_MAINTENANCE_STAMP_NAME = ".store-maintenance.json"
 _STORE_MAINTENANCE_STAMP_SCHEMA = 1
-_STORE_MAINTENANCE_STAMP_VERSION = 1
+#: Bumped for the session-store census pass: the pass set and its order changed,
+#: which the freshness check already catches through ``passes``; the version is
+#: the explicit signal, so an older build reading a newer stamp (or the reverse)
+#: retries once instead of reasoning about a half-known sequence.
+_STORE_MAINTENANCE_STAMP_VERSION = 2
 _STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
 _STORE_MAINTENANCE_PASS_NAMES = (
+    # FIRST, deliberately: the census diffs what the store held at the end of
+    # the PREVIOUS pass against the disk, so a cleanup pass in this one shows up
+    # as a recorded removal in the census that follows it — not as an
+    # unaccounted disappearance the same sequence caused.
+    "session store census",
     "session cleanup policy",
     "orphan process-group sweep",
     "session origin backfill",
@@ -4101,7 +4110,7 @@ def _run_store_maintenance(
     *,
     stop_event: threading.Event | None = None,
 ) -> bool:
-    """Run the six idempotent store passes under one daemon-owned lock.
+    """Run the seven idempotent store passes under one daemon-owned lock.
 
     Separate runtime processes can start more than the 0.75-second idle delay
     apart, so mutual exclusion alone does not suppress their duplicate walks.
@@ -4109,7 +4118,7 @@ def _run_store_maintenance(
     and orphan-group reaping may consequently wait up to 60 seconds after a
     completed sweep. A crash or any failed pass writes no fresh stamp, so the
     next launch retries — and so does a pass that STOOD DOWN mid-walk because
-    this process is leaving: the four store-walking passes check the stop once
+    this process is leaving: the five store-walking passes check the stop once
     per directory and RETURN their partial count rather than raising, so what
     refuses the stamp is the guard on the sequence below
     (``all_passes_succeeded and not stop.is_set()``). That is the same event
@@ -4150,6 +4159,7 @@ def _run_store_maintenance(
             backfill_session_origins,
             backfill_session_titles,
         )
+        from local_operator.session.census import run_store_census
         from local_operator.session.cleanup import cleanup_from_config
         from local_operator.tools.group_reaper import sweep_orphan_groups
 
@@ -4158,6 +4168,16 @@ def _run_store_maintenance(
         # the group reaper acts only on a provably dead owner. The lock serializes
         # those store-wide decisions with other runtime processes.
         passes: list[tuple[str, Callable[[], Any]]] = [
+            (
+                "session store census",
+                # Read-only over the store; appends only unaccounted-* rows and
+                # its own census file. FIRST in the sequence so this pass's own
+                # cleanup is accounted for by the NEXT census rather than
+                # reported by this one — and it runs whatever the cleanup
+                # switch says, because it is the record of what retention did,
+                # not a retention feature.
+                lambda: run_store_census(config_dir, should_stop=stop.is_set),
+            ),
             (
                 "session cleanup policy",
                 lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
@@ -4208,7 +4228,7 @@ def _run_store_maintenance(
                 _write_store_maintenance_stamp(config_dir, pass_names)
             except OSError:
                 # Fail closed: without a trustworthy completion record, do
-                # not let each later process repeat the six store-wide walks.
+                # not let each later process repeat the seven store-wide walks.
                 logger.debug(
                     "store maintenance completion stamp write failed; skipping", exc_info=True
                 )
