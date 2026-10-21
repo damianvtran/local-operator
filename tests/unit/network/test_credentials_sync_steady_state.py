@@ -324,6 +324,23 @@ def test_member_keeps_its_row_when_a_legacy_owner_re_serves_the_same_bytes(
     assert [int(frame["gen"]) for frame in acks] == [1, 2, 3]
 
 
+def _grant_member_broker_capability(mesh: Any) -> None:
+    """Give the MEMBER's own record the capability its credential tick checks.
+
+    The pairing fixture leaves the member's ``self_capabilities`` without
+    ``broker_credential``, so ``credentials_sync_step(member, owner)`` answers
+    ``skipped:no_broker_credential`` and never pulls — while the live member
+    (cloud-node-1, ``drive broker_credential ...``) does pull every tick. Without
+    this the cell measures a gate, not the defect.
+    """
+    from local_operator.network import store
+
+    with store.mutate(mesh.network_id, mesh.b.root) as copy:
+        if "broker_credential" not in copy.self_capabilities:
+            copy.self_capabilities = sorted({*copy.self_capabilities, "broker_credential"})
+        store.save(copy, mesh.b.root)
+
+
 def test_two_relays_steady_state_writes_no_copy_audit_rows(sync_mesh: Any) -> None:  # noqa: F811
     """Real relays, real links, the real tick step on the MEMBER side.
 
@@ -347,12 +364,16 @@ def test_two_relays_steady_state_writes_no_copy_audit_rows(sync_mesh: Any) -> No
         row = SyncState.load(mesh.network_id, mesh.a.root).generation(KEY)
         return int((row or {}).get("gen") or 0)
 
+    _grant_member_broker_capability(mesh)
     baseline_copies = _copies()
     baseline_gen = _owner_gen()
     rows_before = [int(row.id) for row in _member_rows(mesh)]
     token = ("placement", mesh.owner)
     for _ in range(TICKS):
-        sync.credentials_sync_step(mesh.b, mesh.owner)
+        # NOT VACUOUS: the step must reach the member's placement pull (the
+        # defect's path). A ``skipped:*`` answer would pass every assertion
+        # below on the pre-fix code too.
+        assert sync.credentials_sync_step(mesh.b, mesh.owner) in ("scheduled", "in_flight")
         assert net_fixtures.wait_for(
             lambda: token not in mesh.engine_b._pulling
         ), "the member's placement pull never settled"
