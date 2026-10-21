@@ -22,8 +22,9 @@ store other people use, so it is write-tier and goes through the approval gate.
 nothing, and the refusal tells the model to re-read and re-decide — never to
 drop the pin, which would overwrite someone else's edit.
 
-**Untrusted data**: documents other people wrote (``authoredByOthers``) are
-framed with the house clause — external, untrusted, data not instructions.
+**Untrusted data**: documents other people wrote (``authoredByOthers``, or
+any of the store's other co-authorship markers) are framed with the house
+clause — external, untrusted, data not instructions.
 """
 
 from __future__ import annotations
@@ -65,10 +66,14 @@ UNTRUSTED_NOTE = (
 #: wording, kept verbatim so a skill's instructions match this tool's output).
 ME_SENTENCE = "(`me` in this path resolved to your user id on this artifact: {user_id})"
 
-#: ``whoami`` answers per (session, slug). The id is stable for an account on
-#: one artifact, so one call per session is enough; keyed by session so two
-#: sessions under different logins never share an answer.
-_WHOAMI_CACHE: dict[tuple[str, str], str] = {}
+#: Response- or document-level flags meaning someone other than the caller
+#: wrote (or can write) the content. Any one truthy earns the untrusted note.
+_UNTRUSTED_FLAGS = ("authoredByOthers", "outside_writer", "cowritten", "typeLocked")
+
+#: ``whoami`` answers per (session, login, slug). The id is stable for an
+#: account on one artifact, so one call is enough; the login is part of the key
+#: because a different ``/login`` mid-session has a different id.
+_WHOAMI_CACHE: dict[tuple[str, str, str], str] = {}
 
 
 class BatchWrite(BaseModel):
@@ -107,7 +112,10 @@ class ArtifactDataParams(BaseModel):
     )
     limit: int | None = Field(default=None, ge=1, le=1000, description="list: page size.")
     cursor: str | None = Field(default=None, description="list: next_cursor of a prior page.")
-    field: str | None = Field(default=None, description="str_replace: top-level string field.")
+    field: str | None = Field(
+        default=None,
+        description="str_replace (experimental): top-level string field.",
+    )
     old_str: str | None = Field(default=None, description="str_replace: exact text to replace.")
     new_str: str | None = Field(default=None, description="str_replace: replacement text.")
     replace_all: bool | None = Field(default=None, description="str_replace: every occurrence.")
@@ -161,7 +169,25 @@ def _me_suffix(user_id: str | None) -> str:
     return "\n" + ME_SENTENCE.format(user_id=user_id) if user_id else ""
 
 
-def _conflict_message(path: str, exc: wire.ArtifactDataError) -> str:
+def _untrusted(*records: Any) -> bool:
+    return any(
+        isinstance(record, dict) and any(record.get(flag) for flag in _UNTRUSTED_FLAGS)
+        for record in records
+    )
+
+
+def _conflict_message(path: str, exc: wire.ArtifactDataError, *, batch: bool = False) -> str:
+    if batch:
+        # The server stops at the first stale pin, so later entries may be
+        # stale too; a fix-one-and-resend loop would keep failing.
+        now = f" ({path} is now at version {exc.version})" if exc.version is not None else ""
+        return (
+            "Not written: the batch is atomic and wrote nothing. The server names only "
+            f"the first stale pin — {path}{now} — so others may be stale too. Re-read "
+            "every pinned document, re-decide the whole batch against what they hold now, "
+            "and resend with the versions those reads return. Never retry without "
+            "if_version: that would overwrite their change."
+        )
     if exc.reason == "version_required":
         return (
             f"Not written: {path} already exists, so this write must pin its version. "
@@ -177,10 +203,22 @@ def _conflict_message(path: str, exc: wire.ArtifactDataError) -> str:
     )
 
 
-def _error_message(exc: wire.ArtifactDataError, path: str) -> str:
+def _error_message(
+    exc: wire.ArtifactDataError, path: str, *, batch: bool = False, sent: bool = False
+) -> str:
+    """``sent``: the failure came back from the write request itself."""
     code = exc.code
     if code == "version_mismatch":
-        return _conflict_message(path, exc)
+        return _conflict_message(path, exc, batch=batch)
+    if sent and code == "store_unavailable":
+        # A timeout or 5xx can land after the server committed; a blind retry
+        # of an unpinned write could apply it twice.
+        what = "this batch" if batch else f"the write to {path}"
+        return (
+            f"Outcome unknown: {what} may or may not have been applied "
+            f"({exc.message}). Read the document(s) back before retrying, and only "
+            "resend what is not there yet."
+        )
     if code == "login_required":
         return exc.message
     if code in ("credential_rejected", "upstream_auth"):
@@ -210,7 +248,8 @@ def _error_message(exc: wire.ArtifactDataError, path: str) -> str:
 
 
 async def _user_id(slug: str, session_id: str, tokens: wire.TokenSource) -> str:
-    key = (session_id, slug)
+    bearer = await tokens()
+    key = (session_id, (bearer.identity if bearer is not None else None) or "", slug)
     cached = _WHOAMI_CACHE.get(key)
     if cached:
         return cached
@@ -276,7 +315,7 @@ async def _run(
         raw_docs = payload.get("docs")
         docs: list[Any] = raw_docs if isinstance(raw_docs, list) else []
         lines = [f"{len(docs)} document(s) in {collection}."]
-        if payload.get("authoredByOthers") is True:
+        if _untrusted(payload, *docs):
             lines.append(UNTRUSTED_NOTE)
         lines.append(_dump(docs))
         next_cursor = payload.get("nextCursor")
@@ -301,7 +340,7 @@ async def _run(
             )
         doc = {key: payload[key] for key in ("data", "version", "updatedAt") if key in payload}
         lines = [f"Document {path}:"]
-        if payload.get("authoredByOthers") is True:
+        if _untrusted(payload, payload.get("data")):
             lines.append(UNTRUSTED_NOTE)
         lines.append(_dump(doc))
         return "\n".join(lines) + _me_suffix(me_id), {**details, "exists": True}, path
@@ -326,7 +365,10 @@ async def _run(
         new_str=params.new_str,
         replace_all=params.replace_all is True,
     )
-    payload = await wire.call_verb(slug, params.action, args, tokens=tokens)
+    try:
+        payload = await wire.call_verb(slug, params.action, args, tokens=tokens)
+    except wire.ArtifactDataError as exc:
+        raise _SentWriteError(exc, path) from exc
     version = payload.get("version")
     return (
         _write_receipt(path, params.action, payload) + _me_suffix(me_id),
@@ -377,9 +419,7 @@ async def _run_batch(
     except wire.ArtifactDataError as exc:
         # Name the entry the server blamed so the conflict text points at it.
         blamed = paths[exc.index] if exc.index is not None and 0 <= exc.index < len(paths) else ""
-        if exc.code == "version_mismatch":
-            exc.message = "the batch was not applied; nothing was written. " + exc.message
-        raise _BatchError(exc, blamed or "one of the pinned documents") from exc
+        raise _SentWriteError(exc, blamed or "one of the pinned documents", batch=True) from exc
     raw_results = payload.get("results")
     results: list[Any] = raw_results if isinstance(raw_results, list) else []
     lines = [f"Applied {len(ops)} write(s) atomically:"]
@@ -391,11 +431,14 @@ async def _run_batch(
     return "\n".join(lines) + _me_suffix(me_id), {**details, "count": len(ops)}, ""
 
 
-class _BatchError(Exception):
-    def __init__(self, error: wire.ArtifactDataError, path: str) -> None:
+class _SentWriteError(Exception):
+    """A failure answered to a write request (as opposed to before sending one)."""
+
+    def __init__(self, error: wire.ArtifactDataError, path: str, *, batch: bool = False) -> None:
         super().__init__(error.message)
         self.error = error
         self.path = path
+        self.batch = batch
 
 
 async def _default_tokens_for(session_id: str) -> wire.Bearer | None:
@@ -418,16 +461,22 @@ async def execute_artifact_data(
 
     session_id = getattr(context, "session_id", "") or ""
 
+    resolved: list[wire.Bearer | None] = []
+
     async def tokens() -> wire.Bearer | None:
-        return await _default_tokens_for(session_id)
+        # One resolve per tool call: the whoami cache key and the request
+        # must describe the same login.
+        if not resolved:
+            resolved.append(await _default_tokens_for(session_id))
+        return resolved[0]
 
     try:
         text, details, _path = await _run(params, session_id, tokens)
-    except _BatchError as exc:
+    except _SentWriteError as exc:
         return _error(
             tool_call_id,
             TOOL_NAME,
-            _error_message(exc.error, exc.path),
+            _error_message(exc.error, exc.path, batch=exc.batch, sent=True),
             details={"action": params.action, "code": exc.error.code},
         )
     except wire.ArtifactDataError as exc:

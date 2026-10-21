@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from local_operator.artifact_data.client import Bearer
+
+if TYPE_CHECKING:
+    from local_operator.providers.auth_store import OAuthAccess
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +47,7 @@ async def anthropic_bearer(session_id: str | None = None) -> Bearer | None:
 
     store = shared_auth_store()
 
-    async def resolve(force: bool) -> str | None:
+    async def resolve(force: bool) -> OAuthAccess | None:
         try:
             access = await store.get_oauth_access(
                 PROVIDER, session_id, force_refresh=force, read_only=True
@@ -53,13 +57,25 @@ async def anthropic_bearer(session_id: str | None = None) -> Bearer | None:
             return None
         if access is None or access.kind != "oauth" or not access.access_token:
             return None
-        return access.access_token
+        return access
 
-    token = await resolve(False)
-    if token is None:
+    access = await resolve(False)
+    if access is None:
         return None
 
     async def refresh() -> str | None:
-        return await resolve(True)
+        fresh = await resolve(True)
+        return fresh.access_token if fresh is not None else None
 
-    return Bearer(token=token, refresh=refresh)
+    return Bearer(token=access.access_token, refresh=refresh, identity=_identity(access))
+
+
+def _identity(access: OAuthAccess) -> str:
+    """The login behind a token: the account when known, else the stored row.
+
+    A refresh rotates the token but keeps both, so the identity is stable for
+    one login and changes when a different one is picked.
+    """
+    if access.account_id:
+        return f"account:{access.account_id}"
+    return f"credential:{access.credential_id}"
