@@ -1,0 +1,502 @@
+{
+  "390x844": {
+    "before": {
+      "viewport": [
+        390,
+        844
+      ],
+      "status": {
+        "top": 53,
+        "bottom": 98,
+        "h": 45,
+        "left": 0,
+        "width": 390
+      },
+      "spend": {
+        "top": 53,
+        "bottom": 97,
+        "h": 44,
+        "left": 300,
+        "width": 78
+      },
+      "spendText": "\u2265$447.70\u25be",
+      "spendLabel": "\u2265$447.70 spend breakdown",
+      "spendExpanded": "false",
+      "panelPresent": false,
+      "panel": null,
+      "chips": [],
+      "untracked": null,
+      "more": null,
+      "headerControls": [
+        {
+          "label": "back to sessions",
+          "text": "\u2039"
+        },
+        {
+          "label": "session menu",
+          "text": "\u22ee"
+        }
+      ]
+    },
+    "before_settled_pair": [
+      {
+        "viewport": [
+          390,
+          844
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 390
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 300,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      },
+      {
+        "viewport": [
+          390,
+          844
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 390
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 300,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      }
+    ],
+    "expanded": {
+      "viewport": [
+        390,
+        844
+      ],
+      "status": {
+        "top": 53,
+        "bottom": 98,
+        "h": 45,
+        "left": 0,
+        "width": 390
+      },
+      "spend": {
+        "top": 53,
+        "bottom": 97,
+        "h": 44,
+        "left": 300,
+        "width": 78
+      },
+      "spendText": "\u2265$447.70\u25b4",
+      "spendLabel": "\u2265$447.70 spend breakdown",
+      "spendExpanded": "true",
+      "panelPresent": true,
+      "panel": {
+        "top": 98,
+        "bottom": 159,
+        "h": 61,
+        "left": 0,
+        "width": 390
+      },
+      "chips": [
+        "image/gpt-image-1 $0.080",
+        "image/gpt-image-1 $\u2014",
+        "image/gpt-image-2 $0.080",
+        "search $0.0000"
+      ],
+      "untracked": "channels not tracked",
+      "more": "\u00b7 +2 more",
+      "headerControls": [
+        {
+          "label": "back to sessions",
+          "text": "\u2039"
+        },
+        {
+          "label": "session menu",
+          "text": "\u22ee"
+        }
+      ]
+    },
+    "collapsed_again": {
+      "viewport": [
+        390,
+        844
+      ],
+      "status": {
+        "top": 53,
+        "bottom": 98,
+        "h": 45,
+        "left": 0,
+        "width": 390
+      },
+      "spend": {
+        "top": 53,
+        "bottom": 97,
+        "h": 44,
+        "left": 300,
+        "width": 78
+      },
+      "spendText": "\u2265$447.70\u25be",
+      "spendLabel": "\u2265$447.70 spend breakdown",
+      "spendExpanded": "false",
+      "panelPresent": false,
+      "panel": null,
+      "chips": [],
+      "untracked": null,
+      "more": null,
+      "headerControls": [
+        {
+          "label": "back to sessions",
+          "text": "\u2039"
+        },
+        {
+          "label": "session menu",
+          "text": "\u22ee"
+        }
+      ]
+    },
+    "menu": {
+      "open": true,
+      "title": true,
+      "rows": [
+        {
+          "text": "Pin sessionnot pinned",
+          "label": "pin this session",
+          "pressed": "false"
+        },
+        {
+          "text": "Wide viewoff",
+          "label": "wide view",
+          "pressed": "false"
+        },
+        {
+          "text": "Approvals\u2026\u25b8",
+          "label": null,
+          "pressed": null
+        }
+      ]
+    },
+    "asks_header": [
+      {
+        "label": "back to sessions",
+        "text": "\u2039"
+      },
+      {
+        "label": "session menu",
+        "text": "\u22ee"
+      }
+    ],
+    "stacked_approval_header": [
+      {
+        "label": "back to sessions",
+        "text": "\u2039"
+      },
+      {
+        "label": "approvals in this session",
+        "text": "needs you"
+      },
+      {
+        "label": "session menu",
+        "text": "\u22ee"
+      }
+    ]
+  },
+  "360x780": {
+    "before": {
+      "viewport": [
+        360,
+        780
+      ],
+      "status": {
+        "top": 53,
+        "bottom": 98,
+        "h": 45,
+        "left": 0,
+        "width": 360
+      },
+      "spend": {
+        "top": 53,
+        "bottom": 97,
+        "h": 44,
+        "left": 270,
+        "width": 78
+      },
+      "spendText": "\u2265$447.70\u25be",
+      "spendLabel": "\u2265$447.70 spend breakdown",
+      "spendExpanded": "false",
+      "panelPresent": false,
+      "panel": null,
+      "chips": [],
+      "untracked": null,
+      "more": null,
+      "headerControls": [
+        {
+          "label": "back to sessions",
+          "text": "\u2039"
+        },
+        {
+          "label": "session menu",
+          "text": "\u22ee"
+        }
+      ]
+    },
+    "before_settled_pair": [
+      {
+        "viewport": [
+          360,
+          780
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 360
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 270,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      },
+      {
+        "viewport": [
+          360,
+          780
+        ],
+        "status": {
+          "top": 53,
+          "bottom": 98,
+          "h": 45,
+          "left": 0,
+          "width": 360
+        },
+        "spend": {
+          "top": 53,
+          "bottom": 97,
+          "h": 44,
+          "left": 270,
+          "width": 78
+        },
+        "spendText": "\u2265$447.70\u25be",
+        "spendLabel": "\u2265$447.70 spend breakdown",
+        "spendExpanded": "false",
+        "panelPresent": false,
+        "panel": null,
+        "chips": [],
+        "untracked": null,
+        "more": null,
+        "headerControls": [
+          {
+            "label": "back to sessions",
+            "text": "\u2039"
+          },
+          {
+            "label": "session menu",
+            "text": "\u22ee"
+          }
+        ]
+      }
+    ],
+    "expanded": {
+      "viewport": [
+        360,
+        780
+      ],
+      "status": {
+        "top": 53,
+        "bottom": 98,
+        "h": 45,
+        "left": 0,
+        "width": 360
+      },
+      "spend": {
+        "top": 53,
+        "bottom": 97,
+        "h": 44,
+        "left": 270,
+        "width": 78
+      },
+      "spendText": "\u2265$447.70\u25b4",
+      "spendLabel": "\u2265$447.70 spend breakdown",
+      "spendExpanded": "true",
+      "panelPresent": true,
+      "panel": {
+        "top": 98,
+        "bottom": 159,
+        "h": 61,
+        "left": 0,
+        "width": 360
+      },
+      "chips": [
+        "image/gpt-image-1 $0.080",
+        "image/gpt-image-1 $\u2014",
+        "image/gpt-image-2 $0.080",
+        "search $0.0000"
+      ],
+      "untracked": "channels not tracked",
+      "more": "\u00b7 +2 more",
+      "headerControls": [
+        {
+          "label": "back to sessions",
+          "text": "\u2039"
+        },
+        {
+          "label": "session menu",
+          "text": "\u22ee"
+        }
+      ]
+    },
+    "collapsed_again": {
+      "viewport": [
+        360,
+        780
+      ],
+      "status": {
+        "top": 53,
+        "bottom": 98,
+        "h": 45,
+        "left": 0,
+        "width": 360
+      },
+      "spend": {
+        "top": 53,
+        "bottom": 97,
+        "h": 44,
+        "left": 270,
+        "width": 78
+      },
+      "spendText": "\u2265$447.70\u25be",
+      "spendLabel": "\u2265$447.70 spend breakdown",
+      "spendExpanded": "false",
+      "panelPresent": false,
+      "panel": null,
+      "chips": [],
+      "untracked": null,
+      "more": null,
+      "headerControls": [
+        {
+          "label": "back to sessions",
+          "text": "\u2039"
+        },
+        {
+          "label": "session menu",
+          "text": "\u22ee"
+        }
+      ]
+    },
+    "menu": {
+      "open": true,
+      "title": true,
+      "rows": [
+        {
+          "text": "Pin sessionnot pinned",
+          "label": "pin this session",
+          "pressed": "false"
+        },
+        {
+          "text": "Wide viewoff",
+          "label": "wide view",
+          "pressed": "false"
+        },
+        {
+          "text": "Approvals\u2026\u25b8",
+          "label": null,
+          "pressed": null
+        }
+      ]
+    },
+    "asks_header": [
+      {
+        "label": "back to sessions",
+        "text": "\u2039"
+      },
+      {
+        "label": "session menu",
+        "text": "\u22ee"
+      }
+    ],
+    "stacked_approval_header": [
+      {
+        "label": "back to sessions",
+        "text": "\u2039"
+      },
+      {
+        "label": "approvals in this session",
+        "text": "needs you"
+      },
+      {
+        "label": "session menu",
+        "text": "\u22ee"
+      }
+    ]
+  }
+}
