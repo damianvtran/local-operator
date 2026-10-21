@@ -613,6 +613,110 @@ def _passwd_runtime_root() -> Path | None:
     return home / STABLE_ROOT_RELATIVE / "runtime"
 
 
+#: The operator's real runtime root, read ONCE at import — before any test can
+#: monkeypatch ``pwd`` — so the guard below compares against the machine's root
+#: and never against a fixture's fake passwd home.
+_REAL_RUNTIME_ROOT = _passwd_runtime_root()
+#: Every real-root answer the guard refused, in order. Production callers of
+#: ``runtime_root`` swallow exceptions by design (a brand is decoration), so the
+#: raise alone would be silent; this list is what makes the refusal LOUD — the
+#: per-test check in ``isolate_environment`` and ``pytest_sessionfinish`` fail
+#: the run on any entry. See :func:`drain_runtime_root_escapes`.
+_RUNTIME_ROOT_ESCAPES: list[str] = []
+#: The wrapper :func:`refuse_real_runtime_root` installed, so a second call is a no-op.
+_GUARDED_RUNTIME_ROOT: Callable[[], Path | None] | None = None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    resolved = Path(os.path.realpath(path))
+    bound = Path(os.path.realpath(root))
+    return resolved == bound or bound in resolved.parents
+
+
+def drain_runtime_root_escapes() -> list[str]:
+    """Return and clear the recorded escapes (for the cells that provoke one)."""
+    drained = list(_RUNTIME_ROOT_ESCAPES)
+    _RUNTIME_ROOT_ESCAPES.clear()
+    return drained
+
+
+def refuse_real_runtime_root() -> None:
+    """Make ``procname.runtime_root()`` refuse the operator's real root, process-wide.
+
+    The per-test override in ``isolate_environment`` covers a test BODY. It does
+    not cover code that runs while no function-scoped fixture is active —
+    collection-time imports, a module- or session-scoped fixture's teardown
+    (after every function-scoped ``monkeypatch`` has been undone), a hook. There
+    the variable is back to whatever the process had, and an unset variable
+    makes ``runtime_root()`` fall back to the passwd home — the operator's real
+    ``~/.local/share/lop/runtime`` — with nothing failing: every production
+    caller treats a missing brand as decoration and swallows the error.
+
+    So the answer is checked at the one function every plant, sweep and repair
+    asks. A real-root answer is recorded AND raised: the raise stops the write
+    on every path that does not catch it, and the record fails the run on the
+    paths that do. Installed at IMPORT for the same reason as
+    :func:`refuse_real_venv_plant`. A test that monkeypatches ``runtime_root``
+    gets this wrapper back on undo. A child process that does not load this
+    conftest is covered by the import-time default root instead (see
+    ``_SUITE_RUNTIME_ROOT``), not by this wrapper.
+    """
+    global _GUARDED_RUNTIME_ROOT
+    from local_operator import procname
+
+    current = procname.runtime_root
+    if current is _GUARDED_RUNTIME_ROOT:
+        return
+
+    def guarded() -> Path | None:
+        answer = current()
+        if (
+            answer is not None
+            and _REAL_RUNTIME_ROOT is not None
+            and _is_within(answer, _REAL_RUNTIME_ROOT)
+        ):
+            message = (
+                f"procname.runtime_root() answered {answer}, inside the operator's REAL "
+                f"runtime root {_REAL_RUNTIME_ROOT}; refused so nothing is planted, "
+                "swept or replaced there. LOCAL_OPERATOR_RUNTIME_ROOT was "
+                f"{os.environ.get('LOCAL_OPERATOR_RUNTIME_ROOT')!r}."
+            )
+            _RUNTIME_ROOT_ESCAPES.append(message)
+            raise RuntimeRootEscape(message)
+        return answer
+
+    _GUARDED_RUNTIME_ROOT = guarded
+    procname.runtime_root = guarded
+
+
+def _make_suite_runtime_root() -> str:
+    """A process-lifetime runtime root outside the operator's tree.
+
+    Removed at interpreter exit rather than in ``pytest_sessionfinish``: every
+    process that imports this module makes one — xdist workers, and nested runs
+    that import a fixture from here without its hooks — and only ``atexit``
+    reaches all of them.
+    """
+    import atexit
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="lop-test-runtime-")
+    atexit.register(shutil.rmtree, root, True)
+    return root
+
+
+#: The runtime root this process (and every child it spawns) uses OUTSIDE a test
+#: body. Set in the environment at import, replacing any inherited value, so a
+#: child that never loads this conftest — and code that runs after a test's
+#: ``monkeypatch`` is undone — still resolves a scratch root instead of falling
+#: back to the passwd home. ``isolate_environment`` still gives each test its
+#: own root on top of this; monkeypatch's undo restores THIS value, not "unset".
+#: Removed at interpreter exit (see :func:`_make_suite_runtime_root`).
+_SUITE_RUNTIME_ROOT = _make_suite_runtime_root()
+os.environ["LOCAL_OPERATOR_RUNTIME_ROOT"] = _SUITE_RUNTIME_ROOT
+refuse_real_runtime_root()
+
+
 def assert_runtime_root_isolated(scratch: Path) -> Path:
     """Fail unless ``procname.runtime_root()`` resolves under ``scratch``.
 
@@ -843,7 +947,14 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # worker un-gated.
     for name, value in _PROCESS_DESKTOP_GATES:
         monkeypatch.setenv(name, value)
+    escapes_before = len(_RUNTIME_ROOT_ESCAPES)
     yield home
+    # LOUD, not silent: a production caller swallowed the guard's raise, so the
+    # record is the only trace. Fail THIS test rather than let it pass.
+    escaped = _RUNTIME_ROOT_ESCAPES[escapes_before:]
+    if escaped:
+        del _RUNTIME_ROOT_ESCAPES[escapes_before:]
+        pytest.fail("test reached the operator's real runtime root:\n" + "\n".join(escaped))
 
 
 @pytest.fixture(autouse=True)
@@ -1452,7 +1563,15 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     orphaned-process report is actually read. Silent at zero — the expected
     outcome must not add a line to every run.
     """
-    del session
+    # Escapes recorded OUTSIDE any test body (collection, a module-scoped
+    # teardown) have no test to fail, so they fail the session instead.
+    if _RUNTIME_ROOT_ESCAPES:
+        print(
+            "[runtime-root] the suite reached the operator's real runtime root "
+            "outside a test body:\n" + "\n".join(_RUNTIME_ROOT_ESCAPES),
+            file=sys.stderr,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
     with suppress(Exception):
         reclaimed = _sweep_session_leftovers(_SESSION_BASETEMP)
         if reclaimed:

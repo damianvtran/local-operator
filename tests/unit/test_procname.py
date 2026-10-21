@@ -2016,6 +2016,54 @@ class TestStableRuntimeImage:
             assert not list(root.glob("*.tmp.*")), "a staging tree was leaked"
             assert not list(root.glob("*.dead.*")), "a moved-aside tree was leaked"
 
+    def test_a_repair_never_deletes_or_writes_the_published_key_in_place(
+        self, tmp_path, monkeypatch
+    ):
+        """The structural half of the cell above, which timing alone cannot pin.
+
+        ``_settled_image`` waits out a short gap, so the concurrent cell stays
+        green even with the in-place ``rmtree(<key>)`` put back (checked: 3/3
+        green under that mutation). What must hold is about WHERE the writes
+        go: the clone lands in a private staging tree, the dead tree leaves by
+        rename, and every delete is of a staging or moved-aside path. A process
+        that is executing the published image keeps a whole file; the key only
+        ever names a complete tree.
+        """
+        import shutil
+
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        published = image.parent.parent
+        with open(image, "r+b") as handle:
+            handle.truncate(12)
+
+        deleted: list[Path] = []
+        cloned_into: list[Path] = []
+        real_rmtree = shutil.rmtree
+        real_clone = procname._clone_or_copy
+
+        def spy_rmtree(path, *args, **kwargs):
+            deleted.append(Path(path))
+            return real_rmtree(path, *args, **kwargs)
+
+        def spy_clone(source, target):
+            cloned_into.append(Path(target))
+            return real_clone(source, target)
+
+        monkeypatch.setattr(shutil, "rmtree", spy_rmtree)
+        monkeypatch.setattr(procname, "_clone_or_copy", spy_clone)
+
+        repaired = procname._plant_runtime(real, root)
+
+        assert repaired == image and procname._healthy_image(image, real)
+        assert published not in deleted, f"the published key was deleted in place: {deleted}"
+        assert all(".dead." in p.name or ".tmp." in p.name for p in deleted), deleted
+        assert cloned_into and all(
+            published not in p.parents for p in cloned_into
+        ), f"the image was written inside the published key: {cloned_into}"
+
     def test_a_dead_planters_aside_tree_is_swept_and_a_live_ones_kept(self, tmp_path):
         """``<key>.dead.<pid>.<thread>`` gets the staging tree's liveness rule."""
         real = self._copied_tree(tmp_path)
