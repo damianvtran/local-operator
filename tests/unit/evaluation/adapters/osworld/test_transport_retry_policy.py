@@ -18,6 +18,7 @@ from __future__ import annotations
 from lop_osworld_v2_adapter import guest_loss
 from lop_osworld_v2_adapter.providers.base import (
     TRANSPORT_RETRY_ATTEMPTS,
+    TRANSPORT_RETRY_WINDOW_S,
     transport_retry_delay,
 )
 
@@ -44,8 +45,10 @@ def test_a_not_sent_verdict_retries_to_the_bound_and_then_stops() -> None:
     assert delays[-1] is None, "the last permitted attempt must not schedule another"
 
 
-def test_the_whole_intervention_is_bounded_to_a_few_seconds() -> None:
-    """The worst-case spend, at maximum jitter, over the whole schedule."""
+def test_the_whole_delay_schedule_is_bounded_to_a_few_seconds() -> None:
+    """The delays alone, at maximum jitter. The ATTEMPTS are bounded separately
+    by ``TRANSPORT_RETRY_WINDOW_S`` -- an attempt-count bound alone permits four
+    commands each spending the full 90 s socket deadline."""
 
     total = 0.0
     for used in range(1, TRANSPORT_RETRY_ATTEMPTS):
@@ -77,3 +80,30 @@ def test_the_attempt_ordinal_is_clamped_to_one() -> None:
 
     assert transport_retry_delay(_NOT_SENT, failed_attempt=0, jitter=lambda: 0.5) == 0.5
     assert transport_retry_delay(_NOT_SENT, failed_attempt=-3, jitter=lambda: 0.5) == 0.5
+
+
+def test_a_delay_that_does_not_fit_the_wall_clock_window_is_refused() -> None:
+    """The window, not the attempt count, is what stops a retrying statement.
+
+    This is the difference measured by QA: with a real DROP and the production
+    90 s socket deadline, an attempt-only bound allowed ~366 s per statement
+    against the base's ~92 s. A first attempt that already spent the window
+    leaves nothing to retry with.
+    """
+
+    assert TRANSPORT_RETRY_WINDOW_S <= 30.0
+    assert (
+        transport_retry_delay(_NOT_SENT, failed_attempt=1, remaining_s=0.4, jitter=lambda: 0.5)
+        is None
+    )
+    assert (
+        transport_retry_delay(_NOT_SENT, failed_attempt=1, remaining_s=0.0, jitter=lambda: 0.5)
+        is None
+    )
+    assert (
+        transport_retry_delay(_NOT_SENT, failed_attempt=1, remaining_s=-90.0, jitter=lambda: 0.5)
+        is None
+    )
+    assert transport_retry_delay(
+        _NOT_SENT, failed_attempt=1, remaining_s=3.0, jitter=lambda: 0.5
+    ) == 0.5

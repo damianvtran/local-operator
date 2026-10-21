@@ -74,6 +74,7 @@ from lop_osworld_v2_adapter.providers.base import (
     GUEST_COMMAND_TIMEOUT_S,
     GUEST_TRANSPORT_MARGIN_S,
     TRANSPORT_RETRY_ATTEMPTS,
+    TRANSPORT_RETRY_WINDOW_S,
     GuestServerRecovered,
     InstructionUnavailable,
     bounded_observation_cause,
@@ -123,6 +124,32 @@ _EXECUTE_PATH = "/execute"
 # bound lives in ``providers.base`` (``TRANSPORT_RETRY_ATTEMPTS``), where every
 # remote provider can share it.
 _EXECUTE_READINESS_TIMEOUT_S = 2.0
+
+# Waiting for the action server while the supervisor's receipt is unreadable.
+#
+# THE PRE-ACTION WAIT IS THE ONE THAT MUST SURVIVE A BLIP. The recorded episode
+# loss probed for ~3 s, gave up, and the guest answered a health command 2 s
+# AFTER that recovery record -- so a wait shorter than the blip turns a
+# recoverable path failure into a dead episode, with no request ever made. The
+# budget below is a wall-clock bound on that wait: probes at t=0 plus the
+# backoff schedule cover ~14 s, roughly 7x the observed time to regain
+# reachability, and a healthy guest answers the first probe immediately.
+#
+# THE IN-LOOP WAIT IS SMALLER ON PURPOSE. It runs between attempts of a request
+# the classifier has ALREADY proved unsent, where the retry window
+# (``TRANSPORT_RETRY_WINDOW_S``) owns the time budget; spending a full pre-action
+# wait before every retry would consume it. Neither wait is a licence to send
+# input past a receipt: see ``_recover_guest_supervisor`` for what exhaustion
+# does and does not allow.
+_PRE_ACTION_RECOVERY_BUDGET_S = 15.0
+_IN_LOOP_RECOVERY_BUDGET_S = 3.0
+# Backoff between probes: 0.5, 0.5, 1, 1, then 2 s, capped by the budget. A
+# fixed 0.5 s cadence probes more often early and never reaches the later part
+# of a longer blip; this schedule spreads the same probes over a wider window.
+_RECOVERY_PROBE_DELAYS_S = (0.5, 0.5, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0)
+# One probe's own deadline; the readiness endpoint answers in milliseconds on a
+# live guest, and this is a presence check, not a throughput measurement.
+_RECOVERY_PROBE_TIMEOUT_S = 0.5
 
 # Where the episode's guest-preparation evidence is written, inside the
 # episode-owned cache root the adapter mints in ``reset_start``. It sits there
@@ -701,6 +728,7 @@ class AwsProvider:
         desktop_env_factory: Callable[..., Any] | None = None,
         task_factory: Callable[[TaskDescriptor], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._region = region
         self._lease_ref = lease_ref
@@ -718,6 +746,12 @@ class AwsProvider:
         self._desktop_env_factory = desktop_env_factory
         self._task_factory = task_factory
         self._sleep = sleep
+        # The clock the retry/recovery BUDGETS are measured against. Resolved
+        # here rather than bound as a default, so a caller that replaces
+        # ``time.monotonic`` on this module (the test stub does) still gets the
+        # stub's clock, and a test can inject one explicitly to drive the
+        # bounds without spending real seconds or flaking under fleet load.
+        self._monotonic = monotonic if monotonic is not None else time.monotonic
         self._instance_id: str | None = None
         self._public_ip: str | None = None
         self._env: Any = None
@@ -778,6 +812,14 @@ class AwsProvider:
         # evidence. ``_probe_control_server`` is boolean by contract (its async
         # RPC caller acts on the boolean alone) and is patched directly by
         # tests, so the record is a side channel that survives that contract.
+        # CONSTRAINT: it is not thread-local. ``execute`` runs on a worker thread
+        # and the async ``probe_control_server`` RPC can land on another, so two
+        # probes can interleave and the recovery loop could read the OTHER one's
+        # reason. That can only misattribute a probe entry in best-effort
+        # evidence -- both call sites clear the field before probing and never
+        # read it to make a decision -- so it is not worth a lock on a dying
+        # path; a decision-bearing reader must go through
+        # ``_probe_control_server_outcome`` and use its return value instead.
         self._last_probe_record: dict[str, Any] | None = None
         # Reset-retry tracking for ``_seal_upstream``. Upstream's ``reset``
         # loop writes ``is_environment_used = True`` before task-specific
@@ -980,38 +1022,63 @@ class AwsProvider:
         return scrubbed if isinstance(scrubbed, dict) else guest_supervisor.empty_layout("withheld")
 
     def _recover_guest_supervisor(
-        self, delivery: str = "pre_action"
+        self, delivery: str = "pre_action", *, budget_s: float | None = None
     ) -> guest_supervisor.ReceiptResult:
         """Only a verified receipt may authorize input on an existing binding.
 
-        A failed read is not evidence of no restart. Retry it once, then record
-        the uncertainty and force the same fresh-frame boundary as a restart.
-        Unreachable-server exhaustion remains distinct from receipt uncertainty.
+        A failed read is not evidence of no restart, and an unreachable server is
+        not evidence of anything: the wait below is bounded by ``budget_s`` of
+        wall clock (``_PRE_ACTION_RECOVERY_BUDGET_S`` for the check before an
+        action, ``_IN_LOOP_RECOVERY_BUDGET_S`` between retries), not by a fixed
+        probe count. The recorded episode loss waited ~3 s and the guest answered
+        2 s later; a wait sized to a handful of probes loses that race.
 
-        The exhaustion branch records EVERY probe's reason, not just the fact
-        that all of them failed: six silent probes used to collapse to
-        ``read_failed: true``, which names a path failure and not its element.
-        The record is evidence and nothing else -- the decision is still the
-        boolean, and the six-attempt budget is unchanged.
+        Exhaustion keeps two DIFFERENT facts apart, and callers act on both:
+
+        * every probe failed with a connect-class transport verdict
+          (``path_unreachable``): the host never reached the guest, so no
+          receipt exists to read and no generation was observed either way;
+        * anything else (a non-200 answer, an ambiguous transport failure, a
+          probe that reported nothing): the server was reachable or the failure
+          is post-handshake, and the receipt is genuinely unavailable.
+
+        Both write ``read_failed`` plus every probe's verdict and errno -- six
+        silent probes used to collapse to ``read_failed: true``, which names a
+        path failure and not its element. The boolean decision is unchanged.
         """
 
         if self._supervisor_unit is None:
             return guest_supervisor.ReceiptResult("verified_none")
+        if budget_s is None:
+            budget_s = _PRE_ACTION_RECOVERY_BUDGET_S
         probes: list[dict[str, Any]] = []
-        for _ in range(6):
+        deadline = self._monotonic() + budget_s
+        served = False
+        while True:
             # Clear BEFORE the call and read after: the record must belong to
             # THIS probe. ``_probe_control_server`` is boolean by contract and
             # is patched by callers (tests patch it), so a stale record left by
             # an earlier probe elsewhere (``execute``'s readiness check) would
             # otherwise be reported as this probe's reason.
             self._last_probe_record = None
-            answered = self._probe_control_server(0.5)
+            served = self._probe_control_server(_RECOVERY_PROBE_TIMEOUT_S)
             record = self._last_probe_record
-            probes.append({"probe": len(probes) + 1, **(record or {"answered": answered})})
-            if answered:
+            probes.append({"probe": len(probes) + 1, **(record or {"answered": served})})
+            if served:
                 break
-            self._sleep(0.5)
-        else:
+            delay = _RECOVERY_PROBE_DELAYS_S[
+                min(len(probes) - 1, len(_RECOVERY_PROBE_DELAYS_S) - 1)
+            ]
+            # The budget gates the WAIT, so a probe is never started with no
+            # time left to answer inside it.
+            if self._monotonic() + delay > deadline:
+                break
+            self._sleep(delay)
+
+        if not served:
+            path_unreachable = all(
+                entry.get("delivery") == guest_loss.DELIVERY_NOT_SENT for entry in probes
+            )
             self._write_supervisor_evidence(
                 "guest-supervisor-recovery.json",
                 {
@@ -1021,6 +1088,7 @@ class AwsProvider:
                     "records_withheld": False,
                     "cause": "supervisor recovery budget exhausted; server unreachable",
                     "probe_outcomes": probes,
+                    "path_unreachable": path_unreachable,
                     "records": self._supervisor_records,
                     "watchdog": self._watchdog_evidence(),
                     "final_guest_record": "not retrieved: action-server transport unavailable",
@@ -1029,7 +1097,9 @@ class AwsProvider:
                     ),
                 },
             )
-            return guest_supervisor.ReceiptResult("read_failed", recovery_exhausted=True)
+            return guest_supervisor.ReceiptResult(
+                "read_failed", recovery_exhausted=True, path_unreachable=path_unreachable
+            )
 
         receipt_failure = "receipt_read_failed"
         for attempt in range(2):
@@ -1932,37 +2002,46 @@ class AwsProvider:
         attempt: int,
         verdict: guest_loss.TransportVerdict,
         delay_s: float,
-        ready: bool | None,
         error: BaseException,
+        readiness: dict[str, Any],
     ) -> None:
         """One structured event per retry, logged AND persisted.
 
         Values only. Exception text can echo the guest's address or the command,
-        so it is reduced to its type name, and the transport verdict to the
-        classifier's closed vocabulary (see ``guest_loss.failure_record``).
-        ``attempt`` names the send ABOUT to happen, so ``attempt=2`` on the first
-        retry reads as it always has in this module's logs.
+        so it is reduced to ``guest_loss.failure_record`` -- the closed
+        vocabulary plus the OS ``errno``, because ``connect_failed`` alone
+        cannot tell EHOSTUNREACH from ENETUNREACH and those are different
+        repairs. ``attempt`` names the send ABOUT to happen, so ``attempt=2`` on
+        the first retry reads as it always has in this module's logs.
+
+        ``readiness`` is the ONE probe's answer for this statement, stamped with
+        the attempt it was measured on. The probe is not re-taken per retry, so
+        a later event's copy must not read as a fresh measurement -- and when it
+        failed, its own verdict and errno ride along.
         """
 
+        failure = guest_loss.failure_record(error, origin=self._guest_origin())
         event = {
             "statement": index,
             "attempt": attempt + 1,
             "cause": verdict.kind or "unknown",
             "delivery": verdict.delivery,
+            "errno": failure["errno"],
+            "error_class": failure["error_class"],
             "delay_ms": int(round(delay_s * 1000)),
-            "readiness_passed": ready,
-            "error_class": type(error).__name__,
+            "readiness": readiness,
         }
         self._transport_retries.append(event)
         self._persist_transport_retries()
         logger.warning(
             "guest transport retry attempt=%d delivery=%s error_class=%s "
-            "readiness_passed=%s cause=%s delay_ms=%d",
+            "readiness_passed=%s cause=%s errno=%s delay_ms=%d",
             attempt + 1,
             verdict.delivery,
             event["error_class"],
-            ready,
+            readiness.get("passed"),
             event["cause"],
+            event["errno"],
             event["delay_ms"],
         )
 
@@ -1976,20 +2055,46 @@ class AwsProvider:
                 if self._supervisor_unit is not None:
                     recovered = self._recover_guest_supervisor()
                     if recovered.recovery_exhausted:
-                        # Do not send an action just to discover the server came
-                        # back after the deadline: that would bypass re-binding.
-                        self._capture_guest_console(
-                            guest_loss.STAGE_EXECUTE, "supervisor-exhausted"
-                        )
-                        cause = self._execute_guest_health_cause()
-                        verdict = guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT)
-                        message = guest_loss.describe_failed_action(index, verdict)
-                        raise GuestExecutionError(
-                            message + "; supervisor recovery budget exhausted; "
-                            f"guest down: {cause}; no transport retry",
-                            delivery=verdict.delivery,
-                        )
-                    if recovered.state != "verified_none":
+                        if recovered.path_unreachable:
+                            # NOTHING WAS LEARNED ABOUT THE SERVER'S GENERATION:
+                            # the host never reached the guest, so no receipt
+                            # could be read and no restart could be observed.
+                            # Refusing here (what this branch used to do) ended
+                            # episodes with no request ever made, and reported
+                            # "connection could not be established" -- a
+                            # transport verdict for a request that was never
+                            # sent. Compile and send the action instead: the
+                            # transport classifier then says whether it left
+                            # this host, and a proven-unsent request gets the
+                            # bounded retry below.
+                            #
+                            # RESIDUAL RISK, accepted knowingly: if the server
+                            # did restart inside the wait, this input lands on
+                            # a fresh screen. The window is bounded by the
+                            # recovery budget, the alternative is a dead
+                            # episode, and the very next pre-action check reads
+                            # a receipt again (a restart there forces a fresh
+                            # observation before further input).
+                            logger.warning(
+                                "supervisor receipt unavailable over an unreachable "
+                                "transport; attempting guest action %d under the "
+                                "transport classifier",
+                                index + 1,
+                            )
+                        else:
+                            # Reachable-but-unhealthy, or a post-handshake failure:
+                            # the receipt is genuinely unavailable and input must
+                            # not be authorized on an unverified binding.
+                            self._capture_guest_console(
+                                guest_loss.STAGE_EXECUTE, "supervisor-exhausted"
+                            )
+                            cause = self._execute_guest_health_cause()
+                            raise GuestExecutionError(
+                                guest_loss.describe_unattempted_action(index)
+                                + "; supervisor recovery budget exhausted; "
+                                f"guest down: {cause}; no transport retry"
+                            )
+                    elif recovered.state != "verified_none":
                         raise GuestServerRecovered(
                             "action-server restart or receipt unavailable; refresh binding"
                         )
@@ -2001,7 +2106,18 @@ class AwsProvider:
 
                 command = python_source_argv(script)
                 ready: bool | None = None
+                readiness: dict[str, Any] = {"measured_at_attempt": None, "passed": None}
                 supervisor_exhausted = False
+                # Once the recovery's own probes proved the path unreachable, the
+                # retry window owns the remaining time: re-running a full
+                # recovery before every retry would spend the budget learning the
+                # same fact, and a retried request is one that provably never
+                # left this host.
+                supervisor_path_down = False
+                # Wall clock, not attempt count, and started BEFORE the first
+                # send: a blackholed connect spends its own 90 s deadline, which
+                # must count against the window or four attempts cost ~360 s.
+                retry_deadline = self._monotonic() + TRANSPORT_RETRY_WINDOW_S
                 for attempt in range(1, TRANSPORT_RETRY_ATTEMPTS + 1):
                     try:
                         result = self._run_guest_command(command, timeout=GUEST_COMMAND_TIMEOUT_S)
@@ -2018,12 +2134,17 @@ class AwsProvider:
                         verdict = guest_loss.classify_transport_failure(
                             error, origin=self._guest_origin()
                         )
-                        if self._supervisor_unit is not None:
-                            recovered = self._recover_guest_supervisor(verdict.delivery)
-                            supervisor_exhausted = recovered.recovery_exhausted
+                        if self._supervisor_unit is not None and not supervisor_path_down:
+                            recovered = self._recover_guest_supervisor(
+                                verdict.delivery, budget_s=_IN_LOOP_RECOVERY_BUDGET_S
+                            )
+                            supervisor_path_down = recovered.path_unreachable
+                            supervisor_exhausted = (
+                                recovered.recovery_exhausted and not recovered.path_unreachable
+                            )
                             if supervisor_exhausted:
                                 ready = False
-                            elif recovered.state != "verified_none":
+                            elif not supervisor_path_down and recovered.state != "verified_none":
                                 raise GuestServerRecovered(
                                     "action-server restart or receipt unavailable; refresh binding"
                                 ) from None
@@ -2034,17 +2155,28 @@ class AwsProvider:
                             # "not ready" cannot distinguish a dead server from a
                             # transient route. Gating the retry on it -- which is
                             # what this code used to do -- turned exactly that
-                            # blip into a dead episode, and the recorded message
-                            # (connection could not be established, delivery=not_sent)
-                            # is the EHOSTUNREACH shape no other cause produces.
-                            ready = self._probe_control_server(_EXECUTE_READINESS_TIMEOUT_S)
+                            # blip into a dead episode.
+                            ready, probe_record = self._probe_control_server_outcome(
+                                _EXECUTE_READINESS_TIMEOUT_S
+                            )
+                            # Stamped with the attempt it was measured on: one
+                            # probe per statement, copied into every later event.
+                            readiness = {
+                                "measured_at_attempt": attempt,
+                                "passed": ready,
+                                **(probe_record or {}),
+                            }
                         # None means the classifier refused a retry (the request
-                        # may have been applied) or the bound is spent. That is
+                        # may have been applied), the attempt cap is spent, or
+                        # the wall-clock window cannot fit another delay. That is
                         # the ONLY gate; it takes a verdict, never a flag.
+                        remaining = retry_deadline - self._monotonic()
                         delay = (
                             None
                             if supervisor_exhausted
-                            else transport_retry_delay(verdict, failed_attempt=attempt)
+                            else transport_retry_delay(
+                                verdict, failed_attempt=attempt, remaining_s=remaining
+                            )
                         )
                         if delay is not None:
                             self._record_transport_retry(
@@ -2052,8 +2184,8 @@ class AwsProvider:
                                 attempt=attempt,
                                 verdict=verdict,
                                 delay_s=delay,
-                                ready=ready,
                                 error=error,
+                                readiness=readiness,
                             )
                             self._sleep(delay)
                             continue
@@ -2122,7 +2254,10 @@ class AwsProvider:
         Deliberately boolean: refused, timed out, a DNS failure and a non-200
         status all collapse into False because the caller's decision is fail
         closed and nothing acts on the taxonomy. The URL is never surfaced --
-        it names the guest's address.
+        it names the guest's address. A caller that needs the REASON (the
+        recovery evidence, or the retry ledger) uses
+        ``_probe_control_server_outcome`` directly: this method stays boolean so
+        its RPC contract and its patches keep meaning one thing.
         """
 
         return await asyncio.to_thread(self._probe_control_server, timeout)

@@ -433,7 +433,9 @@ async def test_refused_socket_recovers_without_replaying_input(
         )
         deliveries = []
 
-        def recover(delivery: str = "pre_action") -> guest_supervisor.ReceiptResult:
+        def recover(
+            delivery: str = "pre_action", *, budget_s: float | None = None
+        ) -> guest_supervisor.ReceiptResult:
             deliveries.append(delivery)
             return next(checks)
 
@@ -498,14 +500,16 @@ async def test_crash_loop_exhausts_wait_and_ends_cleanly(
             aws_mod.GuestExecutionError, match="supervisor recovery budget exhausted"
         ):
             await provider.execute(["not_applied()"])
-        # One fixed wait, then a clean end without sending stale-frame input.
-        assert stubs.slept.count(0.5) == 6
+        # The whole pre-action wait, then a clean end without sending input: a
+        # refused/False probe is not a connect-class verdict, so the receipt is
+        # genuinely unavailable and the action is never attempted.
+        assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is False
         assert evidence["final_guest_record"].startswith("not retrieved")
         # Every probe is accounted for, even when the probe itself is stubbed:
         # the list is index-aligned with the six attempts, never padded.
-        assert [entry["probe"] for entry in evidence["probe_outcomes"]] == [1, 2, 3, 4, 5, 6]
+        assert [entry["probe"] for entry in evidence["probe_outcomes"]] == list(range(1, 12))
         assert not any("not_applied()" in str(body) for body in stubs.guest_posts)
 
 
@@ -530,15 +534,20 @@ def test_exhaustion_evidence_names_which_path_element_failed(
             provider._credentials, provider._region
         ).http_get
         result = provider._recover_guest_supervisor()
-        assert stubs.slept.count(0.5) == 6
+        assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
 
     assert result.state == "read_failed"
     assert result.recovery_exhausted is True
+    # Every probe failed on the CONNECT: the host never reached the guest, which
+    # is a different fact from a receipt that could not be read over a live
+    # server -- and the only one that lets a caller try the action.
+    assert result.path_unreachable is True
     assert provider._cache_root is not None
     evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
     assert evidence["read_failed"] is True
     outcomes = evidence["probe_outcomes"]
-    assert len(outcomes) == 6
+    assert len(outcomes) == 11, "one probe plus the backoff schedule"
+    assert evidence["path_unreachable"] is True
     assert {outcome["kind"] for outcome in outcomes} == {"refused"}
     assert {outcome["errno"] for outcome in outcomes} == {errno.ECONNREFUSED}
     assert all(outcome["answered"] is False for outcome in outcomes)
@@ -1371,9 +1380,13 @@ async def test_false_readiness_does_not_invent_recovery_budget_exhaustion(
         monkeypatch.setattr(
             provider,
             "_recover_guest_supervisor",
-            lambda *a: guest_supervisor.ReceiptResult("verified_none"),
+            lambda *a, **k: guest_supervisor.ReceiptResult("verified_none"),
         )
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: False)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (False, {"answered": False, "status": 503}),
+        )
         with pytest.raises(aws_mod.GuestExecutionError) as raised:
             await provider.execute(["not_sent()"])
         assert "guest down" in str(raised.value)

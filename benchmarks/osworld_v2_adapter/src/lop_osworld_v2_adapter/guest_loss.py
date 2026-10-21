@@ -306,6 +306,30 @@ def describe_failed_action(index: int, verdict: TransportVerdict) -> str:
     )
 
 
+def describe_unattempted_action(index: int) -> str:
+    """The message for an action that was never sent because no receipt could be read.
+
+    Deliberately NOT ``describe_failed_action``. That function describes a
+    classified TRANSPORT failure, and every verdict it can be given means a
+    request was MADE. Here none was: the pre-action supervisor check could not
+    reach the guest, so the action was refused before any input was compiled
+    into a request. Reusing the transport vocabulary for this state produced
+    "connection could not be established, delivery=not_sent" for a guest that
+    nothing had tried to connect to, which sent an investigation to the wrong
+    layer for days -- the guest was reachable again seconds later.
+
+    The caller appends the supervisor cause (and, where it applies, the transport
+    classification of the probes); this function owns only the distinction
+    between "was not sent" and "was not attempted".
+    """
+
+    return (
+        f"guest action {index + 1} was not attempted "
+        "(action-server receipt unavailable over an unreachable control server); "
+        "no input was sent"
+    )
+
+
 def failure_record(error: BaseException, *, origin: str | None) -> dict[str, Any]:
     """A value-free account of one failed guest request, for EVIDENCE only.
 

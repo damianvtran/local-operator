@@ -182,12 +182,20 @@ GUEST_EXECUTE_TIMEOUT_S = guest_deadline_for(GUEST_COMMAND_TIMEOUT_S)
 # Spending an unbounded number of them is not: the one preserved execute-phase
 # loss refused every request for the remaining ~4 minutes, and a policy that
 # followed it would have turned four minutes of dead time into four minutes of
-# retries. Four attempts with 0.5 s / 1 s / 2 s backoff bound the whole
-# intervention at ~3.5 s (plus jitter), which is sized to the OBSERVED failure
-# class: a host->guest path failure that cleared within ~2 s, corroborated by the
-# episode's own bundle (the guest health POST that ran a command in the guest was
-# written 2 s after the recovery record).
-TRANSPORT_RETRY_ATTEMPTS = 4
+# retries.
+#
+# TWO BOUNDS, because an attempt count alone bounds nothing. Four attempts with
+# 0.5 s / 1 s / 2 s backoff is ~3.5 s of DELAYS, but each attempt carries the
+# guest command's own 90 s socket deadline (``GUEST_COMMAND_TIMEOUT_S``), and a
+# blackholed connect is exactly the case that spends it -- so an attempt-count
+# bound alone permits ~4 x 90 s. ``TRANSPORT_RETRY_WINDOW_S`` is that missing
+# bound: a per-statement wall-clock budget measured from the FIRST failure, so a
+# slow attempt ends the retrying (its own deadline was the episode's normal
+# cost) while a fast refusal still gets its retries. Measured envelope: one full
+# attempt deadline (~90 s, unchanged from a single send) plus the window, and
+# typically ~3.5 s.
+TRANSPORT_RETRY_ATTEMPTS = 4  # TOTAL sends: the first attempt plus three retries
+TRANSPORT_RETRY_WINDOW_S = 20.0
 _TRANSPORT_RETRY_BASE_DELAY_S = 0.5
 _TRANSPORT_RETRY_MAX_DELAY_S = 2.0
 # +/-25% on every delay. The guests of one fleet usually share one network path,
@@ -201,6 +209,7 @@ def transport_retry_delay(
     verdict: TransportVerdict,
     *,
     failed_attempt: int,
+    remaining_s: float | None = None,
     attempts: int = TRANSPORT_RETRY_ATTEMPTS,
     jitter: Callable[[], float] = random.random,
 ) -> float | None:
@@ -220,6 +229,11 @@ def transport_retry_delay(
     ``failed_attempt`` is the 1-based ordinal of the attempt that just failed.
     ``None`` at or past ``attempts`` is the terminal answer, so the caller's loop
     ends exactly where this bound says it does.
+
+    ``remaining_s`` is what is left of the caller's wall-clock retry window. A
+    delay that would not fit inside it returns None: the window, not the attempt
+    count, is what stops a retrying statement from spending minutes. ``None``
+    means "no wall-clock window in force" and leaves the attempt cap alone.
 
     Jitter is applied AFTER the exponential cap, so a delay can exceed
     ``_TRANSPORT_RETRY_MAX_DELAY_S`` by at most the jitter fraction -- a fraction
@@ -243,7 +257,10 @@ def transport_retry_delay(
     if not math.isfinite(sample):
         sample = 0.5
     sample = min(max(sample, 0.0), 1.0)
-    return delay * (1.0 + _TRANSPORT_RETRY_JITTER_FRACTION * (2.0 * sample - 1.0))
+    delay *= 1.0 + _TRANSPORT_RETRY_JITTER_FRACTION * (2.0 * sample - 1.0)
+    if remaining_s is not None and delay >= remaining_s:
+        return None
+    return delay
 
 
 # Budgeted cost of delivering ONE character through the guest's X11 synthetic
