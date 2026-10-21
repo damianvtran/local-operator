@@ -6723,6 +6723,7 @@ def build_app(daemon: MobileDaemon):
                         # remote door, which is what ``dismiss_cold`` records for it
                         # (the same word the live op's own door defaults to).
                         by=str(body.get("by") or ""),
+                        reason=str(body.get("reason") or "") or None,
                     )
                     if outcome.get("ok"):
                         # THE SCREEN IS REPAINTED HERE BECAUSE NOTHING ELSE WILL (UX
@@ -6794,6 +6795,9 @@ def build_app(daemon: MobileDaemon):
                             return await client.ask_revise(ask_id, answers, by=by)
                         if op == "ask_decline":
                             return await client.ask_decline(ask_id, by=by)
+                        dismiss_reason = str(body.get("reason") or "")
+                        if dismiss_reason:
+                            return await client.ask_dismiss(ask_id, by=by, reason=dismiss_reason)
                         return await client.ask_dismiss(ask_id, by=by)
                     finally:
                         client.close()
