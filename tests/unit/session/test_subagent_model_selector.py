@@ -506,3 +506,65 @@ async def test_a_pick_this_machine_cannot_use_is_not_applied_rather_than_refused
         assert "NOT applied" in text(result)
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_hub_resume_of_a_pinned_role_says_the_pick_was_not_applied(
+    tmp_path, monkeypatch
+):
+    """R1-2: a resume is a launch, so its receipt owes the same note.
+
+    ``SubagentComms.resume`` re-resolves the model from current state under the
+    launch rule, which means a role that pins the session's model ignores a
+    ``model=`` passed to ``hub op='resume'`` exactly as it ignores one passed to
+    ``task``. The task path already names the dropped pick; a resume that
+    stayed silent would be the one surface where it reads as honoured — and a
+    resume spends money on the model it actually chose.
+    """
+    session = setup_inherit_pinned(tmp_path, monkeypatch)
+    try:
+        job_id, _ = await launch(session, agent="coder")
+
+        resumed = await execute_hub(
+            "resume",
+            {
+                "op": "resume",
+                "to": [job_id],
+                "message": "continue",
+                "model": "deepseek/deepseek-chat",
+            },
+            None,
+            None,
+            session._build_tool_context(),
+        )
+
+        new_id = details(resumed)["job_ids"][0]
+        await wait_for(lambda: row(session, new_id).status == "completed")
+        assert row(session, new_id).model_label == f"{MODEL.provider}/{MODEL.model_id}"
+        assert "selection: role_inherit" in text(resumed)
+        assert "NOT applied" in text(resumed)
+        assert "model='deepseek/deepseek-chat'" in text(resumed)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_inherit_pick_on_a_pinned_role_is_not_reported_as_dropped(
+    tmp_path, monkeypatch
+):
+    """R1-3: ``model='inherit'`` is not a pick that failed to apply.
+
+    The wire spelling means "no specific model", and the child a sentinel role
+    launches DOES inherit the session's model — the outcome the caller asked
+    for. Calling that "NOT applied" invents a substitution nobody made, and it
+    would teach a reading model to distrust a note that is true everywhere it
+    actually fires.
+    """
+    session = setup_inherit_pinned(tmp_path, monkeypatch)
+    try:
+        job_id, result = await launch(session, agent="coder", model="inherit")
+        assert row(session, job_id).model_label == f"{MODEL.provider}/{MODEL.model_id}"
+        assert "selection: role_inherit" in text(result)
+        assert "NOT applied" not in text(result)
+    finally:
+        await session.dispose()

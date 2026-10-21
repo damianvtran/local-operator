@@ -27834,14 +27834,21 @@ def _not_applied_note(entry: Mapping[str, Any]) -> str:
     and a receipt that reads as though the pick took effect IS the substitution
     by another name. The note is therefore appended to the launch line rather
     than left in the model's head, and it names the value that was passed so
-    the reader can see which one was ignored.
+    the reader can see which one was ignored. Both launch surfaces call it —
+    ``task``'s launch line and ``hub op='resume'``'s receipt — because a resume
+    re-resolves the model and is therefore a launch too.
     """
     if entry.get("model_selection_source") != "role_inherit":
         return ""
     passed: list[str] = []
     if entry.get("effort"):
         passed.append(f"effort={entry['effort']!r}")  # i18n: ignore model-facing tool output
-    if entry.get("model_pick"):
+    # ``model='inherit'`` is NOT a pick this machine failed to apply: it is the
+    # wire's "no specific model" (see ``_validate_task_model``), and a role that
+    # pins the session's model produces exactly the inheritance it asked for.
+    # Reporting it as dropped would invent a substitution, which is the same
+    # class of lie in the other direction.
+    if entry.get("model_pick") and entry["model_pick"] != "inherit":
         passed.append(f"model={entry['model_pick']!r}")  # i18n: ignore model-facing tool output
     if not passed:
         return ""
@@ -29888,6 +29895,15 @@ async def _execute_hub_parent(
                 # Each success carries the NEW job id it was resumed as; the
                 # transcript-replay guidance is stated once in the footer
                 # rather than repeated on every line.
+                # The resume follows the LAUNCH model rule, so a role that pins
+                # the inherit sentinel ignores a ``model=`` passed here exactly
+                # as it ignores one passed to ``task``. The task path says so on
+                # its receipt; a resume that stayed silent would be the one
+                # surface where a dropped pick reads as honoured, and a resume
+                # is a launch that costs money.
+                source = str(
+                    getattr(comms.job(new_job_id), "model_selection_source", "") or ""
+                )
                 lines.append(
                     _resumed_line(
                         comms,
@@ -29897,11 +29913,9 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + (
-                        " [selection: "
-                        f"{getattr(comms.job(new_job_id), 'model_selection_source', '')}]"
-                        if getattr(comms.job(new_job_id), "model_selection_source", "")
-                        else ""
+                    + (f" [selection: {source}]" if source else "")
+                    + _not_applied_note(
+                        {"model_selection_source": source, "model_pick": params.model}
                     )
                 )
             else:

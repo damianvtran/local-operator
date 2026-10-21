@@ -1369,6 +1369,26 @@ def write_profile(
         tools = current.tools if current is not None else None
 
     if params.effort == INHERIT_EFFORT:
+        # The inherit pin is ABSOLUTE, and ``inherit`` is the same value that
+        # clears an ordinary tier — so on a row carrying the sentinel this
+        # call would delete the pin and hand the role back to every layer it
+        # exists to outrank (launch tier, explicit model pick, roster slot).
+        # Startup seed reconciliation restores the packaged pin at the next
+        # launch, which is exactly what makes the hole quiet: after any OTHER
+        # edit the row classifies up-to-date and the pin stays gone for the
+        # rest of the running process, so a role can be un-pinned and used
+        # before anything notices. Refused rather than silently ignored, since
+        # a no-op receipt would read as "pin cleared". The operator keeps a way
+        # out — an explicit tier REPLACES the sentinel — so the refusal names
+        # that path instead of the ``inherit`` spelling it rejects.
+        if current is not None and is_inherit_tier_sentinel(current.effort):
+            raise ValueError(
+                f"role {name!r} pins the launching session's model "
+                "(effort: default), and that pin is absolute: it outranks a launch "
+                "tier, an explicit model pick and a roster slot. 'inherit' cannot "
+                "clear it, because clearing would leave the role on whichever tier "
+                "the next caller asked for. Set an explicit tier to replace the pin."
+            )
         effort = None
     elif params.effort is not None:
         effort = params.effort

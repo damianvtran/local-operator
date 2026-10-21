@@ -1239,8 +1239,8 @@ async def test_a_roster_slot_tier_does_not_move_a_role_that_pins_the_session_mod
     role would run on whatever the delegating model last asked for, which is
     the failure the sentinel exists to close.
 
-    So the precedence is: the role's own inherit pin > the roster slot's tier >
-    the launch tier > the role's own TIER pin. The roster is the operator's
+    So the precedence is: the role's own inherit pin > the launch tier > the
+    roster slot's tier > the role's own TIER pin. The roster is the operator's
     layer for every other kind of pin, and it stays that way — what it cannot
     do is move a role that has declared which model it must run on.
     """
