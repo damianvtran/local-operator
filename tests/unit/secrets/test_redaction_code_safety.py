@@ -386,6 +386,134 @@ def test_the_hyphenated_name_check_is_linear() -> None:
     assert time.perf_counter() - start < TIME_BOUND_SECONDS
 
 
+# --- 2c. the vendor-shaped NAME, and the passphrase typed into a command --------
+#
+# Two majors from agent review round 2, both measured at e720f20f87: the grammar's
+# vendor carve-out exempted a vendor-shaped NAME from the containment refusal (so
+# the promotion R1-1 closed for qualifier-less names survived for every Secret whose
+# name opens with a vendor prefix), and the value-level DNS release left a
+# passphrase in the retained ARGUMENTS copy while the RESULT pass still masked it.
+
+#: Secret names whose FIRST SEGMENT is a vendor prefix the vendor rule's PATTERN
+#: matches. The pattern alone calls these tokens; the vendor rule's own token/name
+#: split (:func:`_vendor_tail_guard`) does not, and that split is the judgement the
+#: containment gate needs.
+VENDOR_SHAPED_NAMES = (
+    "npm-" + "registry",
+    "hf-" + "access-" + "token",
+)
+
+
+@pytest.mark.parametrize("name", VENDOR_SHAPED_NAMES)
+def test_a_vendor_shaped_secret_name_is_never_registered(name: str) -> None:
+    """R2-1: the exemption was on the SPELLING, not on the evidence.
+
+    Measured at e720f20f87 for ``npm-registry`` and ``hf-access-token`` (and the
+    same shape for ``sk-learn-model`` and ``pypi-index-config``): ``secret: <name>``
+    masked once AND registered, so the name became the session's word for it — the
+    amplifier R1-1 removed for every name outside the vendor grammar.
+    """
+    store = _store()
+    line = "secret: " + name
+    out, _ = store.redact_with_report(line)
+    # The in-place residual, unchanged: one masked line, healed by the next read.
+    assert out != line
+    assert REDACTION_MARKER in out
+    assert store._shape_registrations == set()
+    assert store.redact("the manifest uses " + name) == "the manifest uses " + name
+    assert store.redact_arguments(line) == line
+
+
+@pytest.mark.parametrize("name", VENDOR_SHAPED_NAMES)
+def test_a_vendor_shaped_secret_name_is_never_rewritten_in_arguments(name: str) -> None:
+    """R2-1's command half: the object name reaches the executor byte-identical."""
+    store = _store()
+    command = "kubectl get secret " + name + " -n prod -o yaml"
+    assert store.redact_arguments(command) == command
+
+
+def test_a_plain_secret_name_reaches_the_command_byte_identical() -> None:
+    """The R2-1 control rows: name-driven, no vendor spelling, both carriers."""
+    name = "payments-" + "api-" + "db"
+    store = _store()
+    assert store.redact_arguments("kubectl get secret " + name + " -o yaml") == (
+        "kubectl get secret " + name + " -o yaml"
+    )
+    assert store.redact_arguments("secret: " + name) == "secret: " + name
+
+
+#: The passphrase-typed-into-a-command rows. The value is the corpus's own
+#: passphrase shape, and the three names are the ones measured at e720f20f87 as
+#: released: an environment assignment, a CLI flag, and a ``--from-literal`` whose
+#: INNER assignment is the one the rule ends up matching after the outer guard
+#: refuses ``--from-literal``.
+PASSPHRASE_COMMANDS = (
+    "export DB_PASSWORD=" + BATTERY_STAPLE,
+    "mysql -u root --password=" + BATTERY_STAPLE + " app",
+    "kubectl create secret generic api --from-literal=password=" + BATTERY_STAPLE,
+)
+
+
+@pytest.mark.parametrize("command", PASSPHRASE_COMMANDS)
+def test_retained_arguments_still_mask_a_passphrase_typed_into_the_command(
+    command: str,
+) -> None:
+    """R2-2: the retained copy is the transcript row and every later replay.
+
+    Measured at e720f20f87: all three came back byte-identical where the parent
+    masked them. The executed call keeps its own object either way, so that release
+    bought no execution safety — it only put the credential in plaintext at rest.
+    """
+    store = _store()
+    message = _assistant([ToolCall(id="c1", name="bash", arguments={"command": command})])
+    scrubbed = _retained(message, store).tool_calls[0].arguments["command"]
+    assert scrubbed != command
+    assert BATTERY_STAPLE not in scrubbed
+    assert REDACTION_MARKER in scrubbed
+    # ...and the executor's own copy is still untouched.
+    assert message.tool_calls[0].arguments["command"] == command
+
+
+def test_the_passphrase_release_stops_at_the_reference_separator() -> None:
+    """The other side of R2-2: a COLON labels an entry, an ``=`` types a value.
+
+    ``secret`` is a strong credential name, yet ``secret: <name>`` is a reference
+    the agent has to be able to re-run — so the separator, not the name alone, is
+    what decides. The same name under ``DB_PASSWORD=`` is a credential typed into
+    the command and stays masked.
+    """
+    name = "payments-" + "api-" + "db"
+    store = _store()
+    assert store.redact_arguments("secret: " + name) == "secret: " + name
+    assert store.redact_arguments("DB_PASSWORD=" + name) != "DB_PASSWORD=" + name
+
+
+#: One legal label and one label over the cap: ``_DNS_LABEL_MAX_CHARS`` is 63, so
+#: the first is the longest label a cluster can hold and the second is not a name at
+#: all (QA round 2, Q2-1).
+AT_CAP_SEGMENT = "a" * 63 + "-" + "b"
+OVER_CAP_SEGMENT = "a" * 70 + "-" + "b"
+
+
+def test_a_segment_over_the_label_cap_is_not_a_dns_name() -> None:
+    """Q2-1: the release predicate has to reproduce the 63-character label cap.
+
+    The linear run form (``[a-z0-9]+(?:-[a-z0-9]+)+``) has no per-label bound, so at
+    e720f20f87 a 72-character lowercase value with a 70-character first segment was
+    read as a name: masked once in the result and READABLE for the rest of the
+    session, where the parent contained it.
+    """
+    store = _store()
+    at_cap = "secret: " + AT_CAP_SEGMENT
+    over_cap = "secret: " + OVER_CAP_SEGMENT
+    assert store.redact_arguments(at_cap) == at_cap
+    assert store.redact_arguments(over_cap) != over_cap
+    masked, _ = store.redact_with_report("PASSWORD=" + OVER_CAP_SEGMENT)
+    assert masked != "PASSWORD=" + OVER_CAP_SEGMENT
+    assert OVER_CAP_SEGMENT in store._shape_registrations
+    assert store.redact("later " + OVER_CAP_SEGMENT) != "later " + OVER_CAP_SEGMENT
+
+
 # --- 3. the legitimate masking the corpus already pins --------------------------
 
 
