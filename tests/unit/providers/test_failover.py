@@ -7957,3 +7957,85 @@ async def test_quota_blocked_recovers_with_paid_only(
         assert store.is_blocked_for_model(row.id, "openai", "gpt-codex") is not expected
     finally:
         store.close()
+
+
+class TestAFailureIsAttributedToTheTargetThatProducedIt:
+    """The operator's screenshot, at the level where the string is assembled.
+
+    A turn that STARTED on ``anthropic/claude-opus-5-5`` was served by OpenAI
+    after Anthropic's quota ran out; OpenAI refused with a ``cyber_policy``
+    content filter, and the incident was rendered against Anthropic. Nothing in
+    the error carried the target that produced it, so every reporting surface
+    fell back to the session's selected model.
+    """
+
+    REFUSAL = (
+        "cyber_policy: This content was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. If you're doing authorized "
+        "security work that requires more cyber permissive safeguards, apply for "
+        "Daybreak access via https://platform.openai.com/settings/organization/"
+        "status-and-access before retrying."
+    )
+
+    async def _run(self, request: ChatRequest, error: ProviderError) -> ProviderError:
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient(error)
+
+        auth = FakeAuth({request.model.provider: ["k1"]})
+        settings = {"retry": {"baseDelayMs": 1, "maxRetries": 0, "fallbackChains": {"default": []}}}
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(request, auth, settings, client_for):
+                pass
+        return excinfo.value
+
+    async def test_the_error_carries_the_provider_that_returned_it(self) -> None:
+        error = await self._run(
+            _request("openai", "gpt-5"), ProviderError(None, self.REFUSAL, retryable=True)
+        )
+        assert error.selector == "openai/gpt-5"
+        assert error.provider == "openai"
+        assert error.model == "gpt-5"
+        # The walk never left its own entry selector here (the session had
+        # already routed onto the fallback), so there is no hop for IT to
+        # narrate; the session supplies the selection it moved off.
+        assert error.failover_from == ""
+
+    async def test_the_failure_class_survives_the_attribution(self) -> None:
+        """``content-filter`` and ``cyber_policy`` are the diagnosable part.
+
+        A reader needs to know a retry on this model fails identically, so the
+        attribution is a PREFIX in ``describe()`` and ``str()`` is untouched.
+        """
+        error = await self._run(
+            _request("openai", "gpt-5"), ProviderError(None, self.REFUSAL, retryable=True)
+        )
+        assert str(error) == f"transient provider error: {self.REFUSAL}"
+        assert error.describe() == f"failed on openai/gpt-5: {str(error)}"
+
+    def test_a_hop_is_named_as_a_hop(self) -> None:
+        """A fallback target's error says what it failed over FROM."""
+        error = failover_module._attribute_failure(
+            ProviderError(None, self.REFUSAL, retryable=True),
+            FallbackTarget("openai/gpt-5", None),
+            "anthropic/claude-opus-5-5",
+        )
+        assert error.failover_from == "anthropic/claude-opus-5-5"
+        assert error.provenance == (
+            "failed on openai/gpt-5 after failing over from anthropic/claude-opus-5-5"
+        )
+
+    def test_a_primary_failure_states_no_hop(self) -> None:
+        error = failover_module._attribute_failure(
+            ProviderError(None, self.REFUSAL, retryable=True),
+            FallbackTarget("anthropic/claude-opus-5-5", None),
+            "anthropic/claude-opus-5-5",
+        )
+        assert error.failover_from == ""
+        assert error.provenance == "failed on anthropic/claude-opus-5-5"
+
+    def test_an_unattributed_error_degrades_to_its_old_text(self) -> None:
+        """Nothing constructed outside the walk gains a sentence."""
+        error = ProviderError(429, "quota exceeded", retryable=True)
+        assert error.selector == ""
+        assert error.provenance == ""
+        assert error.describe() == str(error)

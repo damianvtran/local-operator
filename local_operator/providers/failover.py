@@ -835,6 +835,9 @@ class ProviderError(RenderedStreamError):
         transport: bool = False,
         transport_cause: BaseException | None = None,
         fail_closed: bool = False,
+        provider: str = "",
+        model: str = "",
+        failover_from: str = "",
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -933,6 +936,71 @@ class ProviderError(RenderedStreamError):
         #: merely means waiting patiently on one that is genuinely unwell, and
         #: changing it would alter behaviour this fix has no business touching.
         self.connectivity_loss = transport and is_connectivity_loss(self)
+        #: WHICH TARGET PRODUCED THIS — not which model the user selected.
+        #:
+        #: The distinction is the whole of the attribution bug this pair
+        #: exists to prevent. A turn can START on one model and be served,
+        #: or refused, by another: an exhausted Anthropic quota hands the
+        #: attempt to OpenAI, and OpenAI then answers with a ``cyber_policy``
+        #: content filter. The text of that failure names no provider (the
+        #: refusal is prose), so every surface downstream fell back to the
+        #: SESSION's model and reported an OpenAI refusal against Anthropic —
+        #: sending the reader to debug a provider that was never reached.
+        #:
+        #: Stamped by ``stream_with_failover`` at the one place that holds
+        #: both facts (the per-attempt ``target`` and the walk's entry
+        #: selector), so logs, telemetry, the session record and the incident
+        #: card all read one answer instead of each re-deriving it.
+        self.provider = provider
+        self.model = model
+        #: The selector the WALK STARTED FROM (the user's selection), and only
+        #: when this error came from a different target. Empty for a primary
+        #: failure, which is what keeps the rendered sentence short when there
+        #: was no failover to describe.
+        self.failover_from = failover_from
+
+    @property
+    def selector(self) -> str:
+        """``provider/model`` of the target that produced this, or ``""``.
+
+        Empty for every error the harness built about itself ("No API key
+        configured for provider 'openai'") and for anything constructed by a
+        caller that has no target to name — ``describe()`` then degrades to
+        exactly ``str()``, so attribution never invents a model.
+        """
+        if self.provider and self.model:
+            return f"{self.provider}/{self.model}"
+        return ""
+
+    @property
+    def provenance(self) -> str:
+        """The sentence that names the failing model, and how it was reached.
+
+        ``"failed on openai/gpt-5 after failing over from anthropic/..."`` —
+        the selection first, because the reader needs to know the model they
+        chose was not the one that answered.
+        """
+        selector = self.selector
+        if not selector:
+            return ""
+        if self.failover_from and self.failover_from != selector:
+            return f"failed on {selector} after failing over from {self.failover_from}"
+        return f"failed on {selector}"
+
+    def describe(self) -> str:
+        """The durable error text: attribution, then the unchanged failure.
+
+        The kind/status (``content-filter``, ``cyber_policy``, ``HTTP 400``)
+        is NOT reprinted here — it is preserved verbatim by ``str(self)``,
+        which stays the second half. A retry on the same model fails the same
+        way and a retry elsewhere may not, so the reader needs both facts in
+        one line, each intact: which model, and what class of refusal.
+        """
+        provenance = self.provenance
+        rendered = str(self)
+        if not provenance:
+            return rendered
+        return f"{provenance}: {rendered}"
 
     def __str__(self) -> str:
         """``<kind> (HTTP <status>, retry in <wait>): <the provider's words>``.
@@ -2213,6 +2281,29 @@ _KIND_DIAGNOSTIC_RANK: dict[str, int] = {
     "unknown": 1,
     "aborted": 0,  # they already know; never worth reporting over a real failure
 }
+
+
+def _attribute_failure(
+    error: ProviderError, target: "FallbackTarget", primary_selector: str
+) -> ProviderError:
+    """Stamp WHICH target produced ``error``, and what it failed over from.
+
+    Called at every point the walk turns "an exception" into "a failure of
+    this target" — ``record()`` for the errors that compete for the reported
+    slot, and the transport wrap for the errors that are re-raised directly.
+    One helper rather than four inline assignments because the THREE facts
+    have to agree: a stale ``provider``/``model`` beside a fresh
+    ``failover_from`` would render a sentence that names the wrong pair.
+
+    ``failover_from`` is empty when this IS the selection: there was no
+    failover to narrate, and saying "failed on X after failing over from X"
+    would be noise in the one case a reader least needs it.
+    """
+    provider, _, model_id = target.selector.partition("/")
+    error.provider = provider
+    error.model = model_id
+    error.failover_from = "" if target.selector == primary_selector else primary_selector
+    return error
 
 
 def error_report_score(error: ProviderError, *, primary: bool) -> int:
@@ -4047,7 +4138,7 @@ async def stream_with_failover(
     clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
 
-    def record(error: ProviderError, *, primary: bool) -> None:
+    def record(error: ProviderError, *, primary: bool, target: FallbackTarget) -> None:
         """Offer ``error`` the reported-error slot, keeping the best so far.
 
         ``>=`` so that at equal rank the LATEST attempt wins, which is the
@@ -4062,14 +4153,21 @@ async def stream_with_failover(
         nowhere at all.
         """
         nonlocal reported, reported_score
+        # BEFORE the slot decision, and before every log line below: an error
+        # that loses the slot is only ever read by whoever follows the log, so
+        # a model name attached only on the winning branch would leave exactly
+        # the failures nobody else can see unattributed.
+        _attribute_failure(error, target, primary_selector)
         score = error_report_score(error, primary=primary)
         if score >= reported_score:
             if reported is not None:
-                logger.warning("superseded by a more diagnostic failure: %s", reported)
+                logger.warning("superseded by a more diagnostic failure: %s", reported.describe())
             reported, reported_score = error, score
         else:
             logger.warning(
-                "%s failed: %s", "requested model" if primary else "fallback selector", error
+                "%s failed: %s",
+                "requested model" if primary else "fallback selector",
+                error.describe(),
             )
 
     # One walk down the cascade, then AT MOST one more. The second sweep exists
@@ -4389,7 +4487,7 @@ async def stream_with_failover(
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
                     missing = _no_credential_error(auth, provider)
-                    record(missing, primary=is_primary)
+                    record(missing, primary=is_primary, target=target)
                     if missing.retryable:
                         # Retryable means blocked-not-absent: backoffs expire on
                         # their own (and other processes release credentials),
@@ -4560,7 +4658,7 @@ async def stream_with_failover(
                     # A local generated-output envelope is not bad credentials
                     # or provider weather: replaying it on another account/route
                     # repeats the resource failure and hides the original cause.
-                    record(exc, primary=is_primary)
+                    record(exc, primary=is_primary, target=target)
                     raise
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
@@ -4709,7 +4807,7 @@ async def stream_with_failover(
                         degradations=input_refusal_degradations,
                         policy_declined=degraded is not None and not retry.enabled,
                     )
-                    record(exc, primary=is_primary)
+                    record(exc, primary=is_primary, target=target)
                     raise exc
                 if is_media_download_failure(exc):
                     # A provider refused a request carrying media because its
@@ -4754,9 +4852,9 @@ async def stream_with_failover(
                         attempts=media_download_retries,
                         policy_declined=not retry.enabled,
                     )
-                    record(exc, primary=is_primary)
+                    record(exc, primary=is_primary, target=target)
                     raise exc
-                record(exc, primary=is_primary)
+                record(exc, primary=is_primary, target=target)
                 target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
                 # A pre-wrapped connectivity loss (a client that turns httpx into
                 # a ProviderError itself) takes the PATIENT path, ahead of the
@@ -4968,7 +5066,7 @@ async def stream_with_failover(
             except Exception as exc:  # network errors et al.
                 if not request.isolated:
                     _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
-                wrapped = wrap_transport_error(exc)
+                wrapped = _attribute_failure(wrap_transport_error(exc), target, primary_selector)
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
                     # cannot be retried — but the failure still has to arrive
@@ -4989,7 +5087,7 @@ async def stream_with_failover(
                     # this arm could classify an in-band gateway failure.
                     _mark_mid_stream_connectivity(wrapped)
                     raise wrapped from exc
-                record(wrapped, primary=is_primary)
+                record(wrapped, primary=is_primary, target=target)
                 # This is the arm a CONNECTIVITY LOSS actually arrives on: no
                 # client in clients.py catches httpx, so a DNS/route/connect
                 # failure on a closed-then-reconnecting laptop reaches here raw

@@ -2239,6 +2239,19 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: frame old readers already accept.
     cut_off: str = ""
     cut_off_cause: str = ""
+    #: WHICH model produced ``error``, as ``provider/model``, and the selector
+    #: the request started from when the failure came from a DIFFERENT target.
+    #:
+    #: The failover stamps this on the ``ProviderError`` it raises; the loop
+    #: copies it here. Without it the REPORTING layer could only read the
+    #: session's selected model, which is how an OpenAI ``cyber_policy``
+    #: refusal reached the operator attributed to Anthropic — a provider the
+    #: turn had already failed over FROM and never reached. Additive with a
+    #: ``""`` default: ``AgentEvent`` is ``extra="allow"``, so an old viewer
+    #: keeps them as extras and an old runtime's event simply carries no
+    #: attribution (the same story ``cut_off`` tells above).
+    failing_model: str = ""
+    failover_from: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
