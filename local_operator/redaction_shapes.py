@@ -1777,8 +1777,16 @@ _DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 #: ``auth-svc.cluster.local``. A slash or a dot is structure no passphrase carries.
 _DNS_PATH_SHAPED = re.compile(rf"{_DNS_LABEL}(?:[./]{_DNS_LABEL})+")
 
-#: The same grammar joined by hyphens alone.
-_DNS_HYPHENATED = re.compile(rf"{_DNS_LABEL}(?:-{_DNS_LABEL})+")
+#: The same grammar joined by hyphens alone, written as RUNS of ``[a-z0-9]+``
+#: rather than as ``_DNS_LABEL`` segments. ``-`` is BOTH the separator and a legal
+#: interior character of a label, so the label form made every hyphen of a failing
+#: ``fullmatch`` an ambiguous split point and backtracked exponentially: measured
+#: 0.30s at 37 characters, 3.1s at 45, no return at 60 — on a pass that scans
+#: arbitrary tool output, where a fetched page or a read file supplies the token.
+#: A run cannot consume the separator, so each hyphen is crossed exactly once and
+#: the match is linear. The per-label 63-character cap is not reproduced: no clause
+#: here reads it, and Kubernetes caps the whole object name at 253 characters.
+_DNS_HYPHENATED = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)+")
 
 #: The segments that make a hyphenated identifier a RESOURCE name rather than a
 #: readable phrase: workload and environment qualifiers. This set IS the deviation
@@ -1820,6 +1828,46 @@ _K8S_QUALIFIER_SEGMENTS = frozenset(
 )
 
 
+#: A canonical lowercase UUID. This is the ONE shape excluded from
+#: :func:`_is_dns_name`, and it is excluded because the module already holds the line
+#: the other way: a UUID is an opaque CREDENTIAL value, not a name, and the readable
+#: class's digit cap exists precisely so UUIDs stay masked and contained (see the
+#: ``_is_readable_hyphen_phrase`` clauses). It satisfies the hyphenated DNS grammar
+#: exactly — ``550e8400-e29b-41d4-a716-446655440000`` is even a legal Kubernetes name —
+#: so a grammar-only refusal would silently stop containing every UUID password in
+#: the corpus (pinned by ``test_a_weak_name_still_masks_an_opaque_value``).
+_UUID_SHAPED = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _is_dns_name(value: str) -> bool:
+    """Whether ``value`` is spelled in the DNS-1123 NAME grammar in ANY form.
+
+    The whole grammar, with NO qualifier judgement: a PATH or DOTTED identifier,
+    or any hyphen-joined run of lowercase alphanumerics. This is the REGISTRATION
+    refusal's predicate (:func:`is_registerable_component`), and it is wider than
+    :func:`_is_identifier_shaped_name` on purpose.
+
+    The qualifier vocabulary only decides whether the MASK is released in place.
+    Containment is the other direction and cannot depend on it: a name-driven rule
+    fires on ``secret: <object name>`` for every Secret in a cluster, and a name
+    outside the vocabulary (``payments-api-db``) promoted here was session-wide —
+    the amplifier this release exists to remove, reproducing for ten of nineteen
+    realistic names before this clause. Vendor-prefixed values are excluded
+    (``glpat-<name>`` satisfies the grammar and IS a credential, owned by the
+    vendor rule) — they must keep registering. So is a canonical UUID, the other
+    opaque shape this grammar swallows (:data:`_UUID_SHAPED`).
+    """
+    if not value or _VENDOR_PATTERN.search(value) is not None:
+        return False
+    # A UUID is an opaque credential, never a name — see :data:`_UUID_SHAPED`.
+    if _UUID_SHAPED.fullmatch(value) is not None:
+        return False
+    return (
+        _DNS_PATH_SHAPED.fullmatch(value) is not None
+        or _DNS_HYPHENATED.fullmatch(value) is not None
+    )
+
+
 def _is_code_keyword_value(value: str) -> bool:
     """Whether ``value`` is a programming-language keyword or literal.
 
@@ -1855,14 +1903,20 @@ def _is_identifier_shaped_name(value: str) -> bool:
     rule (DSN, bearer, PEM, vendor) and is masked by exact value once known. The
     opposite cost — deleting the k8s Secret name an agent needed, and registering
     it so every later line lost it too — is the incident this clause exists for.
+
+    This predicate releases the MASK only, and only inside the qualifier
+    vocabulary. CONTAINMENT is closed over the whole grammar
+    (:func:`_is_dns_name`): a Secret name with no qualifier segment
+    (``payments-api-db``) is still masked IN PLACE by the name-driven assignment
+    rule that fires on ``secret: <name>``, but it is never registered, so the
+    marker never becomes the session's word for that name and every later
+    occurrence is readable again.
     """
-    if not value or _VENDOR_PATTERN.search(value) is not None:
+    if not _is_dns_name(value):
         return False
     if _DNS_PATH_SHAPED.fullmatch(value) is not None:
         return True
-    if _DNS_HYPHENATED.fullmatch(value) is not None:
-        return bool(set(value.split("-")) & _K8S_QUALIFIER_SEGMENTS)
-    return False
+    return bool(set(value.split("-")) & _K8S_QUALIFIER_SEGMENTS)
 
 
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
@@ -4494,19 +4548,28 @@ _MIN_REGISTERABLE_SECRET = 8
 DETECTED_COMPONENT_FLOOR = _MIN_REGISTERABLE_SECRET
 
 
-def is_registerable_component(value: str) -> bool:
+def is_registerable_component(value: str, *, label: str | None = None) -> bool:
     """Whether a matched value may become a session-wide redaction.
+
+    ``label`` is the rule that produced the hit. It matters because the identifier
+    refusal below is about NAME-driven hits: a rule in
+    :data:`_ARGUMENT_EVIDENCE_LABELS` recognises a credential by its own SPELLING
+    (a DSN's ``user:password@``, a ``Bearer`` token, a vendor prefix), so its value
+    is a credential even when it is also spelled like an identifier —
+    ``mongodb://user:<pw>@host/db`` must stay contained session-wide. Omitting the
+    label keeps the SAFE default: the hit is treated as name-driven and the
+    identifier refusal applies.
 
     Registration is a PROMOTION: the value is masked in every later result for
     the rest of the session, so a false positive here outlives the line that
     caused it (``Basic authentication`` was registered as a credential once, and
     the word was then masked in every subsequent result). What remains is the
-    LENGTH floor (:data:`DETECTED_COMPONENT_FLOOR`) plus the two refusals below —
-    a placeholder, a store-grammar name. The word-shape refusal this rule once
-    carried was removed deliberately: it left a word-shaped credential that a real
-    rule had masked free to reappear in the next result (the body comment records
-    the measurement), and such a value is now masked as a WORD rather than a
-    substring (see :func:`_word_pattern`).
+    LENGTH floor (:data:`DETECTED_COMPONENT_FLOOR`) plus the refusals below —
+    a placeholder, a store-grammar name, a code keyword, a DNS-grammar name. The
+    word-shape refusal this rule once carried was removed deliberately: it left a
+    word-shaped credential that a real rule had masked free to reappear in the next
+    result (the body comment records the measurement), and such a value is now
+    masked as a WORD rather than a substring (see :func:`_word_pattern`).
 
     **Only genuine secret VALUES can enter a redaction set** (operator directive): a
     token spelled the way a stored secret's NAME is spelled
@@ -4522,6 +4585,11 @@ def is_registerable_component(value: str) -> bool:
     and flag spellings read it as a reference and release it, as the clause in
     :func:`_value_is_not_a_credential` states — the same read the flag arms already
     take for a credential flag's one-part argument.
+
+    The same tradeoff applies to a DNS-shaped value from a name-driven rule: a
+    passphrase spelled ``word-word-staple`` is masked in place but no longer
+    contained session-wide, because the identifier refusal cannot tell it from a
+    Kubernetes object name and the other direction is the incident.
     """
     # Length only. The word-shape refusal was added to stop ``Basic
     # authentication`` poisoning a session, and the header rules now need their
@@ -4533,7 +4601,7 @@ def is_registerable_component(value: str) -> bool:
         return False
     if _is_a_name_in_the_store_grammar(value):
         return False
-    # CODE and NAME values never become session-wide redactions, whichever rule
+    # CODE values never become session-wide redactions, whichever rule matched
     # matched them. This gate is INDEPENDENT of the rule on purpose: the incident
     # (session 6ccea512c372) was not that one rule misfired, it was that the
     # misfire was PROMOTED — the Python keyword ``continue`` and a Kubernetes
@@ -4546,7 +4614,18 @@ def is_registerable_component(value: str) -> bool:
     # :func:`_value_is_not_a_credential` makes a hit of this class rare already;
     # this gate is what holds when another rule fires first and its value reaches
     # the store by a path that has no name context to consult.
-    if _is_code_keyword_value(value) or _is_identifier_shaped_name(value):
+    if _is_code_keyword_value(value):
+        return False
+    # NAME values, over the WHOLE DNS grammar and not only the qualifier vocabulary
+    # the in-place release uses: the qualifier is what an operator means by "that is
+    # the name of a thing in the cluster", but a name-driven rule fires on
+    # ``secret: <name>`` for EVERY Secret, and the ones outside the vocabulary
+    # (``payments-api-db``) were still promoted here — the incident reproduced
+    # end-to-end for ten of nineteen realistic names. A name may be masked in place
+    # once; it must never become the session's word for it. Spelling-evidence rules
+    # are exempt: ``label`` names the rule, and one of those recognised a credential
+    # rather than guessing from a name.
+    if label not in _ARGUMENT_EVIDENCE_LABELS and _is_dns_name(value):
         return False
     return len(value) >= DETECTED_COMPONENT_FLOOR
 
@@ -5798,7 +5877,12 @@ def _reject_argument_shape_hit(label: str, value: str) -> bool:
        short DSN password or a lowercase vendor tail is still masked;
     3. otherwise any value :func:`_value_is_not_a_credential` releases for itself
        (an expression, a path, a type name, a word under a weak name);
-    4. otherwise, for a NAME-DRIVEN rule, a value that carries no credential
+    4. a value spelled in the full DNS grammar — a name, not a credential. A hyphen
+       is STRUCTURE in a name, not the credential alphabet, so a value the name-driven
+       rules keep masking in place (``secret: payments-api-db``) is left byte-identical
+       in arguments; without this the hyphen counted as evidence and the command the
+       agent was about to run was rewritten;
+    5. otherwise, for a NAME-DRIVEN rule, a value that carries no credential
        evidence — the bare lowercase word the brief names, which in a command is far
        more often a mode, a branch or a flag value than a secret.
     """
@@ -5809,6 +5893,15 @@ def _reject_argument_shape_hit(label: str, value: str) -> bool:
     if label in _ARGUMENT_EVIDENCE_LABELS:
         return False
     if _value_is_not_a_credential(value, name="", strong=True):
+        return True
+    # The WHOLE DNS grammar, not only the qualifier vocabulary the release in
+    # :func:`_is_identifier_shaped_name` uses: that vocabulary is about a MASK in a
+    # result, where a Secret name outside it may still be masked once. This pass
+    # rewrites the program the harness executes, so the narrower question — can this
+    # be a credential at all? — has to be answered for every name, and
+    # ``_carries_credential_evidence`` answers it wrong: every hyphen in
+    # ``payments-api-db`` reads as a credential symbol.
+    if _is_dns_name(value):
         return True
     return not _carries_credential_evidence(value)
 

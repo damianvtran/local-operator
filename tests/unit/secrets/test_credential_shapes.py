@@ -8219,9 +8219,21 @@ def test_the_hyphen_release_is_confined_to_weak_and_ambiguous_names(line: str) -
     a strong assignment name, ``?token=``/``?password=``/``?secret=`` — is
     a leak, and these rows are what would catch it.
     """
-    assert _promotes(line, KEBAB_IDENTIFIER), f"{line!r} stopped masking"
     scrubbed, _ = scrub_shapes_with_hits(line)
     assert KEBAB_IDENTIFIER not in scrubbed
+    # PROMOTION moved in agent review round 1 (R1-1): a readable hyphen phrase is
+    # a NAME — the judgement the snake_case clause already makes — so no name-driven
+    # rule may make one session-wide, even under a strong name. The incident's
+    # ``secret: <name>`` is this same spelling in this same context; pinning the
+    # promotion here while closing it there would leave the amplifier open for every
+    # strong-named spelling. The mask in place is what stays, and the cost is stated
+    # in :func:`_is_dns_name`: a real password spelled as a kebab phrase under a
+    # strong name is no longer contained session-wide, though every spelling-evidence
+    # rule still masks it.
+    assert not _promotes(line, KEBAB_IDENTIFIER), (
+        f"{line!r} promoted a readable hyphen phrase; a name-driven rule must never "
+        "become the session's word for a NAME (R1-1)"
+    )
 
 
 @pytest.mark.parametrize("spelling", ["key", "apikey", "api_key", "api-key"])
