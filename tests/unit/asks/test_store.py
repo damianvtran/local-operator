@@ -1050,9 +1050,10 @@ def test_a_relay_row_folds_a_local_dismissal_over_a_withdrawal():
         "at": 1_000_500,
         "by": {"surface": "agent"},
     }
-    assert store.fold([_relayed(), dismissed], 1_001_000, session_id="s-watch")[0][
-        "status"
-    ] == store.STATUS_DISMISSED
+    assert (
+        store.fold([_relayed(), dismissed], 1_001_000, session_id="s-watch")[0]["status"]
+        == store.STATUS_DISMISSED
+    )
     both = store.fold([_relayed(), withdrawn, dismissed], 1_001_000, session_id="s-watch")
     assert both[0]["status"] == store.STATUS_DISMISSED
     assert both[0]["relay_dismissed_at"] == 1_000_600

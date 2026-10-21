@@ -281,9 +281,7 @@ class AskQueue:
             local_settle = (
                 store.STATUS_DISMISSED
                 if record.get("relay_dismissed_at")
-                else store.STATUS_WITHDRAWN
-                if record.get("relay_withdrawn_at")
-                else ""
+                else store.STATUS_WITHDRAWN if record.get("relay_withdrawn_at") else ""
             )
             origin_session = str(ref.get("session_id") or "")
             origin_ask = str(ref.get("ask_id") or "")

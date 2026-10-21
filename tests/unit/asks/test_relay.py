@@ -264,9 +264,9 @@ def test_declining_the_relay_settles_the_origin(tmp_path: Path):
     assert [event["kind"] for event in store.read_events(watch.session_dir)] == [
         store.EVENT_RELAYED
     ]
-    assert [
-        event["kind"] for event in store.read_events(origin.session_dir)
-    ].count(store.EVENT_DECLINED) == 1
+    assert [event["kind"] for event in store.read_events(origin.session_dir)].count(
+        store.EVENT_DECLINED
+    ) == 1
 
 
 def test_declining_a_settled_origin_through_the_relay_keeps_its_words(tmp_path: Path):
@@ -328,9 +328,7 @@ def test_a_watcher_withdrawal_folds_cold_as_withdrawn(tmp_path: Path):
     assert _has_open_asks(watch.session_dir) is True
     assert watch.withdraw(relay_id, reason="moot")["ok"] is True
     cold = store.fold(store.read_events(watch.session_dir), BASE, session_id=WATCH)
-    assert [(row["ask_id"], row["status"]) for row in cold] == [
-        (relay_id, store.STATUS_WITHDRAWN)
-    ]
+    assert [(row["ask_id"], row["status"]) for row in cold] == [(relay_id, store.STATUS_WITHDRAWN)]
     assert _has_open_asks(watch.session_dir) is False
 
 
@@ -414,9 +412,9 @@ def test_relaying_the_same_origin_ask_twice_is_refused(tmp_path: Path):
     assert second["ok"] is False
     assert second["error"] == render.RELAY_ALREADY_HELD
     assert len([row for row in watch.records() if row.get("relay")]) == 1
-    assert [
-        event["kind"] for event in store.read_events(origin.session_dir)
-    ].count(store.EVENT_RELAY_SURFACED) == 1
+    assert [event["kind"] for event in store.read_events(origin.session_dir)].count(
+        store.EVENT_RELAY_SURFACED
+    ) == 1
     # Closed locally, the ref is free again: the held check reads derived status.
     first_id = str(first["details"]["ask_id"])
     assert watch.withdraw(first_id, reason="moot")["ok"] is True
