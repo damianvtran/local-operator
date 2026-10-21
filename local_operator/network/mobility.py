@@ -2892,7 +2892,9 @@ def _session_roles_refusal(
         "message": (
             f"this conversation owns {len(names)} session "
             f"{'definition' if len(names) == 1 else 'definitions'} ({listed}), and a "
-            "mesh move does not carry them in this version. Either stay on this device, "
+            "mesh move does not carry "
+            f"{'it' if len(names) == 1 else 'them'} in this version. Either stay on this "
+            "device, "
             "or re-run with --drop-session-roles: the definitions will then be stashed "
             f"at {stash} on this device, and the receipt names that path."
         ),

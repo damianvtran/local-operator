@@ -1241,6 +1241,10 @@ def test_a_move_of_a_session_with_session_roles_is_refused_by_default(
     assert result.get("code") == "session_roles", result
     assert "reviewer" in str(result.get("message")), result
     assert "--drop-session-roles" in str(result.get("message")), result
+    # Number agreement in the same sentence (round 4): one definition is
+    # "does not carry it", not "them".
+    assert "1 session definition" in str(result.get("message")), result
+    assert "does not carry it" in str(result.get("message")), result
     assert directory.is_dir(), "the refusal must change nothing on the source"
     assert not (server_b.root / "sessions" / SESSION).exists(), "and nothing on the target"
 
