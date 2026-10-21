@@ -24,6 +24,7 @@ from rich.style import Style
 from textual.content import Content
 
 from local_operator.session.goal_judge import MAX_GOAL_CONTINUATIONS
+from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.goal_panel import (
     MAX_HISTORY_ROWS,
@@ -531,10 +532,15 @@ async def test_a_clipped_record_says_so_on_the_card() -> None:
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
-        panel = app.query_one(GoalPanel)
+        # THE ADOPTION PRECONDITION, not a longer wait: `_cmd_goal` returns at
+        # its own `session is None` guard, so a `/goal` issued before adoption
+        # never opens the card at all and `_card_text` is `''` — the exact
+        # `assert '… dropped …' in ''` this cell recorded on main. The sibling
+        # tests above already wait through `_open_card` for this reason; this
+        # one was the only caller that still issued the command after a single
+        # `pause()`. Waiting for the card that is about to be measured is the
+        # precondition, not a flake workaround.
+        panel = await _open_card(pilot, app, session)
         body = _card_text(panel)
         assert "older settled goals were dropped from this record" in body
         assert "none yet" not in body, "a clipped record cannot be reported as empty"
@@ -622,11 +628,37 @@ async def test_a_resize_while_open_repaints_the_card_for_the_new_ground() -> Non
         assert panel.has_class("-squeezed") is False, "the wide card should afford its gutter"
 
         await pilot.resize_terminal(80, 12)
+        shell = app.query_one("#input-shell")
+        # The OLD wait broke the moment `_fit()` and `-squeezed` AGREED, and
+        # before the resize was delivered they agree about the OLD ground: the
+        # panel still reports `(29, 2, …)`, the class is still absent, and the
+        # loop returned on its first pass. That is the recorded main failure —
+        # `card bottom 22 covers the composer at 6` — measured before either
+        # number had a chance to change (this test's own archived CI log shows
+        # the app already at 80x12 by the time the assertion ran).
+        #
+        # So the wait now has three parts: the app must REPORT the new size, the
+        # card must have re-fit to it, and the invariant the card owes — never
+        # cover a docked surface — is asserted on EVERY pass, not only at the
+        # end. The product's `ComposerDock.BoxChanged` seam repaints the card
+        # from the dock's OWN resize (after its region is real) rather than only
+        # from the 50 ms debounce, so the invariant holds from the first settled
+        # frame; a regression that returns to measuring the pre-resize dock
+        # fails here on the first pass instead of surviving to the final assert.
         for _ in range(200):
-            rows, gutter, _shown = panel._fit()
-            if panel.region.height and panel.has_class("-squeezed") == (gutter == 0):
-                break
             await pilot.pause()
+            card_bottom = panel.region.y + panel.region.height
+            assert card_bottom <= shell.region.y, (
+                f"after resize: card bottom {card_bottom} covers the composer at "
+                f"{shell.region.y} (app={app.size!r}, region={panel.region!r})"
+            )
+            rows, gutter, _shown = panel._fit()
+            if (
+                app.size == (80, 12)
+                and panel.region.height
+                and panel.has_class("-squeezed") == (gutter == 0)
+            ):
+                break
             await asyncio.sleep(0.01)
         else:
             raise AssertionError(
@@ -635,11 +667,46 @@ async def test_a_resize_while_open_repaints_the_card_for_the_new_ground() -> Non
                 f"region={panel.region!r}, display={panel.display}, "
                 f"styles={panel.styles.width!r}x{panel.styles.height!r}, app={app.size!r}"
             )
-        card_bottom = panel.region.y + panel.region.height
+
+
+@pytest.mark.asyncio
+async def test_a_resize_refits_the_card_from_the_dock_without_the_debounce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dock's own resize is the authoritative re-fit trigger, not a 50 ms guess.
+
+    Measured at 100x40 -> 80x12 with the debounce timer neutralised: BOTH the
+    resize handler and the timer can run before the screen has arranged the
+    dock, and `overlay.rows_above_dock` then returns the PREVIOUS frame's
+    ceiling — 29, then 33 rows on a 12-row screen. The card kept its 9-row
+    ground and its gutter, covering the composer at row 6, until a later pass
+    happened to measure real numbers: 0.7 s in the archived CI trace.
+
+    `ComposerDock` now reports its own `Resize` (`BoxChanged`) and the app
+    re-measures the overlay cards there, after the dock's region is real. With
+    the timer out of the picture nothing else can repair the overlap, so a
+    regression that drops the dock seam reopens it here rather than passing on
+    a timer that happened to win the race.
+    """
+    monkeypatch.setattr(app_module, "RESIZE_REFIT_DELAY_S", 30.0)
+    session = _armed()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        panel = await _open_card(pilot, app, session)
         shell = app.query_one("#input-shell")
-        assert (
-            card_bottom <= shell.region.y
-        ), f"after resize: card bottom {card_bottom} covers the composer at {shell.region.y}"
+        await pilot.resize_terminal(80, 12)
+        for _ in range(100):
+            await pilot.pause()
+            bottom = panel.region.y + panel.region.height
+            assert bottom <= shell.region.y, (
+                "the debounce is 30 s, so only the dock's BoxChanged can re-fit; "
+                f"the card bottom is {bottom} over the composer at {shell.region.y}"
+            )
+            if panel.has_class("-squeezed") and app.size == (80, 12):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError(f"the card never re-fit: {panel._fit()!r}")
 
 
 async def _adopted(pilot, app: OperatorApp, session: object) -> None:  # noqa: ANN001

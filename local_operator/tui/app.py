@@ -4155,6 +4155,23 @@ class ComposerDock(Container):
     means the same thing.
     """
 
+    class BoxChanged(TextualMessage):
+        """The dock's box is a different size than it was.
+
+        ``Resize`` does not bubble, and the overlay cards hosted in
+        ``width: auto`` containers are never resized by the terminal, so the app
+        — the one thing that can repaint them — never hears that their ground
+        moved. This message is that report, the same one :class:`Band` makes for
+        the same class of reason. It exists because the cards' ceiling is read
+        off THIS widget's ``region.y`` (``overlay.rows_above_dock``), and that
+        number is only true after the screen's arrange pass: re-measuring from
+        ``App.on_resize`` reads the PREVIOUS frame's dock and, on a shrink, a
+        ceiling taller than the whole new screen.
+        """
+
+    def on_resize(self, event: Resize) -> None:
+        self.post_message(self.BoxChanged())
+
     def on_click(self, event) -> None:  # noqa: ANN001 - Textual event type
         # No `event.stop()`, deliberately. `Click` BUBBLES from the child that
         # was hit, so by the time it arrives here the editor's own mouse
@@ -23291,6 +23308,32 @@ class OperatorApp(App[None]):
         # cards over whatever the band settled to, which is the order those two
         # already depend on.
         self.call_after_refresh(self._refresh_band)
+
+    def on_composer_dock_box_changed(self, event: ComposerDock.BoxChanged) -> None:
+        """The dock's box moved, so every overlay card's ceiling moved with it.
+
+        The cards are hosted in ``width: auto`` containers and are never resized
+        by the terminal, so they measure their ground from the DOCK's region
+        (``overlay.rows_above_dock``). That region is assigned by the screen's
+        arrange pass, which runs AFTER ``App.on_resize``: measuring from the
+        resize handler itself therefore reads the PREVIOUS frame's dock, and on
+        a shrink it can read a ceiling taller than the whole new screen.
+
+        Measured on the goal card at 100x40 -> 80x12: the resize handler and the
+        ``RESIZE_REFIT_DELAY_S`` timer both read ``rows_above_dock == 29`` (then
+        33) on a 12-row screen, kept the card's 9-row height and its gutter, and
+        left the card covering the composer at row 6 until an unrelated pass
+        happened to re-measure ~0.7 s later. The dock had no signal at all, so
+        the card's one authoritative "my ground is real now" event did not
+        exist: :class:`ComposerDock` now posts ``BoxChanged`` from its own
+        ``Resize``, the same report :class:`Band` makes for the same class of
+        reason, and this handler turns it into a re-measure.
+
+        Repainting all four cards is cheap (they are Static updates) and
+        idempotent; the debounce timer above still coalesces a drag-resize.
+        """
+        del event
+        self._sync_overlay_layout(force=True)
 
     def _sync_subagent_compact_layout(self, screen_height: int) -> None:
         """Keep narrow detail pages useful by yielding secondary dock rows."""
