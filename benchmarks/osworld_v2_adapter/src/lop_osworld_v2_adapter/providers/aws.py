@@ -1028,15 +1028,19 @@ class AwsProvider:
         Exhaustion keeps two DIFFERENT facts apart, and callers act on both:
 
         * every probe failed with a connect-class transport verdict
-          (``path_unreachable``): the host never reached the guest, so no
-          receipt exists to read and no generation was observed either way;
+          (``path_unreachable``): no probe established a connection, so no
+          receipt exists to read and no generation was observed either way.
+          That includes ``refused`` -- a TCP RST, where the host DID reach the
+          guest and the action port was closed -- which is exactly the
+          crash-restart window this flag lets a caller attempt through;
         * anything else (a non-200 answer, an ambiguous transport failure, a
           probe that reported nothing): the server was reachable or the failure
           is post-handshake, and the receipt is genuinely unavailable.
 
-        Both write ``read_failed`` plus every probe's verdict and errno -- six
-        silent probes used to collapse to ``read_failed: true``, which names a
-        path failure and not its element. The boolean decision is unchanged.
+        Both write ``read_failed`` plus every probe's verdict and errno -- probes
+        that only ever answered False used to collapse to ``read_failed: true``,
+        which names a path failure and not its element. The boolean decision is
+        unchanged.
         """
 
         if self._supervisor_unit is None:
