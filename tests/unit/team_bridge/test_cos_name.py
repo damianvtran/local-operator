@@ -118,6 +118,7 @@ def test_a_broken_aida_state_never_raises(tmp_path: Path):
         ("", None),
         (None, None),
         ("x" * 80, "x" * AGENT_NAME_MAX_CHARS),  # aida.name allows 80; the bridge 64
+        ("Ai\ud800da", "Aida"),  # lone surrogate (Cs): invalid UTF-8, httpx cannot encode it
     ],
 )
 def test_the_wire_name_is_repaired_into_the_label_grammar(raw: Any, wire: str | None):
@@ -175,27 +176,47 @@ async def test_agent_name_is_never_bundled_into_a_pause(bundled: str):
     assert sent == []
 
 
-async def test_a_server_refusing_the_field_still_enables(tmp_path: Path):
-    """Optional on the wire: a refusal naming agent_name re-sends ONCE without it."""
+async def test_a_refused_agent_name_is_raised_unchanged_and_never_stripped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """R1-1/R1-3: no strip-and-retry. One request, every other field intact.
+
+    A silent re-send without the name would turn a rename re-sync into a bare
+    ``state=active`` assertion; the refusal is the caller's to see instead, and
+    only its closed-set code reaches the log — never the name.
+    """
 
     sent: list[dict[str, Any]] = []
     client = _make_client(_recording(sent, refuse_agent_name=True), config_dir=tmp_path)
 
-    result = await client.put_settings(
-        state="active",
-        tenant_id="tnt_1",
-        consent_version="bridge_consent_v1",
-        agent_name="Aida",
-        endpoint=None,
-        expected_account_id="acc_1",
-    )
+    with caplog.at_level("WARNING", logger="local_operator.team_bridge.client"):
+        with pytest.raises(BridgeRefusal) as info:
+            await client.put_settings(
+                state="active",
+                tenant_id="tnt_1",
+                consent_version="bridge_consent_v1",
+                label="Ben",
+                agent_name="Aida-secret-sentinel",
+                endpoint=None,
+                expected_account_id="acc_1",
+            )
 
-    assert [("agent_name" in body) for body in sent] == [True, False]
-    assert result["endpoint"]["state"] == "active"
+    assert info.value.details == {"field": "agent_name", "rule": "unknown_value"}
+    assert sent == [
+        {
+            "state": "active",
+            "tenant_id": "tnt_1",
+            "consent_version": "bridge_consent_v1",
+            "label": "Ben",
+            "agent_name": "Aida-secret-sentinel",
+        }
+    ]
+    assert "invalid_request/unknown_value" in caplog.text
+    assert "Aida-secret-sentinel" not in caplog.text
     from local_operator.team_bridge.store import Store
 
-    # The enable itself landed and committed the native receipt as usual.
-    assert Store(tmp_path).committed_owner_count() == 1
+    # Nothing was written upstream, so nothing is committed locally either.
+    assert Store(tmp_path).committed_owner_count() == 0
 
 
 async def test_another_validation_refusal_is_not_retried():
@@ -224,6 +245,12 @@ async def test_another_validation_refusal_is_not_retried():
 
 
 def _echoing(agent_name: Any = None, *, echo: bool = True, state: str = "active"):
+    """The paired hub's status endpoint: ``agent_name`` ALWAYS present, null when unset.
+
+    ``echo=False`` is an OLDER hub, whose endpoint block is ``{id, label,
+    state}`` only — the one shape in which the re-sync must stay silent.
+    """
+
     payload = _endpoint_payload(state)
     if echo:
         payload["tenants"][0]["endpoint"]["agent_name"] = agent_name
@@ -314,3 +341,86 @@ async def test_no_designated_cos_never_sends_the_field(tmp_path: Path):
     await _discipline(counter, tmp_path).check(Boundary.APP_START)
 
     assert [r.method for r in counter.requests] == ["GET"]
+
+
+async def test_an_unset_name_echoed_as_null_is_published(tmp_path: Path):
+    """The paired hub serves ``agent_name: null`` until one is set."""
+
+    _enrolled_aida(tmp_path)
+    counter = _Counter(lambda request: _ok(_echoing(None)))
+
+    await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    puts = [json.loads(r.content) for r in counter.requests if r.method == "PUT"]
+    assert puts == [{"state": "active", "tenant_id": "tnt_1", "agent_name": "Aida"}]
+
+
+async def test_a_failed_re_sync_is_retried_at_the_next_fresh_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """R1-2: the debounce records only a SUCCESS; a transient failure retries."""
+
+    _enrolled_aida(tmp_path, "Friday")
+    attempts: list[int] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            attempts.append(1)
+            if len(attempts) == 1:
+                return httpx.Response(503, json={"error": "busy", "code": "service_unavailable"})
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(_echoing("Aida"))
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+
+    await discipline.check(Boundary.APP_START)
+    await discipline.check(Boundary.SURFACE_OPEN)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    # Failed once, succeeded once, then debounced while the hub lags its echo.
+    assert len(attempts) == 2
+
+
+async def test_a_refused_rename_never_degrades_into_a_bare_state_assertion(tmp_path: Path):
+    """R1-3: a refused name is one PUT, never a follow-up ``{state: active}``."""
+
+    _enrolled_aida(tmp_path, "Friday")
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(
+                400,
+                json={
+                    "error": "refused",
+                    "code": "invalid_request",
+                    "details": {"field": "agent_name", "rule": "invisible_character"},
+                },
+            )
+        return _ok(_echoing("Aida"))
+
+    counter = _Counter(responder)
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    puts = [json.loads(r.content) for r in counter.requests if r.method == "PUT"]
+    assert puts == [{"state": "active", "tenant_id": "tnt_1", "agent_name": "Friday"}]
+    assert check.state == tb_client.STATE_READY
+
+
+def test_a_malformed_config_is_never_moved_aside_by_the_resolver(tmp_path: Path):
+    """R1-4: the resolver reads the watcher snapshot; a half-written edit stays put."""
+
+    _aida_lives_in(tmp_path)
+    _designate(tmp_path, AIDA_SESSION)
+    aida_naming.set_name(tmp_path, "Friday")
+    assert cos_display_name(tmp_path) == "Friday"
+
+    config = tmp_path / "config.yml"
+    torn = config.read_text(encoding="utf-8") + "\naida: {name: [unterminated\n"
+    config.write_text(torn, encoding="utf-8")
+
+    # The last-good snapshot still answers, and the user's file is untouched.
+    assert cos_display_name(tmp_path) == "Friday"
+    assert config.read_text(encoding="utf-8") == torn
+    assert not list(tmp_path.glob("config.yml.bad.*"))

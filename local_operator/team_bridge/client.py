@@ -60,6 +60,7 @@ import asyncio
 import enum
 import hashlib
 import json
+import logging
 import re
 import time
 import unicodedata
@@ -81,6 +82,8 @@ from local_operator.providers.radient_credentials import (
 )
 from local_operator.team_bridge import availability
 from local_operator.team_bridge.settings import TeamBridgeSettings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Embedded served texts (fallbacks; the server is each text's canonical home)
@@ -700,9 +703,8 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
 def _refuses_field(refusal: BridgeRefusal, field: str) -> bool:
     """Whether ``refusal`` is a 400 validation refusal naming exactly ``field``.
 
-    Narrow on purpose: only a refusal that names the optional field may trigger
-    the re-send without it. Any other 400 (a bad label, a bad state) is the
-    user's or the caller's to see, and retrying it would hide it.
+    Narrow on purpose: only a refusal that names the field earns the
+    field-specific log line; every refusal is raised unchanged either way.
     """
 
     return refusal.http_status == 400 and refusal.details.get("field") == field
@@ -1225,11 +1227,16 @@ class TeamBridgeClient:
         ("Aida (Ben)"). It follows ``label``'s rule — ``active`` only — because
         it is a name change too, and bundling one into a pause is what rule 2
         forbids. Omitted entirely when ``None``, so the body is byte-identical
-        to the pre-field shape. The field must never cost the enable it rides
-        on: today's server ignores unknown fields (§6.6, plain
-        ``json.Unmarshal``), and if a server instead REFUSES the field
-        (``400`` naming ``field: agent_name``) the same request is re-sent ONCE
-        without it — a 400 wrote nothing, so the retry cannot double-apply.
+        to the pre-field shape. The paired hub accepts it on the write that
+        CREATES the endpoint too, and an older hub ignores it as an unknown
+        field (§6.6, plain ``json.Unmarshal``), so it rides the first enable.
+        There is deliberately NO strip-and-retry: the name is already repaired
+        into the label grammar (``cos_name.bridge_agent_name``), so a refusal
+        naming it is a real disagreement, and a silent re-send would turn a
+        rename re-sync into a bare ``state=active`` assertion (review R1-3).
+        Such a refusal is raised unchanged — the request's other fields are
+        never altered — and logged by its closed-set code only, never the
+        value.
 
         ``expected_account_id`` is the captured-account guard (§5.2's local
         desktop receipt; review round 1, R6/Q1): when supplied, the pinned
@@ -1286,13 +1293,15 @@ class TeamBridgeClient:
         try:
             result = await self._send("PUT", "/messaging/settings", body=body, access=access)
         except BridgeRefusal as refusal:
-            if "agent_name" not in body or not _refuses_field(refusal, "agent_name"):
-                raise
-            # The decoration was refused, not the write: re-send the user's
-            # request without it, on the SAME pinned access (no second account
-            # resolution between the two attempts).
-            body.pop("agent_name")
-            result = await self._send("PUT", "/messaging/settings", body=body, access=access)
+            if "agent_name" in body and _refuses_field(refusal, "agent_name"):
+                # Code and rule are a closed server set (§6.5); the name itself
+                # is user content and stays out of the log.
+                logger.warning(
+                    "team_bridge: agent_name refused: %s/%s",
+                    refusal.code,
+                    refusal.details.get("rule"),
+                )
+            raise
         self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
@@ -2335,10 +2344,12 @@ class StatusDiscipline:
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        #: ``endpoint_id -> agent_name`` this process last re-sent. The
-        #: debounce for :meth:`_sync_agent_name`: one attempt per (endpoint,
-        #: name), so a server that keeps echoing an older name (or refuses
-        #: the field) is not re-PUT on every fresh status read.
+        #: ``endpoint_id -> agent_name`` this process last re-sent SUCCESSFULLY.
+        #: The debounce for :meth:`_sync_agent_name`: a hub that lags its own
+        #: echo is not re-PUT on every fresh read. Recorded only after a 2xx
+        #: (review R1-2): a network blip or a 429/503 at the one fresh read after
+        #: a rename must not suppress that name for the life of the process; a
+        #: failed attempt is retried at the next fresh read (≥ the cache TTL).
         self._agent_name_sent: dict[str, str] = {}
 
     @property
@@ -2594,11 +2605,17 @@ class StatusDiscipline:
 
         * the answer is READY and its selected tenant is eligible with an
           ACTIVE endpoint (never resumes a paused/disabled one it can see);
-        * the endpoint block ECHOES ``agent_name`` (the key present, null or a
-          string) — proof the server supports the field; against a server that
-          does not, nothing is ever sent, so the race window cannot open;
+        * the endpoint block carries the ``agent_name`` KEY — the paired hub
+          always serves it on status (``null`` when unset), so its absence
+          means an older hub that ignores the field; nothing is sent there,
+          so the race window cannot open;
         * the echo differs from the resolved name, and this process has not
-          already tried that name for that endpoint (the debounce);
+          already re-sent that name for that endpoint (the debounce);
+
+        WHY UNDER THE STATUS LOCK. This runs inside the per-account lock the
+        fresh read holds. That serialises re-syncs, which is what keeps two
+        coalesced readers from both PUTting the same rename; the cost (one
+        bounded PUT) is paid only on the single fresh read after a rename.
         * this machine holds the committed owner for THIS account and
           endpoint — the user consented here, so publishing the CoS name is
           part of the enrollment they chose, not a status read enrolling.
@@ -2643,7 +2660,6 @@ class StatusDiscipline:
             or owner.endpoint_id != endpoint_id
         ):
             return
-        self._agent_name_sent[endpoint_id] = wanted
         try:
             await self._client.put_settings(
                 state="active",
@@ -2654,6 +2670,7 @@ class StatusDiscipline:
             )
         except Exception:  # noqa: BLE001 - a display name never fails a status read
             return
+        self._agent_name_sent[endpoint_id] = wanted
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.
