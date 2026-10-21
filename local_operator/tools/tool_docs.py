@@ -150,6 +150,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="create/update",
                 blurb="Author or fix a role, or a specialist profile.",
             ),
+            ToolDocOp(
+                op="delete",
+                blurb=(
+                    "Remove a role/specialist created for THIS conversation; an "
+                    "account row is refused (delete it from the user surfaces)."
+                ),
+            ),
         ),
         notes=(
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
@@ -167,7 +174,43 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "and project briefs on top of; a role is launched with "
             "``task(agent='<name>')``.\n"
             "- When a role's guidance proves wrong, fix it with the `agent` "
-            "tool rather than patching one prompt."
+            "tool rather than patching one prompt.\n"
+            "- SCOPE, the reuse → ephemeral → durable ladder: first reuse a role "
+            "that already resolves (list/search; an account role is usable "
+            "everywhere). If nothing fits the task, create it WITH NO ``scope`` — "
+            "it then lives in THIS conversation only: usable for the rest of the "
+            "conversation (task, /agent, teams), invisible in every other one, and "
+            "gone with it. A DURABLE profile (saved for every conversation) is the "
+            "user's decision: ``scope='global'`` needs their confirmation, and "
+            "this host may not be able to ask — the refusal names the desktop "
+            "Profiles editor, the TUI /agent form and `lop agents`, plus the retry "
+            "without ``scope``. Never choose durable just because a one-off would "
+            "also work. ``op='delete'`` cleans up a conversation role; it cannot "
+            "delete an account row."
+        ),
+    ),
+    # -- team ---------------------------------------------------------------
+    "team": ToolDocNotes(
+        ops=(
+            ToolDocOp(op="list", blurb="What teams exist."),
+            ToolDocOp(op="show", blurb="A team's roster, briefs and project."),
+            ToolDocOp(
+                op="create/update",
+                blurb="Author a roster, or change its members and briefs.",
+            ),
+        ),
+        notes=(
+            "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
+            "when one covers the work; otherwise create it WITH NO ``scope`` so it "
+            "lives in THIS conversation only (usable until the conversation ends, "
+            "invisible elsewhere, gone with it). A team saved for every conversation "
+            "is the user's decision: ``scope='global'`` needs their confirmation, and "
+            "this host may not be able to ask — the refusal names the desktop Teams "
+            "editor, the TUI /team form and `lop teams`, plus the retry without "
+            "``scope``. `team_delete` removes a conversation team only; an account "
+            "team must be deleted from a user surface, which asks its own "
+            "confirmation. A conversation team may reference account roles: those "
+            "are not copied, and they resolve from the account in every conversation."
         ),
     ),
     # -- ask ----------------------------------------------------------------

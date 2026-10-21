@@ -105,7 +105,12 @@ async def test_an_idle_runtime_retires_itself_gracefully_on_a_build_move(
     handle, runtime, stop = IdleHandle(), IdleRuntime(), asyncio.Event()
     exits: list[str] = []
 
-    async def recording_exit(_handle: object, _runtime: object, *, reason: str) -> None:
+    async def recording_exit(
+        _handle: object, _runtime: object, *, reason: str, detail: str = ""
+    ) -> None:
+        # ``detail`` accepted (and unused) because the real ``_clean_exit`` now
+        # carries the why-now into the durable exit record; this cell is about
+        # the REASON string the log names.
         exits.append(reason)
 
     monkeypatch.setattr(process, "_clean_exit", recording_exit)
@@ -137,7 +142,12 @@ async def test_a_turn_arriving_during_the_announce_keeps_the_runtime(
     handle, runtime, stop = IdleHandle(admits=False), IdleRuntime(), asyncio.Event()
     exits: list[str] = []
 
-    async def recording_exit(_handle: object, _runtime: object, *, reason: str) -> None:
+    async def recording_exit(
+        _handle: object, _runtime: object, *, reason: str, detail: str = ""
+    ) -> None:
+        # ``detail`` accepted (and unused) because the real ``_clean_exit`` now
+        # carries the why-now into the durable exit record; this cell is about
+        # the REASON string the log names.
         exits.append(reason)
 
     monkeypatch.setattr(process, "_clean_exit", recording_exit)
@@ -161,7 +171,12 @@ async def test_a_stop_landing_during_the_stagger_leaves_the_exit_to_the_stop(
     stop.set()
     exits: list[str] = []
 
-    async def recording_exit(_handle: object, _runtime: object, *, reason: str) -> None:
+    async def recording_exit(
+        _handle: object, _runtime: object, *, reason: str, detail: str = ""
+    ) -> None:
+        # ``detail`` accepted (and unused) because the real ``_clean_exit`` now
+        # carries the why-now into the durable exit record; this cell is about
+        # the REASON string the log names.
         exits.append(reason)
 
     monkeypatch.setattr(process, "_clean_exit", recording_exit)

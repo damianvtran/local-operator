@@ -349,7 +349,7 @@ class TestResolution:
         """Once an operator has a reviewer of their own, theirs is the one that
         runs — otherwise editing the guidance would have no effect."""
         registry = AgentRegistry(tmp_path)
-        installed = install_seed("reviewer", registry=registry)
+        installed = install_seed("reviewer", registry=registry, scope="global")
         assert installed is not None
         installed = installed[0]
         registry.set_agent_system_prompt(str(installed.agent_id), "MY HOUSE RULES")
@@ -374,7 +374,7 @@ class TestResolution:
 class TestInstall:
     def test_installing_makes_an_ordinary_editable_registry_row(self, tmp_path) -> None:
         registry = AgentRegistry(tmp_path)
-        result = install_seed("reviewer", registry=registry)
+        result = install_seed("reviewer", registry=registry, scope="global")
         assert result is not None
         profile, already_installed = result
         assert profile.agent_id and not already_installed
@@ -387,13 +387,13 @@ class TestInstall:
         """Two launches of the same role can race; the second must not undo an
         edit the operator made to the first."""
         registry = AgentRegistry(tmp_path)
-        first_result = install_seed("reviewer", registry=registry)
+        first_result = install_seed("reviewer", registry=registry, scope="global")
         assert first_result is not None
         first, first_already_installed = first_result
         assert not first_already_installed
         registry.set_agent_system_prompt(str(first.agent_id), "EDITED")
 
-        second_result = install_seed("reviewer", registry=registry)
+        second_result = install_seed("reviewer", registry=registry, scope="global")
         assert second_result is not None
         second, second_already_installed = second_result
         assert second_already_installed, "a second install is a deliberate no-op and must say so"
@@ -402,14 +402,14 @@ class TestInstall:
         assert len([a for a in registry.list_agents() if a.name == "reviewer"]) == 1
 
     def test_an_unknown_starter_installs_nothing(self, tmp_path) -> None:
-        assert install_seed("nope", registry=AgentRegistry(tmp_path)) is None
+        assert install_seed("nope", registry=AgentRegistry(tmp_path), scope="global") is None
 
     def test_the_role_fields_survive_a_round_trip(self, tmp_path) -> None:
         """Tools/effort/delegate are encoded in tags because AgentData is a
         persisted, API-exposed model; this is the guard that the encoding and
         the decoding still agree."""
         registry = AgentRegistry(tmp_path)
-        install_seed("manager", registry=registry)
+        install_seed("manager", registry=registry, scope="global")
         packaged = seed("manager")
         profile = resolve_profile("manager", registry=registry)
         assert profile is not None
@@ -491,7 +491,7 @@ def test_installing_over_a_non_role_name_refuses_rather_than_lying(tmp_path) -> 
     registry = AgentRegistry(tmp_path)
     registry.create_agent(_edit_fields(name="reviewer", description="chat"))
     with _pytest.raises(NameTakenError):
-        install_seed("reviewer", registry=registry)
+        install_seed("reviewer", registry=registry, scope="global")
 
 
 def test_role_lookup_folds_case_like_the_seed_lookup_does(tmp_path) -> None:
@@ -577,7 +577,7 @@ def move_seed(seeds_dir: Path, name: str, *, version: str, body: str | None = No
 
 
 def _install(registry: AgentRegistry, name: str = "reviewer"):
-    installed = install_seed(name, registry=registry)
+    installed = install_seed(name, registry=registry, scope="global")
     assert installed is not None
     row = registry.get_agent_by_name(name)
     assert row is not None
@@ -885,7 +885,7 @@ def test_install_does_not_mint_a_case_duplicate(scratch_seeds, tmp_path) -> None
     role = registry.create_agent(_edit_fields(name="Reviewer", description="house", tags=["role"]))
     registry.set_agent_system_prompt(role.id, "HOUSE RULES")
 
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
 
     assert installed is not None
     names = sorted(agent.name for agent in registry.list_agents())
@@ -1304,7 +1304,7 @@ def test_a_switched_class_survives_an_update_and_reset_restores_it(scratch_seeds
     assert f"class:{PROACTIVE}" in after.tags
     assert registry.get_agent_system_prompt(after.id).strip() == "REVIEWER v2 GUIDANCE"
 
-    install_seed("reviewer", registry=registry, overwrite=True)
+    install_seed("reviewer", registry=registry, overwrite=True, scope="global")
     reset = registry.get_agent_by_name("reviewer")
     assert reset is not None
     assert f"class:{REACTIVE}" in reset.tags

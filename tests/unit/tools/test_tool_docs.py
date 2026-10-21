@@ -240,8 +240,14 @@ _WALK_DEPTH_CAP = 2
 # while every other entry here is byte-identical. The field is mode-independent,
 # so the blocking arm's bench number moved by the same +269 chars and still
 # passes under that ceiling.
+# RE-MEASURED (LOH-9 S2): agent 804 -> 1044 and team 779 -> 1018 are the ONLY
+# entries that moved. The agent doc gains the scope ladder (reuse -> ephemeral
+# -> durable), the delete op, and the consent refusal's user surfaces; the team
+# doc gains the same scope rule and its delete semantics. Both were measured
+# through this test's own printed table on the rebased tree, whose upstream
+# baseline is the #2520 ask raise above (ask 1063, unmoved here).
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 804,
+    "agent": 1044,
     "ask": 1063,
     "ask_withdraw": 314,
     "bash": 295,
@@ -264,7 +270,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 376 -> 240 chars, both model docstrings to one line each). 729 is the
     # structural floor for a capability the model must be able to call. The
     # paired start-context raise is stated in scripts/bench_context_budget.py.
-    "bridge": 729,
+    # RE-MEASURED (#2757 R1): 729 -> 755 via this test's canonical isolated
+    # renderer (count_text_tokens(render_tool_doc(...))). Threads add the
+    # channel_thread op and thread_root_id parameter plus their wire guidance;
+    # no other tool's measured entry moved. This is the deliberate 26-token
+    # cost of letting agents read and answer IN a thread instead of the channel.
+    "bridge": 755,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -404,8 +415,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # list-of-objects shape and its three field descriptions, not added
     # sentences. It is the ONLY entry that moved. Re-measured deliberately
     # through this test's own printed table; the tier arm below is unmoved
-    # because this doc does not read config.
-    "team": 779,
+    # because this doc does not read config. RE-MEASURED (LOH-9 S2): 779 ->
+    # 1018, the scope rule and delete semantics; measured with the same printed
+    # table, and the tier arm below still does not read config.
+    "team": 1018,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -433,7 +446,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
 #: 811 -> 833 (#2509): the same +22 the canonical table above takes, because
 #: the qualified tools/effort/delegate descriptions render on both arms.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 833, "task": 764}
+#: 833 -> 1073 (LOH-9 S2): the same scope ladder the canonical arm takes; the
+#: tier arm renders it identically, so `task` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1073, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

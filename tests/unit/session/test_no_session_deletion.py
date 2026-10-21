@@ -1631,6 +1631,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "boot records under <config>/run/host only; fixed dirname + one-level "
         "'*.json' glob, never a session path",
     ),
+    (
+        "local_operator/session/runtime/journal.py::clear_run_record",
+        "<path>.unlink",
+        "one run record FILE at <session_dir>/runtime-run.json, and only when its "
+        "own run key matches the caller's; never a directory and never the transcript",
+    ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
     # and reaching sessions/ no more than that one does.
@@ -2559,6 +2565,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Adopts a VERIFIED staging directory into sessions/ under a new id (never "
         "renames a session directory); the owner deleted the original through "
         "cleanup.remove_session_dir",
+    ),
+    (
+        "local_operator/network/mobility.py::_stash_session_roles",
+        "os.replace",
+        "LOH-9 S2's drop path: renames the session's `roles/` SUBTREE out to "
+        "<config>/dropped-session-roles/<id>, which is OUTSIDE sessions/; the "
+        "session directory itself is never this call's source or target — its "
+        "removal stays cleanup.remove_session_dir's",
     ),
     (
         "local_operator/network/mobility.py::_promote",

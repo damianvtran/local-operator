@@ -198,5 +198,10 @@
     "role": "read-only refusal",
     "tone": "direct, calm",
     "note": "Agent profile changes, not project changes. Follower session cannot open/save the local editor."
+  },
+  "tui.authoring.scope_conversation": {
+    "role": "facts badge in the agent/team picker",
+    "tone": "plain, lowercase, no jargon",
+    "note": "Marks a role or team that exists only in the current conversation. It rides a 27-cell facts line after the class token, so keep it short and concrete; it is never a warning and never uses error ink."
   }
 }

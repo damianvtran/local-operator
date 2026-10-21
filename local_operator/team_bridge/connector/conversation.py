@@ -63,6 +63,9 @@ class ConversationCardMetadata:
     mention: bool
     message_id: str
     conversation_seq: int
+    #: The thread root when this message is a REPLY; ``None`` for a
+    #: channel-level message. An id, never content.
+    thread_root_id: str | None = None
 
 
 def build_conversation_card(metadata: ConversationCardMetadata) -> str:
@@ -78,16 +81,25 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     mention_line = "mention: yes" if metadata.mention else "mention: no"
     label = _one_line(metadata.conversation_label) or "conversation"
     sender = _one_line(metadata.sender_label) or "member"
+    kind = "Thread reply" if metadata.thread_root_id else "Channel message"
     lines = [
-        f"Channel message · {label} · " f"from {sender} ({metadata.sender_kind}, same tenant)",
+        f"{kind} · {label} · " f"from {sender} ({metadata.sender_kind}, same tenant)",
         # ONE home for the untrusted clause: the shipped constant, verbatim.
         BRIDGE_UNTRUSTED_CLAUSE,
         "",
         mention_line,
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
-        f"guidance: {GUIDANCE_VERSION}",
     ]
+    if metadata.thread_root_id:
+        # Thread context: where the reply lives and how to answer IN it, so an
+        # agent coordinating in a thread does not answer at channel level.
+        lines += [
+            f"thread_root_id: {metadata.thread_root_id}",
+            "reply in thread: bridge channel_post with this thread_root_id; "
+            "read the thread with channel_thread",
+        ]
+    lines.append(f"guidance: {GUIDANCE_VERSION}")
     return "\n".join(lines)
 
 
@@ -382,6 +394,7 @@ async def handle_conversation_available(
                 mention=ref.mention,
                 message_id=message_id,
                 conversation_seq=ref.conversation_seq,
+                thread_root_id=ref.thread_root_id,
             )
             sender: Mapping[str, Any] = {
                 "account_id": "",
@@ -440,6 +453,7 @@ async def handle_conversation_available(
                 mention=ref.mention,
                 message_id=message_id,
                 conversation_seq=ref.conversation_seq,
+                thread_root_id=ref.thread_root_id,
             )
 
         fetched = await _fetch_body(client, ref, owner, access)

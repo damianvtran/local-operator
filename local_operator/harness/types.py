@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from typing import (
     Any,
     Awaitable,
@@ -1457,6 +1458,39 @@ class AskRowQuestion(AskQuestion):
 AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]]
 
 
+@dataclass(frozen=True)
+class DurableWriteIntent:
+    """One TOOL-proposed write that would change the user's ACCOUNT store.
+
+    The host's consent seam (:attr:`ToolContext.authorize_durable_write`) is
+    handed this value so it can show the user WHAT would become account-wide
+    before answering. It is deliberately a description and carries no authority:
+    a model cannot construct one on the wire, and the origin string the seam
+    returns is audit only.
+
+    Why a separate type rather than passing ``params``: the seam must not be able
+    to read or mutate the tool's payload, and the question the user answers is
+    this small — kind, operation, name — not a whole AgentParams (whose fields
+    would make the confirmation card a JSON dump).
+
+    ``operation`` names the act in the tool's own vocabulary. ``install`` and
+    ``reset`` are seed operations: they create a row from a packaged starter or
+    overwrite one the tool did not author, and both are account mutations when
+    they land in the account store.
+    """
+
+    kind: Literal["agent", "team"]
+    #: ``sync`` is here because syncing rewrites installed account rows and its
+    #: hub arm fetches account definitions — both are account mutations the
+    #: seam is asked about, even though the tool's own verb is a different one.
+    operation: Literal["create", "update", "delete", "install", "reset", "sync"]
+    name: str
+    #: Always ``global`` today: a conversation-scoped write never asks. Kept
+    #: explicit so a future scope cannot be read as "no consent needed" by
+    #: omission.
+    scope: Literal["global"] = "global"
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -1649,6 +1683,27 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
+    # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
+    # store is a user decision, and a model must not be able to stamp its own
+    # provenance (which is why no tool parameter carries a grant). A host that
+    # CAN show a specific, non-rememberable confirmation installs this callable;
+    # it returns an audit origin string when the user approved, or ``None`` when
+    # they did not. Declared rather than probed, per the class docstring.
+    #
+    # ``None`` IS NOT "ALLOW": with no seam a tool-issued account write is
+    # REFUSED, never silently permitted. There is no in-tree installer in S2:
+    # the existing approval card is satisfied by the session-scoped "approve
+    # all" latch without showing the specific intent, so wiring this to it would
+    # let a blanket shortcut authorize account-wide writes. The refusal names
+    # the user surfaces that ARE the user's own act (desktop editor, TUI form,
+    # CLI) plus the conversation-only retry.
+    #
+    # Off the tool wire, like every other host-owned presence field here: a
+    # callback is a capability, never payload a provider may see.
+    authorize_durable_write: Callable[[DurableWriteIntent], Awaitable[str | None]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process

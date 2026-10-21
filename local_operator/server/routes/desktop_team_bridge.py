@@ -685,7 +685,17 @@ async def get_directory(
     from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
     if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
-        _raise_read("invalid_request")
+        # Name the field, not the version. A local grammar refusal used to carry
+        # the generic read sentence, which the renderer classified as an outdated
+        # server and told the user to update a current client.
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_request",
+                "message": "tenant_id was not in a shape this client accepts",
+                "field": "tenant_id",
+            },
+        )
     client = TeamBridgeClient(config_manager.config_dir)
     try:
         payload = await client.directory(tenant_id)
@@ -1195,6 +1205,10 @@ class ConversationSendIn(_Strict):
     client_ref: str = Field(min_length=1, max_length=128)
     body: str = Field(min_length=1)
     agent_label: str | None = Field(default=None, max_length=64)
+    #: Reply in this root message's thread (agent-server threads). Held to the
+    #: minted message-id grammar here so a malformed id never reaches the hub;
+    #: the hub owns the real rule (same conversation, root not a reply).
+    thread_root_id: str | None = Field(default=None, pattern=r"^bcmsg_[0-9a-z]{8,64}$")
 
 
 class ConversationJoinIn(_Strict):
@@ -1616,6 +1630,55 @@ async def send_conversation_message(
                 text=body.body,
                 tenant_id=body.tenant_id,
                 agent_label=body.agent_label,
+                thread_root_id=body.thread_root_id,
+            )
+        )
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/replies",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One thread (root + replies, oldest-first) under the history route's gate.
+
+    Mirrors ``conversation_history``'s discipline: the id grammar is checked
+    before any I/O, an unknown query key is refused rather than dropped, and the
+    numeric hints are parsed (never interpolated) so a caller-controlled value
+    is a 422, not a 500.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if set(request.query_params) - {"tenant_id", "limit", "after_seq", "endpoint_id"}:
+        _raise_read("invalid_request")
+    try:
+        parsed_limit = int(limit) if limit is not None else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if parsed_after is not None and parsed_after < 0:
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_replies(
+                conversation_id,
+                message_id,
+                tenant_id=tenant_id,
+                limit=parsed_limit,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
             )
         )
     )
