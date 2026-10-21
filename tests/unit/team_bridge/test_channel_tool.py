@@ -609,3 +609,55 @@ def test_channel_thread_is_a_read_tier_op() -> None:
     assert tool.call_approval_tier is not None
     assert tool.call_approval_tier({"op": "channel_thread"}) == "read"
     assert tool.call_approval_tier({"op": "channel_post"}) == "write"
+
+
+@pytest.mark.asyncio
+async def test_thread_ops_reach_the_hub_with_the_exact_upstream_shape() -> None:
+    """The real client against a mock transport: the reply carries
+    ``thread_root_id`` in the body, the thread read hits the replies path with
+    the agent's endpoint, and a channel-level post sends no thread key at all
+    (an older hub never sees an unknown field)."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return _ok({"root": {"id": "bcmsg_root0001", "reply_count": 1}, "replies": []})
+        return _ok({"message": {"id": "bcmsg_reply001", "seq": 2}})
+
+    runtime = _runtime(
+        TeamBridgeClient(
+            None,
+            base_url="https://hub.example/v1",
+            store=FakeStore(),
+            transport=httpx.MockTransport(handler),
+        )
+    )
+    await execute_bridge(
+        runtime,
+        {
+            "op": "channel_post",
+            "channel_id": "bcv_abcd1234",
+            "body": "claimed",
+            "thread_root_id": "bcmsg_root0001",
+        },
+    )
+    await execute_bridge(
+        runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "top level"}
+    )
+    read = await execute_bridge(
+        runtime,
+        {"op": "channel_thread", "channel_id": "bcv_abcd1234", "thread_root_id": "bcmsg_root0001"},
+    )
+    assert read["ok"] is True
+    reply_body = json.loads(requests[0].content)
+    assert requests[0].url.path == "/v1/messaging/conversations/bcv_abcd1234/messages"
+    assert reply_body["thread_root_id"] == "bcmsg_root0001"
+    assert "thread_root_id" not in json.loads(requests[1].content)
+    assert (
+        requests[2].url.path
+        == "/v1/messaging/conversations/bcv_abcd1234/messages/bcmsg_root0001/replies"
+    )
+    assert requests[2].url.params["endpoint_id"] == "bep_1"
+    assert requests[2].url.params["tenant_id"] == TENANT
