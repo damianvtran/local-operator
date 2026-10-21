@@ -1083,9 +1083,98 @@ class SyncEngine:
         """
         for key in keys:
             try:
+                if self._holds_current_copy(owner, key):
+                    # THE STEADY STATE COSTS NOTHING ON THE WIRE. This pull exists
+                    # for a key the member does NOT hold yet (a share granted since
+                    # the last pull); a value change on a key it already holds is
+                    # the owner's ANNOUNCE to deliver. Before this guard every tick
+                    # re-requested every held key with an empty announced digest,
+                    # which can never match the held one, so the owner re-served
+                    # each key as ``held + 1`` — measured on the live mesh as 5,491
+                    # ``credential.copy`` rows a day for five unchanged values, a
+                    # generation bump per key per 15 s tick, and (through the
+                    # re-applied row's new id) one account-change notice per tick
+                    # in every session on the member.
+                    continue
                 self._pull_blocking(owner, key, announced_gen=0, announced_digest="")
             except Exception:  # noqa: BLE001 — one key never aborts the rest
                 logger.debug("credentials sync: placement pull %s failed", key, exc_info=True)
+
+    def _holds_current_copy(self, owner: str, key: str) -> bool:
+        """Whether this device already holds ``owner``'s copy of ``key``, locally.
+
+        TWO HALVES, BOTH REQUIRED: the ``applied`` ledger names a copy from THIS
+        owner with a digest, AND the copy is still in this device's own store
+        (found by its origin marker, the same way the sweep and the wipe find
+        it). The ledger alone is not enough — an operator who deleted the copy
+        by hand would otherwise never be re-served, because the owner's ack row
+        already says "synced" and it will not announce again. Any doubt (no
+        ledger row, an unopenable store) answers ``False``, which costs one
+        pull — the pre-guard behaviour — never a missed copy.
+        """
+        document = self._placement()
+        if document is None:
+            return False
+        entry = document.entry(key)
+        if entry is None:
+            return False
+        held = SyncState.load(document.network_id, root=self._root).applied_for(key)
+        if not held or str(held.get("owner_device") or "") != owner:
+            return False
+        if not str(held.get("digest") or ""):
+            return False
+        return self._copy_present(owner, key, entry)
+
+    def _copy_present(self, owner: str, key: str, entry: Any) -> bool:
+        """Whether a copy of ``key`` from ``owner`` is in this device's store.
+
+        Read-only, and it never creates a store: the class-2 half checks the
+        store file first, exactly as the wipe does, because a presence probe
+        must not be the reason a secret store appears.
+        """
+        if str(entry.kind) == SECRET_KIND:
+            try:
+                from local_operator.secrets.keys import store_path
+
+                if not store_path(self._root).exists():
+                    return False
+                from local_operator.secrets import access
+
+                store = access.open_store(self._root)
+            except Exception:  # noqa: BLE001 — cannot tell: pull rather than guess
+                return False
+            try:
+                record = store.describe(secret_name_from_key(key))
+                origin = getattr(record, "origin", None)
+                return (
+                    isinstance(origin, dict)
+                    and str(origin.get("key") or "") == key
+                    and str(origin.get("owner_device") or "") == owner
+                )
+            except Exception:  # noqa: BLE001 — an absent record is "not held"
+                return False
+            finally:
+                _close_quietly(store)
+        try:
+            store = self._store()
+        except Exception:  # noqa: BLE001 — cannot tell: pull rather than guess
+            return False
+        try:
+            for row in store.list_credentials(
+                str(entry.provider or key), include_disabled=True
+            ):
+                origin = getattr(row, "data", {}).get(MESH_ORIGIN_KEY)
+                if (
+                    isinstance(origin, dict)
+                    and str(origin.get("key") or "") == key
+                    and str(origin.get("owner_device") or "") == owner
+                ):
+                    return True
+            return False
+        except Exception:  # noqa: BLE001 — cannot tell: pull rather than guess
+            return False
+        finally:
+            _close_quietly(store)
 
     def _exchange_blocking(self, device_id: str) -> None:
         network_id, announces = self._pending_announces(device_id)
@@ -1798,18 +1887,13 @@ class SyncEngine:
             # THE SAME VALUE: adopt the owner's counter (up OR down — the digest
             # proves no value moves) and confirm. This is the reset edge's cheap
             # path and the ordinary "metadata-only touch" path at once.
-            if announced_gen != held_gen:
-                with mutate(document.network_id, self._root) as editable:
-                    editable.record_applied(
-                        key,
-                        gen=announced_gen,
-                        digest=announced_digest,
-                        owner_device=owner,
-                        row_id=int(held.get("row_id") or 0) if held else 0,
-                        at=time.time(),
-                    )
-            self._send_ack(document.network_id, owner, key, announced_gen, announced_digest)
+            self._adopt_counter(document.network_id, key, owner, announced_gen, announced_digest)
             return "in_sync"
+        if held_digest and not self._copy_present(owner, key, entry):
+            # The ledger names a copy the store no longer has (deleted by hand,
+            # a lost store): claim nothing, so the owner serves the value again
+            # rather than confirming bytes this device cannot produce.
+            held_digest = ""
         link = self._server._ensure_link(owner)  # noqa: SLF001 — the one dial seam
         if link is None:
             return "offline"
@@ -1823,6 +1907,11 @@ class SyncEngine:
             "key": key,
             "gen": announced_gen,
             "held": held_gen,
+            # ADDITIVE, and the owner's "adopt, don't re-serve" signal: an owner
+            # whose current digest equals this answers ``in_sync`` with no value
+            # and no generation bump. An older owner ignores the field and serves
+            # as before; the member's apply then adopts an equal digest in place.
+            "held_digest": held_digest,
         }
         try:
             reply = link.request(frame, timeout=COPY_TIMEOUT_S)
@@ -1830,7 +1919,9 @@ class SyncEngine:
             logger.debug("credentials sync: copy request for %s failed", key, exc_info=True)
             return "offline"
         detail = reply.get("detail") if isinstance(reply, dict) else None
-        return self.apply_copy_reply(key, detail, owner=owner, held_gen=held_gen)
+        return self.apply_copy_reply(
+            key, detail, owner=owner, held_gen=held_gen, held_digest=held_digest
+        )
 
     def apply_copy_reply(
         self,
@@ -1839,6 +1930,7 @@ class SyncEngine:
         *,
         owner: str,
         held_gen: int = 0,
+        held_digest: str = "",
     ) -> str:
         """Validate and apply one ``net_broker kind=copy`` reply.
 
@@ -1859,6 +1951,19 @@ class SyncEngine:
         entry = document.entry(key)
         if entry is None or str(entry.owner_device) != owner:
             return "refused:not_a_holder"
+        if (
+            isinstance(detail, dict)
+            and str(detail.get("kind") or "") == "in_sync"
+            and held_digest
+            and _bounded_digest(detail.get("digest")) == held_digest
+        ):
+            # THE OWNER CONFIRMED THE HELD VALUE (``owner_copy``'s adopt arm): no
+            # bytes crossed, so nothing is written to the store — only the
+            # counter is adopted, exactly as an equal-digest announce adopts it.
+            served = peer_int(detail.get("gen"), maximum=GEN_CEILING)
+            if 0 < served < GEN_SAFE_MAX:
+                self._adopt_counter(document.network_id, key, owner, served, held_digest)
+            return "in_sync"
         if not isinstance(detail, dict) or str(detail.get("kind") or "") != "copy":
             logger.debug("credentials sync: copy for %s answered %s", key, detail)
             code = str(detail.get("code") or "") if isinstance(detail, dict) else ""
@@ -1899,6 +2004,16 @@ class SyncEngine:
         if served <= held_gen:
             # NEVER A VALUE ROLLBACK (§5.2's monotonicity rule): a generation at
             # or below what this device holds is dropped however it arrived.
+            return "in_sync"
+        if held_digest and reply_digest == held_digest:
+            # THE SAME BYTES, RE-SERVED (an owner build without the adopt arm).
+            # ``held_digest`` is only ever passed once the copy is proven
+            # present in the store (``_pull_blocking``), so adopting is safe:
+            # adopt the counter and keep the row this device already holds.
+            # Re-writing it would insert a new row and sweep the old one, and
+            # the new row id reads to every session's binding recorder as a
+            # different credential — the per-tick notice the live mesh showed.
+            self._adopt_counter(document.network_id, key, owner, served, reply_digest)
             return "in_sync"
         provenance = detail.get("provenance")
         if not isinstance(provenance, Mapping):
@@ -2100,6 +2215,32 @@ class SyncEngine:
         finally:
             _close_quietly(store)
 
+    def _adopt_counter(
+        self, network_id: str, key: str, owner: str, gen: int, digest: str
+    ) -> None:
+        """Move the held copy's counter to ``gen`` and ack it — no value moves.
+
+        THE ONE ADOPT, shared by the three paths that prove equal bytes (an
+        equal-digest announce, the owner's ``in_sync`` copy answer, and a
+        re-served copy whose digest matches what is held). Up OR down: the
+        digest is the proof no value rolls back, which is the reset edge's
+        rule. The held ``row_id``/``record_id`` are carried forward untouched,
+        because the store row they name is the one still serving.
+        """
+        with mutate(network_id, self._root) as editable:
+            held = editable.applied_for(key) or {}
+            if int(held.get("gen") or 0) != int(gen) or str(held.get("digest") or "") != digest:
+                editable.record_applied(
+                    key,
+                    gen=gen,
+                    digest=digest,
+                    owner_device=owner,
+                    row_id=int(held.get("row_id") or 0),
+                    record_id=str(held.get("record_id") or ""),
+                    at=time.time(),
+                )
+        self._send_ack(network_id, owner, key, gen, digest)
+
     def _send_ack(self, network_id: str, owner: str, key: str, gen: int, digest: str) -> None:
         """Tell the owner what this device holds now. Best effort, never blocking."""
         if gen <= 0 or not digest:
@@ -2276,6 +2417,10 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
         return refused
     requested = peer_int(frame.get("gen"), maximum=GEN_CEILING)
     held = peer_int(frame.get("held"), maximum=GEN_CEILING)
+    # Optional on the wire (older members omit it): what the member says it
+    # holds, by digest. Only ever used to WITHHOLD a copy and a bump, never to
+    # grant anything, so a forged one costs the forger its own copy.
+    held_digest = _bounded_digest(frame.get("held_digest"))
     if held >= GEN_SAFE_MAX:
         # THE ADOPTION BOUND (review round 1, R1): adopting ``held + 1`` at the
         # ceiling would freeze this key's generation forever — bumps clamp and
@@ -2364,6 +2509,36 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
                     "no_value",
                     f"this device has no copyable value for {key!r} right now; nothing was copied",
                 )
+            digest = str(meta.get("digest") or "")
+            if "held_digest" not in frame and held > 0:
+                # A MEMBER BUILD THAT PREDATES THE FIELD (the live cloud-node-1
+                # ran 0.84.5): its own ACK for exactly the generation it says it
+                # holds is the held-digest evidence instead. Without this the
+                # fleet's owner would keep bumping and re-serving every tick
+                # until every member upgraded. A frame that CARRIES the field —
+                # even empty, which a current member sends when its copy is gone
+                # from its store — is taken at its word, so a lost copy is
+                # always re-served.
+                with mutate(str(broker.network_id), broker.root) as state:
+                    acked = state.ack_for(by, key)
+                if (
+                    isinstance(acked, Mapping)
+                    and acked.get("wiped") is not True
+                    and int(acked.get("gen") or 0) == held
+                ):
+                    held_digest = _bounded_digest(acked.get("digest"))
+            if held_digest and held_digest == digest:
+                # ADOPT, DON'T RE-SERVE. The member already holds these exact
+                # bytes, so nothing is copied, nothing is audited as a copy, and
+                # the generation does NOT move: ``_served_generation`` would
+                # answer ``held + 1`` whenever the member's counter is at or
+                # past ours, which is exactly the steady state, and a bump per
+                # request was the live mesh's 1,099 generations for five
+                # unchanged values. The member adopts our counter (up or down)
+                # the way an equal-digest announce already makes it adopt.
+                with mutate(str(broker.network_id), broker.root) as state:
+                    current = _ensure_generation(state, key, meta)
+                return {"kind": "in_sync", "key": key, "gen": current, "digest": digest}
             served = _served_generation(
                 broker.root, broker.network_id, key, meta, requested=requested, held=held
             )
