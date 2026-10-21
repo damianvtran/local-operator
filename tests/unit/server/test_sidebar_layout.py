@@ -50,6 +50,7 @@ from local_operator.server.sidebar_layout import (
     read_layout,
     write_layout,
 )
+from local_operator.session.store_failures import display_root
 
 TOKEN = "synthetic-sidebar-layout-token"
 
@@ -342,7 +343,7 @@ async def test_a_failed_write_is_a_500_with_a_vetted_sentence(desktop) -> None:
     detail = response.json()["detail"]
     assert detail["code"] == "sidebar_layout_write_failed"
     assert detail["text"] == desktop_preferences.write_refusal(root)
-    assert str(root) in detail["text"]
+    assert display_root(root) in detail["text"]
     assert "Errno" not in detail["text"]
     assert target.is_dir()
     assert not [path for path in root.iterdir() if path.name.endswith(".tmp")]
@@ -365,6 +366,22 @@ async def test_a_failed_write_logs_the_real_error(desktop, monkeypatch, caplog) 
     assert "No space left on device" not in response.json()["detail"]["text"]
     assert "No space left on device" in caplog.text
     assert any(record.exc_info for record in caplog.records if record.levelname == "ERROR")
+
+
+def test_the_refusal_names_the_root_home_relative() -> None:
+    """The sentence uses the sibling ``display_root`` spelling, not an absolute path.
+
+    A refusal that says "the volume holding /Users/someone/.local-operator" is
+    addressable but noisy, which is why every sibling names the root through
+    ``display_root`` (agent review round 2, R2-2). The failure tests above use
+    a temporary root, which is not under the home directory and so is left
+    alone by that helper; this pins the shortening itself.
+    """
+    rooted = Path.home() / ".local-operator"
+    sentence = desktop_preferences.write_refusal(rooted)
+    assert "~/.local-operator" in sentence
+    assert str(rooted) not in sentence
+    assert "Retrying will not help" not in sentence
 
 
 # ---------------------------------------------------------------------------

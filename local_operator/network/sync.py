@@ -353,6 +353,14 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "mesh.json": "the ownership stamp, rewritten by whoever adopts the copy",
     # Describes a replica, means nothing inside a session.
     REPLICA_CURSOR_NAME: "the replica cursor, which is about this device's copy",
+    # The DESKTOP sidebar's destination layout (``server.sidebar_layout``): which
+    # destinations this device's column shows above its ``More`` fold. A device
+    # preference, not session content -- the design stores it on the backend so
+    # it survives an app update on THIS device ("one value per device"), and a
+    # copy would impose the source window's arrangement on a machine whose
+    # window is a different size and whose capabilities may differ. It lives at
+    # the config root, beside the sessions tree rather than in one.
+    "sidebar-layout.json": "a device-scoped desktop preference: the source window's sidebar order",
     # The definitions index (``network.definitions.INDEX_NAME``): the agent and team
     # rows this device mirrors to a peer, written BESIDE the sessions tree
     # (``<config>/network/definitions.json``) rather than into a session. It is not an
