@@ -68,3 +68,7 @@ bench/
 # demand a mirror rule in mobile/web/.gitignore (whose tree-mirror guard
 # requires it) for a rule that can never apply inside that subtree.
 /.worktrees/
+
+# pytest HOME/TMPDIR sandboxes created by local verification runs
+.tmp-tmp/
+.tmp-home/
