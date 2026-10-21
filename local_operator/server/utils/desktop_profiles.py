@@ -44,8 +44,18 @@ def profile_detail(
         metadata = profile
     assert metadata is not None
     origin = seed_origin(row) if row is not None else None
+    # WHERE THIS ROW LIVES, additively (LOH-9 S2). Derived from the registry when
+    # it can answer (the session composite), and "global" for a plain registry —
+    # this helper is also used by the account-only routes, where every row is the
+    # account's. A packaged seed has no row yet, so it reads global: installing it
+    # is still a write to one of the two stores.
+    scope = "global"
+    scope_of = getattr(registry, "scope_of", None)
+    if row is not None and callable(scope_of):
+        scope = scope_of(row)
     result: dict[str, Any] = {
         "name": resolved,
+        "scope": scope,
         # The RAW display label (never a composed form -- the desktop lane
         # computes that per surface, exactly as the TUI does); it rides the
         # same projection the catalogue and GET responses share.

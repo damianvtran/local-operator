@@ -279,6 +279,38 @@ def test_session_rows_reach_the_session_pickers_and_no_global_catalogue(scoped) 
     }
     assert {row["name"] for row in team_catalogue(global_teams)} == {"account-team"}
 
+    # THE ADDITIVE SCOPE FACT (S2). The desktop renderer reads this to paint a
+    # badge and to know it may send a session id to the picker route; a plain
+    # registry has no scopes, so every row it returns reads global.
+    by_name = {row["name"]: row for row in profile_catalogue(agents)}
+    assert by_name["conversation-role"]["scope"] == "session"
+    assert by_name["account-role"]["scope"] == "global"
+    global_rows = {row["name"]: row["scope"] for row in profile_catalogue(global_agents)}
+    assert global_rows["account-role"] == "global"
+    # The catalogue also lists packaged starters; none of them can be session.
+    assert set(global_rows.values()) == {"global"}
+
+
+def test_a_raced_duplicate_name_paints_one_row_and_the_session_row_wins(scoped) -> None:
+    """The composite refuses a session create over an account name, but the
+    REVERSE race is tolerated: an account row created later shares the name. The
+    listing documented dedupe-by-name but only consulted `seen` for seeds, so the
+    race painted the same key twice — and completion would put one of two rows'
+    key in the buffer with no way to tell which definition runs.
+    """
+    from local_operator.agent_profiles import agent_listing_rows
+
+    agents, _, global_agents, _, _ = scoped
+    _role(agents.session_registry, "reviewer")
+    _role(global_agents, "reviewer")
+
+    rows = [row for row in agent_listing_rows(agents) if row[0] == "reviewer"]
+
+    assert len(rows) == 1
+    # The composite lists session rows first, so the surviving row is the one in
+    # force — and its badge says so.
+    assert "this conversation" in rows[0][2]
+
 
 def test_a_scoped_registry_write_never_creates_the_session_tree(
     stores: tuple[AgentRegistry, TeamRegistry, Path],
@@ -402,3 +434,12 @@ def test_a_global_write_through_the_composite_leaves_the_session_store_alone(sto
     assert agents.scope_of(row) == "global"
     assert global_agents.get_agent_by_name("durable") is not None
     assert not (session_dir / "roles").exists()
+
+
+def test_the_scope_feature_key_is_its_own_capability() -> None:
+    """A renderer needs to know the additive field exists before it sends a
+    session id to a picker route or paints a badge (design §3.3). Its own key,
+    not a bump of ``profile_catalogue``: nothing existing is withheld."""
+    from local_operator.server.features import feature_flags
+
+    assert feature_flags()["profile_scope"] == 1

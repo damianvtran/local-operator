@@ -85,6 +85,12 @@ def feature_flags() -> dict[str, Any]:
         # working surface because a newer one is missing.
         "skill_catalogue": 1,
         "profile_catalogue": 1,
+        # THE SCOPE FACT ON PROFILE/TEAM ROWS (LOH-9 S2). Its own key, by the rule
+        # stated below: nothing existing is withheld, and a renderer that reads it
+        # knows it may send ``session_id`` to a picker route and paint a badge for
+        # a conversation-scoped row. A client that predates it keeps the fields it
+        # already parsed.
+        "profile_scope": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
         # no network) plus check/apply/apply-all/retry. A renderer gates the

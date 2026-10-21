@@ -421,3 +421,31 @@ async def test_the_class_verb_shows_no_switch_hint(tmp_path: Path) -> None:
         notice = editor.picker._notice or ""
         hint_shown = "Enter to switch" in notice
     assert not hint_shown, notice
+
+
+def test_the_scope_token_is_painted_muted_and_dropped_whole_when_it_cannot_fit() -> None:
+    """LOH-9 S2: a conversation row's scope token shares the class marker's ink.
+
+    At the pane's 27-cell facts budget ``specialist · proactive · this
+    conversation`` is 42 cells, so keeping the tail would clip it mid-word — the
+    exact "reads as breakage" failure the badge constraint names. The token is
+    therefore dropped as ONE part (never truncated), which also keeps the class
+    marker design round 1 (D1) requires to survive.
+    """
+    from rich.style import Style
+
+    from local_operator.tui.widgets.settings_view import _paint_facts
+
+    muted = Style(color="red")
+    faint = Style(color="blue")
+
+    fits = _paint_facts("role · this conversation", 27, muted=muted, faint=faint)
+    assert ("this conversation", muted) in fits
+
+    crowded = _paint_facts(
+        "specialist · proactive · this conversation", 27, muted=muted, faint=faint
+    )
+    plain = "".join(part for part, _style in crowded)
+    assert plain == "    specialist · proactive"
+    assert "conversation" not in plain, "the scope token must be dropped whole"
+    assert ("proactive", muted) in crowded, "the class marker must survive"

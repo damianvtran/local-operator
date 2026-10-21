@@ -19956,23 +19956,9 @@ class OperatorApp(App[None]):
             return []
         choices: list[ArgumentChoice] = []
         for team in teams:
-            # ``member_count()``, never ``len(members) + 1`` (D2). The old
-            # arithmetic assumed the manager is not itself on the roster, which
-            # is false for real teams — two of the three on the reference
-            # machine list their manager as a member, so the picker reported 8
-            # roles for a 7-role team. It also collapsed a ``reviewer x2`` slot
-            # to one, understating the roster the user assembled.
-            #
-            # This is the count `org_chart.py` and `lop teams` already use, and
-            # the chart is TWO KEYSTROKES from this row — a picker that
-            # disagrees with the boxes it opens is worse than one that says
-            # nothing.
-            # Defensive access kept from the original: this list is built from
-            # whatever the session's registry yields, and a reduced double
-            # without the method must degrade to a row rather than break the
-            # picker mid-keystroke.
-            counter = getattr(team, "member_count", None)
-            slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
+            # The COUNT is assembled by ``_team_facts`` (D2): ``member_count()``,
+            # never ``len(members) + 1``, the same number `org_chart.py`, the
+            # listing and `lop teams` paint.
             description = (getattr(team, "description", "") or "").strip() or "no description"
             # FROZEN display rule (D2): only a CHOSEN-and-different label earns
             # the description prefix (``enrichment_label``) -- a derived
@@ -20023,7 +20009,7 @@ class OperatorApp(App[None]):
                     # away in the listing and the chart; the description is the
                     # only thing telling the user which team this IS.
                     aliases=aliases,
-                    detail=f"{slots} {'member' if slots == 1 else 'members'}",
+                    detail=self._team_facts(team),
                 )
             )
         return choices
@@ -20391,6 +20377,51 @@ class OperatorApp(App[None]):
         )
         return rows
 
+    def _team_facts(self, team: Any, registry: Any = None, *, led_by: bool = False) -> str:
+        """The facts line EVERY team surface paints: roster size, then scope.
+
+        ONE assembly for the local listing, the argument picker and the block a
+        follower receives over the wire. They used to build the same sentence in
+        three places — the wire twin even hardcoded English beside the keyed local
+        row — so the scope token would have been a fourth spelling to drift.
+        ``registry`` is passed where the caller already proved it answers
+        ``list_teams``; otherwise the session's own registry is read, which is the
+        same one the rows came from.
+        """
+        from local_operator.profile_scope import row_scope
+
+        counter = getattr(team, "member_count", None)
+        slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
+        parts: list[str] = []
+        if led_by:
+            from local_operator.i18n.keys import tui_app as app_keys
+
+            parts.append(
+                _t(
+                    app_keys.skills_led_by(
+                        manager=str(getattr(team, "manager", "") or ""),
+                        count=slots,
+                        shown=str(slots),
+                    )
+                )
+            )
+        else:
+            # "MEMBERS", never "roles" (R6): the count comes from member_count(),
+            # which excludes the manager, and every sibling surface says members.
+            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+        if registry is None:
+            registry = self._team_registry()
+        # Only a CONVERSATION row is marked: the account is the default a reader
+        # already assumes, and marking every global row would rewrite every
+        # existing listing. Plain registries (desktop account routes) answer
+        # "global", so no token appears there.
+        if row_scope(registry, team) == "session":
+            from local_operator.i18n.keys import tui_authoring as author_keys
+            from local_operator.i18n.text import tr
+
+            parts.append(tr("tui.authoring")(author_keys.scope_conversation()))
+        return " · ".join(parts)
+
     def _team_list_block(self, teams: list[Any]) -> RichBlock:
         """A structured roster list for bare ``/team``.
 
@@ -20408,29 +20439,18 @@ class OperatorApp(App[None]):
         body = Style(color=theme_mod.semantic_color("dim"))
         rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for team in teams:
-            # ``member_count()`` for the D2 reason the picker documents: the
-            # manager is often ON the roster, so `len(members) + 1` overcounts,
-            # and a multi-count slot was collapsed to one. The listing, the
-            # picker and the org chart must agree.
-            slots = team.member_count()
             # The shared display rule, bounded for this row (N1): a long
             # custom label ellipsizes so the KEY keeps its place on the line
             # -- `/team <name>` and the footer both address by the key, so the
             # row must show what to type.
             display = self._team_listing_form(team)
             rows.append(Padding(Text(display, style=heading), (0, 0, 0, 2)))
-            # "members", matching the number (R6) — see the picker's note. This
-            # row names the manager separately ("Led by <manager> · N
-            # members"), so calling the roster count "roles" also double-counted
-            # him in the reader's head.
+            # "members", matching the number (R6) — see the picker's note. The
+            # shared helper names the manager separately ("Led by <manager> · N
+            # members") and appends the scope token for a conversation row in the
+            # same order the picker and the wire twin paint it.
             rows.append(
-                Padding(
-                    Text(
-                        _t(_x.skills_led_by(manager=team.manager, count=slots, shown=str(slots))),
-                        style=body,
-                    ),
-                    (0, 0, 0, 4),
-                )
+                Padding(Text(self._team_facts(team, led_by=True), style=body), (0, 0, 0, 4))
             )
             summary = (team.description or "").strip()
             if summary:
@@ -54813,8 +54833,7 @@ class OperatorApp(App[None]):
             items = [
                 (
                     self._team_listing_form(team),
-                    f"Led by {team.manager} · {team.member_count()} "
-                    f"{'member' if team.member_count() == 1 else 'members'}",
+                    self._team_facts(team, registry, led_by=True),
                     (team.description or "").strip(),
                 )
                 for team in teams

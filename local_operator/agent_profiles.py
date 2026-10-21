@@ -562,6 +562,15 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
     from local_operator.action_class import class_from_tags
     from local_operator.action_class import normalize as normalize_action_class
 
+    # The scope token is USER COPY and localized at build time; this function is
+    # the ONE enumeration the TUI, the argument picker and a detached runtime all
+    # paint, so a locally-worded token here is what keeps those surfaces in one
+    # language (S2 design §3.3).
+    from local_operator.i18n.keys import tui_authoring as author_keys
+    from local_operator.i18n.text import tr
+    from local_operator.profile_scope import row_scope
+
+    session_token = tr("tui.authoring")(author_keys.scope_conversation())
     rows: list[tuple[str, str, str, str]] = []
     seen: set[str] = set()
     if registry is not None and hasattr(registry, "list_agents"):
@@ -573,6 +582,17 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
         specialists: list[tuple[str, str, str, str]] = []
         for agent in agents:
             try:
+                key = str(getattr(agent, "name", "") or "").strip().lower()
+                if key in seen:
+                    # A session row and an account row CAN share a name: the
+                    # composite refuses a session create over an account name,
+                    # but the reverse race (an account row created later) is
+                    # tolerated, and the composite lists session rows FIRST. The
+                    # dedupe below was documented but only consulted for seeds,
+                    # so that race painted the same key twice. First row wins —
+                    # which is session — and its scope fact says which one is in
+                    # force.
+                    continue
                 if is_role(agent):
                     profile = profile_from_agent(registry, agent)
                     facts = "role"
@@ -584,6 +604,13 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                     # agents that carry config detail.
                     if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
                         facts += " · proactive"
+                    # The store this row lives in, after the class token (design
+                    # round 1, D1 keeps the class first because it is the fact a
+                    # narrow pane must not lose). Only a CONVERSATION row is
+                    # marked: the account is the default a reader already assumes,
+                    # and marking every existing row would rewrite every listing.
+                    if row_scope(registry, agent) == "session":
+                        facts += f" · {session_token}"
                     # Model/effort are facts a user picks a hat by; the rest of
                     # the profile is what the attach applies.
                     if profile.model:
@@ -598,11 +625,14 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                     class_fact = (
                         " · proactive" if class_from_tags(agent.tags) == PROACTIVE_CLASS else ""
                     )
+                    scope_fact = (
+                        f" · {session_token}" if row_scope(registry, agent) == "session" else ""
+                    )
                     specialists.append(
                         (
                             str(agent.name),
                             str(getattr(agent, "label", "") or ""),
-                            f"specialist{class_fact}",
+                            f"specialist{class_fact}{scope_fact}",
                             summary,
                         )
                     )

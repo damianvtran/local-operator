@@ -848,9 +848,13 @@ async def entities(
                 raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
             if spec.name == "team":
                 from local_operator.org_chart import resolve_org
+                from local_operator.profile_scope import row_scope
 
+                # The team rows bypass ``team_catalogue`` here, so the additive
+                # scope fact has to be added in this assembly too (LOH-9 S2).
                 rows = [
-                    item.model_dump(mode="json") | {"value": item.name}
+                    item.model_dump(mode="json")
+                    | {"value": item.name, "scope": row_scope(registry, item)}
                     for item in registry.list_teams()
                 ]
                 if name:

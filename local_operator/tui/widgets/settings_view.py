@@ -272,16 +272,36 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
     the ink has to carry them once they do). Whole-token matching only: a
     ``proactive`` inside another word would be a coincidence, not a class.
     """
-    text = truncate_cells(facts, room)
+    # THE SCOPE TOKEN IS DROPPED AS A WHOLE TOKEN, never clipped. The pane's
+    # facts budget is 27 cells; `specialist · proactive · this conversation` is 42,
+    # and at that width the old raw truncation cut the last word mid-word
+    # ("this conversati…"), which reads as breakage rather than as a shorter list.
+    # Dropping only the TRAILING token keeps the class marker design round 1 (D1)
+    # requires to survive, and the remaining parts still truncate as before.
+    from local_operator.i18n.keys import tui_authoring as author_keys
+    from local_operator.i18n.text import tr
+
+    scope_token = tr("tui.authoring")(author_keys.scope_conversation())
+    text = facts
+    if cell_len(text) > room:
+        parts = text.split(" · ")
+        if parts and parts[-1] == scope_token:
+            parts = parts[:-1]
+        text = " · ".join(parts)
+    text = truncate_cells(text, room)
     parts = text.split(" · ")
-    if "proactive" not in parts:
+    # The scope token shares the class marker's ink: both answer "what is this and
+    # where does it live" and both must survive a narrow container. No new style,
+    # no colour of its own (S2 constraint).
+    bright = {"proactive", scope_token}
+    if not (bright & set(parts)):
         return [(f"    {text}", faint)]
     line: _PaneLine = []
     pending_indent = "    "
     for index, part in enumerate(parts):
         if index:
             line.append((" · ", faint))
-        line.append((f"{pending_indent}{part}", muted if part == "proactive" else faint))
+        line.append((f"{pending_indent}{part}", muted if part in bright else faint))
         # ONE indent, FIRST part only (review round 2, R10): without this reset
         # every part carries the 4 spaces, the line overruns its caller's
         # ``room - 4`` budget by 4*(parts-1) cells and the tail drops — measured
