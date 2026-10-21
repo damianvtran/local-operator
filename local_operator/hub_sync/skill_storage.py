@@ -98,12 +98,15 @@ class ManagedSkillStorage:
             return None
         if not path.is_dir():
             # A FILE is a different fact from an unowned skill directory (the
-            # ``apply`` refusal): something that is not a skill is using the
-            # name, so the remedy names moving it out of the skills folder.
+            # ``apply`` refusal), and it carries the same ``alias-occupied``
+            # category the publish preview reports: the client keys on the code
+            # rather than on words inside the sentence (D1), and the storage
+            # layer cannot know which operation -- pull, publish, update or
+            # unpull -- sent it here.
             raise LinkError(
-                "origin-conflict",
-                f"something that is not a skill is already using the name {alias!r}; "
-                "move it out of the skills folder, then try again",
+                "alias-occupied",
+                f"a file named {alias!r} is already in the skills folder; "
+                "move it somewhere else, then try again",
             )
         document = SkillDocument.from_directory(path)
         if document.name != alias:
@@ -280,11 +283,14 @@ class ManagedSkillStorage:
             ):
                 # Reached by pull, publish AND update: name the standing fact
                 # and the remedy every one of them shares. Do NOT name "pull"
-                # here -- update arrives through the same chokepoint.
+                # here -- update arrives through the same chokepoint. The code
+                # is ``alias-occupied``, not ``origin-conflict``: a name
+                # collision is not a lineage conflict, and the desktop keys its
+                # "that alias is already used" copy on the category.
                 raise LinkError(
-                    "origin-conflict",
+                    "alias-occupied",
                     f"a skill named {alias!r} already exists on this machine outside the hub; "
-                    "move or rename that copy, then try again",
+                    "move it elsewhere or give it a different name, then try again",
                 )
             before = current.fingerprint if current is not None else None
             if before != expected_fingerprint:
@@ -436,12 +442,13 @@ class ManagedSkillStorage:
                 # already reports, not a state this route may paper over.
                 raise LinkError("local-concurrent-edit", "managed skill is missing locally")
             if not destination.is_dir():
-                # Same fact as ``_document``: a non-skill file holds the name,
-                # so recovery reuses that sentence rather than the skill one.
+                # Same fact and same code as ``_document``: a file holds the
+                # name, so recovery reuses that category and sentence rather
+                # than the skill one.
                 raise LinkError(
-                    "origin-conflict",
-                    f"something that is not a skill is already using the name {alias!r}; "
-                    "move it out of the skills folder, then try again",
+                    "alias-occupied",
+                    f"a file named {alias!r} is already in the skills folder; "
+                    "move it somewhere else, then try again",
                 )
             operation = uuid.uuid4().hex
             tombstone = self._tombstone(local_id, operation)

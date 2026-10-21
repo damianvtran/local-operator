@@ -775,9 +775,9 @@ def test_a_lost_directory_is_still_the_error_it_was(tmp_path: Path) -> None:
 def test_a_pull_refusal_names_the_personal_copy_and_its_remedy(tmp_path: Path) -> None:
     """A personal skill at the alias: say WHAT exists and WHAT the user can do.
 
-    The refusal stays ``origin-conflict`` and never touches the personal bytes;
-    only the sentence changed, because "unknown local skill" described the
-    code's view, not the user's situation.
+    The refusal never touches the personal bytes, and it carries
+    ``alias-occupied`` -- the same category the publish preview reports -- so a
+    desktop client can key on it instead of matching words in the sentence (D1).
     """
 
     ctx, _manager, _remote, base, _document = _rig(tmp_path)
@@ -800,11 +800,14 @@ def test_a_pull_refusal_names_the_personal_copy_and_its_remedy(tmp_path: Path) -
             alias=ALIAS,
         )
 
-    assert refused.value.code == "origin-conflict"
+    assert refused.value.code == "alias-occupied"
     message = str(refused.value)
     assert f"{ALIAS!r}" in message
     assert "already exists on this machine outside the hub" in message
-    assert "move or rename that copy, then try again" in message
+    assert "move it elsewhere or give it a different name, then try again" in message
+    # "Rename" alone would mislead: a skill's folder must match its frontmatter
+    # name, so the remedy says "give it a different name" (D3).
+    assert "rename" not in message
     # Pull's chokepoint is shared with UPDATE, so it must not name "pull" here.
     assert "pull" not in message
     # The behaviour is unchanged: the personal copy is byte-identical.
@@ -853,13 +856,54 @@ def test_a_publish_refusal_names_the_personal_copy_and_offers_another_name(
             confirm_public_egress=False,
         )
 
-    assert refused.value.code == "origin-conflict"
+    assert refused.value.code == "alias-occupied"
     message = str(refused.value)
     assert f"{ALIAS!r}" in message
     assert "already exists on this machine outside the hub" in message
     # Publish can pick a different name, so its remedy differs from pull's.
-    assert "publish under a different name" in message
-    assert "move or rename that copy" not in message
+    assert "publish under a different name, or move the existing one" in message
+    assert "move it elsewhere" not in message
+    # "The local copy" would read as the skill being published (D3).
+    assert "the local copy" not in message
     assert (personal / "SKILL.md").read_text(encoding="utf-8") == (
         "---\nname: example-skill\ndescription: My own copy\n---\n# Mine\n"
     )
+
+
+def test_a_publish_refusal_calls_a_file_occupant_a_file(tmp_path: Path) -> None:
+    """A plain file at the alias is NOT a skill, even at publish's pre-check (F1).
+
+    The branch is the same one a personal skill reaches, so it keeps the same
+    ``alias-occupied`` category -- but the sentence must state the occupant's
+    actual kind: a file is not "a skill named ...".
+    """
+
+    ctx, _manager, _remote, base, document = _rig(tmp_path)
+    occupant = ctx.config_dir / "skills" / ALIAS
+    occupant.parent.mkdir(parents=True)
+    occupant.write_text("not a skill directory\n", encoding="utf-8")
+    authored = tmp_path / "authored"
+    authored.mkdir()
+    (authored / "SKILL.md").write_text("# Authored\n", encoding="utf-8")
+
+    identity = LinkIdentity("skill", "immutable-local", base, "public", None, "remote")
+    with pytest.raises(LinkError) as refused:
+        svc._materialize_published_skill(
+            ctx,
+            identity=identity,
+            alias=ALIAS,
+            draft=SkillDocument.from_json(document),
+            baseline=prov.make_record("skill", identity.local_id, HUB_ID, None, document, "pull"),
+            source_dir=str(authored),
+            subscribe=True,
+            auto_push=False,
+            confirm_public_egress=False,
+        )
+
+    assert refused.value.code == "alias-occupied"
+    message = str(refused.value)
+    assert f"a file named {ALIAS!r} is already in the skills folder" in message
+    assert "move it somewhere else, then try again" in message
+    # It must not claim a skill exists, and it must not borrow A/B's sentence.
+    assert "a skill named" not in message
+    assert "outside the hub" not in message

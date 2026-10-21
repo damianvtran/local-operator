@@ -653,6 +653,33 @@ async def test_an_alias_owned_by_a_link_is_still_an_origin_conflict(api) -> None
     assert hub.calls == []
 
 
+async def test_the_adoption_rename_guard_stays_an_origin_conflict(api) -> None:
+    """The source's OWN folder under a different published name is not a taken name.
+
+    Publishing ``other-name`` as ``folder-name`` adopts the authored folder in
+    place (`same` is true), so nobody else holds the alias and the remedy cannot
+    be "move the existing one". That guard keeps ``origin-conflict``; only an
+    UNOWNED occupant earns ``alias-occupied`` (D1).
+    """
+
+    client, root, holder = api
+    folder = root / "skills" / "folder-name"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: other-name\ndescription: Authored.\n---\n\n# Other\n", encoding="utf-8"
+    )
+    hub = PublishClient(base_url(root))
+    holder["client"] = hub
+
+    result = await preview(client, source_skill="other-name", local_alias="folder-name")
+
+    assert result["preview"]["can_confirm"] is False
+    assert result["preview"]["reason"] == "origin-conflict"
+    assert hub.calls == []
+    # The authored bytes are still there: a preview never adopts or moves.
+    assert (folder / "SKILL.md").read_text(encoding="utf-8").startswith("---\nname: other-name")
+
+
 def attest_skill_capability(root: Path) -> None:
     """Credit the configured base with the skill capability as a real check does."""
 
