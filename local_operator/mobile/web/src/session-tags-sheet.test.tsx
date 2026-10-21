@@ -87,9 +87,9 @@ describe("the catalogue's states", () => {
 		getTags.mockReturnValue(new Promise(() => {}));
 		renderSheet();
 		expect(screen.getAllByText("loading…").length).toBeGreaterThan(0);
-		expect(screen.getAllByRole("status").some((node) =>
-			node.textContent?.includes("loading…"),
-		)).toBe(true);
+		const statuses = screen.getAllByRole("status");
+		expect(statuses).toHaveLength(1);
+		expect(statuses[0].textContent).toContain("loading…");
 		expect(screen.queryByRole("checkbox")).toBeNull();
 	});
 
@@ -189,9 +189,9 @@ describe("assignment writes", () => {
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
 		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
-		expect(screen.getAllByRole("status").some((node) =>
-			node.textContent?.includes("saving…"),
-		)).toBe(true);
+		const status = screen.getAllByRole("status");
+		expect(status).toHaveLength(1);
+		expect(status[0].textContent).toContain("saving…");
 	});
 
 	it("paints the read-back once the write lands", async () => {

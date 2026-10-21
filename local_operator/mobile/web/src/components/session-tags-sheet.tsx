@@ -212,8 +212,10 @@ export function SessionTagsSheet({
 	/* ONE PRE-MOUNTED LIVE REGION. A region created already populated is not
 	   announced (the same rule the save-error alert follows below), and one
 	   status node per row would put eight empty regions in the accessibility
-	   tree. This region exists before either state changes, then reports the
-	   loading or saving sentence as it becomes true. */
+	   tree. The region exists before the SAVING state changes, so a pending
+	   write updates a live node rather than creating one. Loading is the
+	   sheet's initial paint: this region mounts with that sentence, and we do
+	   not claim it is announced; it is readable in browse mode. */
 	const announced = pending !== null
 		? messageRuntime.t("relay.session.tags.saving")
 		: catalogue === null && !loadError
