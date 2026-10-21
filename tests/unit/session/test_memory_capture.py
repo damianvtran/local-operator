@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -25,6 +26,29 @@ from local_operator.memory_capture import (
     snapshot,
     watermark,
 )
+
+
+async def _await_capture_row(memory: MemoryStore, marker: str, *, timeout: float = 10.0) -> Any:
+    """The marker's capture row, waiting for a worker that has not landed yet.
+
+    THE FAILURE THIS REPLACES was a bare ``assert all(watermark(...))``: a False
+    with no marker, no status and no reason (run 39383034418, job 118496365150,
+    ``[context-full]`` at :1162). A capture row is written by
+    ``complete_memory_capture`` after it awaits the scan task, so the honest wait
+    is for the ROW, not for a snapshot of ``_background_tasks`` — a completion
+    task that is spawned or rescheduled after the snapshot is invisible to it.
+
+    Returns ``capture_detail`` (``status``/``n``/``reason``/``refused``/
+    ``skipped``) or ``None``. The caller asserts on the value, so a timeout is a
+    named reading rather than a lost assertion.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        detail = capture_detail(memory, marker)
+        if detail is not None or time.monotonic() >= deadline:
+            return detail
+        await asyncio.sleep(0.05)
+
 
 NOISY_LOCATORS = (
     "Ratio 9/1, see guide://credentials and skill://software-development. "
@@ -754,6 +778,73 @@ async def test_failure_is_terminal_not_false_capture_success(store):
 
 
 @pytest.mark.asyncio
+async def test_failure_logs_exception_class_and_never_its_message(store, caplog):
+    # A failed capture used to land as status='failed'/n=0 with the coarse
+    # ``store-error`` reason and no way to tell a code bug from a store fault.
+    # The class name is the diagnostic; the message is untrusted conversation
+    # content and must never reach the log.
+    secret = "untrusted content: /Users/example/private.md"
+
+    async def broken():
+        raise TypeError(secret)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.memory_capture"):
+        terminal = await finish(store, "raise-marker", asyncio.create_task(broken()), "")
+
+    assert terminal == "failed"
+    assert capture_detail(store, "raise-marker") == ("failed", 0, "store-error", 0, 0)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("TypeError" in message and "raise-marker" in message for message in messages)
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_attributed_as_timeout_not_a_store_error(store, caplog, monkeypatch):
+    import local_operator.memory_capture as capture
+
+    # Shrink the module's real bound instead of sleeping the shipped 2.5s: the
+    # path under test is ``wait_for`` expiring, and the bound is not the subject.
+    monkeypatch.setattr(capture, "SCAN_BUDGET", 0.05)
+    monkeypatch.setattr(capture, "_SCAN_GRACE", 0.0)
+    inner = asyncio.create_task(asyncio.sleep(5))
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.memory_capture"):
+        terminal = await finish(store, "timeout-marker", inner, "")
+
+    inner.cancel()
+    assert terminal == "failed"
+    assert capture_detail(store, "timeout-marker") == ("failed", 0, "timeout", 0, 0)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("TimeoutError" in message and "timeout-marker" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates_and_is_never_recorded_as_a_failure(store, caplog):
+    # A cancelled pass (shutdown, a superseded compaction) is not a defect and
+    # must never be counted beside real failures in ``captures``.
+    inner = asyncio.create_task(asyncio.sleep(30))
+    writer = asyncio.create_task(finish(store, "cancelled-marker", inner, ""))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not writer.done()
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.memory_capture"):
+        writer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+
+    inner.cancel()
+    try:
+        await inner
+    except asyncio.CancelledError:
+        pass
+    assert capture_detail(store, "cancelled-marker") is None
+    assert [
+        record for record in caplog.records if record.name == "local_operator.memory_capture"
+    ] == []
+
+
+@pytest.mark.asyncio
 async def test_real_committed_compaction_finishes_capture_while_idle_without_waking(
     tmp_path, monkeypatch
 ):
@@ -1141,6 +1232,7 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
     memory = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
     explicit = memory.put("session", {"title": "Release decision", "body": "Decision: ship Friday"})
     markers = []
+    readings: list[tuple[str, Any]] = []
     try:
         for n in range(3):
             for m in range(3):
@@ -1158,8 +1250,25 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
             assert archived == (strategy == "snapcompact"), entry.payload.get("summary", "")[:80]
             for task in list(session._background_tasks):
                 await asyncio.wait_for(task, 5)
+            # WAIT FOR THE ROW, and carry its fields into the failure. A chained
+            # pass's completion can be scheduled around the snapshot above; the
+            # postcondition is the persisted row, which is what the rest of this
+            # cell (and a resumed session) actually reads.
+            readings.append((entry.id, await _await_capture_row(memory, entry.id)))
         assert len(set(markers)) == 3
-        assert all(watermark(memory, marker) for marker in markers)
+        missing = [marker for marker, detail in readings if detail is None]
+        assert not missing, (
+            "a chained compaction left no capture row: "
+            + "; ".join(
+                f"{marker}: status={detail.status if detail else None} "
+                f"n={detail.n if detail else None} reason={detail.reason if detail else None} "
+                f"refused={detail.refused if detail else None} "
+                f"skipped={detail.skipped if detail else None}"
+                for marker, detail in readings
+            )
+            + f"; pending_background={len(session._background_tasks)} "
+            f"last_terminal={getattr(session, '_memory_terminal', None)!r}"
+        )
         before = len(requests)
     finally:
         await session.dispose()

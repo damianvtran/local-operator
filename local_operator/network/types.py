@@ -279,7 +279,7 @@ def normalise_pending(value: object) -> str | None:
 
 
 def row_needs_claim(*, state: object, pending: object) -> str | None:
-    """The ONE reader of a ROW's needs claim: never a claim on a STORED row.
+    """The ONE reader of a ROW's needs claim: only an answerable live runtime.
 
     ``pending`` answers "what is a person being waited on" — a parked gate on a
     runtime that can be answered (``approval``/``ask``) — and a stored session
@@ -292,13 +292,13 @@ def row_needs_claim(*, state: object, pending: object) -> str | None:
     they are dropped HERE, at the row boundary, so a mixed-version fleet paints
     one row one way — the rule is the reader's, not each renderer's.
 
-    ``state`` is the row's own state word, compared against the catalogue's
-    ``stored`` token — the same token ``session_state_words`` renders as "not
-    running" — rather than inferred from an absent field: a live row's state
-    is a runtime word (``live``/``wedged``/...), and a row that carries
-    neither state nor pending is "no claim" either way.
+    The phantom-approval case also includes wedged owners: an older relay can
+    retain pending="approval" after its heartbeat stops, but that owner cannot
+    answer the gate. Drop known non-live states here so mixed-version fleets
+    are protected even when producer-side normalization is absent. An absent
+    state retains the legacy reader contract; it is not evidence of death.
     """
-    if str(state or "").strip() == "stored":
+    if str(state or "").strip() in {"stored", "wedged", "stale"}:
         return None
     return normalise_pending(pending)
 
@@ -493,6 +493,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
     # boundary as the three leg-1 verbs, a different direction of travel.
     "credential_revoke",
+    # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
+    # same boundary rule — this device's own relay is told to pull one copy from
+    # its owner now, and the link it needs lives in that process.
+    "credential_sync_pull",
     # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
     # peer, or one named peer, and bring its user-scope MCP servers up to date.
     # A local op for the same reason ``definitions_sync`` is one — this device's

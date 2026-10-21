@@ -72,6 +72,7 @@ from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
+    GUEST_TRANSPORT_MARGIN_S,
     GuestServerRecovered,
     InstructionUnavailable,
     bounded_observation_cause,
@@ -730,6 +731,16 @@ class AwsProvider:
         self._supervisor_password = ""
         self._supervisor_restart: int | None = None
         self._supervisor_records: list[Any] = []
+        # The last watchdog summary the guest reported. Kept so the evidence of
+        # a LATER unreachable read still says what the watchdog had done: an
+        # episode that only survived because the watchdog revived the server
+        # must not look like one whose server never died.
+        self._supervisor_watchdog: dict[str, Any] | None = None
+        # Once a recovery was VERIFIED, a later watchdog-only change must not
+        # overwrite that snapshot with a ``verified_none`` observation: the
+        # episode did restart, and the evidence of it is the more important
+        # fact. The flag is per-episode, like the evidence file.
+        self._supervisor_recovery_verified = False
         # The provider's OWN secret values, for the exact-value half of the
         # console scrub (``guest_loss``): console text is the one guest-authored
         # artifact this module persists, and the AWS credentials, the session
@@ -842,7 +853,9 @@ class AwsProvider:
                 guest_supervisor.install_command(plan.client_password), timeout=15.0
             )
             if result.returncode == 0:
-                response = guest_supervisor.parse_output(result.stdout)
+                response = guest_supervisor.parse_output(
+                    result.stdout, guest_supervisor.is_install_payload
+                )
                 if isinstance(response, dict) and response.get("installed") is True:
                     self._supervisor_unit = guest_supervisor.installed_unit(result.stdout)
                     self._supervisor_password = plan.client_password
@@ -851,6 +864,13 @@ class AwsProvider:
                         "unit": self._supervisor_unit,
                         "status": "supervised",
                     }
+                    # ADDITIVE ONLY, and never fabricated: the guest refuses to
+                    # install when its watchdog is inactive or shares the
+                    # server's cgroup, so a missing proof is recorded as absent
+                    # rather than asserted as success.
+                    watchdog = guest_supervisor.watchdog_install_status(response)
+                    if watchdog is not None:
+                        status["watchdog"] = watchdog
                 else:
                     reason = (
                         response.get("reason", "invalid response")
@@ -859,6 +879,19 @@ class AwsProvider:
                     )
                     safe = guest_loss._scrub(str(reason)[:512], self._known_secret_values)
                     status["cause"] = safe or "installation reason withheld"
+                    # ADDITIVE ONLY: a unit-discovery refusal records why the
+                    # guest's units looked the way they did. The outcome and the
+                    # cause above are already final, and every failure below is
+                    # recorded as an absent/undetermined layout, never raised.
+                    if str(reason) in guest_supervisor.LAYOUT_REFUSALS:
+                        try:
+                            status["layout"] = self._capture_supervisor_layout(plan.client_password)
+                        except Exception:
+                            # The capture is additive evidence. A defect in the
+                            # diagnostic itself must not replace the refusal
+                            # reason the guest already gave (the outer handler
+                            # writes an exception TYPE into cause).
+                            status["layout"] = {"schema_version": 1, "status": "error"}
             else:
                 status["cause"] = "privilege escalation or installation command failed"
         except Exception as error:
@@ -872,6 +905,60 @@ class AwsProvider:
                 (self._cache_root / name).write_text(json.dumps(value, sort_keys=True) + "\n")
         except Exception:
             logger.warning("guest supervisor evidence unavailable")
+
+    def _capture_supervisor_layout(self, password: str) -> dict[str, Any]:
+        """Bounded, fail-open topology capture for a unit-discovery refusal.
+
+        The guest's install script already said WHICH refusal fired; this says
+        what the guest's process tree and units actually look like, so a
+        refusal can be designed against rather than guessed at. Bounded by ONE
+        shared deadline (``guest_loss._run_bounded``, the console-capture
+        helper): a hung transport, a hung guest, a malformed document or a
+        scrub it cannot vouch for each become a status-only record, and the
+        episode continues with the unchanged refusal.
+        """
+        budget = guest_supervisor.LAYOUT_BUDGET_S
+        # The socket deadline is NOT the shared budget. The guest's subprocess
+        # deadline is ``guest_deadline_for`` of this value (margin subtracted),
+        # and it must exceed LAYOUT_SOURCE's own 3 s deadline or a loaded guest
+        # is killed before it can print; ``_run_bounded`` still abandons the
+        # whole capture at ``budget``, which stays the authority.
+        socket_timeout = guest_supervisor.LAYOUT_GUEST_DEADLINE_S + GUEST_TRANSPORT_MARGIN_S
+        try:
+            outcome = guest_loss._run_bounded(
+                {
+                    "layout": lambda: self._run_guest_command(
+                        guest_supervisor.layout_command(
+                            password, port=guest_supervisor.ACTION_SERVER_PORT
+                        ),
+                        timeout=socket_timeout,
+                    )
+                },
+                budget,
+            )["layout"]
+        except Exception:
+            return guest_supervisor.empty_layout("error")
+        state, value = outcome
+        if state == "timeout":
+            return guest_supervisor.empty_layout("timeout")
+        if state != "ok" or getattr(value, "returncode", None) != 0:
+            return guest_supervisor.empty_layout("error")
+        try:
+            layout = guest_supervisor.layout_record(
+                value.stdout, port=guest_supervisor.ACTION_SERVER_PORT
+            )
+        except Exception:
+            # Includes SupervisorOutputUnparseable: guest text never explains
+            # itself into the record, only this fixed status does.
+            return guest_supervisor.empty_layout("unparseable")
+        try:
+            safe = guest_loss._scrub(json.dumps(layout), self._known_secret_values)
+            if safe is None:
+                return guest_supervisor.empty_layout("withheld")
+            scrubbed = json.loads(safe)
+        except Exception:
+            return guest_supervisor.empty_layout("withheld")
+        return scrubbed if isinstance(scrubbed, dict) else guest_supervisor.empty_layout("withheld")
 
     def _recover_guest_supervisor(
         self, delivery: str = "pre_action"
@@ -898,6 +985,7 @@ class AwsProvider:
                     "records_withheld": False,
                     "cause": "supervisor recovery budget exhausted; server unreachable",
                     "records": self._supervisor_records,
+                    "watchdog": self._watchdog_evidence(),
                     "final_guest_record": "not retrieved: action-server transport unavailable",
                     "guest_record_path": (
                         f"/var/lib/lop-action-supervisor/{self._supervisor_unit}.json"
@@ -917,18 +1005,74 @@ class AwsProvider:
                 )
                 if result.returncode != 0:
                     raise ValueError("receipt command failed")
-                records = guest_supervisor.receipt_records(result.stdout)
+                records, watchdog = guest_supervisor.receipt_report(result.stdout)
+                # The watchdog repairs the server THROUGH a channel the host
+                # does not have, so its record is the only trace of a death the
+                # episode survived. Surface it whenever it changes: a completed
+                # episode that needed three revivals must not read like one that
+                # needed none. Between interventions the summary is unchanged,
+                # so a healthy episode writes no extra evidence.
+                # The FIRST read is a silent baseline: it establishes what the
+                # watchdog had done before this action, and writing it would
+                # create a ``recovered: false`` file for an episode that has
+                # nothing to recover from. Only a CHANGE is evidence.
+                watchdog_changed = (
+                    self._supervisor_watchdog is not None and watchdog != self._supervisor_watchdog
+                )
+                self._supervisor_watchdog = watchdog
                 if not records or records[-1]["restart"] == self._supervisor_restart:
+                    if watchdog_changed and not self._supervisor_recovery_verified:
+                        self._write_supervisor_evidence(
+                            "guest-supervisor-recovery.json",
+                            {
+                                "recovered": False,
+                                "read_failed": False,
+                                "receipt_unavailable": False,
+                                "records_withheld": False,
+                                "observed": "verified_none",
+                                "watchdog": watchdog,
+                                "records": self._supervisor_records,
+                            },
+                        )
                     return guest_supervisor.ReceiptResult("verified_none")
-                restart = records[-1]["restart"]
                 # Keep the console evidence's fail-closed treatment. A withheld
                 # stderr payload is explicitly marked, never a silent clean [].
                 safe = guest_loss._scrub(json.dumps(records), self._known_secret_values)
                 self._supervisor_records = json.loads(safe) if safe is not None else []
-                # Commit the seen generation only after receipt processing has
-                # completed. Otherwise a scrub/parse error could make the retry
-                # mistake this unbound generation for an already accepted one.
-                self._supervisor_restart = restart
+                # A RECEIPT ONLY SAYS systemd's MainPID was replaced. Under
+                # ``KillMode=process`` every other holder survives that restart
+                # and can keep answering the action port with pre-restart screen
+                # state, so the receipt alone is NOT recovery. Bounce every
+                # process in the unit's cgroup and prove the listener is one
+                # that did not hold the port before; an unproved listener fails
+                # closed instead of authorizing input against a survivor.
+                verification = self._restart_supervisor_unit(self._supervisor_unit)
+                if verification["status"] != "verified":
+                    status = str(verification["status"])
+                    self._write_supervisor_evidence(
+                        "guest-supervisor-recovery.json",
+                        {
+                            "recovered": False,
+                            "read_failed": False,
+                            "receipt_unavailable": False,
+                            "records_withheld": safe is None,
+                            "cause": guest_supervisor.restart_cause(status),
+                            "cause_status": status,
+                            "restart_verification": verification,
+                            "failed_action_delivery": delivery,
+                            "remaining_batch": "not_sent",
+                            "records": self._supervisor_records,
+                            "watchdog": self._watchdog_evidence(),
+                        },
+                    )
+                    # The existing recovery failure, with a fixed cause: the
+                    # caller stops before posting the pending action.
+                    return guest_supervisor.ReceiptResult("read_failed", recovery_exhausted=True)
+                # Commit the generation the restart itself produced. Without
+                # this, the next poll would read the same record as a second
+                # restart and bounce a healthy server in a loop.
+                self._supervisor_restart = verification["latest_restart"]
+                self._supervisor_recovery_verified = True
                 self._write_supervisor_evidence(
                     "guest-supervisor-recovery.json",
                     {
@@ -936,9 +1080,11 @@ class AwsProvider:
                         "read_failed": False,
                         "receipt_unavailable": False,
                         "records_withheld": safe is None,
+                        "restart_verification": verification,
                         "failed_action_delivery": delivery,
                         "remaining_batch": "not_sent",
                         "records": self._supervisor_records,
+                        "watchdog": watchdog,
                     },
                 )
                 return guest_supervisor.ReceiptResult("new_restart")
@@ -963,9 +1109,62 @@ class AwsProvider:
                 "failed_action_delivery": delivery,
                 "remaining_batch": "not_sent",
                 "records": self._supervisor_records,
+                "watchdog": self._watchdog_evidence(),
             },
         )
         return guest_supervisor.ReceiptResult("read_failed")
+
+    def _watchdog_evidence(self) -> dict[str, Any]:
+        """The last watchdog summary we read, or an explicit absent record.
+
+        Never fabricated: ``absent`` means no summary was ever readable in this
+        episode, which is itself the diagnostic a missing record carries.
+        """
+
+        return self._supervisor_watchdog or guest_supervisor.empty_watchdog("absent")
+
+    def _restart_supervisor_unit(self, unit: str) -> dict[str, Any]:
+        """Detached restart + freshness proof; never raises.
+
+        THE DISPATCH MAY LOSE ITS RESPONSE. The supervised unit is the process
+        serving this request, so the all-process kill terminates our HTTP
+        connection -- and, if the restart ran in the target cgroup, would
+        terminate the restart itself. The restart therefore runs as a transient
+        service and writes its verdict to ``RESTART_RESULT_PATH``; this method
+        treats the dispatch as fire-and-forget (a transport error is expected,
+        a clean non-zero return is a failure) and reads the result from a LATER
+        command once the server answers again. A token ties the result to this
+        dispatch, so a stale file cannot be read as a fresh restart.
+        """
+
+        token = time.time_ns()
+        try:
+            dispatched = self._run_guest_command(
+                guest_supervisor.restart_command(unit, self._supervisor_password, token),
+                timeout=guest_supervisor.RESTART_DISPATCH_TIMEOUT_S,
+            )
+            if dispatched.returncode != 0:
+                return guest_supervisor.empty_restart("command_failed")
+        except Exception:
+            # Expected: the kill closes the connection that carried the request.
+            pass
+        deadline = time.monotonic() + guest_supervisor.RESTART_RESULT_BUDGET_S
+        while time.monotonic() < deadline:
+            try:
+                result = self._run_guest_command(
+                    guest_supervisor.restart_result_command(self._supervisor_password),
+                    timeout=guest_supervisor.RESTART_RESULT_TIMEOUT_S,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    record = guest_supervisor.restart_record(result.stdout)
+                    if record["token"] == token:
+                        return record
+            except Exception:
+                # The server is down for part of this window, or the file holds
+                # a malformed/stale document; keep polling until the budget ends.
+                pass
+            self._sleep(guest_supervisor.RESTART_RESULT_INTERVAL_S)
+        return guest_supervisor.empty_restart("result_unavailable")
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float

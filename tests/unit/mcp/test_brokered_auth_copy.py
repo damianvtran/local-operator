@@ -19,6 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_operator.mcp.auth import McpAuthChallengeError, McpAuthRequiredError
 from local_operator.mcp.manager import McpManager
 
@@ -198,3 +200,94 @@ def test_an_unreadable_placement_degrades_instead_of_raising(tmp_path: Path) -> 
     text = manager._auth_failure_text("linear", _challenge(), store=store)
 
     assert text == "/mcp login linear to authorize"
+
+
+class TestOneBrokerRetryAfterALocal401:
+    """Real-node QA: a row that cannot serve a bearer shadowed the broker.
+
+    An emptied or tombstoned local row made the local path win, the server
+    answered 401, and no borrow was ever attempted. The connect path now retries
+    exactly ONCE through ``BrokeredBearerAuth``; the retry cannot loop, and a
+    device with no mesh client keeps its old behaviour byte for byte.
+    """
+
+    async def _manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, borrow: bool):
+        from local_operator.mcp.manager import McpManager
+
+        store: Any = _Store(_Client()) if borrow else _Store(None)
+        manager = McpManager(str(tmp_path), auth_store=store)
+        monkeypatch.setattr(
+            "local_operator.mcp.auth.server_has_stored_grant", lambda url, store=None: True
+        )
+
+        async def fresh(*a: Any, **k: Any) -> None:
+            return None
+
+        async def tools(_session: Any) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", fresh)
+        monkeypatch.setattr(manager, "_list_all_tools", tools)
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_a_local_401_retries_once_with_the_broker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = await self._manager(tmp_path, monkeypatch, borrow=True)
+        calls: list[bool] = []
+
+        async def fake_open(stack, name, cfg, timeout_s, stderr_log, **kwargs):
+            calls.append(bool(kwargs.get("force_brokered")))
+            if not kwargs.get("force_brokered"):
+                raise McpAuthRequiredError("sign-in expired")
+            return SimpleNamespace(name=name, live_session=object())
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", fake_open)
+        conn = await manager._connect_server("linear", MCPHttpServerConfig(url=URL))
+
+        assert calls == [False, True]
+        assert conn.name == "linear"
+
+    @pytest.mark.asyncio
+    async def test_both_failures_end_in_the_auth_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = await self._manager(tmp_path, monkeypatch, borrow=True)
+        calls: list[bool] = []
+
+        async def fake_open(stack, name, cfg, timeout_s, stderr_log, **kwargs):
+            calls.append(bool(kwargs.get("force_brokered")))
+            raise McpAuthRequiredError("sign-in expired")
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", fake_open)
+        with pytest.raises(McpAuthRequiredError):
+            await manager._connect_server("linear", MCPHttpServerConfig(url=URL))
+        assert calls == [False, True], "one retry, never a loop"
+
+    @pytest.mark.asyncio
+    async def test_a_device_with_no_mesh_client_never_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = await self._manager(tmp_path, monkeypatch, borrow=False)
+        calls: list[bool] = []
+
+        async def fake_open(stack, name, cfg, timeout_s, stderr_log, **kwargs):
+            calls.append(bool(kwargs.get("force_brokered")))
+            raise McpAuthRequiredError("sign-in expired")
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", fake_open)
+        with pytest.raises(McpAuthRequiredError):
+            await manager._connect_server("linear", MCPHttpServerConfig(url=URL))
+        assert calls == [False]

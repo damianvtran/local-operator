@@ -5,6 +5,9 @@ The UI lane's HTTP surfaces over :mod:`local_operator.team_bridge`:
 - ``GET  /v1/desktop/team-bridge/status``    — the eligibility/state read.
 - ``GET  /v1/desktop/team-bridge/settings``  — endpoint, consent record, policies.
 - ``PUT  /v1/desktop/team-bridge/settings``  — state changes (the consented write).
+- ``GET  /v1/desktop/team-bridge/directory`` — the organization's member rows,
+  the frozen ``{members:[{account_id,display_label,role,bridge_enabled,
+  bridge_state}]}`` shape, for the surface that chooses who an agent may reach.
 - ``GET  /v1/desktop/team-bridge/allowlist`` — own policy entries + honest defaults.
 - ``PUT  /v1/desktop/team-bridge/allowlist`` — the bounded replace-set.
 - ``GET  /v1/desktop/team-bridge/inbox``     — one page of agent messages, METADATA
@@ -66,6 +69,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -76,10 +80,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
 
 router = APIRouter(tags=["Desktop agent messages"], dependencies=[Depends(require_desktop)])
 
-#: The server mints conversation ids as ``bcv_`` + hex; validating the grammar
-#: BEFORE interpolating an id into an upstream path is the pair lane's rule
-#: (review S-RSA-5) and applies unchanged here.
-_CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
+#: The shared minted grammar (``team_bridge.types.CONVERSATION_ID_PATTERN``):
+#: validating it BEFORE interpolating an id into an upstream path is the pair
+#: lane's rule (review S-RSA-5) and applies unchanged here. Imported rather
+#: than respelled so the agent tool and this route cannot drift apart.
+_CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: The conversation domain's other two interpolated path/query values. Both are
 #: opaque server-minted strings; this route family only has to prove they
 #: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
@@ -645,6 +650,49 @@ async def put_settings(
         # missing consent echo for a known-to-be-required case): caller bugs, in
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
+    return reply(payload)
+
+
+@router.get("/v1/desktop/team-bridge/directory", response_model=CRUDResponse[Any])
+async def get_directory(
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One organization's member directory (§6.1), passed through untouched.
+
+    The payload is the frozen desktop shape
+    ``{members:[{account_id, display_label, role, bridge_enabled,
+    bridge_state}]}``; this route adds nothing and drops nothing, so the pair
+    backend owns the member fields and a later additive field arrives without
+    a route change (§6.6).
+
+    ``tenant_id`` is validated BEFORE any I/O against the SAME grammar the
+    other tenant-scoped reads use, and a malformed one answers the closed
+    read-table's ``invalid_request`` (422) rather than FastAPI's echoing
+    validation body: this family never puts a caller-supplied value back on
+    the wire (S-RSA-7). Upstream refusals keep their §6.5 status and code
+    verbatim through ``_raise_bridge``, exactly like the settings read.
+    """
+
+    from local_operator.team_bridge.client import (
+        BridgeRefusal,
+        BridgeSignInRequired,
+        TeamBridgeClient,
+    )
+
+    # Imported here, not at module scope: read_context reaches the client stack,
+    # which must never ride ``lop serve``'s boot path (module docstring).
+    from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
+
+    if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+        _raise_read("invalid_request")
+    client = TeamBridgeClient(config_manager.config_dir)
+    try:
+        payload = await client.directory(tenant_id)
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
     return reply(payload)
 
 

@@ -51,7 +51,27 @@ LEGACY_SCHEMA = 1
 #: Last N pre-apply backups kept per item (A9.3).
 BACKUPS_KEPT = 5
 
-RecordedBy = Literal["pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown"]
+RecordedBy = Literal[
+    "pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown", "subscribe"
+]
+
+#: Whether this link's managed content exists locally (``present``) or was never
+#: installed / deliberately removed (``absent``). Membership of the hub is the
+#: LINK, not its bytes: subscribing records the origin + policy without writing
+#: a copy, and unpulling removes the copy without unlinking. Absence is therefore
+#: an EXPLICIT recorded state, "the directory is missing" is not evidence of it --
+#: a genuinely lost directory must keep raising as the error it always was.
+#: Records written before this field existed carry content, so a missing key
+#: reads as ``present`` and every one of them behaves exactly as before.
+#:
+#: FORWARD COMPATIBILITY, ACCEPTED: an older core does not know this key, so it
+#: reads an absent record as ``present`` and reports the missing directory as
+#: ``local-concurrent-edit``. That is the honest failure it already had; it can
+#: neither install nor delete anything from it, and the record keeps its
+#: baseline, identity and alias reservation. Bumping ``SCHEMA`` would be worse
+#: (an older core would drop the whole link, losing the reservation), and the
+#: state is settled correctly as soon as a core that knows the field touches it.
+ContentState = Literal["present", "absent"]
 
 #: ``recorded_by`` of a record that LINKS an item to a hub id without vouching for
 #: what the two sides had in common (``lop teams link`` over a differing copy). The
@@ -287,6 +307,10 @@ class BaselineRecord:
     #: this is per-artifact migration metadata, not another policy database.
     legacy_subscribe_hint: bool | None = None
     scope_known: bool = True
+    #: See ``ContentState``: an absent record keeps its baseline and policy and
+    #: has no managed directory. Only an explicit write may move it, and only
+    #: the managed-skill writer (install/apply) may move it back to ``present``.
+    content_state: ContentState = "present"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
@@ -309,6 +333,7 @@ class BaselineRecord:
             "local_alias": self.local_alias,
             "legacy_subscribe_hint": self.legacy_subscribe_hint,
             "scope_known": self.scope_known,
+            "content_state": self.content_state,
         }
 
 
@@ -350,8 +375,30 @@ def iter_baselines(config_dir: Path) -> list[BaselineRecord]:
     return records
 
 
+def _sync_dir(directory: Path) -> None:
+    """Fsync a directory so a rename/replace in it survives a power loss.
+
+    ``atomic_json`` in ``transactions`` does this for the journal; this module
+    cannot import it (transactions imports this one), so the same few lines live
+    here rather than in a shared package for one call site.
+    """
+
+    if os.name == "nt":  # directory fsync is not supported on Windows
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
-    """Temp file in the same directory + ``os.replace`` (the monitors/state shape)."""
+    """Temp file in the same directory + ``os.replace`` (the monitors/state shape).
+
+    The record's OWN directory entry is fsynced too: a successful replace is only
+    durable in the directory whose entries changed, and a baseline that vanishes
+    after a reported write would present as a lost link.
+    """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -361,6 +408,9 @@ def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        _sync_dir(path.parent)
+        if path.parent.parent != path.parent:
+            _sync_dir(path.parent.parent)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -529,6 +579,9 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
     lineage = raw.get("lineage", "unknown")
     if lineage not in ("clean", "unknown", "mixed-lineage"):
         return None
+    content_state = raw.get("content_state", "present")
+    if content_state not in ("present", "absent"):
+        return None
     return BaselineRecord(
         kind=kind,
         local_id=local_id,
@@ -546,6 +599,7 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
         local_alias=local_alias,
         legacy_subscribe_hint=hint,
         scope_known=scope_known,
+        content_state=content_state,
     )
 
 

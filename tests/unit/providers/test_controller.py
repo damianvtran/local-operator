@@ -2765,6 +2765,9 @@ class TestQwenCloudTicketFromSecretStore:
     # -- the guards --------------------------------------------------------
 
     @pytest.mark.asyncio
+    # This cell's SUBJECT is the product guard, so it must reach the real
+    # ``ensure_broker``; its own ``_spawn_broker`` spy is what asserts no spawn.
+    @pytest.mark.allow_secret_broker
     async def test_no_secret_store_spawns_no_daemon(
         self, controller, store, monkeypatch, tmp_path
     ) -> None:

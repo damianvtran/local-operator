@@ -1575,7 +1575,43 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # payload shape the nit asked for, and every variant that keeps it fails. The
 # raise is chosen to keep the payload clue AND leave margin, not to fit by
 # deleting the thing the nit was about.
-BUDGET_BILLED_TOKENS = 31_025
+# RAISED to 31,466 for the Team Bridge agent channel tool (#2665), measured with
+# THIS script on the merged base a68b18bdb5 in an isolated HOME:
+#   top arm:   87,323 chars = ~31,411 billed  -> 31,411 + 55-token band = 31,466
+#   child arm: 79,182 chars = ~28,483 billed  -> 28,483 + 55-token band = 28,538
+# The channel tool adds the four ops (channels/create/post/history), eleven
+# parameters and the nested member model; every field is load-bearing (name,
+# topic and visibility are request facts, members is the invite shape). The
+# prose was trimmed before this raise; what remains is structural.
+# RAISED 31,466 -> 31,982 for the V2-4 agent ``tags`` tool, measured with THIS
+# script on this branch in an isolated HOME (final wording, after the primary
+# fallback description landed):
+#   top arm:   88,825 chars = ~31,951 billed  -> 31,982 leaves 31 headroom
+#   child arm: 80,684 chars = ~29,023 billed  -> 29,053 leaves 30 headroom
+# The delta is the tool itself: +1,188 chars of ``tool_schemas`` (its
+# description and flat params schema), +307 chars of instructions (the
+# system-prompt guidance line the design requires, reworded in review rounds 1
+# and 2 to qualify the receipt claim to ``assign``) and +7 chars of inventory.
+# The schema and the prompt line are both load-bearing — the design's own
+# prompt rule is "never spell a category the store does not contain" — and the
+# reference vocabulary was kept OFF the wire in ``read tool://tags``, whose
+# ledger entry in tests/unit/tools/test_tool_docs.py moves with this one.
+# RAISED 31,982 -> 32,104 for the ask RELAY field (#2520). This raise COMPOSES
+# onto the two above rather than replacing them: the branch's pre-rebase value
+# (31,025 -> 31,160) was measured against a tree that carried neither #2665's
+# channel tool nor the V2-4 tags tool, so merging it as-is would have silently
+# LOWERED the ceiling under two shipped surfaces. Measured on the merged tree,
+# one run per tree on the same host with an isolated HOME:
+#   base (origin/main 2c55ac459b)  88,825 chars = ~31,951 billed
+#   head (this branch)             89,094 chars = ~32,049 billed
+#   delta                             +269 chars = ~+97
+# The whole delta is the ``relay`` property on ``AskParams`` plus its one clause
+# in the queued description. The child arm does not carry ``ask`` and does not
+# move (80,684 chars = ~29,023 vs the 29,053 ceiling), so
+# BUDGET_CHILD_BILLED_TOKENS stays where main put it.
+# Ceiling = measured head + the 55-token band, so the next field-size edit is a
+# deliberate raise rather than silent creep.
+BUDGET_BILLED_TOKENS = 32_104
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1680,7 +1716,14 @@ BUDGET_BILLED_TOKENS = 31_025
 # audio pair and on the same measurement pass (child arm measured 27,688 billed
 # on this head). The two ceilings move together because the pair is in every
 # session's surface, child included; the difference between them is unchanged.
-BUDGET_CHILD_BILLED_TOKENS = 28_100
+# RAISED 28,100 -> 28,466 with the top arm's #2665 channel-tool raise, on the
+# same clean-arm pass (env -i, isolated HOME, same machine):
+#   base (origin/main 8714b008c1)  78,063 chars = ~28,080 billed
+#   head (this branch)             78,982 chars = ~28,411 billed
+#   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
+#     arm: the channel tool is in every session's surface, children included,
+#     and no child counter moved. Ceiling = measured head + the 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 29_053
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

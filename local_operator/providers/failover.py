@@ -3814,7 +3814,9 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
     )
 
 
-def _stamp_serving_spec(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+def _stamp_serving_spec(
+    event: StreamEvent, spec: ModelSpec, *, access: Any = None, key: str | None = None
+) -> StreamEvent:
     """Copy the on-the-wire serving spec onto a usage-bearing event.
 
     ``stream_with_failover`` rewrites ``current_request.model`` to the fallback
@@ -3830,7 +3832,22 @@ def _stamp_serving_spec(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
     if usage is None:
         return event
     try:
-        stamped = usage.model_copy(update={"provider": spec.provider, "model_id": spec.model_id})
+        from local_operator.providers.registry import env_secret_is_oauth
+        from local_operator.session.spend import inference_billing_labels
+
+        # Credential choice belongs to this dispatch, not the provider registry:
+        # two attempts on the same provider may spend different payment pools.
+        kind = getattr(access, "kind", None)
+        if key and (kind is None or not getattr(access, "credential_id", 0)):
+            # Env credentials have no stored row and older access wrappers call
+            # them api_key even when the resolver selected an OAuth-named env.
+            kind = "oauth" if env_secret_is_oauth(key) else (kind or "api_key")
+        basis, _ = inference_billing_labels(
+            spec.provider, getattr(usage, "usd_cost", None), credential_kind=kind
+        )
+        stamped = usage.model_copy(
+            update={"provider": spec.provider, "model_id": spec.model_id, "billing_basis": basis}
+        )
         return event.model_copy(update={"usage": stamped})
     except Exception:  # noqa: BLE001 — a stamp failure must not drop the event
         return event
@@ -4463,7 +4480,7 @@ async def stream_with_failover(
                                 # inference. No exception text: it can carry SQL
                                 # metadata or credential material.
                                 logger.warning("Muse allowance receipt could not be retained")
-                    stamped = _stamp_serving_spec(event, spec)
+                    stamped = _stamp_serving_spec(event, spec, access=access, key=key)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
                     stamped = _stamp_attempted_selector(stamped, spec)
                     if buffered is not None:

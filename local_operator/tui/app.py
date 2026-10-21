@@ -134,6 +134,7 @@ from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
 
@@ -571,6 +572,32 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: `/tag` and `/tags` copy. TUI-owned, English-only: the surface describes THIS
+#: terminal's conversation labels and sidebar grouping, and it has no desktop
+#: counterpart to keep translated in step.
+_t_tags = tr("tui.tags")
+#: Fixed-width, non-colour membership markers. Width is the point: six rows with
+#: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
+#: a coloured dot would carry the only copy of the state.
+TAG_APPLIED_MARK = "[x]"
+TAG_UNAPPLIED_MARK = "[ ]"
+
+
+def _tag_header(applied: int, total: int) -> str:
+    """The `/tag` list's helper line, chosen by what the store actually holds.
+
+    Three states, never collapsed: no categories at all (the create teaching),
+    categories but none applied (a fact about THIS conversation), and the
+    applied count. ``total`` is the registry size, not the filtered row count —
+    a query must not make the conversation look emptier than it is.
+    """
+    if total == 0:
+        return _t_tags(_tag_keys.empty())
+    if applied == 0:
+        return _t_tags(_tag_keys.none_applied())
+    return _t_tags(_tag_keys.header(count=str(applied)))
+
+
 #: The projects edit slice's copy (LOH-19 P2). The app composes exactly two of
 #: its sentences — the "project vanished mid-write" refusals that only the
 #: write's own KeyError can produce; every other sentence belongs to the page.
@@ -6199,6 +6226,8 @@ class OperatorApp(App[None]):
         # for the same reason — the Esc chain and every approval/ask/clear
         # yield close it the same way, and ``_sync_boot_layout_class`` counts
         # it against the boot layout.
+        self._file_viewer: Any | None = None
+        self._file_viewer_focus_restore: Any | None = None
         self._projects_view: Any | None = None
         self._team_form: Any | None = None
         self._team_form_focus_restore: Any | None = None
@@ -6314,6 +6343,9 @@ class OperatorApp(App[None]):
         self._startup_cleanup_timer: Timer | None = None
         self._sidebar_refresh_generation = 0
         self._sidebar_refresh_pending = False
+        #: `/tags on` state, read by `_apply_sidebar_settings` from the TUI-local
+        #: store and handed to the sidebar. Off is the shipped flat list.
+        self._tag_groups = False
         #: A layer flip (``ctrl+a`` or a chip press) that landed while a poll
         #: was in flight. That poll read the store BEFORE the flip, so its
         #: answer cannot carry the flip, and the ask would otherwise sit until
@@ -11073,6 +11105,10 @@ class OperatorApp(App[None]):
 
     def _apply_sidebar_settings(self) -> None:
         settings = SidebarSettings.from_values(self._config_values())
+        from local_operator.paths import config_dir
+        from local_operator.tui.sidebar_tags import read_tag_groups
+
+        tag_groups = read_tag_groups(config_dir())
         apply_visibility = (
             not self._sidebar_settings_applied or settings.visible != self._sidebar_settings.visible
         )
@@ -11084,10 +11120,28 @@ class OperatorApp(App[None]):
             not self._sidebar_settings_applied
             or settings.show_subagents != self._sidebar_settings.show_subagents
         )
+        # Same rule for `/tags`: the store is its own writer (there is no
+        # settings-page row for it, see `tui.sidebar_tags`), so a change is
+        # whatever the file says at the moment this runs.
+        apply_tag_groups = not self._sidebar_settings_applied or tag_groups != self._tag_groups
         self._sidebar_settings = settings
         self._sidebar_settings_applied = True
+        self._tag_groups = tag_groups
         if apply_subagents:
             self._session_sidebar.show_subagents = settings.show_subagents
+        if apply_tag_groups:
+            # THE MODE IS ADOPTED WITH ITS MAP, by the refresh, never here: a
+            # bare `set_tag_groups(True)` paints one frame with an empty
+            # registry — every row under Untagged — until the map lands (agent
+            # review round 3, MINOR-5). The map costs one assignment read per
+            # row, the work the poll exists to move off this thread, so this
+            # takes the same adoption path as `/tags on`. A poll already in
+            # flight collected under the OLD mode; `again` makes it re-collect
+            # instead of waiting for the 2 s tick.
+            if self._sidebar_refresh_pending:
+                self._sidebar_refresh_again = True
+            else:
+                self._refresh_sidebar()
         if apply_visibility:
             self._set_sidebar_open(settings.visible)
         else:
@@ -11184,7 +11238,10 @@ class OperatorApp(App[None]):
         would be a second, silently diverging notion of "next".
         """
 
-        def collect() -> list[CatalogEntry]:
+        def collect() -> tuple[
+            list[CatalogEntry],
+            tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
+        ]:
             from local_operator.paths import config_dir
             from local_operator.tui.session_catalog import load_catalog
             from local_operator.tui.sidebar_pins import read_pins
@@ -11194,14 +11251,30 @@ class OperatorApp(App[None]):
             # same ranking an open one shows. The population count does NOT
             # belong here: this runs with the list closed, so there is no
             # footer to draw it in.
-            return load_catalog(
+            entries = load_catalog(
                 root,
                 include_subagents=self._session_sidebar.show_subagents,
                 pinned_hidden_ids=tuple(read_pins(root)),
             )
+            # `/tags on` is persisted, so a shortcut pressed while the drawer
+            # is shut must still traverse the grouped order the next open will
+            # paint — the same "one notion of next" rule as the ranking above.
+            # The mode is read ONCE and carried WITH the map for the reason
+            # `_refresh_sidebar` states: adoption must never pair one mode's
+            # snapshot with a later flip of `self._tag_groups`. Reading the flag
+            # again for the tuple was that same TOCTOU one level down — a flip
+            # between the branch and the tuple stamped `(True, (), {})` and
+            # painted every row under Untagged (QA round 2, Q-1).
+            enabled = self._tag_groups
+            if enabled:
+                categories, primaries = self._tag_group_snapshot(root, entries)
+            else:
+                categories, primaries = (), {}
+            tag_groups = (enabled, categories, primaries)
+            return entries, tag_groups
 
         try:
-            entries = await asyncio.to_thread(collect)
+            entries, tag_groups = await asyncio.to_thread(collect)
         except Exception:
             logger.debug("sidebar switch catalog load failed", exc_info=True)
             return
@@ -11215,6 +11288,7 @@ class OperatorApp(App[None]):
         # Closed list: adopt the fresh read so the drawer, when it next opens,
         # shows the order the switch just traversed rather than the stale one.
         self._session_sidebar.set_current(str(getattr(self._session, "session_id", "")))
+        self._session_sidebar.set_tag_groups(*tag_groups)
         self._session_sidebar.set_entries(entries)
         self._switch_session_from(self._session_sidebar.entries, delta)
 
@@ -11441,6 +11515,44 @@ class OperatorApp(App[None]):
         # arrangement, including draft wrapping and gates, without a reflow.
         sidebar.styles.height = "1fr"
 
+    def _tag_group_snapshot(
+        self, root: Any, entries: Sequence[CatalogEntry]
+    ) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
+        """Read the registry and each row's grouping primary, on one thread hop.
+
+        Only called when grouping is ON: the ordinary flat sidebar must not pay
+        one assignment-file read per row, and the tag store is not on this
+        widget's paint path. Peers are skipped because the tag store is local to
+        THIS config root; a remote session has no assignment here and is
+        honestly Untagged rather than guessed at from its device.
+
+        The predicate is the store's (`effective_primary`), not a renderer's, so
+        an unregistered or unassigned primary cannot create a bucket.
+        """
+        from local_operator.session.session_tags import (
+            effective_primary,
+            read_categories,
+            read_entity_tags,
+        )
+
+        registry = read_categories(root)
+        categories = tuple((item["id"], item["name"]) for item in registry)
+        primaries: dict[str, str] = {}
+        for entry in entries:
+            if entry.row.is_remote:
+                continue
+            try:
+                state = read_entity_tags(root, "session", entry.id, categories=registry)
+            except (OSError, ValueError):
+                # A row whose id is not a session id (a test fixture, a store
+                # written by a newer build) has no assignment file to read.
+                # Untagged is the truthful bucket, never a failed frame.
+                continue
+            primary = effective_primary(state["tags"], state["primary"], registry)
+            if primary is not None:
+                primaries[entry.id] = primary
+        return categories, primaries
+
     def _refresh_sidebar(self) -> None:
         if not self._session_sidebar.display or self._sidebar_refresh_pending:
             return
@@ -11455,6 +11567,7 @@ class OperatorApp(App[None]):
             tuple[SessionRow, ...],
             tuple[UnansweredPeer, ...],
             dict[str, int],
+            tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
         ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import read_listing
@@ -11525,7 +11638,24 @@ class OperatorApp(App[None]):
             # SUMMING the marks at paint time, and the current session's live
             # wire count is unioned in there (round 2: F9 — the second return
             # value used to ride this tuple and be unpacked unused).
-            return entries, pins, total, peer_rows, unanswered, ask_marks
+            #
+            # The bucket map is read only in grouping mode, and from the same
+            # worker hop as the catalogue: a per-row assignment read on the UI
+            # thread would be the one new cost this poll adds to the frame.
+            # The MODE travels with the map, read ONCE. Adoption must not
+            # re-read `self._tag_groups`: a flip while this poll is in flight
+            # would pair one mode's snapshot with the other mode's flag, and an
+            # old-off snapshot adopted as on paints every row under Untagged
+            # until the deferred refresh lands (agent review round 2, MINOR-1).
+            # A second read for the tuple reproduced that window one level down
+            # (QA round 2, Q-1).
+            enabled = self._tag_groups
+            if enabled:
+                categories, primaries = self._tag_group_snapshot(root, entries)
+            else:
+                categories, primaries = (), {}
+            tag_groups = (enabled, categories, primaries)
+            return entries, pins, total, peer_rows, unanswered, ask_marks, tag_groups
 
         async def refresh() -> None:
             try:
@@ -11536,6 +11666,7 @@ class OperatorApp(App[None]):
                     peer_rows,
                     unanswered,
                     ask_marks,
+                    tag_groups,
                 ) = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
@@ -11544,6 +11675,12 @@ class OperatorApp(App[None]):
                     return
                 session = self._session
                 self._session_sidebar.set_current(str(getattr(session, "session_id", "")))
+                # BEFORE set_entries: the bucket map participates in the
+                # presentation order the rows are adopted in, so filling rows
+                # first would paint one frame in the old grouping and then
+                # reorder under the pointer on the next tick. The mode is the
+                # one this collect ran under, never a later flip.
+                self._session_sidebar.set_tag_groups(*tag_groups)
                 self._session_sidebar.set_entries(entries)
                 self._session_sidebar.set_pins(pins)
                 if total is not None:
@@ -12353,8 +12490,20 @@ class OperatorApp(App[None]):
         # user's chosen level would repaint the band with a level they did not
         # choose and are no longer running.
         spec = _model_spec(session)
+        follower = callable(getattr(session, "route_shared_slash", None))
+        # A RESTORED choice already belongs to the session; the app's own
+        # preference starts empty after a restart. Seed it BEFORE the restore
+        # guard below, or a resumed session with nothing else to restore never
+        # runs the restore at all and the first `/model` would apply the
+        # target's seed — the reported defect one step later (review round 5).
+        # Never on a FOLLOWER: its remembered local effort must not rewrite the
+        # shared owner's model, and the owner projection is authoritative.
+        if not follower and self._effort_choice is None:
+            restored_choice = getattr(session, "chosen_effort", None)
+            if restored_choice:
+                self._effort_choice = restored_choice
         if (
-            not callable(getattr(session, "route_shared_slash", None))
+            not follower
             and spec is not None
             and (self._effort_choice is not None or self._fast_choice)
             and hasattr(session, "set_model")
@@ -17960,7 +18109,17 @@ class OperatorApp(App[None]):
     #: the handler never runs, while the marks it lists are on disk in front of
     #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/sidebar", "/help", "/settings", "/hub", "/resume", "/notifications"}
+        {
+            "/copy",
+            "/links",
+            "/view",
+            "/sidebar",
+            "/help",
+            "/settings",
+            "/hub",
+            "/resume",
+            "/notifications",
+        }
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -25284,6 +25443,7 @@ class OperatorApp(App[None]):
                 # read-only composer already claims the keyboard: the claim
                 # must not depend on that side effect, or a future focusable
                 # mode rebuilds the hole (agent review round 1, finding 11).
+                or self._file_viewer is not None
                 or self._projects_view is not None
                 or self._agent_form is not None
                 or self._team_form is not None
@@ -26118,6 +26278,8 @@ class OperatorApp(App[None]):
             return
         if self._agent_form is not None:
             self._agent_form.action_cancel_request()
+            return
+        if self._close_file_viewer():
             return
         if self._projects_view is not None and self._projects_view.escape_surface():
             return
@@ -30213,6 +30375,7 @@ class OperatorApp(App[None]):
             and self._settings_view is None
             and self._subagent_view is None
             and self._org_chart_view is None
+            and self._file_viewer is None
             and self._projects_view is None
             and self._agent_form is None
             and self._team_form is None
@@ -34902,6 +35065,218 @@ class OperatorApp(App[None]):
             return
         self._status.update(cwd=cwd)
 
+    # -- conversation tags (`/tag`, `/tags`) --------------------------------
+
+    def _tag_session_id(self) -> str:
+        """The CURRENT conversation id, or ``""`` when there is none to tag.
+
+        A tag write must never mint or attach a session: the operator's rule is
+        that a remote/unsupported/no-current-conversation surface offers no
+        write and no phantom conversation.
+
+        A mesh viewer of a conversation on ANOTHER device is refused for the
+        same reason grouping skips it: ``_tag_group_snapshot`` never reads a
+        remote row's assignment, so accepting the write here would receipt
+        "applied" while the sidebar painted the same conversation under
+        Untagged. One local assignment and one grouping rule must name the same
+        state, so the surface with no bucket to show is the one that declines.
+        """
+        session = self._session
+        if getattr(session, "runtime_locality", "") == "another-machine":
+            return ""
+        return str(getattr(session, "session_id", "") or "")
+
+    def _tag_argument_choices(self) -> tuple[list[ArgumentChoice], str]:
+        """The `/tag` rows and the helper line, for the CURRENT conversation.
+
+        Applied rows come first, registry order within each partition, because
+        this list's primary job is "what is this conversation labelled" and the
+        catalogue can be much longer than the applied set. Each row carries a
+        fixed-width non-colour membership marker, and the primary row says so
+        in WORDS rather than a dot.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.session_tags import (
+            effective_primary,
+            read_categories,
+            read_entity_tags,
+        )
+
+        session_id = self._tag_session_id()
+        if not session_id:
+            return [], _t_tags(_tag_keys.unavailable())
+        root = config_dir()
+        try:
+            registry = read_categories(root)
+            state = read_entity_tags(root, "session", session_id, categories=registry)
+        except (OSError, ValueError):
+            return [], _t_tags(_tag_keys.failed(error="unreadable tag store"))
+        applied = set(state["tags"])
+        primary = effective_primary(state["tags"], state["primary"], registry)
+        rows: list[ArgumentChoice] = []
+        for group in (
+            [item for item in registry if item["id"] in applied],
+            [item for item in registry if item["id"] not in applied],
+        ):
+            for item in group:
+                is_applied = item["id"] in applied
+                marker = TAG_APPLIED_MARK if is_applied else TAG_UNAPPLIED_MARK
+                detail = (
+                    _t_tags(_tag_keys.primary())
+                    if item["id"] == primary
+                    else (
+                        _t_tags(_tag_keys.applied())
+                        if is_applied
+                        else _t_tags(_tag_keys.not_applied())
+                    )
+                )
+                rows.append(
+                    ArgumentChoice(
+                        name=item["name"],
+                        display=f"{marker} {item['name']}",
+                        detail=detail,
+                    )
+                )
+        return rows, _tag_header(len(applied), len(registry))
+
+    def _tag_choices_with_create(self, query: str) -> tuple[list[ArgumentChoice], str]:
+        """The built-in rows plus the exact create-and-apply action, if valid.
+
+        The create row is appended after the registry rows. The shared scorer
+        may still rank it FIRST when the typed text is its exact name (1000
+        beats a prefix match), which is deliberate: the row is named
+        ``Create and apply “…”``, so the frame says what Enter will do before
+        the key is pressed. An existing exact name suppresses the row entirely
+        — uniqueness is the store's rule, not a client guess.
+        """
+        rows, notice = self._tag_argument_choices()
+        cleaned = query.strip()
+        if cleaned and (len(cleaned) > 24 or cleaned.casefold() == "untagged"):
+            return rows, _t_tags(_tag_keys.invalid())
+        if not cleaned:
+            return rows, notice
+        if any(row.name.casefold() == cleaned.casefold() for row in rows):
+            return rows, notice
+        rows.append(
+            ArgumentChoice(
+                name=cleaned,
+                display=_t_tags(_tag_keys.create(name=cleaned)),
+                description=_t_tags(_tag_keys.create_help()),
+            )
+        )
+        return rows, notice
+
+    def _cmd_tag(self, arg: str, notice: NoticeFn) -> None:
+        """``/tag`` — open this conversation's tags; ``/tag <name>`` — toggle.
+
+        One activation is one assignment commit. There is no confirmation and no
+        chip band; the row's marker and the receipt are the state. A name that
+        does not exist yet is created and applied by the SAME activation, with a
+        partial-create failure reported as ``created but not applied`` rather
+        than as a flat failure that invites a blind retry.
+        """
+        session_id = self._tag_session_id()
+        if not session_id:
+            notice(_t_tags(_tag_keys.unavailable()), "warning")
+            return
+        cleaned = arg.strip()
+        if not cleaned:
+            editor = self._editor()
+            if editor is not None and not editor.text.strip():
+                editor.open_command_arguments("tag")
+                return
+            # An inline `/tag` left a draft in the composer. Replacing it to
+            # open a list would destroy work; report the current labels instead
+            # and let the user choose `/tag <name>`.
+            rows, message = self._tag_argument_choices()
+            labels = ", ".join(
+                row.name for row in rows if row.detail != _t_tags(_tag_keys.not_applied())
+            )
+            notice(f"{message} · {labels}" if labels else message)
+            return
+        from local_operator.paths import config_dir
+        from local_operator.session.session_tags import (
+            TagCreateApplyError,
+            toggle_entity_tag,
+        )
+
+        try:
+            result = toggle_entity_tag(config_dir(), "session", session_id, cleaned)
+        except TagCreateApplyError:
+            notice(_t_tags(_tag_keys.partial_create()), "warning")
+            self._refresh_tag_views()
+            return
+        except ValueError as error:
+            text = str(error)
+            if "At most 8" in text:
+                text = _t_tags(_tag_keys.cap_applied())
+            elif "At most 32" in text:
+                text = _t_tags(_tag_keys.cap_registry())
+            elif "1..24" in text or "reserved" in text.casefold() or "control" in text:
+                text = _t_tags(_tag_keys.invalid())
+            notice(text, "warning")
+            return
+        except OSError as error:
+            notice(_t_tags(_tag_keys.failed(error=str(error))), "warning")
+            return
+        if result["created"]:
+            notice(_t_tags(_tag_keys.created_applied(name=result["name"])), "info")
+        elif result["applied"]:
+            notice(_t_tags(_tag_keys.added(name=result["name"])), "info")
+        else:
+            notice(_t_tags(_tag_keys.removed(name=result["name"])), "info")
+        self._refresh_tag_views()
+
+    def _refresh_tag_views(self) -> None:
+        """Repaint the grouped sidebar after this conversation's tags moved.
+
+        Only when grouping is ON: the flat list is independent of tags, so a
+        toggle there must not cause a 2 s poll's worth of catalogue work for a
+        row the user cannot see.
+        """
+        if self._tag_groups:
+            self._refresh_sidebar()
+
+    def _cmd_tags(self, arg: str, notice: NoticeFn) -> None:
+        """``/tags`` — report; ``/tags on|off`` — persist and apply grouping.
+
+        The setting is the TUI's own (see `tui.sidebar_tags`): it changes THIS
+        terminal's list and nothing the model is told. Off restores the exact
+        historical sectioned rendering, including the title budget; on
+        subdivides each section by primary tag with an explicit occupied
+        Untagged bucket.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.tui.sidebar_tags import read_tag_groups, write_tag_groups
+
+        word = arg.strip().casefold()
+        root = config_dir()
+        if not word:
+            state = _t_tags(_tag_keys.on()) if read_tag_groups(root) else _t_tags(_tag_keys.off())
+            notice(_t_tags(_tag_keys.status(state=state)))
+            return
+        if word not in {"on", "off"}:
+            notice(_t_tags(_tag_keys.usage()), "warning")
+            return
+        enabled = word == "on"
+        try:
+            write_tag_groups(root, enabled)
+        except OSError as error:
+            notice(_t_tags(_tag_keys.failed(error=str(error))), "warning")
+            return
+        self._tag_groups = enabled
+        # Let the refresh ADOPT the mode together with its bucket map. Calling
+        # `set_tag_groups` here first would paint one frame with an empty
+        # registry — every row under Untagged — before the read landed.
+        if self._sidebar_refresh_pending:
+            self._sidebar_refresh_again = True
+        else:
+            self._refresh_sidebar()
+        notice(
+            _t_tags(_tag_keys.grouping_on()) if enabled else _t_tags(_tag_keys.grouping_off()),
+            "info",
+        )
+
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
         """``/title`` — report; ``/title <text>`` — set it; ``/title refresh`` — ask.
 
@@ -36092,7 +36467,19 @@ class OperatorApp(App[None]):
         dock has been told to re-arrange but has not finished, so the guard
         compares two stale numbers, agrees with itself, and returns.
         """
-        for panel in (self._usage_panel(), self._aside_panel(), self._keys_legend()):
+        # THE GOAL CARD IS IN THIS LIST FOR THE SAME REASON as the three below it:
+        # it is hosted in a ``width: auto`` container, so a terminal resize reaches
+        # the screen and never the card. It was omitted, and its pre-layout fit —
+        # including the ``-squeezed`` decision — survived a resize unchanged
+        # (measured at 80x12, run 39286870604 / job 118199298717). A card that
+        # keeps its old ground on a shorter terminal covers the composer, which is
+        # the one invariant it owes.
+        for panel in (
+            self._usage_panel(),
+            self._aside_panel(),
+            self._keys_legend(),
+            self._goal_panel(),
+        ):
             if panel is not None:
                 panel.sync_layout(force=force)
 
@@ -36220,6 +36607,7 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         comms = getattr(self._session, "_subagent_comms", None)
@@ -36419,6 +36807,7 @@ class OperatorApp(App[None]):
         # Conversation boot needs the dismissal message, not the optional
         # renderer. Import before registry/focus/layout work so a first-use
         # import failure remains observable without leaving a half-entered mode.
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         from local_operator.tui.widgets.org_chart_view import OrgChartView
@@ -36548,6 +36937,7 @@ class OperatorApp(App[None]):
         Its data loading is async in the widget's own worker, so the first
         frame is the loading state rather than a blocked app.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._import_view is not None:
@@ -36623,6 +37013,7 @@ class OperatorApp(App[None]):
         loading is async in the widget's own worker, so the first frame is the
         loading state rather than a blocked app.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._review_view is not None:
@@ -36702,6 +37093,7 @@ class OperatorApp(App[None]):
         page reads the live scheduler synchronously, so its first frame is the
         populated (or empty) list rather than a loading state.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._schedule_view is not None:
@@ -36798,6 +37190,7 @@ class OperatorApp(App[None]):
         ``on_mount`` so the first painted frame already says "reading the
         library" instead of flashing an empty list for one tick.
         """
+        self._close_file_viewer()
         if self._library_view is not None:
             return
         from local_operator.paths import config_dir
@@ -37014,6 +37407,7 @@ class OperatorApp(App[None]):
         and handed to the widget, so a repaint costs no registry or credential
         I/O — the same split the org chart makes with its resolved tree.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._settings_view is not None:
@@ -37585,6 +37979,7 @@ class OperatorApp(App[None]):
         view switch, zoom and cursor movement without ever re-reading, so a
         repaint costs no registry or filesystem I/O.
         """
+        self._close_file_viewer()
         self._close_agent_form()
         self._close_team_form()
         if self._projects_view is not None:
@@ -37653,6 +38048,9 @@ class OperatorApp(App[None]):
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
         """
+        # Every mode/session transition already closes the projects sibling;
+        # keep the local-file worker on that same lifecycle boundary.
+        self._close_file_viewer()
         view = self._projects_view
         if view is None:
             return False
@@ -40861,22 +41259,25 @@ class OperatorApp(App[None]):
         # `test_every_authoritative_slash_routes_to_owner_with_supported_images`,
         # which is why they keep their own pullbacks below.
         #
-        # The four here are different: the store they write is
+        # The six here are different: the store they write is
         # `config_dir()/archived-sessions.json`, the directory they remove is in
-        # this `config_dir()/sessions/`, and the projects store `/project` reads
-        # and mutates is `config_dir()/projects` — all THIS machine's, with the
-        # sidebar, picker and full-page view that render the result also this
-        # terminal's. Routed to an owner — which is what happened for `/delete`
-        # in the state a user is actually in, and what the wrong-machine split
-        # would do to `/archive` on a cross-host attach — they would act on
-        # another machine's store, and `/delete` would be refused by the owner's
-        # own guard because the conversation a viewer is standing in always
-        # holds a live claim (review round 1, MAJOR-1). `/project` joins on the
-        # projects page's own argument: the page reads THIS machine's store and
-        # sessions, and an OLDER owner still advertises the command
-        # ``authoritative_session`` — this pullback is what keeps that stale
-        # advertisement from routing the command to another machine.
-        _LOCAL_WORK_SLASHES = frozenset({"/archive", "/unarchive", "/delete", "/project"})
+        # this `config_dir()/sessions/`, the projects store `/project` reads and
+        # mutates is `config_dir()/projects`, and the tag registry `/tag` and
+        # `/tags` read and mutate is `config_dir()/tags` — all THIS machine's,
+        # with the sidebar, picker and full-page view that render the result
+        # also this terminal's. Routed to an owner — which is what happened for
+        # `/delete` in the state a user is actually in, and what the
+        # wrong-machine split would do to `/archive` on a cross-host attach —
+        # they would act on another machine's store, and `/delete` would be
+        # refused by the owner's own guard because the conversation a viewer is
+        # standing in always holds a live claim (review round 1, MAJOR-1).
+        # `/project` joins on the projects page's own argument: the page reads
+        # THIS machine's store and sessions, and an OLDER owner still advertises
+        # the command ``authoritative_session`` — this pullback is what keeps
+        # that stale advertisement from routing the command to another machine.
+        _LOCAL_WORK_SLASHES = frozenset(
+            {"/archive", "/unarchive", "/delete", "/project", "/tag", "/tags"}
+        )
 
         if command == "/model" and arg.strip().casefold() == "saved":
             # Saved belongs to the invoking terminal, not the owner's config.
@@ -40893,7 +41294,7 @@ class OperatorApp(App[None]):
             )
         }
         remote_capability = remote_capabilities.get(command)
-        if command in {"/loop", "/sidebar"}:
+        if command in {"/loop", "/sidebar", "/view"}:
             # The invoking TUI owns scheduling/interaction, even when a legacy
             # owner advertises the older authoritative classification. Each
             # loop iteration still uses the source's real owner prompt route.
@@ -41141,6 +41542,10 @@ class OperatorApp(App[None]):
             self._cmd_move(arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
+        elif command == "/tag":
+            self._cmd_tag(arg, notice)
+        elif command == "/tags":
+            self._cmd_tags(arg, notice)
         elif command == "/archive":
             # Acts on the CURRENT session; see the registry entry for why it
             # takes no argument.
@@ -41168,6 +41573,8 @@ class OperatorApp(App[None]):
                 notice("Use /sidebar or /sidebar focus", "error")
             else:
                 self.action_toggle_sidebar()
+        elif command == "/view":
+            self._cmd_view(arg)
         elif command == "/settings":
             self._cmd_settings(notice)
         elif command == "/import":
@@ -43466,7 +43873,16 @@ class OperatorApp(App[None]):
         if session is None or spec is None or not hasattr(session, "set_model"):
             return False
         self._effort_choice = level if remember else None
-        session.set_model(spec.model_copy(update={"reasoning_effort": level}))
+        # The session owns the DURABLE half of the same decision: an explicit
+        # level is a choice, and `remember=False` (`/effort auto`) is a
+        # WITHDRAWAL. Passed explicitly rather than left for the session to
+        # infer from the spec, because a withdrawal can leave the spec level
+        # untouched and a failover clamp can move it without a decision (review
+        # round 1, M1/M3).
+        session.set_model(
+            spec.model_copy(update={"reasoning_effort": level}),
+            effort_choice=(level if remember else None),
+        )
         # READ BACK rather than trusting the write. A host is free to accept a
         # spec and keep its own, and the whole value of this return is that a
         # receipt is never printed for a level the session is not carrying —
@@ -43657,7 +44073,7 @@ class OperatorApp(App[None]):
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
         )
-        return f"reasoning effort: {rendered} — shift+tab cycles, this session only"
+        return f"reasoning effort: {rendered} — shift+tab cycles, this conversation"
 
     def _cmd_effort(self, arg: str, notice: NoticeFn) -> None:
         """``/effort`` — list this model's levels; ``/effort <level>`` — set one.
@@ -43671,20 +44087,23 @@ class OperatorApp(App[None]):
         in one keystroke, so the listing names that key instead of competing
         with it.
 
-        The level is SESSION-scoped: ``/effort`` has no durable form of its own,
-        which is where this parts company with ``PERSIST_HINT``. The model is a
-        standing preference — you want the same one next launch — while effort is
-        a per-task dial: raised for a hard refactor, dropped for chat. Freezing
-        one task's dial into every future session is the failure mode, so there
-        is still no ``/effort default``. What changed with the ``model_effort``
-        key is that a level CAN be made the BIRTH default for new conversations
-        — by saving the model with ``/model default`` while it is in force —
-        which is a separate, deliberate action about the DEFAULT rather than a
-        side effect of turning a dial. So the SET receipt points at that
-        command (D10). The ``/effort auto`` receipt points at ``/settings``
-        instead: auto WITHDRAWS the preference, so ``/model default`` is not the
-        route that keeps it (a stored level survives a bare ``/model default`` by
-        design, D6) — the settings row is (U2).
+        The level is CONVERSATION-scoped: ``/effort`` has no durable form of its
+        own as a machine setting, which is where this parts company with
+        ``PERSIST_HINT``. The model is a standing preference — you want the same
+        one next launch — while effort is a per-task dial: raised for a hard
+        refactor, dropped for chat. Freezing one task's dial into every future
+        session is the failure mode, so there is still no ``/effort default``.
+        The level IS written to this conversation's own journal, so a restart of
+        THIS conversation keeps it — the reported "set Max, restart, back to
+        High" defect. And what changed with the ``model_effort`` key is that a
+        level CAN be made the BIRTH default for new conversations — by saving
+        the model with ``/model default`` while it is in force — which is a
+        separate, deliberate action about the DEFAULT rather than a side effect
+        of turning a dial. So the SET receipt points at that command (D10). The
+        ``/effort auto`` receipt points at ``/settings`` instead: auto WITHDRAWS
+        the preference, so ``/model default`` is not the route that keeps it (a
+        stored level survives a bare ``/model default`` by design, D6) — the
+        settings row is (U2).
         """
         session = self._session
         spec = _model_spec(session)
@@ -43755,19 +44174,24 @@ class OperatorApp(App[None]):
             destination = restored or "auto"
             scope = "(the model's own default)" if restored else "(nothing sent)"
             if restored == current:
+                # THE LEVEL DID NOT MOVE, BUT THE CHOICE MAY HAVE — and the
+                # `_apply_effort(..., remember=False)` above already carried the
+                # WITHDRAWAL to the session even when the spec did not move
+                # (review round 1, M3). Only the receipt differs here.
                 notice(f"reasoning effort: already {destination} {scope}")
                 return
-            # U2: the withdrawal is SESSION-scoped and the user is told the one
-            # route that makes it stick, because the key they set earlier still
-            # holds the level and the next `/new` boots on it. The origin clause
-            # (`(the model's own default)` / `(nothing sent)`) gives way to it:
-            # at 80 columns a notice row holds 70 cells (design review D2) and
-            # origin + `(this session)` + the pointer do not fit together, so the
-            # actionable half stays. What it dropped is on the band and in the
-            # `/settings` expansion beside the level this row names.
+            # U2: the withdrawal is CONVERSATION-scoped and the user is told the one
+            # route that makes it stick for NEW conversations, because the key
+            # they set earlier still holds the level and the next `/new` boots
+            # on it. The origin clause (`(the model's own default)` /
+            # `(nothing sent)`) gives way to it: at 80 columns a notice row holds
+            # 70 cells (design review D2) and origin + `(saved)` + the pointer do
+            # not fit together, so the actionable half stays. What it dropped is
+            # on the band and in the `/settings` expansion beside the level this
+            # row names.
             notice(
                 f"reasoning effort: {current or 'auto'} → {destination} "
-                f"(this session) — /settings sets auto"
+                f"(saved) — /settings sets auto"
             )
             return
         if wanted not in levels:
@@ -43792,6 +44216,16 @@ class OperatorApp(App[None]):
             # out in full, so the shorter form still points at the state it means.
             # Kept word for word in `_effort_slash_result`, or a phone and a
             # terminal answer one command two ways.
+            # Typing the level the band already shows is a NO-OP unless a
+            # DIFFERENT level is held: a narrow route can clamp a real choice
+            # (say `max`) onto the level on the band, and the user typing that
+            # level is how they replace it. With nothing held, arming the
+            # switch-following preference here would leak it across an
+            # unrelated later `/model` — exactly the B2 leak this branch's
+            # neighbour pins (see `_pending_effort_override`).
+            held = getattr(session, "chosen_effort", None)
+            if held and held != wanted:
+                self._apply_effort(wanted)
             self._system_notice(
                 f"reasoning effort: already {wanted} — /effort auto restores the default"
             )
@@ -43806,7 +44240,7 @@ class OperatorApp(App[None]):
         # receipt for an action rather than an answer about the app's settings.
         # The pointer is the one place the app tells the user a level can be made
         # the standing default (D10); it is on this receipt and not on the bare
-        # listing, whose budget is tight and whose "this session only" clause is
+        # listing, whose budget is tight and whose "this conversation" clause is
         # still exactly true of the command it describes.
         #
         # `{current or 'auto'}` is the BAND's word for "a ladder, no level set"
@@ -48924,7 +49358,7 @@ class OperatorApp(App[None]):
 
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         projects: list[ArgumentChoice] = []
-        if not message.directory:
+        if not message.directory and not self._editor().text.startswith("/view "):
             projects = self._project_picker_choices(await project_picker_rows())
         prepended = len(projects)
         choices = [*projects, *choices]
@@ -49297,6 +49731,38 @@ class OperatorApp(App[None]):
                 else "or type a title"
             )
             return
+        if message.command == "tag":
+            # The rows are a function of the typed text because the create
+            # action's NAME is that text. `_tag_choices_with_create` owns the
+            # uniqueness rule: an existing exact name suppresses the create
+            # row, so one activation can only toggle it.
+            rows, line = self._tag_choices_with_create(editor.current_argument())
+            picker.set_choices(rows)
+            picker.set_notice(line)
+            return
+        if message.command == "tags":
+            from local_operator.paths import config_dir
+            from local_operator.tui.sidebar_tags import read_tag_groups
+
+            enabled = read_tag_groups(config_dir())
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        "on",
+                        description=_t_tags(_tag_keys.grouping_on()),
+                        detail=_t_tags(_tag_keys.current()) if enabled else "",
+                    ),
+                    ArgumentChoice(
+                        "off",
+                        description=_t_tags(_tag_keys.grouping_off()),
+                        detail="" if enabled else _t_tags(_tag_keys.current()),
+                    ),
+                ],
+                highlight="on" if enabled else "off",
+            )
+            state_word = _t_tags(_tag_keys.on()) if enabled else _t_tags(_tag_keys.off())
+            picker.set_notice(_t_tags(_tag_keys.status(state=state_word)))
+            return
         if message.command == "mcp":
             # Clear BEFORE the fill: the builder may set a notice of its own
             # (an unreadable credential store on the logout list), and a
@@ -49440,7 +49906,10 @@ class OperatorApp(App[None]):
 
         ``/mcp`` and ``/team`` are the two-level commands; other commands never
         trigger the editor's post, so a fall-through here is dead code rather
-        than a silent wrong list.
+        than a silent wrong list. ``/tag`` is the exception whose rows follow the
+        whole argument rather than a slot boundary: its create-and-apply action
+        is NAMED after the typed text, so the set has to be rebuilt per keystroke
+        to keep an exact new name one activation away.
         """
         message.stop()
         editor = self._editor()
@@ -49479,6 +49948,15 @@ class OperatorApp(App[None]):
             picker = editor.picker
             picker.set_notice("")
             picker.set_choices(self._project_argument_choices(editor))
+        elif message.command == "tag":
+            # The create row's name is the typed text, so the refill and the
+            # opening share one builder. The notice follows the row set: a
+            # too-long or reserved query says so instead of silently showing
+            # fuzzy survivors as if they were the answer.
+            picker = editor.picker
+            rows, line = self._tag_choices_with_create(editor.current_argument())
+            picker.set_choices(rows)
+            picker.set_notice(line)
 
     def _credential_choices(
         self, *, armed: bool = False, cited: bool = False
@@ -54150,7 +54628,7 @@ class OperatorApp(App[None]):
                     text=f"reasoning effort: already {destination} {scope}",
                     style="info",
                 )
-            # Word for word the sibling site above, including the session scope and
+            # Word for word the sibling site above, including the saved scope and
             # the route to making the withdrawal stick (U2): the two surfaces exist
             # so a phone and a terminal get the SAME answer from one set of rules,
             # and an answer that omitted the durability clause here would be the one
@@ -54159,7 +54637,7 @@ class OperatorApp(App[None]):
                 kind="notice",
                 text=(
                     f"reasoning effort: {current or 'auto'} → {destination} "
-                    f"(this session) — /settings sets auto"
+                    f"(saved) — /settings sets auto"
                 ),
                 style="info",
             )
@@ -54175,6 +54653,12 @@ class OperatorApp(App[None]):
         if wanted == current:
             # Word for word the sibling site above, including its cell budget: the
             # two surfaces exist so one command gets one answer whatever renders it.
+            # Same conditional as the sibling: only a DIFFERENT held choice is
+            # replaced; with nothing held this is a true no-op and must not arm
+            # a switch-following preference (review round 1, M3 / B2).
+            held = getattr(session, "chosen_effort", None)
+            if held and held != wanted:
+                self._apply_effort(wanted)
             return SlashResult(
                 kind="notice",
                 text=f"reasoning effort: already {wanted} — /effort auto restores the default",
@@ -55527,6 +56011,12 @@ class OperatorApp(App[None]):
             manager = getattr(self._session, "mcp_manager", None)
             startup = getattr(self._session, "mcp_startup", None)
             failures = dict(startup.failures) if startup is not None else {}
+            # The tool-count accessor and the credential-reason reader are both
+            # optional: a minimal manager stand-in (and a session whose manager
+            # could not start) must render the block without them rather than
+            # collapse it.
+            tools_for = getattr(manager, "get_server_tools", None)
+            reason_for = getattr(manager, "credential_reason", None)
             rows: list[tuple[str, str, str]] = []
             for name, cfg in configs.items():
                 target = getattr(cfg, "command", None) or getattr(cfg, "url", None) or ""
@@ -55535,7 +56025,35 @@ class OperatorApp(App[None]):
                 # server that has since reconnected must not keep reporting the
                 # failure it recovered from, or /mcp becomes a permanent accusation.
                 error = failures.get(name, "") if status != "connected" else ""
-                rows.append((name, status, error or target))
+                reason = ""
+                if status != "connected" and callable(reason_for):
+                    try:
+                        reason = str(reason_for(name) or "")
+                    except Exception:  # noqa: BLE001 — a detail must not break /mcp
+                        reason = ""
+                if status == "connected":
+                    # WHICH SERVER AND HOW MUCH IT OFFERS, on one line. The target
+                    # alone stopped answering the question once a peer's tools could
+                    # be borrowed: the operator wants to know the connection carries
+                    # tools, and the count is the cheapest proof it does.
+                    detail = target
+                    if callable(tools_for):
+                        try:
+                            from collections.abc import Sized
+
+                            listing = tools_for(name)
+                            if isinstance(listing, Sized):
+                                detail = f"{target} · {len(listing)} tools"
+                        except Exception:  # noqa: BLE001 — keep the target
+                            detail = target
+                else:
+                    # THE REASON REPLACES THE TARGET, because the target is not the
+                    # answer to "why is this server down" (design §5). Order: the
+                    # boot error is the most specific fact while it is current; the
+                    # credential state is the durable one; the target is the last
+                    # resort for a manager that knows neither.
+                    detail = error or reason or target
+                rows.append((name, status, detail))
             name_column = max(len(name) for name, _, _ in rows)
             status_column = max(len(status) for _, status, _ in rows)
             items = [
@@ -59431,8 +59949,69 @@ class OperatorApp(App[None]):
         self._supplement_read_inflight.clear()
         self._supplement_live.clear()
 
-    def open_transcript_file(self, url: str, *, source_path: str = "") -> None:
-        """Reveal a file callout in Finder — the open half of the affordance.
+    def _cmd_view(self, arg: str) -> None:
+        from local_operator.i18n.keys import tui_viewer as viewer_msg
+        from local_operator.i18n.text import tr
+
+        if not arg.strip():
+            self._notice(tr("tui.viewer")(viewer_msg.usage()), "warning")
+            return
+        raw = arg.strip()
+        if len(raw) > 1 and raw[0] == raw[-1] == '"':
+            raw = raw[1:-1]
+        self._open_file_viewer(raw)
+
+    def _open_file_viewer(self, raw: str, *, expected: Any = None) -> None:
+        from pathlib import Path
+
+        from local_operator.tui.widgets.file_viewer import FileViewer
+
+        self._close_projects_view()
+        self._close_settings_view()
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_org_chart_view()
+        self._close_subagent_view()
+        self._file_viewer_focus_restore = self.focused
+        page = FileViewer(raw, cwd=Path(self.session_cwd()), expected=expected)
+        self._file_viewer = page
+        self._transcript_view().display = False
+        self.screen.mount(page, before=self.query_one("#input-dock"))
+        self.screen.add_class(PROJECTS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_file_viewer(self) -> bool:
+        page = self._file_viewer
+        if page is None:
+            return False
+        self._file_viewer = None
+        page.cancel_read()
+        page.remove()
+        self.screen.remove_class(PROJECTS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._file_viewer_focus_restore
+        self._file_viewer_focus_restore = None
+        target = (
+            restore
+            if restore is not None and restore.is_attached and restore.display
+            else self._editor()
+        )
+        target.focus()
+        return True
+
+    def on_file_viewer_dismissed(self, message: Any) -> None:
+        message.stop()
+        self._close_file_viewer()
+
+    def open_transcript_file(
+        self, url: str, *, source_path: str = "", expected: Any = None
+    ) -> None:
+        """Preview supported text locally; retain Finder reveal for other files.
 
         ``open -R``, never ``webbrowser``: the callout hands the user the FILE,
         and revealing it is the least authority that answers "where is it".
@@ -59458,9 +60037,27 @@ class OperatorApp(App[None]):
             # moved root): refuse rather than reveal what was never vouched for.
             notice("that file changed since it was listed", "warning")
             return
-        from urllib.parse import unquote, urlparse
+        from local_operator.tui.link_targets import file_uri_to_path
 
-        path = unquote(urlparse(checked).path)
+        path = file_uri_to_path(checked)
+        from pathlib import Path
+
+        from local_operator.tui.file_viewer import file_identity, viewer_kind
+
+        if expected is not None:
+            try:
+                changed = file_identity(Path(path)) != expected
+            except OSError:
+                changed = True
+            if changed:
+                from local_operator.i18n.keys import tui_viewer as viewer_msg
+                from local_operator.i18n.text import tr
+
+                notice(tr("tui.viewer")(viewer_msg.changed()), "warning")
+                return
+        if viewer_kind(Path(path)) is not None:
+            self._open_file_viewer(source_path, expected=expected)
+            return
         self.run_worker(self._reveal_file(path, notice), group="reveal-file")
 
     async def _reveal_file(self, path: str, notice: NoticeFn) -> None:
@@ -59987,10 +60584,14 @@ def mode_word(auto: bool) -> str:
 #: of rungs the shared vocabulary can form has to fit one 70-cell notice row at
 #: 80 columns (design review round 2, D9 / review NEW-2 / QA Q1) — and the test
 #: that proves that has to measure the SHIPPED string rather than a copy of it
-#: kept in the test file. `(session)`, one word shorter than the sibling
-#: receipts' `(this session)`, is the 5 cells that buy the invariant: 18 + 3 +
-#: rungs + 30 ≤ 70 holds for the longest two words in the vocabulary.
-EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (session); /model default keeps it"
+#: kept in the test file. `(saved)` is the 7 cells that buy the invariant (18 +
+#: 3 + rungs + 33 ≤ 70 holds for the longest two words in the vocabulary) and
+#: it is also the HONEST word now: the level is written into the conversation's
+#: own journal and survives a restart (see
+#: ``Session._journal_effort_if_selection_in_force``), while `/new` still starts
+#: on the configured default — which is exactly what `/model default = new
+#: chats` says.
+EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (saved); /model default = new chats"
 
 
 def _effort_unavailable(label: str) -> str:

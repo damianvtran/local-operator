@@ -98,3 +98,28 @@ def test_the_payload_shape_is_the_frozen_one():
     assert payload["version"] == 1
     assert payload["bars"] == 240
     assert len(payload["peaks"]) == 240
+
+
+def test_compute_duration_is_read_from_the_bytes():
+    """The length comes from the decode, not from any provider field.
+
+    This is the property the BYOK sound card depends on: without a duration the
+    player renders nothing, so the number has to exist for a leg whose vendor
+    states none. Asserted exactly - "not None" would pass with a wrong length,
+    and a wrong length makes the waveform and the clock wrong in a way nobody
+    notices until they try to scrub.
+    """
+    _require_engine()
+    raw = _wav(0.5, rate=8000)
+    duration = peaks_module.compute_duration(raw)
+    assert duration is not None
+    assert duration == pytest.approx(0.5, abs=1e-6)
+
+    # A different length moves the number; the decode is not pinned to a grid.
+    longer = peaks_module.compute_duration(_wav(1.25, rate=8000))
+    assert longer == pytest.approx(1.25, abs=1e-6)
+
+
+def test_compute_duration_degrades_to_none_never_raises():
+    assert peaks_module.compute_duration(b"") is None
+    assert peaks_module.compute_duration(b"ID3not-really-audio") is None
