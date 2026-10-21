@@ -81,6 +81,7 @@ from local_operator.providers.radient_credentials import (
 )
 from local_operator.team_bridge import availability
 from local_operator.team_bridge.settings import TeamBridgeSettings
+from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN
 
 # ---------------------------------------------------------------------------
 # Embedded served texts (fallbacks; the server is each text's canonical home)
@@ -579,6 +580,28 @@ REQUEST_TIMEOUT_S = 30.0
 #: caller-sized buffer on the failure path.
 MAX_ERROR_BODY_BYTES = 16 * 1024
 
+#: Image attachments (docs/TEAM-BRIDGE-CONVERSATIONS.md, "Image attachments").
+#: The hub's own ceiling is 5 MiB; this client refuses a larger upload BEFORE
+#: any I/O and a larger download as soon as it is seen, so a misbehaving
+#: proxy or a hostile hub cannot hand a desktop route a caller-sized buffer.
+#: Clients bound images to 1024 px / 1 MiB first, so this is headroom, never
+#: the normal path.
+ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+#: The hub's per-message bound; the client refuses a longer id list rather than
+#: spending a round trip on a guaranteed 400.
+ATTACHMENT_MAX_COUNT = 4
+#: The one closed set of image types the hub stores and serves. A served
+#: Content-Type outside it is refused here — the bytes are never trusted to
+#: name their own type downstream.
+ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
+#: The two attachment fetch purposes (manager decision D1). ``screen`` is the
+#: pre-admission classification read whose bytes go ONLY to the isolated
+#: screening call; ``context`` is the post-``allow`` read whose bytes may enter
+#: an agent's context. The hub enforces each predicate; naming the purpose on
+#: every agent read keeps the runtime from ever reusing screen bytes.
+ATTACHMENT_FETCH_PURPOSES = ("screen", "context")
+_ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
+
 #: §5.2's body bound: a settings body is a fixed small shape, never content.
 SETTINGS_BODY_MAX_BYTES = 4 * 1024
 
@@ -684,6 +707,62 @@ VALID_EFFECTS = ("allow", "deny")
 #: server decide and drive the 409 path), ``None`` (the caller KNOWS there is no
 #: endpoint yet — a fresh enable) and a dict (the last-known endpoint block).
 _UNKNOWN_ENDPOINT: Any = object()
+
+
+def _require_attachment_id(attachment_id: str) -> None:
+    """Refuse an attachment id that could reshape the upstream path."""
+
+    if not isinstance(attachment_id, str) or _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        raise ValueError("attachment id is not a minted batt_ id")
+
+
+def _attachment_ids(ids: Sequence[str] | None) -> list[str]:
+    """The validated id list for a send/schedule, or ``[]`` for "none".
+
+    A duplicate is refused rather than de-duplicated: the hub binds in send
+    order, and silently changing the list would change ``attachments_hash``.
+    """
+
+    if not ids:
+        return []
+    out = list(ids)
+    if len(out) > ATTACHMENT_MAX_COUNT:
+        raise ValueError(f"at most {ATTACHMENT_MAX_COUNT} attachments per message")
+    if len(set(out)) != len(out):
+        raise ValueError("attachment ids must be distinct")
+    for value in out:
+        _require_attachment_id(value)
+    return out
+
+
+def attachments_capability(payload: Any) -> dict[str, Any] | None:
+    """The hub's ``attachments`` capability block, or ``None`` = feature off.
+
+    The hub emits the block only when its attachment store is wired (no deploy
+    flag), so ABSENCE is the old-hub answer and every surface must then hide
+    image affordances and never send ``attachment_ids`` — an old hub rejects
+    the unknown field. A present block must say ``enabled: true`` and list at
+    least one type this client can handle; anything malformed reads as off
+    rather than as a guess at the hub's limits.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    block = payload.get("attachments")
+    if not isinstance(block, Mapping) or block.get("enabled") is not True:
+        return None
+    mimes = block.get("mime_types")
+    if not isinstance(mimes, list):
+        return None
+    usable = [m for m in mimes if isinstance(m, str) and m in ATTACHMENT_MIME_TYPES]
+    if not usable:
+        return None
+    out: dict[str, Any] = {"enabled": True, "mime_types": usable}
+    for key in ("max_count", "max_bytes", "max_pixels"):
+        value = block.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            out[key] = value
+    return out
 
 
 def _envelope_result(response: httpx.Response) -> dict[str, Any]:
@@ -976,6 +1055,8 @@ class TeamBridgeClient:
         *,
         params: Mapping[str, Any] | None,
         body: Mapping[str, Any] | None,
+        content: bytes | None = None,
+        max_response_bytes: int | None = None,
     ) -> httpx.Response:
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
@@ -987,15 +1068,48 @@ class TeamBridgeClient:
             transport=self._transport,
             follow_redirects=False,
         ) as http:
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            if max_response_bytes is not None:
+                # The attachment byte read: STREAM and stop at the bound, so an
+                # oversized (or endless) answer is refused after at most
+                # ``max_response_bytes + chunk`` bytes instead of being
+                # buffered whole. The capped body is rebuilt into an ordinary
+                # Response so refusal mapping stays the one shared path.
+                headers["Accept"] = "image/png, image/jpeg, application/json"
+                async with http.stream(
+                    method, self._base_url + path, params=params, headers=headers
+                ) as streamed:
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in streamed.aiter_bytes():
+                        size += len(chunk)
+                        if size > max_response_bytes:
+                            raise BridgeRefusal(
+                                "attachment_too_large",
+                                "Radient returned an attachment larger than allowed.",  # i18n: ignore, no code
+                                http_status=502,
+                            )
+                        chunks.append(chunk)
+                    return httpx.Response(
+                        streamed.status_code,
+                        headers=streamed.headers,
+                        content=b"".join(chunks),
+                        request=streamed.request,
+                    )
+            if content is not None:
+                # An attachment upload is the one raw-body request: the hub
+                # ignores the declared type and sniffs the bytes itself, so
+                # this is a fixed opaque label, never a caller-chosen one.
+                headers["Content-Type"] = "application/octet-stream"
+                return await http.request(
+                    method, self._base_url + path, params=params, content=content, headers=headers
+                )
             return await http.request(
                 method,
                 self._base_url + path,
                 params=params,
                 json=body,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                },
+                headers=headers,
             )
 
     async def _send(
@@ -1007,6 +1121,7 @@ class TeamBridgeClient:
         body: Mapping[str, Any] | None = None,
         access: OAuthAccess | None = None,
         empty_result: bool = False,
+        content: bytes | None = None,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
 
@@ -1019,25 +1134,9 @@ class TeamBridgeClient:
         resolution, here.
         """
 
-        pinned = access or await self.current_access()
-        try:
-            response = await self._dispatch(
-                method, path, pinned.access_token, params=params, body=body
-            )
-        except httpx.HTTPError as failure:
-            raise BridgeUnreachable() from failure
-        if response.status_code == 401:
-            refreshed = await self._refreshed_access(pinned)
-            try:
-                response = await self._dispatch(
-                    method, path, refreshed.access_token, params=params, body=body
-                )
-            except httpx.HTTPError as failure:
-                raise BridgeUnreachable() from failure
-            if response.status_code == 401:
-                # The second failure STOPS the bridge (no loop) and surfaces the
-                # sign-in state: retrying again cannot mint a working bearer.
-                raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        response = await self._authorized(
+            method, path, params=params, body=body, access=access, content=content
+        )
         if response.status_code >= 400:
             raise _refusal(response)
         if empty_result:
@@ -1050,6 +1149,58 @@ class TeamBridgeClient:
             if isinstance(envelope, dict) and isinstance(envelope.get("msg"), str):
                 return {}
         return _envelope_result(response)
+
+    async def _authorized(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+        access: OAuthAccess | None = None,
+        content: bytes | None = None,
+        max_response_bytes: int | None = None,
+    ) -> httpx.Response:
+        """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
+
+        Split out of :meth:`_send` so the attachment byte read — whose success
+        body is an image, not the ``{msg, result}`` envelope — shares the exact
+        same pinned-identity and single-refresh discipline instead of growing a
+        second copy of it.
+        """
+
+        pinned = access or await self.current_access()
+        try:
+            response = await self._dispatch(
+                method,
+                path,
+                pinned.access_token,
+                params=params,
+                body=body,
+                content=content,
+                max_response_bytes=max_response_bytes,
+            )
+        except httpx.HTTPError as failure:
+            raise BridgeUnreachable() from failure
+        if response.status_code == 401:
+            refreshed = await self._refreshed_access(pinned)
+            try:
+                response = await self._dispatch(
+                    method,
+                    path,
+                    refreshed.access_token,
+                    params=params,
+                    body=body,
+                    content=content,
+                    max_response_bytes=max_response_bytes,
+                )
+            except httpx.HTTPError as failure:
+                raise BridgeUnreachable() from failure
+            if response.status_code == 401:
+                # The second failure STOPS the bridge (no loop) and surfaces the
+                # sign-in state: retrying again cannot mint a working bearer.
+                raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        return response
 
     async def _refreshed_access(self, pinned: OAuthAccess) -> OAuthAccess:
         """One FORCED refresh of the EXACT pinned row, with the owner check.
@@ -1896,6 +2047,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
+        attachment_ids: Sequence[str] | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
         """Append one message. ``client_ref`` is required and idempotent.
@@ -1908,9 +2060,18 @@ class TeamBridgeClient:
         makes the send a reply in that root message's thread; the server validates
         it (same conversation, root not itself a reply) and the key is omitted
         when unset so an older server never sees an unknown field.
+
+        ``attachment_ids`` binds staged uploads (see :meth:`upload_attachment`)
+        to this message; ``text`` may then be empty. The key is sent ONLY when
+        the list is non-empty: a hub without the attachments capability
+        refuses unknown fields, so a text-only send must stay byte-identical
+        to the pre-attachment wire.
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
+        ids = _attachment_ids(attachment_ids)
+        if ids:
+            body["attachment_ids"] = ids
         if tenant_id:
             body["tenant_id"] = tenant_id
         if agent_label:
@@ -1991,11 +2152,28 @@ class TeamBridgeClient:
         body_hash: str,
         tenant_id: str | None = None,
         endpoint_id: str | None = None,
+        attachments_hash: str | None = None,
+        template_sha256: str | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
-        """Record the screening verdict. ``reject`` is terminal."""
+        """Record the screening verdict. ``reject`` is terminal.
 
+        ``attachments_hash`` + ``template_sha256`` admit the message's IMAGES
+        too: the hub binds the allow to that exact image set and requires the
+        v3 template hash, so an image is never admitted by a screen that did
+        not see it. Both ride only on an ``allow`` that actually screened the
+        images; a text-only allow (old hub, a screener without vision) omits
+        them, and the hub then keeps the images withheld from agent context.
+        """
+
+        if (attachments_hash is None) != (template_sha256 is None):
+            raise ValueError("attachments_hash and template_sha256 travel together")
+        if attachments_hash is not None and verdict != "allow":
+            raise ValueError("only an allow binds an attachments_hash")
         body: dict[str, Any] = {"verdict": verdict, "body_hash": body_hash}
+        if attachments_hash is not None:
+            body["attachments_hash"] = attachments_hash
+            body["template_sha256"] = template_sha256
         if tenant_id:
             body["tenant_id"] = tenant_id
         params = {"endpoint_id": endpoint_id} if endpoint_id else None
@@ -2006,6 +2184,127 @@ class TeamBridgeClient:
             body=body,
             access=access,
         )
+
+    # -- image attachments --------------------------------------------------
+    #
+    # Thin transport like every conversation method: membership, type sniffing,
+    # pixel/size bounds, staging lifetime and every fetch predicate are the
+    # hub's. Bytes pass THROUGH this client and are never written to disk, the
+    # team-bridge store or a log — the same no-body-cache rule as message text.
+
+    async def upload_attachment(
+        self,
+        conversation_id: str,
+        data: bytes,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
+
+        The size bound refuses before any I/O. Type is deliberately NOT checked
+        here: the hub sniffs the bytes and answers ``415``/``422`` itself, and a
+        second local opinion would only be a way for the two to disagree.
+        """
+
+        if not data:
+            raise BridgeRefusal(
+                "attachment_invalid",
+                "The attachment is empty.",  # i18n: ignore, no code
+                http_status=422,
+            )
+        if len(data) > ATTACHMENT_MAX_BYTES:
+            raise BridgeRefusal(
+                "attachment_too_large",
+                "The attachment is larger than allowed.",  # i18n: ignore, no code
+                http_status=413,
+            )
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/attachments",
+            params=params,
+            content=bytes(data),
+            access=access,
+        )
+
+    async def delete_attachment(
+        self,
+        conversation_id: str,
+        attachment_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Discard one STAGED upload (idempotent on the hub; bound ones stay)."""
+
+        _require_attachment_id(attachment_id)
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        response = await self._authorized(
+            "DELETE",
+            f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
+            params=params,
+            access=access,
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        # 204 carries no envelope; a 200 {msg} acknowledgement is equally final.
+        return {}
+
+    async def fetch_attachment(
+        self,
+        conversation_id: str,
+        message_id: str,
+        attachment_id: str,
+        *,
+        tenant_id: str | None = None,
+        endpoint_id: str | None = None,
+        purpose: Literal["screen", "context"] | None = None,
+        access: OAuthAccess | None = None,
+    ) -> tuple[bytes, str]:
+        """One bound attachment's bytes and served type: ``(data, mime)``.
+
+        A HUMAN read omits ``endpoint_id``/``purpose``. An AGENT read names its
+        endpoint and the purpose (D1): ``screen`` only while the message awaits
+        this endpoint's verdict, ``context`` only after an allow bound to the
+        current ``attachments_hash``. Every other case is the hub's uniform
+        ``404 attachment_not_found``, surfaced unchanged.
+
+        The served type must be one of :data:`ATTACHMENT_MIME_TYPES`; anything
+        else (including a missing header) is refused, so a caller never hands
+        downstream bytes whose type it cannot name.
+        """
+
+        _require_attachment_id(attachment_id)
+        if purpose is not None and purpose not in ATTACHMENT_FETCH_PURPOSES:
+            raise ValueError("purpose must be 'screen' or 'context'")
+        if purpose is not None and not endpoint_id:
+            raise ValueError("an attachment purpose is an agent read and needs endpoint_id")
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        if purpose:
+            params["purpose"] = purpose
+        response = await self._authorized(
+            "GET",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+            f"/attachments/{attachment_id}",
+            params=params or None,
+            access=access,
+            max_response_bytes=ATTACHMENT_MAX_BYTES,
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                "Radient returned an invalid response.",  # i18n: ignore, no code
+                http_status=502,
+            )
+        return response.content, mime
 
     async def conversation_read(
         self,
