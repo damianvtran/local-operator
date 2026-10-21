@@ -15,6 +15,7 @@ the defining module).
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
 )
-from local_operator.redaction_shapes import REDACTION_MARKER
+from local_operator.redaction_shapes import REDACTION_MARKER, scrub_shapes
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.variables import VariableStore
@@ -276,6 +277,115 @@ def test_loop_config_defaults_to_no_argument_hook() -> None:
     assert field.default is None
 
 
+# --- 2b. the name-driven amplifier, closed over the whole DNS grammar -----------
+
+#: Real-shaped Kubernetes Secret names whose segments all miss the qualifier
+#: vocabulary. Review round 1 measured ten of nineteen realistic names masked in
+#: place AND registered at b55c948f9a: the in-place mask is the accepted residual
+#: (one line, the next read shows it once), the registration is the amplifier.
+K8S_NAMES_OUTSIDE_THE_VOCABULARY = (
+    "payments-api-db",
+    "monitoring-grafana",
+    "backstage-db-credentials",
+    "ops-pagerduty-key",
+    "redis-cache",
+    "postgres-primary",
+    "platform-db",
+    "grafana-admin",
+    "orders-db-credentials",
+    "team-alpha-api",
+)
+
+
+@pytest.mark.parametrize("name", K8S_NAMES_OUTSIDE_THE_VOCABULARY)
+def test_a_secret_name_outside_the_vocabulary_is_never_registered(name: str) -> None:
+    """R1-1: the in-place release is a VOCABULARY, the containment is the GRAMMAR.
+
+    ``secret: <name>`` still masks in place — the stated residual, and recoverable.
+    The promotion is not: a registered name becomes the session's word for it, and
+    every later result, replayed request and newly written cell loses it.
+    """
+    store = _store()
+    line = "secret: " + name
+    out, _ = store.redact_with_report(line)
+    # The residual, in the direction that heals on the next read...
+    assert out != line
+    assert REDACTION_MARKER in out
+    # ...and the containment that matters: never promoted, so readable again.
+    assert store._shape_registrations == set()
+    assert store.redact("the manifest uses " + name) == "the manifest uses " + name
+
+
+@pytest.mark.parametrize("name", K8S_NAMES_OUTSIDE_THE_VOCABULARY)
+def test_a_secret_name_outside_the_vocabulary_is_never_rewritten_in_arguments(
+    name: str,
+) -> None:
+    """R1-1's argument half: a hyphen in a NAME is structure, not credential alphabet.
+
+    Measured at b55c948f9a: ``kubectl get secret payments-api-db -n prod`` came back
+    with the name replaced, because ``_carries_credential_evidence`` counted the
+    hyphen as a credential symbol and the vocabulary release did not cover it.
+    """
+    store = _store()
+    command = "kubectl get secret " + name + " -n prod -o yaml"
+    assert store.redact_arguments(command) == command
+    assert store._shape_registrations == set()
+
+
+def test_an_identifier_shaped_dsn_password_is_registered() -> None:
+    """R1-3: the identifier refusal is NAME-driven, not value-only.
+
+    A DSN password spelled like a path (``prod/secret``) is masked by the DSN rule,
+    whose spelling is its own evidence, and then refused registration at head: masked
+    in place once and free again in the next result. The label decides which gate
+    applies, so this registers while ``secret: payments-api-db`` above does not.
+    """
+    store = _store()
+    password = "prod" + "/" + "secret"
+    dsn = "MONGO_DSN=mongodb://user:" + password + "@host/db"
+    out, _ = store.redact_with_report(dsn)
+    assert out != dsn
+    assert REDACTION_MARKER in out
+    assert password in store._shape_registrations
+    later = "the password is " + password + " exactly"
+    assert store.redact(later) != later
+
+
+#: 60 characters, thirty hyphens, ending out of grammar: the ``fullmatch`` FAILS,
+#: which is where a separator that is also a legal label character backtracks. A
+#: matching string took the first split every time, which is why the hazard hid.
+ADVERSARIAL_HYPHENATED = "a-" * 29 + "aZ"
+
+#: A bound, not a benchmark: the linear form measures 0.0002s here, the old one did
+#: not return in 5s. Generous enough that a loaded machine cannot make it flaky.
+TIME_BOUND_SECONDS = 0.5
+
+
+def test_the_hyphenated_name_check_is_linear() -> None:
+    """R1-2: ``-`` is both the separator and an interior label character.
+
+    The old form (``_DNS_LABEL(?:-_DNS_LABEL)+``) left every hyphen of a failing
+    ``fullmatch`` an ambiguous split point: measured 0.30s at 37 characters, 3.1s at
+    45, no return at this 60-character payload — on a pass that scans arbitrary tool
+    output, so a fetched page or a read file could wedge the agent loop with no
+    timeout to rescue it. Both entry points that reach it are measured.
+    """
+    text = "secret: " + ADVERSARIAL_HYPHENATED
+    store = _store()
+    # Warm once: the first call pays for the one-time compile of the rule table,
+    # which is not what this test measures.
+    scrub_shapes(text)
+    store.redact_with_report(text)
+
+    start = time.perf_counter()
+    store.redact_with_report(text)
+    assert time.perf_counter() - start < TIME_BOUND_SECONDS
+
+    start = time.perf_counter()
+    scrub_shapes(text)
+    assert time.perf_counter() - start < TIME_BOUND_SECONDS
+
+
 # --- 3. the legitimate masking the corpus already pins --------------------------
 
 
@@ -333,7 +443,7 @@ def test_a_real_session_wires_both_hooks_and_they_disagree_on_code(tmp_path: Pat
     assert session._redact_tool_arguments_text(line) == line
     assert store._shape_registrations == set()
 
-    # ...while the result hook still masks a credential typed into a command.
+    # ...while the argument hook still masks a credential typed into a command.
     dsn = "psql postgres://svc:" + ("S3cret" + "Pass1") + "@db.invalid/app"
     masked = session._redact_tool_arguments_text(dsn)
     assert masked != dsn and REDACTION_MARKER in masked

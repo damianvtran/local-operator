@@ -1037,8 +1037,11 @@ class VariableStore:
         for hit in hits:
             # The FLOOR and the placeholder rule govern REGISTRATION only; the hit
             # itself is recorded for every mask (see ``_run_shapes``), so a short
-            # credential still produces its notice.
-            if not is_registerable_component(hit.value):
+            # credential still produces its notice. The hit's LABEL goes in: it is
+            # what distinguishes a value a spelling-evidence rule recognised from one
+            # a name-driven rule guessed at, and only the latter may be refused for
+            # being spelled like an identifier.
+            if not is_registerable_component(hit.value, label=hit.label):
                 continue
             if hit.value in self._shape_registrations:
                 continue
