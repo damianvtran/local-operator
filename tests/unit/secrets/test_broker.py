@@ -40,9 +40,10 @@ from local_operator.secrets.protocol import (
 from local_operator.secrets.store import SecretStore
 
 _SUPPORTED = sys.platform == "darwin" or sys.platform.startswith("linux")
-pytestmark = pytest.mark.skipif(
-    not _SUPPORTED, reason="the broker is implemented for macOS and Linux"
-)
+pytestmark = [
+    pytest.mark.skipif(not _SUPPORTED, reason="the broker is implemented for macOS and Linux"),
+    pytest.mark.allow_secret_broker,
+]
 
 SECRET_VALUE = b"s3cr3t-token-value"
 

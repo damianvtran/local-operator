@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     AgentMessage,
     ImageContent,
     NoticeEvent,
@@ -489,7 +490,9 @@ class FakeSession:
     def effective_model_label(self) -> str:
         return self.model_label
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = EFFORT_CHOICE_UNSET
+    ) -> None:
         pass
 
     @property
@@ -5281,7 +5284,7 @@ async def test_model_switch_calls_session_set_model() -> None:
     session = FakeSession()
     set_models: list[Any] = []
 
-    def set_model(spec, *, explicit=False):
+    def set_model(spec, *, explicit=False, effort_choice=EFFORT_CHOICE_UNSET):
         set_models.append(spec)
 
     session.set_model = set_model  # type: ignore[attr-defined]
@@ -9283,7 +9286,9 @@ class _SwitchableSession(FakeSession):
     def model_label(self) -> str:
         return self._label
 
-    def set_model(self, model, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model, *, explicit: bool = False, effort_choice: object = EFFORT_CHOICE_UNSET
+    ) -> None:
         self._label = f"{model.provider}/{model.model_id}"
 
 
@@ -10620,7 +10625,9 @@ class _CountingSession(_SwitchableSession):
         super().__init__()
         self.set_model_calls: list[tuple[str, bool]] = []
 
-    def set_model(self, model, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model, *, explicit: bool = False, effort_choice: object = EFFORT_CHOICE_UNSET
+    ) -> None:
         self.set_model_calls.append((f"{model.provider}/{model.model_id}", explicit))
         super().set_model(model, explicit=explicit)
 
@@ -11276,7 +11283,9 @@ class _AsyncLabelSession(FakeSession):
     def model_label(self) -> str:
         return self._label
 
-    def set_model(self, model, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model, *, explicit: bool = False, effort_choice: object = EFFORT_CHOICE_UNSET
+    ) -> None:
         self.requested.append((model.provider, model.model_id))
 
 
@@ -14988,7 +14997,9 @@ class _RehomableSession(FakeSession):
         provider, _, model_id = self._label.partition("/")
         return ModelSpec(provider=provider, model_id=model_id)
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = EFFORT_CHOICE_UNSET
+    ) -> None:
         self.switched.append(model)
         self._label = f"{model.provider}/{model.model_id}"
 

@@ -788,6 +788,18 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # Enter on the bare command does something useful, which is the line
         # `/login` sits on the other side of.
         "move": ArgumentMode.OPTIONAL,
+        # REQUIRED: the TUI-only viewer needs a path before it can open a file;
+        # bare /view reports usage rather than performing a useful default.
+        "view": ArgumentMode.REQUIRED,
+        # REQUIRED: the list IS the command here — bare `/tag` opens the
+        # picker, and Enter on the row opens that list and stops rather than
+        # submitting an empty word over it. The space is where a tag NAME
+        # starts; names may contain spaces, so the whole trailing text is one
+        # argument (ArgumentShape.ANY).
+        "tag": ArgumentMode.REQUIRED,
+        # OPTIONAL like `/notifications`: bare `/tags` reports the current mode,
+        # and the space offers the two words (`on`, `off`) that change it.
+        "tags": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`: bare `/team` lists the teams, and the space
         # opens the team-name argument list with roster details.
         "team": ArgumentMode.OPTIONAL,

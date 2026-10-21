@@ -66,6 +66,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from local_operator.compaction.carry import (
+    is_carried_tier,
+    read_recent_decisions,
+    read_unresolved_asks,
+    render_carried_tier,
+)
 from local_operator.compaction.cutpoint import (
     ELISION_GENUINE_COUNT_KEY,
     ELISION_INJECTION_COUNT_KEY,
@@ -100,6 +106,7 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 # module, so the vocabulary cannot be defined here or in the modules that own
 # it (``harness/message_types.py`` carries the full reasoning).
 from local_operator.harness.message_types import (
+    ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
@@ -144,6 +151,7 @@ from local_operator.harness.subagent import (
     team_slot_name,
 )
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
     QUIET_TURN_KEY,
@@ -1775,17 +1783,19 @@ def _payload_count(payload: dict[str, Any], key: str) -> int:
 def _is_persistable_message(message: AgentMessage) -> bool:
     """Whether ``message`` may be written to the transcript as a message entry.
 
-    The compaction elision notice is the one plain ``Message`` that may not.
-    It is synthesized into the live context from counts on the marker payload,
-    and replay synthesizes the same text from the same counts — so journalling
-    it writes a row that lands AFTER ``first_kept_entry_id``, inside the
-    replayed suffix, and the resumed context then holds it twice. That is
+    The compaction elision notice and the carried tier are the plain
+    ``Message``s that may not be journalled. Each is synthesized into the live
+    context from the marker payload, and replay synthesizes the same rows from
+    the same payload — so journalling either one writes a row that lands AFTER
+    ``first_kept_entry_id``, inside the replayed suffix, and the resumed
+    context then holds it twice. That is
     exactly what shipped in an earlier revision of this fix: live 2 rows vs
     resumed 3, and because the persisted copy carried ``compaction_preserved``
     it was skipped by ``find_cut_point`` and folded into the next pass's count,
     which doubled the reported figure on every resume (6 -> 7,167 over ten
-    cycles). Excluded by id here AND kept out of the payload at the write site;
-    one guard failing silently is what produced the defect.
+    cycles). Excluded by ``is_carried_tier`` here (the same predicate the cut
+    walker and the kept-window filter use) AND kept out of the payload at the
+    write site; one guard failing silently is what produced the defect.
 
     Plain ``Message``s otherwise always may. A ``CustomMessage`` may only when its type is
     in :data:`_PERSISTABLE_CUSTOM_TYPES` — todo reminders are ephemeral by
@@ -1812,6 +1822,15 @@ def _is_persistable_message(message: AgentMessage) -> bool:
         ):
             return False
         return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
+    # The carried tier is synthesized on BOTH paths from the marker payload.
+    # Journalling it would put a copy inside the replayed suffix, and the next
+    # resume would re-inject the payload copy too — the exact duplication that
+    # doubled the elision notice (6 -> 7,167). The predicate, not a local id
+    # check: it is the SAME test the cut walker and the kept-window filter use,
+    # and a guard that recognises less than its siblings is how a payload-flag
+    # copy would slip through one of the three.
+    if is_carried_tier(message):
+        return False
     return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
 
@@ -2790,6 +2809,53 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             blocks[index] = str(value)
 
 
+def _chosen_level_from(level: str | None, spec: ModelSpec) -> str | None:
+    """The CONVERSATION-chosen level a journal row implies, or ``None``.
+
+    ``level`` is the row's own ``effort`` field. The answer is a CHOICE only
+    when it differs from the TARGET model's own seed — the same
+    ``reasoning_effort != reasoning_default_effort`` contract ``_carried_effort``
+    reads, and the one ``_normalise_effort_choice`` states live. Comparing
+    against the target is what makes a withdrawal row, which stores the target's
+    seed, read as "nothing chosen" instead of as a choice relative to the model
+    the conversation happened to boot on (review round 2, M5).
+
+    Computed against the spec the row resolves to. Its level may have been
+    CLAMPED for display by the caller, but only its SEED is read here, and the
+    clamp does not move that seed: a row naming ``max`` for a route whose ladder
+    stops at ``high`` keeps ``max`` as the choice while the spec carries the
+    clamp. The clamp is the level IN FORCE; the row is what was ASKED FOR.
+    """
+    # ``None`` means the row stored NO level (a ladderless selection, or one
+    # written before the field carried a choice). It is never read as "use the
+    # spec's level": on a restore the spec's level can be a CLAMP, and treating
+    # a clamp as the choice is the defect this helper exists to avoid (review
+    # round 1, M1a). A birth-default level still reaches switches through the
+    # spec (`_carried_effort`); it is not a conversation choice.
+    if not level:
+        return None
+    candidate = level
+    if candidate == getattr(spec, "reasoning_default_effort", None):
+        return None
+    return candidate
+
+
+def _normalise_effort_choice(choice: object) -> str | None:
+    """A caller's explicit effort decision as a storable level, or ``None``.
+
+    ``None``, an empty string and the ``auto`` sentinel all mean "no level
+    chosen" — ``auto`` is the value the pickers show for that state, and a
+    caller that sends it is withdrawing rather than naming a rung. Any other
+    string is kept EVEN WHEN it equals the model's seed: the caller said this
+    was a decision, and the seed comparison on RESTORE (``_chosen_level_from``)
+    is where the unavoidable ambiguity with a seeded spec is settled.
+    """
+    if not isinstance(choice, str):
+        return None
+    level = choice.strip().lower()
+    return None if level in ("", "auto") else level
+
+
 def _member_reasoning_effort(spec: ModelSpec, requested: str | None) -> str | None:
     """A member override's effort word as a level THIS spec can be asked for.
 
@@ -2837,6 +2903,62 @@ def _dispose_hook_failure_label(hook: object, exc: BaseException) -> str:
     """
     name = getattr(hook, "__qualname__", None) or getattr(hook, "__name__", None) or "anonymous"
     return f"dispose hook {name} failed: {type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _monitor_comparable_text(text: str, details: Any) -> tuple[str | None, str | None, str | None]:
+    """``(comparable_text, blind_reason, spill_handle)`` for one monitor check.
+
+    WHY the monitor must not compare ``ToolResult.text``: for an oversized
+    result that is the DISPLAY PROJECTION — a ``spill_truncate`` head+tail plus
+    a footer naming the char count and a ``spill://`` handle — not the result.
+    A live Slack-thread monitor compared two projections of a 13.8 KB
+    single-line JSON, saw only the footer's count change, and the gate called
+    that count non-material metadata: seven new replies were suppressed and the
+    baseline advanced past them. The FULL stored body is the thing that was
+    watched, so it is read back from the spill store.
+
+    Only ``complete=True`` entries may be compared. A missing, evicted or
+    incomplete entry returns a human sentence instead: comparing what survived
+    would silently narrow the watch (and an incomplete body could hide the
+    change), which is the failure this function exists to prevent. The caller
+    turns that sentence into a ``kind="blind"`` outcome that advances no
+    baseline. The handle rides back with the body so the scheduler can keep it
+    as the next diff's baseline: for a result above ``snapshotMaxChars`` the
+    stored snapshot is a clipped prefix, and diffing against that prefix hides
+    a change past the cut (review round 1, F1).
+    """
+    spill = details.get("spill") if isinstance(details, Mapping) else None
+    if not isinstance(spill, Mapping):
+        return text, None, None
+    handle = spill.get("handle")
+    if not isinstance(handle, str) or not handle:
+        return None, "its full result was not kept, so there is nothing to compare", None
+
+    # Imported here: ``session`` is on every session's import path, and the
+    # spill store is reached only by a check whose result actually overflowed.
+    from local_operator.tools.spill import get_store
+
+    store = get_store()
+    meta = store.stat(handle)
+    if meta is None:
+        return None, "its full result is no longer in the spill store", None
+    if not meta.complete:
+        return (
+            None,
+            (
+                "its result was stored incompletely (it exceeded the spill store's per-entry cap), "
+                "so a change in the missing part could not be compared"
+            ),
+            None,
+        )
+    loaded = store.read_lines(handle, 1, None)
+    if loaded is None:
+        return None, "its full result could not be read back from the spill store", None
+    lines, _total = loaded
+    # ``splitlines`` drops a trailing newline; ``diff.normalize`` drops it from
+    # the comparison anyway, so the joined body is the same text as far as the
+    # monitor's equality is concerned.
+    return "\n".join(lines), None, handle
 
 
 class Session:
@@ -3075,6 +3197,9 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # Tool contexts are rebuilt per turn; presence belongs to the Session
+        # so both transition updates and the serving heartbeat read one fact.
+        self._waiting_on = 0
         # BUSY-TURN CHECKPOINT LATCH (ready-successor handoff). A coordinator asks
         # a BUSY runtime to move; ordinary retirement only ever fires on idle, so
         # this is the one path that carries a mid-turn session across a swap. An
@@ -3459,13 +3584,22 @@ class Session:
         #: is never tagged; ``_load_conversation_name`` sets it from the
         #: ``_is_unnamed_fork()`` verdict it already computes at construction.
         self._wears_inherited_title = False
-        # The birth selector also governs the existing effort-journalling
-        # policy. Restore its historical value on resume: the factory now
-        # configures the saved primary before construction, not today's default.
-        # Only deliberate flags, never synthesized pairs, may override history.
+        # The birth selector is recorded for diagnostics and for the rows a
+        # journal write stamps (``_persist_selected_model``). It no longer
+        # gates effort journalling: the boot-model early return that used to
+        # live in ``_journal_effort_if_selection_in_force`` was left behind when
+        # v2 selection rows became authoritative for the initial selection, and
+        # it was what made a chosen level revert on the next restart.
         self._boot_selector = f"{model.provider}/{model.model_id}"
         self._model_source = model_source
         self._explicit_model_choice = False
+        #: The reasoning level this CONVERSATION chose (see
+        #: :meth:`_remember_effort_choice`), or ``None``. Deliberately separate
+        #: from ``self._model.reasoning_effort``: the selected model may be a
+        #: route that cannot express the choice (its spec carries ``None`` or a
+        #: clamp), and the durable journal must still record what the user
+        #: asked for.
+        self._chosen_effort: str | None = None
         self._selection_needs_initial_write = True
         self._model_migration_notice = False
         #: Set by :meth:`_apply_config_change` when ``web_search.enabled`` /
@@ -6372,7 +6506,13 @@ class Session:
         )
         return result
 
-    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: ModelSpec,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         """Swap the model spec, in force from the very next provider call.
 
         Not "from the next turn": the running turn picks it up too. A turn is a
@@ -6408,9 +6548,26 @@ class Session:
         re-selects the very model the fallback displaced, because that is the
         user reclaiming it. A knob change never withdraws — the user is adjusting
         the model that is serving them, fallback or not.
+
+        ``effort_choice`` is the OTHER decision this call can carry, and it is
+        deliberately a separate parameter rather than something inferred from
+        the spec's level. A spec level is three different things: a level the
+        caller CHOSE, a level a failover CARRY clamped into a narrower ladder,
+        or the model's own SEED. Inferring "chosen" from ``level !=
+        reasoning_default_effort`` recorded a clamp as the user's choice and
+        missed a withdrawal that did not move the level at all (review round 1,
+        M1/M3). So only a caller that KNOWS the answer passes it:
+        ``ServingSessionHandle.set_model_effort`` for an explicit level,
+        ``set_effort``, and the TUI's ``/effort``; ``None`` is the explicit
+        WITHDRAWAL (``/effort auto``), and omitting it leaves the conversation's
+        choice exactly as it was — which is what every model swap, adoption,
+        rehome and sampling override must do.
         """
+        previous_choice = self._chosen_effort
         previous = self._model
         self._model = model
+        if effort_choice is not EFFORT_CHOICE_UNSET:
+            self._chosen_effort = _normalise_effort_choice(effort_choice)
         if previous.supports_images and not model.supports_images:
             # A genuine move onto a text-only model (same-model knob changes
             # copy the spec and cannot flip the capability): explain the
@@ -6431,7 +6588,7 @@ class Session:
                 withdraw = getattr(self._stream_fn, "withdraw_fallback", None)
                 if callable(withdraw):
                     withdraw()
-                self._journal_effort_if_selection_in_force(previous, model)
+                self._journal_effort_if_selection_changed(previous, model, previous_choice)
                 self.refresh_frontend_state()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
@@ -6458,14 +6615,17 @@ class Session:
             # (see `spec_for_target` — a chain entry naming no effort inherits
             # the chosen level), so an `/effort` change has to re-derive it or
             # the band keeps naming the level the user just moved away from.
-            # Quietly — no event, no persistence: the route did not move, and
-            # the `/effort` receipt plus the host's own repaint already cover
-            # the level change.
+            # Quietly — no event: the route did not move, and the `/effort`
+            # receipt plus the host's own repaint already cover the level
+            # change. The SELECTION row is a different matter and is re-written
+            # below: a level the user chose is a durable property of the
+            # conversation, not an in-memory knob (see
+            # `_journal_effort_if_selection_in_force`).
             if self._active_route is not None:
                 refreshed = self._spec_for_route(*self._active_route)
                 if refreshed is not None:
                     self._active_fallback = refreshed
-            self._journal_effort_if_selection_in_force(previous, model)
+            self._journal_effort_if_selection_changed(previous, model, previous_choice)
             self.refresh_frontend_state()
             return
         # A genuine model change is a SELECTION, and selections outlive the
@@ -6563,33 +6723,82 @@ class Session:
             )
         )
 
-    def _journal_effort_if_selection_in_force(self, previous: ModelSpec, model: ModelSpec) -> None:
-        """Re-journal the selection when a knob change moves the effort on a
-        model the user SWITCHED to, so the restored effort tracks it.
+    @property
+    def chosen_effort(self) -> str | None:
+        """The level this CONVERSATION chose, or ``None`` when nothing was chosen.
 
-        The ``selected_model`` row carries an effort field, and a switch
-        followed by a SEPARATE ``/effort`` change would otherwise leave that
-        field frozen at the switch's level: the ``/effort`` call takes
-        ``set_model``'s same-pair early return and never reaches the journal
-        write, so a resume would come back on the switched model at its
-        DEFAULT effort — silently dropping the level the user chose and, on a
-        reasoning model, quietly changing cost (review round 1, F1).
+        Distinct from ``self.model.reasoning_effort``, which is the level the
+        SELECTED model can express right now (a clamp, a seed, or ``None`` on a
+        model with no ladder). Set ONLY by a caller that states the decision —
+        ``set_model(effort_choice=...)`` — never inferred from the spec: a
+        change that INFERRED it from ``level != seed`` recorded a failover
+        CLAMP as the choice and could not see a withdrawal that changed no
+        level (review round 1, M1/M3).
+        """
+        return self._chosen_effort
+
+    def _journal_effort_if_selection_changed(
+        self, previous: ModelSpec, model: ModelSpec, previous_choice: str | None
+    ) -> None:
+        """Re-journal the selection when an effort DECISION moved it.
+
+        "Decision" covers both halves the row stores: the level the selected
+        model now expresses, and the level the CONVERSATION chose
+        (``effort_choice``). ``/effort auto`` can change only the second one
+        when the spec already sits on its seed, and the row must still be
+        rewritten — otherwise the withdrawn level comes back on the next
+        restart (review round 1, M3).
+
+        The ``selected_model`` row carries an effort field, and ``/effort``
+        takes ``set_model``'s same-pair early return and never reaches the
+        switch's own journal write. Without this, EVERY model — not only a
+        model the user switched to — would come back from ``--resume`` at the
+        level its spec happens to seed, silently dropping the level the user
+        chose and, on a reasoning model, quietly changing cost.
+
+        THE BIRTH MODEL IS NOT EXEMPT, and it used to be. ``#240`` returned
+        early when the model's selector equalled ``self._boot_selector``, on
+        the stated ground that ``_restore_selected_model`` skipped a row whose
+        selector was the boot selector. That skip was removed in ``#797`` when
+        version-2 rows became authoritative for the initial selection too: the
+        restore now honours a boot-selector row, so the guard no longer
+        prevented an inert write — it prevented the ONE write that makes a
+        chosen level survive a restart on the model the conversation booted on.
+        That is the reported defect: a session on its boot model (an agent
+        conversation whose configured model has not been switched, and which
+        restarts most often) took ``/effort max`` in memory, never journalled
+        it, and resumed on the seed ``high`` with nothing on screen having
+        changed. The guard's other half — "effort changes alone do not create
+        model-switch records" — is unaffected: this method appends a
+        ``selected_model`` SNAPSHOT and emits no ``ModelChangeEvent``, so a
+        knob change still never reads as a switch.
 
         Bounded twice, and each bound is load-bearing:
 
-        - **Only an actual effort move.** A sampling-only override
+        - **Only an actual effort decision.** A sampling-only override
           (temperature / top_p, the server's ``ChatRequest.options`` path)
           rides ``set_model`` on the same pair too, and the journal stores no
           sampling — so re-journalling on those would append identical rows for
-          a change the row cannot even express.
-        - **Only a non-birth selection.** This retains the existing /effort
-          policy: effort changes alone do not create model-switch records on
-          the birth model. Initial identity is now durable at admission, but
-          that is not an expansion of this effort-change journalling policy.
+          a change the row cannot even express. The spec level and the chosen
+          level are compared SEPARATELY; a settled call that moved neither is
+          still skipped.
+        - **Coalesced, not one append per keystroke.** ``/effort`` cycling
+          (``shift+tab``) lands one write per SETTLED level: the writer
+          snapshots the spec at write time, and a second change while a write
+          is in flight is covered by the dirty flag (see
+          ``_spawn_selected_model_write``). The cost is one small custom row
+          per level change, which is the price of the durability this row
+          exists to provide.
         """
-        if previous.reasoning_effort == model.reasoning_effort:
-            return
-        if f"{model.provider}/{model.model_id}" == self._boot_selector:
+        # BOTH HALVES MOVE THE ROW: the level a model can express, and the
+        # level the CONVERSATION chose. ``/effort auto`` on a spec that is
+        # already at its seed changes only the second one, and an early return
+        # on the spec comparison alone left the withdrawn level in the row for
+        # the next restart to resurrect (review round 1, M3).
+        if (
+            previous.reasoning_effort == model.reasoning_effort
+            and previous_choice == self._chosen_effort
+        ):
             return
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
@@ -9940,7 +10149,8 @@ class Session:
         if (
             queue is None
             or not isinstance(message, CustomMessage)
-            or message.custom_type not in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE)
+            or message.custom_type
+            not in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE, ASK_RELAY_MESSAGE_TYPE)
             or not row_id
         ):
             # H5a (F3): a NEWLY written bridge row is the ONLY place a request
@@ -11331,17 +11541,27 @@ class Session:
             self._ask_gate_diverts.popitem(last=False)
 
     def _enqueue_ask(
-        self, questions: list[Any], timeout: Any = None, tool_call_id: str = ""
+        self,
+        questions: list[Any],
+        timeout: Any = None,
+        tool_call_id: str = "",
+        relay: str | None = None,
     ) -> dict[str, Any]:
         """Queue one ask and return the tool's receipt (or a refusal).
 
         Thin by design: the caps, the log write, the index and the deadline row
         all live in ``AskQueue.enqueue``, and the tool layer never learns about
-        any of them.
+        any of them. ``relay`` (#2520) selects the POINTER entry point instead —
+        one reference to another session's ask, whose status is derived — and
+        the questions list is then empty by construction (the validator forbids
+        both); the origin owns the deadline, so ``timeout`` is not consulted on
+        that arm.
         """
         queue = self.ask_queue()
         if queue is None:  # pragma: no cover — the tool only calls this when set
             return {"ok": False, "error": "this session has no queued-ask engine"}
+        if relay is not None:
+            return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
         return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
 
     #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
@@ -11641,6 +11861,13 @@ class Session:
             # The same hop the blocking path used: it keeps the raw bytes out of
             # the model's context by substituting the key name, announces the new
             # key to later turns, and reports a refused store as NOT PROVIDED.
+            #
+            # A RELAY CANNOT TAKE THIS HOP, and that is a SECURITY property, not
+            # an optimisation (#2520): ``enqueue_relay`` refuses any origin that
+            # carries a secret question (``RELAY_SECRET_ORIGIN``), so the
+            # questions copied onto a relay row are never secret and this test is
+            # false for one. A credential's value is typed only against the card
+            # of the session that asked for it.
             from local_operator.asks.render import apply_secret_answers
 
             merged.update(
@@ -15644,6 +15871,12 @@ class Session:
             self._active_route = None
             self._active_route_reason = None
             await self._persist_active_route(self._model)
+            # The EFFECTIVE model is a canonical-state field, so publish the
+            # edge here rather than leaving it to a host that happens to fold
+            # the event below: a reader between the two calls would otherwise
+            # see the fallback this session just left. An edge, not a
+            # per-token path (see ``refresh_frontend_state``).
+            self.refresh_frontend_state()
             await self._emit(
                 ModelChangeEvent(
                     provider=self._model.provider,
@@ -15675,6 +15908,10 @@ class Session:
         self._active_route = (selector, target_effort)
         self._active_route_reason = reason
         await self._persist_active_route(self._model)
+        # Same edge as the return branch: ``effective_model`` and the
+        # displacement sentence it implies are canonical-state fields, so a
+        # reader must not have to wait for a host's event fold to see them.
+        self.refresh_frontend_state()
         await self._emit(
             ModelChangeEvent(
                 provider=spec.provider,
@@ -15695,6 +15932,25 @@ class Session:
             reason=reason,
             transient=True,
         )
+        # THE LEVEL IS PART OF WHAT JUST MOVED, so it gets said out loud.
+        #
+        # The band's effort segment names the level IN FORCE — correctly — and
+        # that is exactly why a fallback serving at a level other than the one
+        # the conversation chose used to look like the dial moving on its own:
+        # the target's ladder clamps the choice (``spec_for_target``), or the
+        # chain entry pins a level of its own, and nothing distinguished either
+        # from an explicit ``/effort``. The sentence is composed by
+        # ``frontend_state.effort_displacement`` so the notice here, the
+        # canonical state and every client read one wording.
+        #
+        # ``queue_notice`` because this fires inside the turn the fallback
+        # rescued: the line belongs AFTER that turn's answer, not between the
+        # user's question and the reply (see its docstring).
+        from local_operator.session.frontend_state import effort_displacement
+
+        displacement = effort_displacement(self._model, spec, self._chosen_effort)
+        if displacement.get("note"):
+            await self.queue_notice(displacement["note"], "info")
 
     def _spec_for_route(self, selector: str, effort: str | None) -> ModelSpec | None:
         """The fallback target's own ``ModelSpec``, or None when unresolvable.
@@ -17681,6 +17937,10 @@ class Session:
             "code_requests show for review rounds and CI."
         )
 
+    def _note_waiting(self, count: int) -> None:
+        """Record presence without I/O; serving updates publish this snapshot."""
+        self._waiting_on = max(0, int(count))
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -17693,6 +17953,7 @@ class Session:
 
         lineage = _session_lineage(self)
         return ToolContext(
+            note_waiting=self._note_waiting,
             team_id=lineage[-1] if lineage else "",
             memory_config_dir=str(self._config_dir),
             cwd=self._cwd,
@@ -18009,6 +18270,18 @@ class Session:
         shipped default that silently downgraded review quality could not be
         traced to anything the operator decided.
 
+        ONE exception to that order, and it is the only absolute one: a role
+        whose own pin IS the inherit sentinel (``effort: default``) states
+        "always run on the launching session's model", and nothing a delegating
+        model can pass moves it — not a launch tier, not a roster slot's tier
+        (the ``team`` tool lets a model author one), not an explicit
+        ``model=`` pick. The role's own pin being a TIER is still the role's
+        DEFAULT and keeps being overridable; only the sentinel is absolute,
+        because only the sentinel claims the session's model rather than naming
+        a tier. The launch receipt names the deciding layer (``role_inherit``)
+        so a caller whose tier was not applied is told, rather than left to
+        assume its pick took effect.
+
         A tier whose VALUE is the inherit sentinel (``default``, matched by
         :func:`~local_operator.harness.subagent.is_inherit_tier_sentinel`)
         resolves to the session's own model (``self.model``) instead of being
@@ -18089,7 +18362,11 @@ class Session:
         Sources: ``explicit_inherit`` and ``explicit_model`` for a per-run
         ``model``, ``team`` when a ``TeamMember`` ``tier``/``effort`` decided
         either field, ``effort`` for the caller's own tier argument, ``role`` for
-        the row's ``effort:`` tag, ``parent`` for no pin at all.
+        the row's ``effort:`` tag, ``parent`` for no pin at all, and
+        ``role_inherit`` when the row's pin IS the inherit sentinel and that
+        absolute pin decided the model (which is why it outranks ``effort`` and
+        ``team`` here, and why a caller whose tier was passed but not applied
+        must be told so rather than left to assume it took effect).
 
         The resolution itself is
         :func:`~local_operator.harness.subagent.resolve_member_model` -- the SAME
@@ -18113,19 +18390,72 @@ class Session:
                 agent_registry=registry,
             )
 
+        def _role_resolution() -> Any:
+            """The launch resolution WITH the registry, or the lenient fallback.
+
+            The registry is the OPERATOR's layer: a pin written into it is a
+            decision the operator made, so a registry that cannot be read is
+            precisely the silent substitution the strict tier path refuses one
+            layer up. Surface it instead.
+
+            The fallback re-resolves with no registry at all: the ROW pin is
+            what could not be read, and a roster override does not need it, so a
+            member tier still wins on the lenient path.
+            """
+            try:
+                return _resolved(self.agent_registry)
+            except Exception as exc:  # noqa: BLE001
+                if strict:
+                    raise SubagentModelUnavailable(
+                        agent,
+                        f"the agent registry could not be read ({exc}); refusing to "
+                        "inherit the session model for a role whose pin cannot be "
+                        "resolved",
+                    ) from exc
+                logger.warning(
+                    "agent registry could not be read while resolving role %r (%s); "
+                    "using the session model",
+                    agent,
+                    exc,
+                )
+                return _resolved(None)
+
         if model is not None:
             # Explicit run choices override the role, but never rewrite it.
             # Retain the inherit sentinel separately from omission so restart
             # can follow the lineage without accidentally re-applying a pin.
             if effort is not None:
                 raise ValueError("pass either model or effort, not both")
+            provider, separator, model_id = model.partition("/")
+            if model != "inherit" and (
+                not separator or not provider or not model_id or any(c.isspace() for c in model)
+            ):
+                # The SHAPE of a pick is checked before the role is consulted,
+                # and stays checked for every role: a malformed selector is
+                # malformed whether or not the role's pin was going to use it,
+                # and refusing it here is what keeps "an unusable selector
+                # registers no job" true of every role rather than only of the
+                # ones whose pin the selector could have moved.
+                raise ValueError("model must be 'inherit' or <provider>/<model-id>")
+            # THE ROLE IS CONSULTED NEXT, because a role whose own pin is the
+            # inherit sentinel states an ABSOLUTE decision -- "always run on
+            # the launching session's model" -- and a delegating model's pick
+            # cannot move it. Every layer this outranks is model-reachable (the
+            # ``task`` tool's ``effort``/``model`` arguments, and the ``team``
+            # tool's roster-slot tier), so a pin any of them could move would
+            # not be a pin. The role's own row is the only place the decision
+            # can be stated or withdrawn.
+            role_resolution = _role_resolution()
+            if role_resolution.role_pins_inherit:
+                requested = role_resolution.effort if apply_tier_effort else None
+                return (
+                    _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                    "role_inherit",
+                )
             if model == "inherit":
                 return None, "explicit_inherit"
             from local_operator.mobile.peer_model import validate_subagent_selection
 
-            provider, separator, model_id = model.partition("/")
-            if not separator or not provider or not model_id or any(c.isspace() for c in model):
-                raise ValueError("model must be 'inherit' or <provider>/<model-id>")
             chosen = validate_subagent_selection(provider, model_id)
             # The MODEL and the DEPTH are independent fields, so a member's own
             # ``effort`` still applies to an explicitly chosen model. Only that
@@ -18133,40 +18463,23 @@ class Session:
             # so a member TIER loses to it (including the effort a ``{model,
             # effort}`` tier mapping carries -- that effort belongs to the tier's
             # model, which is not the one being run).
-            member = _resolved(None)
+            member = role_resolution
             if apply_tier_effort and member.effort_source == "team":
                 chosen = _with_tier_effort(chosen, _member_reasoning_effort(chosen, member.effort))
             return chosen, "explicit_model"
-        try:
-            resolution = _resolved(self.agent_registry)
-        except Exception as exc:  # noqa: BLE001
-            # An unreadable registry is NOT "no role of that name": the old
-            # swallow sent this down the seed path (a packaged seed carries no
-            # operator pin) and then inherited the session model with no trace --
-            # precisely the silent substitution the strict tier path refuses one
-            # layer up. Surface it instead.
-            if strict:
-                raise SubagentModelUnavailable(
-                    agent,
-                    f"the agent registry could not be read ({exc}); refusing to "
-                    "inherit the session model for a role whose pin cannot be "
-                    "resolved",
-                ) from exc
-            logger.warning(
-                "agent registry could not be read while resolving role %r (%s); "
-                "using the session model",
-                agent,
-                exc,
-            )
-            # Re-resolve with no registry at all: the ROW pin is what could not
-            # be read, and a roster override does not need it, so a member tier
-            # still wins on the lenient path.
-            resolution = _resolved(None)
+        resolution = _role_resolution()
         wanted = resolution.tier
         source = (
-            "team"
-            if resolution.decided_by_team
-            else "effort" if effort else "role" if resolution.selector is not None else "parent"
+            # The role's ABSOLUTE pin decides first: it outranks both the
+            # launch tier and the roster's tier, so a source that named either
+            # of them here would report a layer that did not decide.
+            "role_inherit"
+            if resolution.role_pins_inherit
+            else (
+                "team"
+                if resolution.decided_by_team
+                else "effort" if effort else "role" if resolution.selector is not None else "parent"
+            )
         )
 
         def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:
@@ -20992,6 +21305,7 @@ class Session:
             return cut
 
         preserved_key = getattr(compaction_api, "PRESERVED_USER_TURN_KEY", None)
+        carried_key = getattr(compaction_api, "CARRIED_TIER_KEY", None)
         fixed = self._wire_bytes_of(
             compaction_api,
             [
@@ -21002,6 +21316,16 @@ class Session:
                     preserved_key is not None
                     and isinstance(message.provider_payload, dict)
                     and message.provider_payload.get(preserved_key)
+                )
+                # The carried tier is re-synthesized in FRONT of the kept
+                # window, like the marker and preserved turns. It is small
+                # (count-bounded), but counting it here keeps the band's
+                # arithmetic honest rather than leaving a constant-sized
+                # undercount for the 20% margin to absorb.
+                or (
+                    carried_key is not None
+                    and isinstance(message.provider_payload, dict)
+                    and message.provider_payload.get(carried_key)
                 )
             ],
         )
@@ -21751,7 +22075,11 @@ class Session:
         task = asyncio.create_task(
             asyncio.to_thread(
                 extract_messages,
-                plan.llm_history[: plan.cut],
+                # The carried tier is a LIVE-STATE projection, not history.
+                # Summarizing or mining a previous projection can assert an ask
+                # still open after it was answered, and the fresh projection
+                # cannot retract a sentence inside the summary.
+                [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)],
                 locators=enabled["locators"],
             )
         )
@@ -21772,8 +22100,50 @@ class Session:
         """
         self._begin_memory_capture(plan)
         return await self._produce_summary(
-            plan.compaction_api, plan.llm_history[: plan.cut], plan.strategy
+            plan.compaction_api,
+            [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)],
+            plan.strategy,
         )
+
+    def _carried_tier_live_state(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read the carried tier from LIVE state, fresh, for THIS pass.
+
+        **Never accumulated.** Both sources are re-read every pass and nothing
+        is taken from the previous marker, which is what makes an answered ask
+        disappear and stops an expired one from resurrecting. A carried list
+        that grew across passes would be worse than the loss it fixes.
+
+        Asks are bounded by COUNT (``carry.CARRIED_ASKS_LIMIT``) rather than
+        tokens: the verbatim user-turn block is token-capped with oldest-first
+        eviction, so a still-blocked question must not compete there for a slot.
+
+        Memory is read only when the operator has it enabled; a read failure
+        carries nothing and never fails the pass. Every failure is contained
+        here for that reason — this is an enhancement to a pass, not a
+        precondition of one.
+        """
+        asks: list[dict[str, Any]] = []
+        decisions: list[dict[str, Any]] = []
+        if self._session_id:
+            try:
+                from local_operator.asks import store as ask_store
+
+                directory = ask_store.session_dir(self._config_dir, self._session_id)
+                asks = read_unresolved_asks(directory)
+            except Exception:  # noqa: BLE001 - carry nothing, never fail the pass
+                logger.warning("carried asks: read failed; carrying none", exc_info=True)
+        if self._config_dir:
+            try:
+                from local_operator.memory_capture import policy
+                from local_operator.tools.memory_tools import store_for
+
+                if policy(self._config_dir)["enabled"]:
+                    decisions = read_recent_decisions(store_for(self._build_tool_context()))
+            except Exception:  # noqa: BLE001 - carry nothing, never fail the pass
+                logger.warning("carried decisions: read failed; carrying none", exc_info=True)
+        return asks, decisions
 
     async def _finish_compaction(
         self,
@@ -21795,7 +22165,7 @@ class Session:
         compaction_api = plan.compaction_api
         try:
             self._begin_memory_capture(plan)
-            to_summarize = plan.llm_history[: plan.cut]
+            to_summarize = [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
             # ``llm_history`` went through the capability strip (the summary
             # request must not carry images a text-only model cannot take),
@@ -21941,6 +22311,21 @@ class Session:
                                 for capture in elided_captures
                             ),
                         )
+            # THE CARRIED TIER, LIVE half. Read fresh here, at the commit, not at
+            # plan time: a detached summary can be minutes old, and an ask
+            # answered in between must not ride the marker. The lists are passed
+            # to the transcript below and rendered from them — the SAME renderer
+            # replay uses — so live and resumed contexts agree message for
+            # message.
+            carried_asks, carried_decisions = self._carried_tier_live_state()
+            # A carried row is compaction's own output, re-synthesized every
+            # pass; it is never legitimate kept history. Drop any previous copy
+            # BEFORE the fresh one is seated, or a cut that lands after the old
+            # block would leave two copies, then three — one per pass. The cut
+            # walker already refuses it as a boundary (``is_carried_tier``), so
+            # this is the second of the two guards, not the only one.
+            kept = [message for message in kept if not is_carried_tier(message)]
+            carried_message = render_carried_tier(carried_asks, carried_decisions)
             first_kept_entry_id = kept[0].id
             memory_marker = await self._transcript.append_compaction(
                 summary,
@@ -21956,6 +22341,8 @@ class Session:
                 # numbers rather than re-deriving them from content.
                 preserved_turns_dropped=preserved_turns_dropped,
                 preserved_turns_shed=preserved_turns_shed,
+                carried_asks=carried_asks,
+                carried_decisions=carried_decisions,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
@@ -22042,6 +22429,11 @@ class Session:
                 message = _replayed_user_message([TextContent(text=turn["text"])], turn["id"])
                 message.provider_payload = {compaction_api.PRESERVED_USER_TURN_KEY: True}
                 preserved_messages.append(message)
+            # The carried tier sits AFTER the verbatim turns and BEFORE the kept
+            # window — the same position ``replay_entries`` seats it. Built from
+            # the fresh lists above, never from the previous payload.
+            if carried_message is not None:
+                preserved_messages.append(carried_message)
             # The context becomes the RENDERED history, so a live todo reminder
             # does not survive this — by design, and the reason the plan renders
             # without them (see :meth:`_render_for_compaction`): a reminder
@@ -26080,13 +26472,28 @@ class Session:
         payload = {
             "version": 2,
             "selector": f"{model.provider}/{model.model_id}",
-            "effort": model.reasoning_effort,
+            # THE CHOICE FIRST (see ``_remember_effort_choice``): a route that
+            # cannot express the chosen level carries ``None`` (or a clamp) on
+            # its spec, and writing the spec's own level would let the trip
+            # through that route erase the user's choice from the durable row.
+            # The clamp is still a pure function of the row's level and the
+            # target's ladder, so a restore re-derives exactly the level in
+            # force — no clamped value is ever replayed as a choice.
+            "effort": self._chosen_effort or model.reasoning_effort,
             "boot": self._boot_selector,
         }
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
         self._selection_needs_initial_write = False
         current = self._model
-        if (f"{current.provider}/{current.model_id}", current.reasoning_effort) == (
+        # THE SAME EXPRESSION THE PAYLOAD USED. Comparing the spec's raw level
+        # here would read a model that cannot express the choice as "the
+        # selection moved under the append" on every write and schedule a
+        # successor forever — the loop below is only safe because the two sides
+        # are derived identically.
+        if (
+            f"{current.provider}/{current.model_id}",
+            self._chosen_effort or current.reasoning_effort,
+        ) == (
             payload["selector"],
             payload["effort"],
         ):
@@ -26171,6 +26578,9 @@ class Session:
         self._selection_needs_initial_write = not saved.authoritative or saved.recovered
         self._model_migration_notice = saved.recovered
         if selector == self.model_label and effort == self._model.reasoning_effort:
+            # The row names this very spec, so the birth spec IS the target and
+            # its own seed is the right comparison.
+            self._chosen_effort = _chosen_level_from(effort, self._model)
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -26180,11 +26590,45 @@ class Session:
         # stale.
         spec = self._spec_for_route(selector, effort)
         if spec is None:
+            # The row is DROPPED and the session stays on the birth model, so a
+            # level recorded for a model this host cannot resolve says nothing
+            # about the conversation it is actually on. Keeping it would let a
+            # withdrawal on the vanished model ride switches here as a phantom
+            # choice (review round 3, M6).
+            self._chosen_effort = None
             logger.warning("dropping unresolvable persisted model selection: %r", selector)
             self._selection_needs_initial_write = True
             self._model_migration_notice = True
             return
+        if effort:
+            # A STORED LEVEL IS CLAMPED INTO THE LADDER, exactly as a live
+            # ``set_model_effort`` clamps it. ``spec_for_target`` deliberately
+            # trusts an EXPLICIT target effort verbatim (that is the failover
+            # driver's contract for a chain entry), so passing the row's level
+            # straight through would leave a rung this route does not offer on
+            # the spec. The band would then name ``max`` on a model whose ladder
+            # stops at ``high`` while the wire's membership re-check silently
+            # sent nothing — the loss-of-depth-under-a-status-band failure
+            # ``resolve_effort_in``'s own docstring exists to prevent (QA round
+            # 1, Q-1). Only the level IN FORCE is clamped here; the CHOICE is
+            # recovered from the row against the TARGET spec below, and a later
+            # switch to a model that can express it carries the choice again.
+            spec = spec.model_copy(
+                update={
+                    "reasoning_effort": resolve_effort_in(
+                        spec.reasoning_efforts, spec.reasoning_default_effort, effort
+                    )
+                }
+            )
         self._model = spec
+        # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
+        # withdrawal row now stores the TARGET's seed, so comparing it to the
+        # BIRTH model's default read that seed as a choice whenever the two
+        # models seeded different levels — and the withdrawn level then rode the
+        # next switch. A row with no stored level is no choice at all; a birth
+        # default still reaches switches through the spec, not through this
+        # field.
+        self._chosen_effort = _chosen_level_from(effort, spec)
         # A restored row IS the user's earlier explicit choice, so a config
         # default edited after the resume must not override it either.
         self._explicit_model_choice = True
@@ -26833,7 +27277,10 @@ class Session:
                 ),
                 "kind": "fatal",
             }
-        return {"text": result.text, "error": None}
+        comparable, blind, handle = _monitor_comparable_text(result.text, details)
+        if blind is not None:
+            return {"error": blind, "kind": "blind"}
+        return {"text": comparable, "error": None, "handle": handle}
 
     def _mcp_call_lost_its_server(self, name: str) -> bool:
         """Whether an MCP error result happened while the server was not up.

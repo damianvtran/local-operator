@@ -17,6 +17,8 @@ from local_operator.i18n.keys import (
     tui_import,
     tui_review,
     tui_schedule,
+    tui_tags,
+    tui_viewer,
     wire_memory,
     wire_slash,
     wire_slash_library,
@@ -1206,6 +1208,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # stays the path form's: it is the one every install has, and the mesh form
     # is taught where the mesh is (`/network`, the design's §1.6 strings).
     SlashCommand(
+        "view",
+        _tr(tui_viewer.description()),
+        arguments=ArgumentMode.REQUIRED,
+        argument_shape=ArgumentShape.ANY,
+    ),
+    SlashCommand(
         "move",
         # Names the two ways to answer it, because the argument form is the
         # half a picker cannot teach: a user who has only ever seen the list
@@ -1268,6 +1276,34 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # with it and the OWNER dispatch hands it to the runtime.
         argument_shape=ArgumentShape.ANY,
         desktop_destination="session.rename",
+    ),
+    # Beside `/rename` because both edit the CURRENT conversation's metadata,
+    # and because that is the family a user looks in. TUI-only on purpose: the
+    # desktop's tag surface is its own sidebar control, and a
+    # `desktop_destination` here would promise a destination this slice does not
+    # have. `/tag` edits only the conversation it is standing in, never the
+    # global tag manager.
+    #
+    # REQUIRED, not OPTIONAL: the list of tag rows IS the command's surface, and
+    # a bare `/tag` must open it rather than submit a no-op. The same choice
+    # `/view` makes above. ANY shape because a tag name may contain spaces, so
+    # the WHOLE trailing text is one name (the store trims and validates it).
+    SlashCommand(
+        "tag",
+        _tr(tui_tags.slash_tag()),
+        arguments=ArgumentMode.REQUIRED,
+        argument_shape=ArgumentShape.ANY,
+    ),
+    # The presentation sibling, and deliberately a different word from `/tag`: a
+    # command that both edits one conversation and changes the whole sidebar's
+    # shape would make the blast radius unreadable. TUI-only (it describes THIS
+    # terminal's list), OPTIONAL so bare reports the current state, WORD so
+    # `on`/`off` are selectors rather than prose.
+    SlashCommand(
+        "tags",
+        _tr(tui_tags.slash_tags()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.WORD,
     ),
     # Beside the session-transition family because it is one: /fork is the entry
     # the table was missing, the one that carries history INTO a fresh session

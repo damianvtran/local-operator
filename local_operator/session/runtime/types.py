@@ -1369,6 +1369,15 @@ class SessionRecord:
     #: A turn is running right now. The picker's liveness marker, and the
     #: difference between a session that is working and one merely resident.
     busy: bool = False
+    #: Canonical job ids an in-flight foreground wait is parked on. Zero means
+    #: not waiting, not that this runtime has no background work. ADDITIVE like
+    #: busy above: older readers ignore the key, older writers get the default,
+    #: and PROTOCOL_VERSION deliberately stays unchanged.
+    waiting_on: int = 0
+    #: Running background jobs EXCLUDING task/subagent rows, which the roster
+    #: counts separately below. None is an older/unreadable producer's no-claim;
+    #: zero is a measured empty set. Keep that distinction across every wire.
+    jobs_running: int | None = None
     #: This session has run at least one REAL turn (a user prompt, a wake
     #: delivery, a resume catch-up — anything through ``_run_turn_pipeline``).
     #: ``False`` marks the window after ``/new`` when the record is already

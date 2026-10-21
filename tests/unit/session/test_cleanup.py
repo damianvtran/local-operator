@@ -223,6 +223,28 @@ def test_remove_empty_takes_only_transcriptless_directories(tmp_path: Path) -> N
     assert not empty.exists() and not zero.exists()
 
 
+def test_a_hidden_sidecar_directory_is_not_a_removable_session(tmp_path: Path) -> None:
+    """Review M1: ``sessions/.cleanup-manifests/`` is a sidecar, not an empty session.
+
+    ``remove_empty`` used to see the manifest directory as a transcriptless
+    user session: it deleted every reclaim record whole and logged a phantom
+    removal row. A hidden name is never a conversation.
+    """
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    sidecar = tmp_path / "sessions" / ".cleanup-manifests"
+    sidecar.mkdir()
+    manifest = sidecar / "20260101T000000Z-kid.json"
+    manifest.write_text('{"schema": "cleanup.removal.v1"}', encoding="utf-8")
+    for entry in (sidecar, manifest):
+        os.utime(entry, (NOW - 5 * DAY, NOW - 5 * DAY))
+
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, remove_empty=True), now=NOW)
+
+    assert result.removed == []
+    assert sidecar.is_dir() and manifest.exists()
+    assert not (tmp_path / "sessions" / CLEANUP_LOG_NAME).exists(), "no phantom log row"
+
+
 def test_max_inactive_days_uses_last_activity_not_creation(tmp_path: Path) -> None:
     _store(tmp_path, 12, transcript=True, age_days=1)
     old = _session(tmp_path, "old", age_days=40)
@@ -1513,3 +1535,70 @@ def test_dir_bytes_counts_scratch(tmp_path: Path) -> None:
     (directory / "scratchpad" / "bulk.md").write_text("z" * 500, encoding="utf-8")
 
     assert cleanup._dir_bytes(directory) == before + 500
+
+
+# --------------------------------------------------------------------------
+# The non-git COPY arm's config keys (the arm itself lives in delegated_retention)
+# --------------------------------------------------------------------------
+
+
+def test_copy_arm_defaults_off_and_parses_its_references_and_holds(tmp_path: Path) -> None:
+    manager = ConfigManager(tmp_path)
+    policy = policy_from_config(manager)
+    assert policy.delegated_non_git_copies_enabled is False
+    assert policy.delegated_non_git_copy_references == ()
+    assert policy.delegated_non_git_copy_holds == ()
+    assert policy.delegated_non_git_copy_holds_unreadable is False
+
+    manager.update_config(
+        {
+            "session": {
+                "cleanup": {
+                    "delegated": {
+                        "non_git_copies": {
+                            "enabled": True,
+                            "reference_repos": (f"{tmp_path}/a{os.pathsep}{tmp_path}/b"),
+                            "hold_sessions": f"aaa{os.pathsep}bbb,ccc",
+                        }
+                    }
+                }
+            }
+        }
+    )
+    policy = policy_from_config(manager)
+    assert policy.delegated_non_git_copies_enabled is True
+    assert policy.delegated_non_git_copy_references == (f"{tmp_path}/a", f"{tmp_path}/b")
+    assert policy.delegated_non_git_copy_holds == ("aaa", "bbb", "ccc")
+    assert policy.delegated_non_git_copy_holds_unreadable is False
+
+    # The switch reads as written, and garbage reads OFF (the default is off,
+    # so refusing to guess cannot arm the arm).
+    manager.update_config(
+        {"session": {"cleanup": {"delegated": {"non_git_copies": {"enabled": False}}}}}
+    )
+    assert policy_from_config(manager).delegated_non_git_copies_enabled is False
+    manager.update_config(
+        {"session": {"cleanup": {"delegated": {"non_git_copies": {"enabled": "banana"}}}}}
+    )
+    assert policy_from_config(manager).delegated_non_git_copies_enabled is False
+
+
+def test_an_unreadable_hold_list_is_not_read_as_no_holds(tmp_path: Path) -> None:
+    """The wrong direction here would reap exactly the reserved session."""
+    manager = ConfigManager(tmp_path)
+    manager.update_config(
+        {"session": {"cleanup": {"delegated": {"non_git_copies": {"hold_sessions": 42}}}}}
+    )
+    policy = policy_from_config(manager)
+    assert policy.delegated_non_git_copy_holds == ()
+    assert policy.delegated_non_git_copy_holds_unreadable is True
+
+    manager.update_config(
+        {"session": {"cleanup": {"delegated": {"non_git_copies": {"hold_sessions": {"a": 1}}}}}}
+    )
+    assert policy_from_config(manager).delegated_non_git_copy_holds_unreadable is True
+
+    manager.update_config(
+        {"session": {"cleanup": {"delegated": {"non_git_copies": {"hold_sessions": ["ok", 7]}}}}}
+    )
+    assert policy_from_config(manager).delegated_non_git_copy_holds_unreadable is True

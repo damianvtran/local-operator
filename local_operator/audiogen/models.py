@@ -222,7 +222,10 @@ class AudioAsset(MediaAsset):
     fields with ``getattr`` (absent-safe: a BYOK leg knows fewer facts — the
     rule is "absent where unknown", never a synthesized stand-in). ``sha256``
     is what a Radient download was VERIFIED against; ``None`` where no
-    provider digest existed to verify.
+    provider digest existed to verify. THE ONE FACT THAT IS NOT ABSENT-SAFE is
+    ``duration_s``: a surface needs a length to draw a waveform and a clock,
+    and a record without one renders NO PLAYER, so it is derived from the
+    bytes where a vendor states none (``audiogen.peaks.compute_duration``).
     """
 
     #: Container ("mp3"), when the provider stated one.
