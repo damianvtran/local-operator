@@ -1602,3 +1602,222 @@ def test_an_unreadable_hold_list_is_not_read_as_no_holds(tmp_path: Path) -> None
         {"session": {"cleanup": {"delegated": {"non_git_copies": {"hold_sessions": ["ok", 7]}}}}}
     )
     assert policy_from_config(manager).delegated_non_git_copy_holds_unreadable is True
+
+
+# ---------------------------------------------------------------------------
+# The removal RECEIPT: contents, fail-closed writes, holds and fresh creates
+# ---------------------------------------------------------------------------
+
+
+def _log_rows(root: Path) -> list[dict[str, Any]]:
+    path = root / "sessions" / CLEANUP_LOG_NAME
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_a_removal_whose_receipt_cannot_be_written_does_not_happen(tmp_path: Path) -> None:
+    """The reproduced defect: an unwritable log path must NOT lose the session.
+
+    A directory named ``.cleanup-log.jsonl`` gives the append an ``OSError`` of
+    the same shape as ENOSPC/EACCES; before this test the rmtree proceeded and
+    the removal left no row anywhere.
+    """
+    (target,) = _store(tmp_path, 1)
+    (tmp_path / "sessions" / CLEANUP_LOG_NAME).mkdir()
+
+    removed = remove_session_dir(
+        target,
+        config_dir=tmp_path,
+        policy="receipt-test",
+        reason="the receipt path is unwritable",
+        actor="test",
+    )
+
+    assert removed is False
+    assert target.is_dir(), "a directory whose receipt cannot be written must survive"
+
+
+def test_a_removal_row_records_what_the_session_held(tmp_path: Path) -> None:
+    (target,) = _store(tmp_path, 1)  # transcript.jsonl is 100 bytes
+    pad = target / "scratchpad" / "evidence"
+    pad.mkdir(parents=True)
+    (pad / "rig.txt").write_text("y" * 400, encoding="utf-8")
+    (target / "origin.json").write_text('{"origin": "subagent"}', encoding="utf-8")
+
+    assert remove_session_dir(
+        target,
+        config_dir=tmp_path,
+        policy="contents-test",
+        reason="control",
+        actor="test",
+        title="a named session",
+    )
+    rows = _log_rows(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["transcript_bytes"] == 100
+    assert row["pad_bytes"] >= 400
+    assert row["pad_entries"] >= 1
+    assert row["bytes"] >= 500
+    assert row["entries"] >= 3
+    assert row["origin"] == "subagent"
+    assert row["last_activity_at"] is not None
+    assert row["contents_complete"] is True
+    assert row["path"] == str(target.absolute())
+    assert row["policy"] == "contents-test" and row["actor"] == "test"
+    assert row["title"] == "a named session"
+
+
+def test_a_held_session_is_refused_and_release_writes_its_own_row(tmp_path: Path) -> None:
+    (target,) = _store(tmp_path, 1)
+    sessions = tmp_path / "sessions"
+
+    assert cleanup.set_hold(
+        sessions, "s000", reason="evidence for the tax case", by="operator", kind="evidence"
+    )
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="held-test", reason="r", actor="test"
+        )
+        is False
+    )
+    assert target.is_dir()
+    hold = cleanup.hold_for(sessions, "s000")
+    assert hold is not None
+    assert hold["reason"] == "evidence for the tax case"
+    assert hold["by"] == "operator" and hold["kind"] == "evidence"
+
+    assert cleanup.release_hold(sessions, "s000", reason="case closed", actor="cli")
+    rows = _log_rows(tmp_path)
+    assert rows[-1]["policy"] == "hold-release"
+    assert rows[-1]["reason"] == "case closed"
+    assert rows[-1]["previous"]["kind"] == "evidence"
+    assert cleanup.hold_for(sessions, "s000") is None
+
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="held-test", reason="r", actor="test"
+        )
+        is True
+    )
+    assert not target.exists()
+
+
+def test_an_unreadable_holds_file_refuses_removal_and_the_guard(tmp_path: Path) -> None:
+    (target,) = _store(tmp_path, 1)
+    sessions = tmp_path / "sessions"
+    (sessions / cleanup.HOLDS_NAME).write_text("{ not json", encoding="utf-8")
+
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="holds-test", reason="r", actor="test"
+        )
+        is False
+    )
+    assert target.is_dir()
+    assert cleanup._guard(target, tmp_path, time.time()) == "operator holds unreadable"
+
+
+def test_remove_fresh_session_dir_writes_a_receipt_and_refuses_a_transcript(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    fresh = sessions / "ffff11112222"
+    fresh.mkdir(parents=True)
+    (fresh / "created_at.json").write_text("{}", encoding="utf-8")
+    # Deliberately NO store marker: the fresh-create window is exactly the store
+    # that has never had a session built in it.
+    assert cleanup.remove_fresh_session_dir(
+        fresh,
+        config_dir=tmp_path,
+        policy="wake-rollback",
+        reason="the arm failed",
+        actor="test",
+    )
+    rows = _log_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["policy"] == "wake-rollback"
+    assert rows[0]["session"] == "ffff11112222"
+    assert rows[0]["path"] == str(fresh.absolute())
+
+    live = sessions / "llll11112222"
+    live.mkdir()
+    (live / "transcript.jsonl").write_text("x", encoding="utf-8")
+    assert (
+        cleanup.remove_fresh_session_dir(
+            live, config_dir=tmp_path, policy="failed-create", reason="r", actor="test"
+        )
+        is False
+    )
+    assert live.is_dir()
+
+
+def test_remove_fresh_session_dir_keeps_the_directory_when_the_receipt_fails(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    fresh = sessions / "ffff33334444"
+    fresh.mkdir(parents=True)
+    (sessions / CLEANUP_LOG_NAME).mkdir()
+    assert (
+        cleanup.remove_fresh_session_dir(
+            fresh, config_dir=tmp_path, policy="failed-create", reason="r", actor="test"
+        )
+        is False
+    )
+    assert fresh.is_dir()
+
+
+def test_a_release_with_a_blank_reason_is_refused_and_keeps_the_hold(tmp_path: Path) -> None:
+    """UX round 1, U1: releasing is the decision that lets retention reap.
+
+    The CLI refuses before it resolves a target; this pins the API backstop,
+    which is what a non-CLI caller reaches.
+    """
+    (target,) = _store(tmp_path, 1)
+    sessions = tmp_path / "sessions"
+    assert cleanup.set_hold(sessions, "s000", reason="evidence", by="operator")
+
+    assert cleanup.release_hold(sessions, "s000", reason="", actor="cli") is False
+    assert cleanup.release_hold(sessions, "s000", reason="   ", actor="cli") is False
+    assert cleanup.hold_for(sessions, "s000") is not None
+    assert _log_rows(tmp_path) == []
+    assert (
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="held-test", reason="r", actor="test"
+        )
+        is False
+    )
+
+
+def test_guard_refusals_name_the_hold_and_its_remedy() -> None:
+    """Review round 1, M6: a hold is not an unevaluated guard."""
+    held = cleanup._guard_refusal("held by the operator", "abc123")
+    assert "held as a value" in held
+    assert "lop sessions unhold abc123" in held
+    assert "could not be checked" not in held
+
+    unreadable = cleanup._guard_refusal("operator holds unreadable", "abc123")
+    assert ".session-holds.json" in unreadable
+    assert "could not be checked" not in unreadable
+
+
+def test_an_unreadable_subtree_is_a_lower_bound_not_absent_bytes(tmp_path: Path) -> None:
+    """Review round 1, M1: a 0000 subtree must not measure as a 0-byte pad.
+
+    The census refuses a size comparison on ``contents_complete: False``; the
+    receipt carries the same flag so a removal never understates the loss.
+    """
+    (target,) = _store(tmp_path, 1)
+    pad = target / "scratchpad"
+    pad.mkdir()
+    (pad / "big.bin").write_bytes(b"y" * 4096)
+    os.chmod(pad, 0)
+    try:
+        measured = cleanup.measure_session_dir(target)
+    finally:
+        os.chmod(pad, 0o700)
+    assert measured["contents_complete"] is False
+    assert measured["skipped_entries"] >= 1
+    assert measured["transcript_bytes"] == 100
