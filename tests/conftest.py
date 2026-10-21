@@ -1554,6 +1554,50 @@ def _broker_is_still_up(candidate: Path) -> bool:
         return True
 
 
+#: Escapes the CONTROLLER learned of from xdist workers (see
+#: :func:`pytest_testnodedown`), reported and failed in its own session finish.
+_WORKER_RUNTIME_ROOT_ESCAPES: list[str] = []
+#: The ``workeroutput`` key a worker ships its escape records under.
+_RUNTIME_ROOT_ESCAPES_KEY = "lop_runtime_root_escapes"
+
+
+def _fail_session_on_runtime_root_escapes(session: pytest.Session) -> None:
+    """Fail the run for escapes recorded OUTSIDE any test body.
+
+    Collection-time imports and wider-scoped teardowns have no test to fail, so
+    the session fails instead. Under xdist this runs in each WORKER, and xdist
+    reads a worker's exit status only to detect an interrupt, so a worker that
+    sets it changes nothing (agent review round 5, MAJOR). A worker therefore
+    ships its records to the controller in ``workeroutput``, and the controller
+    — which also runs this hook — fails the run on them.
+    """
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput[_RUNTIME_ROOT_ESCAPES_KEY] = list(_RUNTIME_ROOT_ESCAPES)
+        return
+    escapes = _RUNTIME_ROOT_ESCAPES + _WORKER_RUNTIME_ROOT_ESCAPES
+    if escapes:
+        print(
+            "[runtime-root] the suite reached the operator's real runtime root "
+            "outside a test body:\n" + "\n".join(escapes),
+            file=sys.stderr,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object | None) -> None:
+    """Collect a finished worker's escape records on the controller.
+
+    ``optionalhook`` because xdist defines this hook, not pytest. A worker that
+    died before its session finished sends no ``workeroutput``; the root
+    conftest's own ``pytest_testnodedown`` already fails that run.
+    """
+    del error
+    output = getattr(node, "workeroutput", None) or {}
+    _WORKER_RUNTIME_ROOT_ESCAPES.extend(output.get(_RUNTIME_ROOT_ESCAPES_KEY, ()))
+
+
 def pytest_sessionfinish(session: pytest.Session) -> None:
     """Run the session-end broker net and say what it reclaimed.
 
@@ -1563,15 +1607,7 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     orphaned-process report is actually read. Silent at zero — the expected
     outcome must not add a line to every run.
     """
-    # Escapes recorded OUTSIDE any test body (collection, a module-scoped
-    # teardown) have no test to fail, so they fail the session instead.
-    if _RUNTIME_ROOT_ESCAPES:
-        print(
-            "[runtime-root] the suite reached the operator's real runtime root "
-            "outside a test body:\n" + "\n".join(_RUNTIME_ROOT_ESCAPES),
-            file=sys.stderr,
-        )
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    _fail_session_on_runtime_root_escapes(session)
     with suppress(Exception):
         reclaimed = _sweep_session_leftovers(_SESSION_BASETEMP)
         if reclaimed:
