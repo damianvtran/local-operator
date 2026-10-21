@@ -414,6 +414,10 @@ class FakeClient:
             during()
         return self._answer("message")
 
+    async def directory(self, tenant_id: str, *, access: Any = None) -> dict[str, Any]:
+        FakeClient.behavior["last_directory_tenant"] = tenant_id
+        return self._answer("directory")
+
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("settings")
 
@@ -691,6 +695,26 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
     ) as client:
         yield client, root, discipline
+
+
+async def test_directory_accepts_a_uuid_tenant_id(api):
+    """The live tenant id is a UUID, not the legacy ``tnt_`` form.
+
+    The route's pre-I/O grammar used to accept only ``tnt_...``; a real tenant
+    was therefore refused with 422 ``invalid_request`` and the renderer showed
+    its "needs a newer version" cause even though the deployed server had the
+    directory. The UUID must reach the client unchanged.
+    """
+
+    client, _root, _discipline = api
+    tenant_id = "5b72d9f4-8ce7-4821-ac8a-f92c365ed5b3"
+    FakeClient.behavior["directory"] = {"members": []}
+    response = await client.get(
+        "/v1/desktop/team-bridge/directory", params={"tenant_id": tenant_id}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"members": []}
+    assert FakeClient.behavior["last_directory_tenant"] == tenant_id
 
 
 async def test_status_composes_state_local_config_consent_and_the_screening_receipt(api):

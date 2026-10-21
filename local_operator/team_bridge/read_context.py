@@ -171,7 +171,16 @@ MAX_PAGE = 100
 MESSAGE_ID_PATTERN = r"^bmsg_[A-Za-z0-9_-]{1,64}$"
 THREAD_ID_PATTERN = r"^bth_[A-Za-z0-9_-]{1,64}$"
 ACCOUNT_ID_PATTERN = r"^acc_[A-Za-z0-9_-]{1,64}$"
-TENANT_ID_PATTERN = r"^tnt_[A-Za-z0-9_-]{1,64}$"
+#: Tenant ids arrive in two shapes: the legacy minted ``tnt_...`` form and the
+#: account service's UUID (the live Minerva tenant is a UUID). The directory
+#: route used to accept only the first, so a real tenant id was refused 422
+#: before any I/O and the desktop rendered its "needs a newer version" cause.
+#: Accept both; the upstream membership check remains the authorization.
+TENANT_ID_PATTERN = (
+    r"^(?:tnt_[A-Za-z0-9_-]{1,64}"
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
 CURSOR_PATTERN = r"^[A-Za-z0-9_+/=-]{1,512}$"
 
 #: The closed state filter the upstream accepts (§6.1: the DELIVERY state).
