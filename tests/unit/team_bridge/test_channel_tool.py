@@ -514,6 +514,7 @@ async def test_react_is_an_agent_write_with_runtime_identity():
     ]
     tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
     assert tool is not None
+    assert tool.call_approval_tier is not None
     assert tool.call_approval_tier({"op": "react"}) == "write"
     result = await execute_bridge(
         runtime,

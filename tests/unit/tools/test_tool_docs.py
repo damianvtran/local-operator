@@ -270,7 +270,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 376 -> 240 chars, both model docstrings to one line each). 729 is the
     # structural floor for a capability the model must be able to call. The
     # paired start-context raise is stated in scripts/bench_context_budget.py.
-    "bridge": 729,
+    # RE-MEASURED (#2760 reaction op): 729 -> 754 by this test's canonical
+    # render_tool_doc/count_text_tokens path, isolated on the reaction-only head.
+    # Adds react/emoji/remove without raising any soft cap or context ceiling.
+    # A combined threads+reactions integration must remeasure its merged schema;
+    # neither branch's standalone number is authority for that combined surface.
+    "bridge": 754,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
