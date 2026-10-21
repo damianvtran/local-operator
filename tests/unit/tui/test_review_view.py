@@ -885,6 +885,55 @@ async def test_ultra_compact_row_shows_the_stale_notice_in_a_three_line_body(
 
 
 @pytest.mark.asyncio
+async def test_a_paint_restores_the_anchor_after_the_body_has_measured(refreshes) -> None:
+    """The FIRST paint scrolls against an EMPTY body, and must scroll again.
+
+    ``_scroll_to_cursor`` clamps its target against the body's virtual size, and
+    ``Static.update`` does not recompute that size until the next layout pass.
+    On the first paint the clamp therefore runs against zero rows: the selected
+    row starts at line 1, the clamp refuses it, and the offset stays at 0 with
+    the row's identity line above the fold. Main's CI measured exactly this as
+    ``assert 0 == 1`` in the compact-page test; it only reproduced under the
+    shard's load, because the paint has to land in the window before the body
+    has measured the text.
+
+    This reproduces that window deterministically instead: empty the measured
+    body, put the viewport at the top, then paint the real content. The
+    immediate scroll is still clamped against the empty size — the after-refresh
+    pass is the one that can see the four-line body — so the anchor is restored
+    only by the re-apply this guards.
+    """
+    _populated(
+        1,
+        title="feat(code-review): the session's request ledger",
+        stale=True,
+        lanes=[
+            {"lane": "agent", "round": 2, "state": "clean", "freshness": "fresh"},
+        ],
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_review(pilot, app)
+        start, _height = view._row_offsets[0]
+        assert view._body.scroll_offset.y == start
+
+        # The first-paint shape: nothing measured, cursor at the top. The
+        # container's virtual height cannot fall below its viewport, so the
+        # MEASURED CONTENT is the empty thing here; the clamp is what sees a
+        # body no taller than the viewport and refuses to scroll.
+        view._body.scroll_to(y=0, animate=False, immediate=True)
+        view._body_text.update(Text())
+        await pilot.pause()
+        assert not view._body_text.content.plain
+        assert view._body.virtual_size.height == view._body.size.height
+
+        view._paint()
+        await pilot.pause()
+        assert view._body.scroll_offset.y == start
+
+
+@pytest.mark.asyncio
 async def test_the_detail_pane_is_focusable_scrollable_and_wraps_narrow_titles(
     refreshes,
 ) -> None:
