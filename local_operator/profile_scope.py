@@ -182,16 +182,17 @@ def shadow_refusal(kind: str, name: str, *, existing_scope: Scope) -> str:
     confusing: an account row created while this conversation already has one is
     unreachable HERE. Each case names the one action that resolves it.
     """
+    article = "an" if kind == "agent" else "a"
     if existing_scope == "global":
         launch = f"/team {name}" if kind == "team" else f"task(agent={name!r})"
         return (
-            f"a {kind} named {name!r} already exists in your account, and this "
+            f"{article} {kind} named {name!r} already exists in your account, and this "
             f"conversation uses it: launch it as it is ({launch}). Choose a different "
             "name for the conversation-only version."
         )
     delete = "team_delete" if kind == "team" else "the agent tool's op='delete'"
     return (
-        f"this conversation already has a {kind} named {name!r}, so an account row of "
+        f"this conversation already has {article} {kind} named {name!r}, so an account row of "
         "that name would be hidden here. Delete the conversation one first "
         f"({delete}), or choose another name."
     )
@@ -276,8 +277,13 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     approval channel and a user who declined are different facts, and the second
     must not invite a retry of the same question. The remedy is ONE concrete
     surface for this intent — a menu of three vague ones made the model pick.
-    The conversation-only retry stays, because it is the path that needs no
-    consent at all and it is what the scope default does.
+
+    The conversation-only retry is offered ONLY where it can succeed (round 3,
+    U7): create and install choose their store, so retrying without scope lands
+    in this conversation. Update and reset act on an EXISTING row, whose store
+    the retry does not change — offering it there reproduced the same refusal
+    byte for byte. Those two name the user-surface action instead. ``sync`` is
+    account-only and has no conversation retry either.
     """
     article = "an" if intent.kind == "agent" else "a"
     if reason == "declined":
@@ -304,10 +310,12 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
         action = "`lop agents sync`"
     else:
         action = "the TUI `/agent` form"
-    return (
-        f"{opening} To keep it for THIS conversation only, retry without scope (or with "
-        f"scope='session'). To change the user's account, ask them to use {action}."
-    )
+    if intent.operation in ("create", "install"):
+        return (
+            f"{opening} To keep it for THIS conversation only, retry without scope (or with "
+            f"scope='session'). To change the user's account, ask them to use {action}."
+        )
+    return f"{opening} To change the user's account, ask them to use {action}."
 
 
 class _ScopedAgentWrites:

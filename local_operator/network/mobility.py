@@ -2647,15 +2647,56 @@ def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
     if not base.exists():
         return []
     names: list[str] = []
+
+    def _unparsed(store_dir: Path, suffix: str, parsed_ids: set[str]) -> Path | None:
+        """The first row file on disk that the registry did NOT parse.
+
+        THE STORES LOG AND SKIP a corrupt row (``invalid agent metadata in <id>``),
+        so a list that came back short is indistinguishable from a clean tree by
+        its length alone. This walks the same directories and compares, which is
+        what turns a silent skip into the gate's own refusal (round-3 item 1).
+        """
+        if not store_dir.is_dir():
+            return None
+        for child in sorted(store_dir.iterdir()):
+            marker = child / suffix
+            if not child.is_dir() or not marker.is_file():
+                continue
+            if child.name not in parsed_ids:
+                return marker
+        return None
+
     try:
         store = AgentRegistry(base, initialize=False, migrate=False)
-        names.extend(str(row.name) for row in store.list_agents())
+        agents = list(store.list_agents())
+        unparsed = _unparsed(
+            base / "agents", "agent.yml", {str(getattr(row, "id", "") or "") for row in agents}
+        )
+        if unparsed is not None:
+            raise _SessionRolesUnreadable(
+                f"the role store at {base / 'agents'} holds a file that does not parse: "
+                f"{unparsed}"
+            )
+        names.extend(str(row.name) for row in agents)
+    except _SessionRolesUnreadable:
+        raise
     except Exception as exc:  # noqa: BLE001 — turned into a refusal, never a pass
         raise _SessionRolesUnreadable(
             f"the role store at {base / 'agents'} could not be read ({exc})"
         ) from exc
     try:
-        names.extend(str(team.name) for team in TeamRegistry(base).list_teams())
+        teams = list(TeamRegistry(base).list_teams())
+        unparsed = _unparsed(
+            base / "teams", "team.yml", {str(getattr(team, "id", "") or "") for team in teams}
+        )
+        if unparsed is not None:
+            raise _SessionRolesUnreadable(
+                f"the team store at {base / 'teams'} holds a file that does not parse: "
+                f"{unparsed}"
+            )
+        names.extend(str(team.name) for team in teams)
+    except _SessionRolesUnreadable:
+        raise
     except Exception as exc:  # noqa: BLE001 — turned into a refusal, never a pass
         raise _SessionRolesUnreadable(
             f"the team store at {base / 'teams'} could not be read ({exc})"
@@ -2758,12 +2799,22 @@ def _session_roles_notice(
     """
     noun = "definition" if count == 1 else "definitions"
     if kept:
-        where = f"in the source conversation on {device_name} (--keep leaves it running)"
-    else:
-        where = f"at {stash}" if stash is not None else "under dropped-session-roles"
+        return (
+            f"{count} session role/team {noun} remain in the source conversation on "
+            f"{device_name} (--keep leaves it running) — a mesh move does not carry "
+            "them in this version"
+        )
+    where = f"at {stash}" if stash is not None else "under the dropped-session-roles root"
+    # ONE CONCEPT WORD (round 3, U9): "stash" across the flag's prose, the
+    # refusal, the receipt and this notice. The earlier wording mixed
+    # stayed/dropped/not deleted for the same act, which reads as three
+    # different outcomes.
     return (
-        f"{count} session role/team {noun} stayed on {device_name} {where} — a mesh "
-        "move does not carry them in this version"
+        f"{count} session role/team {noun} were stashed on {device_name} {where} — a "
+        "mesh move does not carry them in this version. The stash holds the definition "
+        "files and a stash.json record of what it contains; to use them again, recreate "
+        "the roles and teams on the destination and copy their instructions from that "
+        "directory."
     )
 
 
@@ -2786,11 +2837,9 @@ def _session_roles_refusal(
         "code": "session_roles",
         "message": (
             f"this conversation owns {len(names)} session definition(s) ({listed}), and a "
-            "mesh move does not carry them in this version: moving it would leave them "
-            f"on {server._own_label()} with nothing on the destination. "  # noqa: SLF001
-            "To take them along, recreate them in the destination conversation first. "
-            "To move the conversation without them, re-run with --drop-session-roles: "
-            f"the definitions are then moved to {stash} on this device, not deleted."
+            "mesh move does not carry them in this version. Either stay on this device, "
+            "or re-run with --drop-session-roles: the definitions are stashed at "
+            f"{stash} on this device, and the receipt names that path."
         ),
         "session_id": session_id,
     }

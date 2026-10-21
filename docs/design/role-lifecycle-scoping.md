@@ -297,7 +297,7 @@ description; the decision ladder and rationale go in `tool://agent`, `tool://tea
 | Session delete | removed with the session dir (`cleanup.remove_session_dir`) — and only the addressed session's dir |
 | Retention sweep | an unarchived old session is removed with its roles; an **archived** session is protected (archive hides, it does not declare disposable — `cleanup.py` already lists archived sessions in the recent-N guard) |
 | Archive / unarchive | kept; the directory and its `roles/` are untouched |
-| Mesh move to another device | **v1 does not carry role definitions.** The move path detects `<session>/roles`; by default it **refuses** and names the roles, with the two real ways forward: recreate them at the destination, or drop them. `--drop-session-roles` proceeds and — because the commit deletes the session directory — **moves the tree to a device-level stash** at `<config>/dropped-session-roles/<session_id>/` (suffixed `-2`… on a collision) with a `stash.json` naming the definitions. Nothing walks that root (no sync, retention or cleanup ownership), and the receipt/queued receipt names the exact path; the failure this replaced promised the roles "stayed" while deleting them. Follow-up filed for mesh-synced role definitions. |
+| Mesh move to another device | **v1 does not carry role definitions.** The move path detects `<session>/roles`; by default it **refuses** and names the roles, with the two real ways forward: stay on this device, or re-run with the drop flag. `--drop-session-roles` proceeds and — because the commit deletes the session directory — **moves the tree to a device-level stash** at `<config>/dropped-session-roles/<session_id>/` (suffixed `-2`… on a collision) with a `stash.json` naming the definitions. Nothing walks that root (no sync, retention or cleanup ownership), and the receipt/queued receipt names the exact path; the failure this replaced promised the roles "stayed" while deleting them. Follow-up filed for mesh-synced role definitions. |
 | Global hub/mesh push | never includes session rows |
 
 **Invariant: no cleanup of existing user definitions.** This change never migrates, rewrites,
@@ -491,7 +491,10 @@ first S2 head got wrong, folded in here as the contract now:
   of a name (session rows are listed first, so the row in force wins), and `list`/`show`
   group and label by store ("this conversation" / "your account").
 - **The mesh gate fails closed.** An unreadable `roles` tree refuses with
-  `session_roles_unreadable`; it never answers "no definitions".
+  `session_roles_unreadable`; it never answers "no definitions". A tree that is
+  readable but holds a row file that does not parse refuses the same way and names
+  the offending path, because the stores log-and-skip a corrupt row — an empty list
+  there is indistinguishable from a clean tree and would fail the gate open.
 - **The scope fact fits the pane.** When the 27-cell facts line cannot hold both, the
   settings pane paints a SECOND facts row carrying the full scope token in the existing
   `muted` ink — dropping or clipping it was measured as the failure (D1/U2).

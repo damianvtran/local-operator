@@ -34834,7 +34834,10 @@ class OperatorApp(App[None]):
         stay_note = str(carry.get("session_roles_notice") or "")
         if stay_note:
             receipt += f" {stay_note}."
-        self._system_notice(receipt, "info")
+        # `note`, not `info` (round 3, U10): the queued receipt for the same
+        # request rides `note`'s muted ink, and a finished move should not look
+        # like a different class of event than the queue it came through.
+        self._system_notice(receipt, "note")
         if str(result.get("phase") or "") not in ("committed", "done"):
             return
         # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both

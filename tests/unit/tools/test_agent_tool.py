@@ -201,6 +201,10 @@ async def test_search_finds_a_role_authored_a_moment_ago(context) -> None:
     )
     body = await call(context, op="search", query="look for tenant isolation problems in auth")
     assert "sec-auditor" in body
+    # U11: a search hit is a flat row, so its store fact rides the bracket marks
+    # — the same word `list` groups under.
+    row = next(line for line in body.splitlines() if line.startswith("- sec-auditor"))
+    assert "this conversation" in row, row
 
 
 @pytest.mark.asyncio
@@ -2029,6 +2033,8 @@ async def test_a_create_over_an_account_name_refuses_before_asking_for_consent(
     body = await call(context, op="create", name="reviewer", description="d", instructions="i")
 
     assert "already exists in your account" in body
+    assert "an agent named" in body, body
+    assert "a agent" not in body, body
     assert "Choose a different name" in body
     assert seen == [], "a name collision must not reach the consent question"
 
@@ -2138,3 +2144,23 @@ async def test_reset_of_an_account_row_needs_the_same_consent_as_a_create(regist
     applied = await execute_agent("tc", {"op": "reset", "name": "reviewer"}, None, None, consenting)
     assert "account" in applied.text, applied.text
     assert seen and seen[0].operation == "reset"
+
+
+@pytest.mark.asyncio
+async def test_an_account_update_refusal_offers_no_retry_that_cannot_work(registry) -> None:
+    """U7: an update's store comes from the existing row, not from the scope.
+
+    "Retry without scope" re-resolved the same account row and reproduced the
+    refusal byte for byte, so the update/reset refusal names the user surface
+    and nothing else.
+    """
+    from local_operator.agent_profiles import install_seed
+
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
+    body = await call(
+        _context(agent_registry=registry), op="update", name="reviewer", description="x"
+    )
+
+    assert "needs the user's confirmation" in body
+    assert "retry without scope" not in body
+    assert "TUI `/agent` form" in body

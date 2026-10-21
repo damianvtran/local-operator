@@ -1266,7 +1266,10 @@ def test_drop_session_roles_moves_and_reports_what_stayed_behind(
     carry = result.get("carry") or {}
     assert carry.get("session_roles") == 1, result
     notice = str(carry.get("session_roles_notice") or "")
-    assert "stayed on" in notice and "does not carry" in notice, notice
+    assert "were stashed on" in notice and "does not carry" in notice, notice
+    # U9: the notice says what the stash HOLDS and how to get the definitions
+    # back; the record file is the named handle.
+    assert "stash.json" in notice, notice
 
     landed = server_b.root / "sessions" / SESSION
     assert (landed / "transcript.jsonl").is_file()
@@ -1303,4 +1306,28 @@ def test_an_unreadable_roles_tree_refuses_the_move_instead_of_failing_open(
 
     assert result.get("ok") is not True, result
     assert result.get("code") == "session_roles_unreadable", result
+    assert directory.is_dir(), "the refusal changed nothing on the source"
+
+
+def test_a_corrupt_role_file_refuses_the_move_instead_of_being_skipped(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """Round-3 item 1: the store LOGS and SKIPS a file that does not parse.
+
+    A skipped row made `_session_role_definitions` answer [] — the same answer a
+    clean tree gives — so a deleting move proceeded with no refusal and no stash.
+    The gate now walks the store and refuses, naming the offending path.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    broken = directory / "roles" / "agents" / "broken" / "agent.yml"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("name: [unclosed\n", encoding="utf-8")
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "session_roles_unreadable", result
+    assert "broken" in str(result.get("message") or ""), result
     assert directory.is_dir(), "the refusal changed nothing on the source"

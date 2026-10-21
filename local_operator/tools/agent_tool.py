@@ -330,6 +330,7 @@ def _profile_line(
     installed: bool,
     compact: bool = False,
     context: ToolContext | None = None,
+    session_scope: bool = False,
 ) -> str:
     """One scannable row: name, where it came from, and what it is for.
 
@@ -357,6 +358,12 @@ def _profile_line(
         marks.append(f"{count} tool" if count == 1 else f"{count} tools")
     if profile.effort:
         marks.append(profile.effort)
+    # THE STORE, ON THE ONE ROW SHAPE THAT HAS NO GROUP HEADING (round 3,
+    # U11): `list` groups under `roles in this conversation`, but a search hit
+    # is a flat row, so the fact rides the existing bracket marks rather than a
+    # second line the compact cap would cost.
+    if session_scope:
+        marks.append("this conversation")
     suffix = f" [{', '.join(marks)}]" if marks else ""
     # DISPLAY prefers the short ``description``; RETRIEVAL (in ``_op_search``)
     # prefers the long ``when_to_use``. The two texts exist for different
@@ -904,12 +911,34 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
             "agent",
             "no roles available to search; use op='list'.",
         )
+    # Which candidates live in THIS conversation, resolved once for the shortlist.
+    session_scoped: set[str] = set()
+    if registry is not None and hasattr(registry, "list_agents"):
+        from local_operator.agent_profiles import is_role as _is_role
+        from local_operator.agent_profiles import is_specialist as _is_specialist
+        from local_operator.profile_scope import row_scope as _row_scope
+
+        try:
+            for agent in registry.list_agents():
+                if not (_is_role(agent) or _is_specialist(agent)):
+                    continue
+                if _row_scope(registry, agent) == "session":
+                    session_scoped.add(str(getattr(agent, "name", "") or "").lower())
+        except Exception:  # noqa: BLE001 — a row without scope still lists
+            session_scoped = set()
     lines = []
     for row in picked:
         profile = by_name.get(row.name)
         if profile is None:
             continue
-        lines.append(_profile_line(profile, installed=bool(profile.agent_id), context=context))
+        lines.append(
+            _profile_line(
+                profile,
+                installed=bool(profile.agent_id),
+                context=context,
+                session_scope=profile.name.lower() in session_scoped,
+            )
+        )
     # Measured on a query set: true matches score 0.118 and up, while
     # unrelated queries ("order me a pizza") top out near 0.10. The margin is
     # too thin to CUT on (that was the old behaviour, and it hid roles whose

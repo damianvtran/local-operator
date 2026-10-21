@@ -370,6 +370,16 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
         shown = " ".join(_notices(app))
         assert "✓ prepared  ✓ handing off  ✓ committed  ✓ done" in shown, shown
         assert "Moved sess1 to pixel-8. It runs there now." in shown, shown
+        # U10: a finished move rides the SAME muted ink as the queued receipt
+        # for the same request — `info`'s dim token made them two event classes.
+        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+        finished = next(
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "Moved sess1 to pixel-8" in block.text()
+        )
+        assert finished._token == "muted", finished._token
 
 
 #: The five refusals the move contract can produce AFTER the current session has
@@ -680,7 +690,7 @@ class _QueuedFake:
             }
         )
         notice = (
-            "1 session role/team definition stayed on laptop at "
+            "1 session role/team definition were stashed on laptop at "
             "/tmp/config/dropped-session-roles/other1 — a mesh move does not "
             "carry them in this version"
         )
@@ -788,7 +798,7 @@ async def test_a_queued_drop_move_reports_the_stash(monkeypatch: pytest.MonkeyPa
         assert fake.calls[0]["drop_session_roles"] is True, fake.calls
         shown = " ".join(_notices(app))
         assert "dropped-session-roles/other1" in shown, shown
-        assert "stayed on laptop" in shown, shown
+        assert "were stashed on laptop" in shown, shown
 
 
 @pytest.mark.asyncio
