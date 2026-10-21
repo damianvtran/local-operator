@@ -11,16 +11,18 @@ were broken.
 
 Each cell pins one half of the repair:
 
-* the copy-phase ``Moved`` is rolled back on the destination and reported as a
-  refusal that says the source still holds the conversation, and the same
-  destination's retry then lands (``test_a_copy_phase_link_failure_...``);
+* the copy-phase ``Moved`` is rolled back on the destination — including a
+  destination handoff entry that already exists — and reported as a refusal naming
+  the destination and the source holder
+  (``test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination``);
 * the move handler turns a ``Moved`` from ``_recall``/``_offload`` into a refusal
   instead of dropping the control connection (``test_the_move_handler_...``);
-* a ``prepared`` entry left by a failed copy is re-prepareable by the SAME
-  destination (a prepared handoff never committed), while a different destination
-  still gets ``in_progress`` — naming the source device, not "this device"
-  (``test_a_prepared_handoff_from_the_same_destination_...`` /
-  ``test_a_prepared_handoff_for_another_destination_...``).
+* after such a failure the same destination's retry is refused ``in_progress``
+  naming the source, and only a source relay restart (a fresh reconcile instance)
+  clears the prepared entry before a retry prepares
+  (``test_a_retry_after_a_failed_copy_...``);
+* a prepared entry for another destination refuses the same way
+  (``test_a_prepared_handoff_for_another_destination_...``).
 
 The rig is ``test_mobility``'s two real relays, driven the way the CLI drives them,
 for the same reason that module gives: a second implementation of the move would not
@@ -29,13 +31,16 @@ be the thing under test.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from local_operator.network import mobility, sync
-from local_operator.session.placement import read_handoff_journal
+from local_operator.session.placement import (
+    HANDOFF_PHASE_HANDING_OFF,
+    read_handoff_journal,
+    write_handoff_entry,
+)
 from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a fixture
     SESSION,
     Devices,
@@ -75,27 +80,14 @@ def _prepare_frame(to_device: str) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# 1 — the copy-phase failure is a refusal, the destination is swept, a retry lands
-# ---------------------------------------------------------------------------
+def _lose_the_second_fetch(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, int], Any]:
+    """Make the destination's copy lose its link on the SECOND file's first chunk.
 
-
-def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
-    pair: Devices, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The live defect, driven through the real transport.
-
-    The failure is injected at the SECOND ``net_sync`` ``fetch`` — the transcript's
-    own chunks have already been written into the staging directory by then, so this
-    is a partial copy being rolled back, not a failure before any byte moved. The
-    first ``net_sync`` (the plan) and the first file's chunks are the real calls.
+    The plan and the transcript's chunks are real, so the staging directory holds
+    partial bytes when the failure lands — the shape the live defect had. Returns
+    the counter for the cell's assertion and the real ``ask`` so a retry can restore
+    the transport.
     """
-    server_a, server_b, _host, _port = pair
-    _pair_settled(pair, monkeypatch, role="admin")
-    source = _owned_session(server_a)
-    before = _transcript(server_a.root, SESSION)
-    staging = sync.staging_dir(server_b.root, SESSION)
-
     real_ask = mobility.LinkTransport.ask
     fetches = {"n": 0}
 
@@ -111,6 +103,46 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
         return real_ask(self, frame, timeout=timeout)
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", losing_copy_ask)
+    return fetches, real_ask
+
+
+# ---------------------------------------------------------------------------
+# 1 — the copy-phase failure is a refusal and the destination is swept
+# ---------------------------------------------------------------------------
+
+
+def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live defect, driven through the real transport.
+
+    The failure is injected at the SECOND ``net_sync`` ``fetch`` — the transcript's
+    own chunks have already been written into the staging directory by then, so this
+    is a partial copy being rolled back, not a failure before any byte moved. The
+    first ``net_sync`` (the plan) and the first file's chunks are the real calls.
+
+    A destination handoff entry is planted FIRST, at the phase the destination
+    writes after the copy (R1-2): the live instance's entry is skipped by reconcile,
+    so it survives to the rollback, and the rollback has to clear it rather than
+    leave a claim on an id nobody committed.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    staging = sync.staging_dir(server_b.root, SESSION)
+    write_handoff_entry(
+        server_b.root,
+        SESSION,
+        {
+            "role": "destination",
+            "phase": HANDOFF_PHASE_HANDING_OFF,
+            "from_device": server_a.identity.device_id,
+            "instance_id": str(server_b.instance_id),
+        },
+    )
+
+    fetches, _ = _lose_the_second_fetch(monkeypatch)
 
     failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
 
@@ -121,13 +153,23 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     assert failed["code"] == "unreachable", failed
     assert failed["changed"] is False, failed
     assert failed["phase_reached"] == "prepared", failed
-    # THE SENTENCE: the cause, the intact source, and the retry's one precondition.
+    # THE SENTENCE, pinned exactly: the cause, WHO discarded what, the holder, the
+    # paused state and ONE action. R1-2's actor confusion is why the destination is
+    # named by label rather than "this device".
     message = str(failed["message"])
-    assert "cloud-node-1 stopped answering during the copy" in message, message
-    assert "still holds the conversation" in message, message
-    assert "prepared handoff" in message, message
-    assert "lop network restart" in message, message
-    # THE DESTINATION SWEPT EVERYTHING IT STAGED, so a retry starts clean.
+    dest = str(server_b._own_label())  # noqa: SLF001
+    holder = str(server_a._own_label())  # noqa: SLF001
+    assert message == (
+        f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
+        f"partial copy; {holder} still has the conversation, paused for this move. "
+        f"Restart the relay on {holder} (`lop network restart`), then run the move "
+        "again."
+    ), message
+    assert "this device" not in message, message
+    assert "nothing was lost" not in message, message
+    assert "nothing was changed" not in message, message
+    # THE DESTINATION SWEPT EVERYTHING IT STAGED AND RELEASED ITS OWN CLAIM, so a
+    # retry starts clean.
     assert not staging.exists(), "the partial copy was left staged"
     assert read_handoff_journal(server_b.root) == {}, "the destination kept a journal entry"
     assert not (server_b.root / "sessions" / SESSION).exists()
@@ -138,19 +180,6 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     source_entry = read_handoff_journal(server_a.root)[SESSION]
     assert source_entry["role"] == "source", source_entry
     assert source_entry["phase"] == "prepared", source_entry
-
-    # THE RETRY IS THE OPERATOR'S NEXT ACTION, and it must not need the source's
-    # relay restarted: the same destination asking again clears the prepared entry
-    # (cell 3) and the move completes.
-    monkeypatch.setattr(mobility.LinkTransport, "ask", real_ask)
-    retried = _move(server_b, SESSION, monkeypatch=monkeypatch)
-
-    assert retried["ok"] is True, retried
-    assert retried["state"] == "completed", retried
-    assert _transcript(server_b.root, SESSION) == before
-    assert not source.exists()
-    assert read_handoff_journal(server_a.root) == {}
-    assert read_handoff_journal(server_b.root) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -197,53 +226,61 @@ def test_the_move_handler_turns_a_peer_refusal_into_a_refusal(
 
 
 # ---------------------------------------------------------------------------
-# 3 — a prepared handoff from the SAME destination is a retry, not a second mover
+# 3 — a retry is refused until the SOURCE relay restarts
 # ---------------------------------------------------------------------------
 
 
-def test_a_prepared_handoff_from_the_same_destination_re_prepares(
+def test_a_retry_after_a_failed_copy_is_refused_until_the_source_relay_restarts(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Prepare, simulate the failed copy's leftover, prepare again: it proceeds.
+    """R1-1: ``prepared`` is NOT a licence for the same destination to re-prepare.
 
-    The entry a copy-phase link failure leaves is written by the source's LIVE relay
-    instance, and the reconcile at the top of ``_source_prepare`` skips its own
-    instance's entries — so before this rule the only way out was restarting the
-    source's relay. ``prepared`` is the licence: the source stopped its runtime and
-    wrote a plan, no byte was committed, and the SAME destination asking again is
-    the retry of exactly that attempt.
+    ``prepared`` is precisely the phase in which the SAME destination's copy may
+    still be live: the destination writes its own role entry only after the copy,
+    so two prepares from one device can share the staging directory, and clearing
+    on the second lets the loser's rollback delete the winner's verified copy after
+    the source committed — the only copy. So the retry is refused with the source's
+    sentence, and only a source relay restart (a fresh reconcile instance, which
+    makes the entry stale) clears it before a retry prepares.
     """
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
-    destination = server_b.identity.device_id
+    fetches, real_ask = _lose_the_second_fetch(monkeypatch)
 
-    first = mobility._source_prepare(
-        server_a, cast(Any, _Link(destination)), _prepare_frame(destination)
-    )  # noqa: SLF001
-    assert first["result"] == "prepared", first
-    first_entry = read_handoff_journal(server_a.root)[SESSION]
-    assert first_entry["phase"] == "prepared", first_entry
-    assert first_entry["to_device"] == destination, first_entry
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
 
-    second = mobility._source_prepare(
-        server_a, cast(Any, _Link(destination)), _prepare_frame(destination)
-    )  # noqa: SLF001
+    assert failed["ok"] is False and failed["code"] == "unreachable", failed
+    assert fetches["n"] == 2, fetches
+    monkeypatch.setattr(mobility.LinkTransport, "ask", real_ask)
 
-    assert second["result"] == "prepared", second
-    second_entry = read_handoff_journal(server_a.root)[SESSION]
-    assert second_entry["phase"] == "prepared", second_entry
-    assert second_entry["to_device"] == destination, second_entry
-    # RE-JOURNALED, not the same entry carried forward: a new attempt has a new
-    # lease, so the destination's ready can commit against the plan it was given.
-    assert second_entry["lease_epoch"] != first_entry["lease_epoch"], (
-        first_entry,
-        second_entry,
-    )
-    # THE PREPARE NEVER DELETES: the conversation is still on the source.
+    # THE SAME DESTINATION ASKING AGAIN IS REFUSED, and the sentence names the
+    # SOURCE whose relay has to be restarted — not the destination that read it.
+    retried = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert retried["ok"] is False, retried
+    assert retried["code"] == "in_progress", retried
+    holder = str(server_a._own_label())  # noqa: SLF001
+    message = str(retried["message"])
+    assert f"already in progress on {holder}" in message, message
+    assert "this device" not in message, message
+    assert "lop network restart" in message, message
     assert source.is_dir()
     assert _transcript(server_a.root, SESSION) == before
+    assert read_handoff_journal(server_a.root)[SESSION]["phase"] == "prepared"
+
+    # THE SOURCE RELAY RESTART: a fresh instance makes the live writer stale, which
+    # is the one recovery reconcile applies to a prepared entry.
+    report = mobility.reconcile(server_a.root, server=server_a, own_instance="restarted-a")
+    assert [row["action"] for row in report] == ["rolled_back"], report
+    assert read_handoff_journal(server_a.root) == {}
+
+    retried = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert retried["ok"] is True, retried
+    assert retried["state"] == "completed", retried
+    assert _transcript(server_b.root, SESSION) == before
+    assert not source.exists()
+    assert read_handoff_journal(server_a.root) == {}
 
 
 def test_a_prepared_handoff_for_another_destination_still_refuses_and_names_the_source(
@@ -325,29 +362,3 @@ def test_a_handing_off_entry_is_never_cleared_by_a_retry(
     still = read_handoff_journal(server_a.root)[SESSION]
     assert still["phase"] == HANDOFF_PHASE_HANDING_OFF, still
     assert still["to_device"] == destination, still
-
-
-def test_the_destination_holds_no_journal_entry_after_a_refused_copy(
-    pair: Devices, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The rollback also releases the destination's own claim on the id, which a
-    retry would otherwise read as a handoff in progress HERE."""
-    server_a, server_b, _host, _port = pair
-    _pair_settled(pair, monkeypatch, role="admin")
-    _owned_session(server_a)
-    real_ask = mobility.LinkTransport.ask
-
-    def refusing_ask(self: Any, frame: dict[str, Any], *, timeout: float | None = None):
-        if str(frame.get("op") or "") == "net_sync" and str(frame.get("phase") or "") == "fetch":
-            raise mobility.Moved("unreachable", "the source vanished mid-copy")
-        return real_ask(self, frame, timeout=timeout)
-
-    monkeypatch.setattr(mobility.LinkTransport, "ask", refusing_ask)
-
-    refused = _move(server_b, SESSION, monkeypatch=monkeypatch)
-
-    assert refused["ok"] is False and refused["code"] == "unreachable", refused
-    # The destination's journal named the id while it was receiving; nothing
-    # committed, so the sweep must leave it empty.
-    assert read_handoff_journal(server_b.root) == {}
-    assert Path(server_b.root, "sessions", SESSION).exists() is False
