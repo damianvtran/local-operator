@@ -124,6 +124,10 @@ WATCHDOG_INTERVAL_S = 10.0
 WATCHDOG_MIN_INTERVAL_S = 30.0
 WATCHDOG_WINDOW_S = 3600.0
 WATCHDOG_MAX_ATTEMPTS = 5
+#: A dispatch that provably changed nothing (``no-effect``) draws on a smaller
+#: budget than a real repair: a permanently broken unit must not spend a later
+#: real failure's five attempts. Mirrors ``MAX_INEFFECTIVE`` in the script.
+WATCHDOG_MAX_INEFFECTIVE = 2
 WATCHDOG_ABSENT_GRACE_S = 30.0
 WATCHDOG_EVENT_CAP = 8
 
@@ -217,43 +221,57 @@ persist()
 #: THE TRIGGER TABLE IS THE WHOLE DESIGN. ``systemctl start`` is a no-op on a
 #: unit that is already active, and ``reset-failed`` on a non-failed unit only
 #: clears bookkeeping, so an intervention aimed at an ``active`` unit would
-#: change nothing while spending an attempt and recording ``started`` -- false
+#: change nothing while spending an attempt and recording success -- false
 #: evidence, and a cap burned three times over before a real ``failed`` state
 #: arrives. Each state therefore gets exactly the action that can change it:
 #:
 #:   failed/inactive, no listener -> reset-failed + start   (attempt)
 #:   failed/inactive, listener that does not answer
 #:                                -> verified all-process restart (attempt)
-#:   failed/inactive, listener that answers
-#:                                -> none (a live survivor is serving)
+#:   active/activating/... with a listener that does not answer
+#:                                -> verified restart only after TWO consecutive
+#:                                   observations (attempt on the second)
+#:   any state, listener that answers -> none; observed as ``serving``
 #:   active/activating/reloading/deactivating, no listener
 #:                                -> none; observed as ``no-listener`` only
-#:   any state, listener that answers -> none; observed as ``serving``
 #:
-#: The verified restart is ``RESTART_SOURCE`` itself, run as the same transient
-#: service the host uses. It is the ONLY operation that can reap a
-#: ``KillMode=process`` survivor, so a bare ``start`` beside a stuck listener
-#: would fail to bind and could merge into systemd's own pending job.
+#: WHY THE ACTIVE WEDGE IS REPAIRED HERE. The host's only channel is the same
+#: listener: its recovery probe fails against a wedged server and
+#: ``_restart_supervisor_unit`` runs only after a SUCCESSFUL probe, so a
+#: permanent wedge is repaired by neither side. Two consecutive unresponsive
+#: observations are required before acting, so a single slow response is never
+#: mistaken for death.
+#:
+#: THE VERDICT IS DERIVED FROM THE PAYLOAD, NEVER FROM A FIELD THE SCRIPT DOES
+#: NOT WRITE. ``RESTART_SOURCE`` reports observations (pids, start ticks,
+#: ancestry, receipt); only the host's ``restart_record`` turns them into a
+#: ``status``. This watchdog therefore applies the same rule guest-side --
+#: complete pre/post scans, post owners that postdate the kill and descend from
+#: the new MainPID, a postdating MainPID and a non-null receipt -- instead of
+#: reading a ``status`` key that does not exist.
 #:
 #: OBSERVATIONS ARE NOT ATTEMPTS. A state the watchdog cannot repair is
 #: recorded in ``last_observation`` (fixed words) without touching
 #: ``attempts``, so a dead-but-blocked server is distinguishable from a
 #: healthy one in the host's evidence instead of both reading ``attempts: 0``.
+#: A dispatch that provably changed nothing (``no-effect``) draws on a smaller
+#: budget (2/hour) than real repairs, so a permanently broken unit cannot
+#: starve a later real failure of its five attempts.
 #:
 #: RATE LIMITS. One intervention per ``MIN_INTERVAL_S`` (never race systemd's
 #: own ``RestartSec=1`` attempt), at most ``MAX_ATTEMPTS`` per rolling
-#: ``WINDOW_S`` -- the same hour systemd uses, so the watchdog does not fight
-#: the same failure forever. ``capped`` is recomputed from the window every
-#: cycle, so it clears when the window rolls rather than latching forever.
+#: ``WINDOW_S`` -- the same hour systemd uses -- and at most
+#: ``MAX_INEFFECTIVE`` no-effect dispatches per window. ``capped`` is
+#: recomputed from the window every cycle, so it clears when the hour rolls.
 #:
 #: THE RECORD IS NUMBERS AND FIXED WORDS ONLY: no unit name, no argv, no
 #: environment, no guest text. Attempt ticks are monotonic microseconds, the
-#: same clock as systemd's ``*TimestampMonotonic`` properties, so the host can
-#: compare them with the unit's activation stamps. The event ring is bounded
-#: because the file is rewritten on every intervention and a crash loop must
-#: not grow it without limit. A process restart of the WATCHDOG seeds its
-#: counters from that same file: the unit's own ``Restart=always`` must not
-#: turn ``attempts`` back to zero and hand the crash loop a fresh cap.
+#: same clock as systemd's ``*TimestampMonotonic`` properties. The event ring
+#: is bounded because the file is rewritten on every intervention. A process
+#: restart of the WATCHDOG seeds its counters from that same file: the unit's
+#: own ``Restart=always`` must not turn ``attempts`` back to zero and hand the
+#: crash loop a fresh cap. Monotonic stamps do not survive a BOOT, so a stamp
+#: in the future is ignored rather than trusted.
 #:
 #: FAIL-OPEN. A defect here must never fail an episode: every cycle is caught,
 #: the loop continues, and a record it cannot write is simply missing evidence.
@@ -267,24 +285,27 @@ INTERVAL_S = 10.0
 MIN_INTERVAL_S = 30.0
 WINDOW_S = 3600.0
 MAX_ATTEMPTS = 5
+MAX_INEFFECTIVE = 2
 ABSENT_GRACE_S = 30.0
 EVENT_CAP = 8
 PROBE_TIMEOUT_S = 2.0
+START_VERIFY_S = 9.0
 RESTART_TIMEOUT_S = 15.0
-START_VERIFY_S = 8.0
 
 TRIGGERS = ('failed', 'inactive', 'unresponsive')
 ACTIONS = ('reset-failed+start', 'verified-restart')
-OUTCOMES = ('started', 'start-failed', 'no-effect', 'restarted',
-            'restart-failed', 'throttled', 'capped')
+OUTCOMES = ('started', 'start-failed', 'reset-failed-error', 'no-effect',
+            'restarted', 'restart-failed', 'throttled', 'capped')
 OBSERVATIONS = ('none', 'serving', 'no-listener', 'unresponsive', 'unknown')
 
 absent_since = None
+unresponsive_streak = 0
 #: The throttle compares against the last DISPATCH's clock value, not the
 #: record's microsecond stamp: a legitimate intervention at monotonic 0 would
 #: otherwise read as "never attempted" and defeat the minimum interval.
 last_attempt = None
 recent = []
+ineffective = []
 state = {'attempts': 0, 'intervened': False, 'capped': False,
          'last_attempt_us': 0, 'last_trigger': 'none',
          'last_action': 'none', 'last_outcome': 'none',
@@ -314,16 +335,31 @@ def listening():
     return False
 
 def answers():
-    # A LISTEN socket is not a serving server. One short HTTP request is the
-    # only honest test: a wedged backend still accepts at the kernel level, and
-    # a survivor that holds the port without answering is the exact state the
-    # host's own channel reports as unreachable.
-    connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    connection.settimeout(PROBE_TIMEOUT_S)
+    # A LISTEN socket is not a serving server, and an exit code is not proof of
+    # one either. The rule is deliberately one-sided: ANY complete HTTP status
+    # line means the server is answering (a 404/500 is still a live app, and
+    # this probe is not a health endpoint), so a slow-but-alive server is never
+    # restarted. Only silence -- connect refused, or no status line inside the
+    # bound -- is "unresponsive". Both families are tried because the scan
+    # above accepts a v6-only listener.
+    connection = None
+    for host in ('127.0.0.1', '::1'):
+        try:
+            connection = socket.create_connection((host, port), PROBE_TIMEOUT_S)
+            break
+        except OSError:
+            continue
+    if connection is None:
+        return False
     try:
-        connection.connect(('127.0.0.1', port))
         connection.sendall(b'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n')
-        return bool(connection.recv(1))
+        response = b''
+        while b'\r\n' not in response and len(response) < 256:
+            chunk = connection.recv(64)
+            if not chunk:
+                break
+            response += chunk
+        return response.startswith(b'HTTP/')
     except OSError:
         return False
     finally:
@@ -347,8 +383,9 @@ def persist():
 
 def seed():
     # A restarted watchdog inherits the counters it already spent. Only this
-    # file's own fixed vocabulary is copied forward, so a corrupt record can
-    # neither inject text nor buy an extra cap window.
+    # file's own fixed vocabulary is copied forward. A stamp in the FUTURE is
+    # dropped: CLOCK_MONOTONIC restarts at boot, so a record written before a
+    # reboot otherwise throttles every cycle until the wall clock catches up.
     global last_attempt
     try:
         previous = json.loads(record_path.read_text())
@@ -367,33 +404,116 @@ def seed():
             if (type(stamp) is not int or stamp <= 0 or trigger not in TRIGGERS
                     or action not in ACTIONS or outcome not in OUTCOMES):
                 continue
+            age = now - stamp / 1000000.0
+            if age < 0:
+                continue
             state['events'] = (state['events'] + [{
                 'us': stamp, 'trigger': trigger,
                 'action': action, 'outcome': outcome}])[-EVENT_CAP:]
-            if now - stamp / 1000000.0 < WINDOW_S:
+            if age < WINDOW_S:
                 recent.append(stamp / 1000000.0)
+                if outcome == 'no-effect':
+                    ineffective.append(stamp / 1000000.0)
     recent.sort()
+    ineffective.sort()
     if recent:
         last_attempt = recent[-1]
         state['last_attempt_us'] = int(recent[-1] * 1000000)
     attempts = previous.get('attempts')
     if type(attempts) is int and 0 <= attempts <= MAX_ATTEMPTS * 1000:
         state['attempts'] = max(attempts, len(state['events']))
-    state['intervened'] = state['attempts'] > 0
-    state['capped'] = len(recent) >= MAX_ATTEMPTS
-    for key, allowed in (('last_trigger', TRIGGERS + ('none',)),
-                         ('last_action', ACTIONS + ('none',)),
-                         ('last_outcome', OUTCOMES + ('none',)),
+    for key, allowed in (('last_trigger', TRIGGERS), ('last_action', ACTIONS),
+                         ('last_outcome', OUTCOMES),
                          ('last_observation', OBSERVATIONS)):
         value = previous.get(key)
         if value in allowed:
             state[key] = value
+    if state['last_attempt_us'] and not state['last_trigger'] == 'none':
+        state['intervened'] = True
+    state['capped'] = (len(recent) >= MAX_ATTEMPTS
+                       or len(ineffective) >= MAX_INEFFECTIVE)
 
-def observe(word):
-    if state['last_observation'] == word:
-        return
-    state['last_observation'] = word
-    persist()
+def postdated(owners, new_main, new_main_start, kill_ticks):
+    # The host's freshness rule, derived guest-side from the raw payload.
+    if kill_ticks <= 0 or new_main <= 0 or new_main_start < kill_ticks:
+        return False
+    for owner in owners:
+        if not isinstance(owner, dict):
+            return False
+        start = owner.get('start_ticks')
+        pid = owner.get('pid')
+        ancestors = owner.get('ancestors')
+        if type(pid) is not int or type(start) is not int:
+            return False
+        if start < kill_ticks or not isinstance(ancestors, list):
+            return False
+        if pid != new_main and new_main not in ancestors:
+            return False
+    return True
+
+def verified_verdict(verdict, token):
+    # The host's restart_record rule, applied to the script's raw payload.
+    # RESTART_SOURCE writes observations; ``status`` is a HOST-derived field.
+    # Reading one here would accept a key the producer never emits, so every
+    # real repair would read as a failure. This mirrors the derivation instead.
+    if not isinstance(verdict, dict) or verdict.get('schema_version') != 1:
+        return False
+    if verdict.get('token') != token:
+        return False
+    if (verdict.get('pre_scan_complete') is not True
+            or verdict.get('post_scan_complete') is not True):
+        return False
+    pre = verdict.get('pre_restart_pids')
+    post = verdict.get('post_restart_pids')
+    owners = verdict.get('post_restart_owners')
+    if not isinstance(pre, list) or not isinstance(post, list) or not isinstance(owners, list):
+        return False
+    if verdict.get('pre_restart_count') != len(pre):
+        return False
+    if verdict.get('post_restart_count') != len(post):
+        return False
+    if not post or [owner.get('pid') if isinstance(owner, dict) else None
+                    for owner in owners] != post:
+        return False
+    new_main = verdict.get('new_main_pid')
+    new_main_start = verdict.get('new_main_start_ticks')
+    kill_ticks = verdict.get('kill_uptime_ticks')
+    if (type(new_main) is not int or type(new_main_start) is not int
+            or type(kill_ticks) is not int):
+        return False
+    if not postdated(owners, new_main, new_main_start, kill_ticks):
+        return False
+    receipt = verdict.get('receipt')
+    if not isinstance(receipt, dict) or receipt.get('schema_version') != 1:
+        return False
+    records = receipt.get('records')
+    if not isinstance(records, list) or not records:
+        return False
+    latest = records[-1]
+    return isinstance(latest, dict) and type(latest.get('restart')) is int
+
+def start_outcome():
+    # ``systemctl start`` exits 0 when the JOB completes, even if the service
+    # exited the moment it started (measured on systemd 255: five `started`
+    # outcomes for a unit with a missing ExecStart target that never served).
+    # So the exit code proves nothing; the outcome is only ``started`` when a
+    # bounded poll sees BOTH an active unit and a listener. ``no-effect`` is
+    # the honest word for a job that completed and changed nothing.
+    try:
+        run('systemctl', 'reset-failed', unit)
+    except Exception:
+        return 'reset-failed-error'
+    try:
+        run('systemctl', 'start', unit)
+    except Exception:
+        return 'start-failed'
+    deadline = time.monotonic() + START_VERIFY_S
+    while True:
+        if listening() and active_state() == 'active':
+            return 'started'
+        if time.monotonic() >= deadline:
+            return 'no-effect'
+        time.sleep(0.5)
 
 def verified_restart():
     token = monotonic_us()
@@ -412,29 +532,7 @@ def verified_restart():
         verdict = json.loads(result_path.read_text())
     except (OSError, ValueError):
         return 'restart-failed'
-    if not isinstance(verdict, dict) or verdict.get('token') != token:
-        return 'restart-failed'
-    return 'restarted' if verdict.get('status') == 'verified' else 'restart-failed'
-
-def start_outcome():
-    # ``systemctl start`` exits 0 when the JOB completes, even if the service
-    # exited the moment it started (measured on systemd 255: five `started`
-    # outcomes for a unit with a missing ExecStart target that never served).
-    # So the exit code proves nothing; the outcome is only ``started`` when a
-    # bounded poll sees BOTH an active unit and a listener. ``no-effect`` is
-    # the honest word for a job that completed and changed nothing.
-    try:
-        run('systemctl', 'reset-failed', unit)
-        run('systemctl', 'start', unit)
-    except Exception:
-        return 'start-failed'
-    deadline = time.monotonic() + START_VERIFY_S
-    while True:
-        if listening() and active_state() == 'active':
-            return 'started'
-        if time.monotonic() >= deadline:
-            return 'no-effect'
-        time.sleep(0.5)
+    return 'restarted' if verified_verdict(verdict, token) else 'restart-failed'
 
 def intervene(now, trigger, action):
     global last_attempt
@@ -445,13 +543,16 @@ def intervene(now, trigger, action):
         outcome = start_outcome()
     else:
         outcome = verified_restart()
+    if outcome == 'no-effect':
+        ineffective.append(now)
     event = {'us': monotonic_us(), 'trigger': trigger,
              'action': action, 'outcome': outcome}
     state.update(intervened=True, last_attempt_us=event['us'],
                  last_trigger=trigger, last_action=action,
                  last_outcome=outcome,
                  events=(state['events'] + [event])[-EVENT_CAP:])
-    state['capped'] = len(recent) >= MAX_ATTEMPTS
+    state['capped'] = (len(recent) >= MAX_ATTEMPTS
+                       or len(ineffective) >= MAX_INEFFECTIVE)
     persist()
 
 def suppressed(outcome):
@@ -460,27 +561,40 @@ def suppressed(outcome):
     state['last_outcome'] = outcome
     persist()
 
+def observe(word):
+    if state['last_observation'] == word:
+        return
+    state['last_observation'] = word
+    persist()
+
 def cycle():
-    global absent_since
+    global absent_since, unresponsive_streak
     now = time.monotonic()
     recent[:] = [stamp for stamp in recent if now - stamp < WINDOW_S]
-    capped = len(recent) >= MAX_ATTEMPTS
+    ineffective[:] = [stamp for stamp in ineffective if now - stamp < WINDOW_S]
+    capped = (len(recent) >= MAX_ATTEMPTS
+              or len(ineffective) >= MAX_INEFFECTIVE)
     if state['capped'] != capped:
         state['capped'] = capped
         persist()
     if listening():
         absent_since = None
-        observed = active_state()
         if answers():
+            # A serving port is the whole healthy-path shortcut: no unit query,
+            # no verb, not even a state read.
+            unresponsive_streak = 0
             observe('serving')
             return
+        unresponsive_streak += 1
         observe('unresponsive')
-        if observed not in ('failed', 'inactive'):
-            # ``start`` cannot change an active unit; the host's verified
-            # restart is the only remedy and the host can still reach it.
+        observed = active_state()
+        if observed not in ('failed', 'inactive') and unresponsive_streak < 2:
+            # One slow response is not death. The second consecutive silence is
+            # a wedged server the host cannot reach either.
             return
         trigger, action = 'unresponsive', 'verified-restart'
     else:
+        unresponsive_streak = 0
         observed = active_state()
         if observed in ('failed', 'inactive'):
             observe('no-listener')
@@ -679,6 +793,9 @@ content = ('[Unit]\nStartLimitIntervalSec=3600\nStartLimitBurst=3\n'
            '[Service]\nRestart=always\nRestartSec=1\nKillMode=process\n'
            'ExecStopPost=' + hook + '\n')
 created = not path.exists()
+# Set only when THIS attempt issued the start: a unit that was already
+# running is not ours to stop, and one we started must not survive a refusal.
+watchdog_started = False
 if not created:
     if path.read_text() != content or capture.read_text() != sys.argv[1]:
         raise RuntimeError('supervisor installation conflict')
@@ -776,6 +893,7 @@ try:
     # install is the only step that can still reach the guest to do it.
     run('systemctl', 'enable', 'lop-action-watchdog.service')
     run('systemctl', 'start', 'lop-action-watchdog.service')
+    watchdog_started = True
     watchdog = dict(line.split('=', 1) for line in run('systemctl', 'show',
         'lop-action-watchdog.service', '-p', 'LoadState', '-p', 'ActiveState',
         '-p', 'ControlGroup').splitlines())
@@ -794,14 +912,23 @@ except Exception:
     # installation. Re-entry MUST verify effective config, not trust bytes.
     # A watchdog that was STARTED before the refusal keeps repairing the
     # server while the host records ``installed: false``, so stop and disable
-    # it before the file goes away. Every rollback step is best-effort: a
-    # failure here must not replace the refusal that caused it.
-    if watchdog_created:
-        for verb in ('stop', 'disable'):
+    # it before the file goes away. The VERBS are not the proof: a bounded
+    # state read must show it gone, and a survivor is killed. Every rollback
+    # step is best-effort: a failure here must not replace the refusal.
+    if watchdog_started:
+        for verb in ('disable', 'stop'):
             try:
                 run('systemctl', verb, 'lop-action-watchdog.service')
             except Exception:
                 pass
+        try:
+            left = dict(line.split('=', 1) for line in run('systemctl', 'show',
+                'lop-action-watchdog.service', '-p', 'ActiveState',
+                '-p', 'ControlGroup').splitlines())
+            if left.get('ActiveState') == 'active' or left.get('ControlGroup'):
+                run('systemctl', 'kill', '--kill-whom=all', 'lop-action-watchdog.service')
+        except Exception:
+            pass
     if created:
         path.unlink()
     if watchdog_created:
@@ -1345,8 +1472,8 @@ watchdog_path = pathlib.Path('/var/lib/lop-action-supervisor') / 'watchdog.json'
 try:
     watchdog_text = watchdog_path.read_text()
 except OSError:
-    # No file at all: the host records ``absent``.
-    history['watchdog'] = None
+    # No file at all: the key is OMITTED, which the host reads as ``absent``.
+    pass
 else:
     try:
         history['watchdog'] = json.loads(watchdog_text)
@@ -1977,6 +2104,7 @@ _WATCHDOG_OUTCOMES = frozenset(
         "none",
         "started",
         "start-failed",
+        "reset-failed-error",
         "no-effect",
         "restarted",
         "restart-failed",
@@ -2038,9 +2166,9 @@ def _watchdog_value(value: object) -> dict[str, Any]:
     name, port, argv, environment or any other guest text.
     """
 
-    if value is None:
-        return empty_watchdog("absent")
     if not isinstance(value, dict) or value.get("schema_version") != 1:
+        # A JSON ``null`` is a RECORD THAT EXISTS but cannot be used; only a
+        # missing key means no record at all.
         return empty_watchdog("unparseable")
     events: list[dict[str, Any]] = []
     raw_events = value.get("events")
@@ -2083,7 +2211,9 @@ def receipt_report(output: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     value = parse_output(output, is_receipt_payload)
     if not isinstance(value, dict):
         raise ValueError("invalid supervisor receipt")
-    return _receipt_records_value(value), _watchdog_value(value.get("watchdog"))
+    if "watchdog" not in value:
+        return _receipt_records_value(value), empty_watchdog("absent")
+    return _receipt_records_value(value), _watchdog_value(value["watchdog"])
 
 
 #: Every status a restart verification can report. Fixed vocabulary only: no

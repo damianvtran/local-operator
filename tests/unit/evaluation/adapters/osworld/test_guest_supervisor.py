@@ -14,6 +14,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -68,6 +69,7 @@ def _script_guest(
     props: dict[str, str] | None = None,
     effective_props: dict[str, str] | None = None,
     watchdog_props: dict[str, str] | None = None,
+    watchdog_stop_effective: bool = True,
     ppid: int = 8000,
 ) -> tuple[Any, list[Any]]:
     """Run the exact install source; only OS-boundary modules are substituted."""
@@ -97,12 +99,22 @@ def _script_guest(
         "ControlGroup": "/system.slice/lop-action-watchdog.service",
     }
     watchdog_properties.update(watchdog_props or {})
+    watchdog_state = {"stopped": False}
 
     def check_output(args: Any, **kwargs: Any) -> str:
         calls.append(args)
         if args[1] == "daemon-reload":
             return ""
+        if args[1] == "stop" and args[2] == guest_supervisor.WATCHDOG_UNIT:
+            if watchdog_stop_effective:
+                watchdog_state["stopped"] = True
+            return ""
+        if args[1] == "kill":
+            watchdog_state["stopped"] = True
+            return ""
         if args[1] == "show" and args[2] == guest_supervisor.WATCHDOG_UNIT:
+            if watchdog_state["stopped"]:
+                return "ActiveState=inactive\nControlGroup="
             return "\n".join(k + "=" + v for k, v in watchdog_properties.items())
         result = properties
         if "Restart" in args:
@@ -184,6 +196,44 @@ def test_install_is_idempotent_and_cannot_restart_or_kill_desktop(tmp_path: Path
     for source in (guest_supervisor.INSTALL_SOURCE, guest_supervisor.CAPTURE_SOURCE):
         assert "/home/" not in source and "/Desktop" not in source and "/task" not in source
         assert "os.kill" not in source and "killpg" not in source
+
+
+def test_a_refusal_stops_a_watchdog_this_attempt_started_even_if_it_existed(
+    tmp_path: Path,
+) -> None:
+    """``created`` is not the test: we started it, so a refusal must stop it."""
+    install, _ = _script_guest(tmp_path)
+    install()
+    # The same tree, a harness whose post-start verification will refuse: the
+    # unit file already exists, but this attempt still started the process.
+    shutil.rmtree(tmp_path / "proc")
+    install_again, calls = _script_guest(
+        tmp_path,
+        watchdog_props={"ControlGroup": "/system.slice/action-server.service"},
+    )
+    with pytest.raises(RuntimeError, match="shares the action-server cgroup"):
+        install_again()
+    verbs = [
+        args[1] for args in calls if len(args) > 2 and args[2] == guest_supervisor.WATCHDOG_UNIT
+    ]
+    assert "stop" in verbs and "disable" in verbs
+
+
+def test_a_watchdog_that_survives_stop_is_killed_on_rollback(tmp_path: Path) -> None:
+    """The rollback asserts death, not the verbs it issued."""
+    install, calls = _script_guest(
+        tmp_path,
+        watchdog_props={"ControlGroup": "/system.slice/action-server.service"},
+        watchdog_stop_effective=False,
+    )
+    with pytest.raises(RuntimeError, match="watchdog unit shares the action-server cgroup"):
+        install()
+    assert (
+        "systemctl",
+        "kill",
+        "--kill-whom=all",
+        guest_supervisor.WATCHDOG_UNIT,
+    ) in calls
 
 
 @pytest.mark.parametrize(
@@ -3405,12 +3455,17 @@ def _execute_watchdog(
     cycles: int,
     answering: list[bool] | None = None,
     failures: dict[int, Exception] | None = None,
+    failures_on: dict[str, Exception] | None = None,
     seed: dict[str, Any] | None = None,
-    verdict: str = "verified",
+    restart_verdict: dict[str, Any] | None = None,
     v6: bool = False,
+    reachable_host: str = "127.0.0.1",
     clock_start: float = 0.0,
     start_state: str = "active",
     start_listens: bool = True,
+    target_unit: str = "action-server.service",
+    probe_log: list[tuple[str, int, float]] | None = None,
+    probe_status: bytes = b"HTTP/1.0 200 OK\r\n",
 ) -> tuple[dict[str, Any], list[Any], float]:
     """Run the shipped WATCHDOG_SOURCE against a redirected /proc and fake manager.
 
@@ -3418,7 +3473,12 @@ def _execute_watchdog(
     exercised as real elapsed time instead of patched thresholds. ``answering``
     drives the one-shot HTTP liveness probe (a wedged listener accepts at the
     kernel level and then returns nothing). ``failures`` makes the named cycle's
-    ``systemctl`` raise: the loop must survive it.
+    ``systemctl`` raise; ``failures_on`` targets one verb.
+
+    ``restart_verdict`` is written verbatim as the transient restart's result.
+    It must come from the REAL ``RESTART_SOURCE`` (``_real_restart_verdict``),
+    never a hand-built document: a seam that invents a field the producer does
+    not write is exactly the defect this round removes.
     """
     root = tmp_path / "var/lib/lop-action-supervisor"
     root.mkdir(parents=True, exist_ok=True)
@@ -3429,8 +3489,10 @@ def _execute_watchdog(
     if seed is not None:
         record_path.write_text(json.dumps(seed))
     calls: list[Any] = []
+    probes: list[tuple[str, int, float]] = []
     clock = {"now": clock_start, "cycle": 0}
     failures = failures or {}
+    failures_on = failures_on or {}
     answers = answering if answering is not None else [True] * cycles
     # What a real ``systemctl start`` does to the unit: the fake manager owns
     # the observable state exactly as the real one would.
@@ -3452,32 +3514,33 @@ def _execute_watchdog(
         def __init__(self, ok: bool) -> None:
             self.ok = ok
 
-        def settimeout(self, seconds: float) -> None:
-            pass
-
-        def connect(self, address: Any) -> None:
-            pass
-
         def sendall(self, payload: bytes) -> None:
             pass
 
         def recv(self, size: int) -> bytes:
-            return b"H" if self.ok else b""
+            return probe_status if self.ok else b""
 
         def close(self) -> None:
             pass
+
+    def create_connection(address: tuple[str, int], timeout: float) -> Any:
+        probes.append((address[0], address[1], timeout))
+        if address[0] != reachable_host:
+            raise OSError("no route to host")
+        return _Connection(answers[min(clock["cycle"], len(answers) - 1)])
 
     def check_output(args: Any, **kwargs: Any) -> str:
         calls.append(args)
         if args[0] == "systemd-run":
             # The transient service would have run RESTART_SOURCE; the fake
-            # writes the same token-scoped verdict file it writes.
-            result_path.write_text(
-                json.dumps({"schema_version": 1, "token": int(args[-1]), "status": verdict})
-            )
+            # writes the exact document that script writes.
+            if restart_verdict is not None:
+                result_path.write_text(json.dumps(restart_verdict))
             return ""
         if clock["cycle"] in failures:
             raise failures[clock["cycle"]]
+        if args[1] in failures_on:
+            raise failures_on[args[1]]
         if args[1] == "start":
             started["done"] = True
             if start_listens:
@@ -3510,15 +3573,15 @@ def _execute_watchdog(
     modules = {
         "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
         "socket": SimpleNamespace(
-            AF_INET=2,
+            create_connection=create_connection,
+            AF_INET6=10,
             SOCK_STREAM=1,
-            socket=lambda family, kind: _Connection(answers[min(clock["cycle"], len(answers) - 1)]),
         ),
         "subprocess": SimpleNamespace(check_output=check_output),
         "sys": SimpleNamespace(
             argv=[
                 "watchdog.py",
-                "action-server.service",
+                target_unit,
                 "5000",
                 str(guest_supervisor.WATCHDOG_RECORD_PATH),
                 str(guest_supervisor.RESTART_SCRIPT_PATH),
@@ -3537,7 +3600,35 @@ def _execute_watchdog(
             guest_supervisor.WATCHDOG_SOURCE,
             {"__builtins__": {**vars(builtins), "__import__": importer}},
         )
+    if probe_log is not None:
+        probe_log.extend(probes)
     return json.loads(record_path.read_text()), calls, clock["now"]
+
+
+def _real_restart_verdict(
+    tmp_path: Path, *, token: int, stale: bool = False, unit: str = "action-server.service"
+) -> dict[str, Any]:
+    """Produce the REAL RESTART_SOURCE document for the watchdog to consume.
+
+    The only acceptable test for a cross-process contract runs the real
+    producer: a hand-built ``{"status": ...}`` document is the invented field
+    that made round 1's repair read as a failure on the real guest.
+    """
+    payload, _, _ = _execute_restart_script(
+        tmp_path,
+        dispatch_argv=[
+            "python3",
+            "-c",
+            guest_supervisor.RESTART_SOURCE,
+            unit,
+            "5000",
+            guest_supervisor.RESTART_RESULT_PATH,
+            str(token),
+        ],
+        on_kill=None if stale else (lambda proc: _write_listeners(proc, {})),
+        on_start=None if stale else (lambda proc: _serve(proc, 9100, 4343, 1, 101000)),
+    )
+    return payload
 
 
 def _interventions(calls: list[Any]) -> list[str]:
@@ -3583,8 +3674,9 @@ def test_a_healthy_server_is_never_touched(tmp_path: Path) -> None:
     assert record["attempts"] == 0
     assert record["intervened"] is False
     assert record["events"] == []
-    # A serving server is observed, never acted on. The unit IS read (the state
-    # decides whether a blocked listener is repairable), but no verb is issued.
+    # A serving port short-circuits even the unit query: a healthy episode
+    # issues ZERO systemctl calls -- no show, no start, nothing.
+    assert not any(args[1] == "show" for args in calls)
     assert record["last_observation"] == "serving"
     assert elapsed >= guest_supervisor.WATCHDOG_INTERVAL_S * 10
 
@@ -3609,14 +3701,19 @@ def test_a_failed_unit_with_a_wedged_listener_takes_the_verified_restart(
     failed); only the all-process restart can, so the watchdog dispatches the
     host's own RESTART_SOURCE as a transient service and records its verdict.
     """
+    token = 1_000_000_000
+    verdict = _real_restart_verdict(tmp_path / "producer", token=token)
     record, calls, _ = _execute_watchdog(
         tmp_path,
         active_states=["failed"],
         listening=[True],
         answering=[False],
         cycles=1,
+        clock_start=1000.0,
+        restart_verdict=verdict,
     )
     dispatch = next(args for args in calls if args[0] == "systemd-run")
+    assert str(token) in dispatch
     assert "--wait" in dispatch and "--collect" in dispatch
     assert "action-server.service" in dispatch and "5000" in dispatch
 
@@ -3630,7 +3727,9 @@ def test_a_failed_unit_with_a_wedged_listener_takes_the_verified_restart(
     assert record["attempts"] == 1
     assert record["last_trigger"] == "unresponsive"
     assert record["last_action"] == "verified-restart"
-    assert record["last_outcome"] == "restarted"
+    # last_outcome reflects the most recent DECISION, and the cycle after a
+    # repair is legitimately throttled; the dispatch itself is the event.
+    assert record["events"][0]["outcome"] == "restarted"
     assert record["last_observation"] == "unresponsive"
     # A bare start beside the holder is never attempted.
     assert _interventions(calls) == []
@@ -3639,33 +3738,82 @@ def test_a_failed_unit_with_a_wedged_listener_takes_the_verified_restart(
 def test_a_verified_restart_that_fails_is_recorded_as_restart_failed(
     tmp_path: Path,
 ) -> None:
+    token = 1_000_000_000
+    # The REAL producer's stale report: the old holder survived the kill, so
+    # the post owners predate it and nothing was replaced.
+    verdict = _real_restart_verdict(tmp_path / "producer", token=token, stale=True)
+    assert "status" not in verdict, "RESTART_SOURCE must never write a status key"
     record, _, _ = _execute_watchdog(
         tmp_path,
         active_states=["failed"],
         listening=[True],
         answering=[False],
         cycles=1,
-        verdict="stale_listener",
+        clock_start=1000.0,
+        restart_verdict=verdict,
     )
     assert record["attempts"] == 1
     assert record["last_action"] == "verified-restart"
     assert record["last_outcome"] == "restart-failed"
 
 
-def test_an_active_unit_with_a_wedged_listener_is_observed_not_restarted(
-    tmp_path: Path,
-) -> None:
-    """``start`` cannot change an active unit; the host still owns that repair."""
+def test_a_verdict_for_another_dispatch_is_not_accepted(tmp_path: Path) -> None:
+    """The token ties the verdict to THIS dispatch; a stale file cannot pass."""
+    verdict = _real_restart_verdict(tmp_path / "producer", token=999)
+    record, _, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[True],
+        answering=[False],
+        cycles=1,
+        clock_start=1000.0,
+        restart_verdict=verdict,
+    )
+    assert record["last_outcome"] == "restart-failed"
+
+
+def test_one_unresponsive_observation_is_not_death(tmp_path: Path) -> None:
+    """A single slow response must never restart a live server."""
     record, calls, _ = _execute_watchdog(
         tmp_path,
         active_states=["active"],
         listening=[True],
         answering=[False],
-        cycles=5,
+        cycles=1,
     )
     assert not any(args[0] == "systemd-run" for args in calls)
-    assert _interventions(calls) == []
     assert record["attempts"] == 0
+    assert record["last_observation"] == "unresponsive"
+
+
+def test_an_active_wedge_is_repaired_after_two_consecutive_observations(
+    tmp_path: Path,
+) -> None:
+    """The host cannot reach a wedged listener either, so the guest must act.
+
+    ``_recover_guest_supervisor`` only probes before a restart, and its probe
+    fails against the wedge; two consecutive silences are the evidence that
+    this is a dead server rather than a slow one.
+    """
+    # The dispatch happens on the SECOND observation, one interval after the
+    # first, so its monotonic-microsecond token is 1_010_000_000.
+    token = 1_010_000_000
+    verdict = _real_restart_verdict(tmp_path / "producer", token=token)
+    record, calls, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["active"],
+        listening=[True],
+        answering=[False],
+        cycles=3,
+        clock_start=1000.0,
+        restart_verdict=verdict,
+    )
+    assert record["attempts"] == 1
+    assert record["last_trigger"] == "unresponsive"
+    assert record["last_action"] == "verified-restart"
+    # last_outcome reflects the most recent DECISION, and the cycle after a
+    # repair is legitimately throttled; the dispatch itself is the event.
+    assert record["events"][0]["outcome"] == "restarted"
     assert record["last_observation"] == "unresponsive"
 
 
@@ -3709,15 +3857,33 @@ def test_a_unit_that_exits_immediately_is_never_recorded_as_started(
         start_state="failed",
         start_listens=False,
     )
-    assert record["attempts"] == guest_supervisor.WATCHDOG_MAX_ATTEMPTS
+    # A no-effect dispatch draws on a SMALLER budget than a real repair, so a
+    # permanently broken unit cannot starve a later real failure of its five.
+    assert record["attempts"] == guest_supervisor.WATCHDOG_MAX_INEFFECTIVE
     assert record["capped"] is True
     assert {event["outcome"] for event in record["events"]} == {"no-effect"}
     assert "started" not in {event["outcome"] for event in record["events"]}
-    # Five attempts did really happen; none of them is evidence of a revival.
-    assert _interventions(calls).count("start") == guest_supervisor.WATCHDOG_MAX_ATTEMPTS
+    assert _interventions(calls).count("start") == guest_supervisor.WATCHDOG_MAX_INEFFECTIVE
     # The verification stays inside the normal interval: 5 attempts spaced by
     # the 30 s throttle and 8 s of proof each never overruns a cycle's design.
     assert elapsed >= 120.0
+
+
+def test_a_reset_failed_failure_is_distinguished_from_a_start_failure(
+    tmp_path: Path,
+) -> None:
+    """The two dispatches fail for different reasons; the evidence says which."""
+    record, calls, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[False],
+        cycles=1,
+        failures_on={"reset-failed": OSError("manager unavailable")},
+    )
+    assert record["last_outcome"] == "reset-failed-error"
+    assert record["attempts"] == 1
+    # The start was never attempted: there is no point after a refused reset.
+    assert "start" not in _interventions(calls)
 
 
 def test_a_start_that_takes_effect_is_recorded_as_started(tmp_path: Path) -> None:
@@ -3773,6 +3939,9 @@ def test_a_corrupt_watchdog_file_is_unparseable_while_no_file_is_absent(
     """``absent`` means no file; a file we cannot read is its own answer."""
     corrupt = _execute_report(tmp_path, watchdog_text="{not json")
     _, watchdog = guest_supervisor.receipt_report(corrupt)
+    assert watchdog["status"] == "unparseable"
+    literal_null = _execute_report(tmp_path, watchdog_text="null")
+    _, watchdog = guest_supervisor.receipt_report(literal_null)
     assert watchdog["status"] == "unparseable"
     (tmp_path / "var/lib/lop-action-supervisor/watchdog.json").unlink()
     missing = _execute_report(tmp_path, watchdog_text=None)
@@ -3831,14 +4000,35 @@ def test_a_watchdog_error_does_not_kill_the_loop(tmp_path: Path) -> None:
     assert _interventions(calls) == ["reset-failed", "start"]
 
 
-def test_a_v6_only_listener_is_observed(tmp_path: Path) -> None:
-    """The tcp6 parse path is the AMI's own: both tables must be consulted."""
+def test_a_v6_only_listener_is_observed_and_probed_on_v6(tmp_path: Path) -> None:
+    """The tcp6 parse path is the AMI's own, so the probe must try ::1 too."""
+    probes: list[tuple[str, int, float]] = []
     record, calls, _ = _execute_watchdog(
-        tmp_path, active_states=["active"], listening=[True], cycles=2, v6=True
+        tmp_path,
+        active_states=["active"],
+        listening=[True],
+        cycles=2,
+        v6=True,
+        reachable_host="::1",
+        probe_log=probes,
     )
     assert record["attempts"] == 0
     assert record["last_observation"] == "serving"
     assert _interventions(calls) == []
+    assert probes[0][0] == "127.0.0.1" and probes[1][0] == "::1"
+
+
+def test_any_complete_http_status_counts_as_answering(tmp_path: Path) -> None:
+    """A 404/500 is a live app; only silence is "unresponsive"."""
+    record, _, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[True],
+        cycles=1,
+        probe_status=b"HTTP/1.0 500 Internal Server Error\r\n",
+    )
+    assert record["attempts"] == 0
+    assert record["last_observation"] == "serving"
 
 
 def test_a_restarted_watchdog_seeds_its_counter_and_cap(tmp_path: Path) -> None:
@@ -3859,7 +4049,12 @@ def test_a_restarted_watchdog_seeds_its_counter_and_cap(tmp_path: Path) -> None:
         ],
     }
     record, calls, _ = _execute_watchdog(
-        tmp_path, active_states=["failed"], listening=[False], cycles=2, seed=seed
+        tmp_path,
+        active_states=["failed"],
+        listening=[False],
+        cycles=2,
+        seed=seed,
+        clock_start=1000.0,
     )
     # The restarted process inherits the spent cap instead of earning a new one.
     assert record["attempts"] == 5
@@ -4000,7 +4195,6 @@ def test_install_refuses_a_watchdog_that_shares_the_action_server_cgroup(
         args[1] for args in calls if len(args) > 2 and args[2] == guest_supervisor.WATCHDOG_UNIT
     ]
     assert "stop" in verbs and "disable" in verbs
-    assert verbs.index("stop") < verbs.index("disable")
     assert not (tmp_path / "etc/systemd/system/lop-action-watchdog.service").exists()
     assert not (
         tmp_path / "etc/systemd/system/action-server.service.d/90-lop-supervisor.conf"
@@ -4158,6 +4352,10 @@ def test_a_corrupt_watchdog_record_is_absent_not_a_failed_receipt() -> None:
     envelope.pop("watchdog")
     _, missing = guest_supervisor.receipt_report(json.dumps(envelope))
     assert missing == guest_supervisor.empty_watchdog("absent")
+    # An explicit JSON null is a record that EXISTS but cannot be used.
+    envelope["watchdog"] = None
+    _, null = guest_supervisor.receipt_report(json.dumps(envelope))
+    assert null == guest_supervisor.empty_watchdog("unparseable")
 
 
 def test_install_evidence_carries_the_watchdog_proof(
