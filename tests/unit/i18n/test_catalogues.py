@@ -157,9 +157,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
     # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
     # The wire.memory slice adds the independently audited `wire.memory`
-    # namespace, whose ledger row is what un-ships it.
+    # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
+    # tag slice adds `relay.session.tags` on the same terms: one audited
+    # namespace with its own fresh ledger row.
     locale = "hi"
     namespaces = (
+        "relay.session.tags",
         "tui.authoring",
         "tui.projects_edit",
         "tui.review",

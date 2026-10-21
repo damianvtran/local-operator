@@ -274,7 +274,7 @@ export function SessionTagsSheet({
 								<span className="flex w-11 shrink-0 justify-center text-meta text-ink-dim">
 									{messageRuntime.t("relay.session.tags.primary")}
 								</span>
-								<span className="w-14 shrink-0" />
+								<span className="min-w-14 shrink-0" />
 							</div>
 						) : null}
 						<ul className="flex flex-col">
@@ -336,7 +336,13 @@ export function SessionTagsSheet({
 										) : (
 											<span className="size-11 shrink-0" aria-hidden />
 										)}
-										<span className="w-14 shrink-0 text-right text-meta text-ink-dim">
+										{/* The pending label is LOCALIZED, so its width is not English's:
+										    "enregistrement…" (fr) measures ~89px at text-meta, Hindi and
+										    Russian ~80px, Spanish ~70px against English's 46px. A fixed
+										    56px cell spills left across the 44px radio column; min-w-14 is
+										    a floor and whitespace-nowrap lets the cell take its max-content
+										    width while the flex-1 tag label absorbs the difference. */}
+										<span className="min-w-14 shrink-0 whitespace-nowrap text-right text-meta text-ink-dim">
 											{rowPending
 												? messageRuntime.t("relay.session.tags.saving")
 												: ""}

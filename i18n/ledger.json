@@ -3002,6 +3002,101 @@
       },
       "status": "passed",
       "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 a597880d8b045c1000412af91bea5034de4567f4a383fd366632c6033bb61864. 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Initial ES-1 minor (confirm lost its object), ES-2 nit (idiomatic hacer de), ES-3/ES-4 fit notes. ES-1 and ES-2 fixed; fit notes closed by the status-cell min-w-14/nowrap fix. Re-audit round 2 PASS."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "Initial FR-1 major (saving label overflowed the fixed status cell), FR-2/FR-3 nits. FR-1 resolved by min-w-14/whitespace-nowrap; FR-3 transient row shift noted for design. Copy re-audit round 2 PASS."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Initial HI-1 minor (saving wraps in fixed status cell), resolved by min-w-14/nowrap; copy otherwise clean. Translation audit PASS."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Initial RU-1 nit only (pin hint wraps at 320px); accepted as a wrapping hint. Translation audit PASS."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Initial VI-1 minor (saving fit), VI-2 nit (missing-label width). VI-1 closed by the status-cell fix; VI-2 accepted. Translation audit PASS."
     }
   ]
 }
