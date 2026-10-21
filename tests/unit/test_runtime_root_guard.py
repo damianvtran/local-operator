@@ -227,3 +227,78 @@ def test_an_escape_fails_the_test_that_caused_it(tmp_path) -> None:
     assert result.returncode != 0, output
     assert "1 passed, 1 error" in output, output
     assert "reached the operator's real runtime root" in output, output
+
+
+@pytest.mark.parametrize("mode", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])
+def test_an_escape_outside_a_test_body_fails_the_run(tmp_path, mode) -> None:
+    """A swallowed escape at COLLECTION time — no test to fail — fails the run.
+
+    Both modes, because the repo runs ``-n auto`` by default and under xdist the
+    session hook runs in each worker, where setting the exit status alone is
+    ignored (agent review round 5, MAJOR). The nested conftest uses the suite's
+    own hooks, imported rather than copied.
+    """
+    import subprocess
+    import textwrap
+
+    repo = Path(__file__).resolve().parents[2]
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "conftest.py").write_text(
+        "from tests.conftest import (  # noqa: F401\n"
+        "    isolate_environment,\n"
+        "    pytest_sessionfinish,\n"
+        "    pytest_testnodedown,\n"
+        ")\n"
+    )
+    (nested / "test_collect_escape.py").write_text(textwrap.dedent("""
+            import os
+            from pathlib import Path
+
+            from local_operator import procname
+            from tests import conftest as suite
+
+            fake_real = Path(os.environ["NESTED_FAKE_REAL_ROOT"])
+            suite._REAL_RUNTIME_ROOT = fake_real
+            saved = os.environ["LOCAL_OPERATOR_RUNTIME_ROOT"]
+            os.environ["LOCAL_OPERATOR_RUNTIME_ROOT"] = str(fake_real)
+            try:
+                procname.runtime_root()
+            except Exception:
+                pass  # the shape of every production caller
+            os.environ["LOCAL_OPERATOR_RUNTIME_ROOT"] = saved
+
+            def test_innocent():
+                pass
+            """))
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(repo),
+        NESTED_FAKE_REAL_ROOT=str(tmp_path / "operator" / "runtime"),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            *mode,
+            "--rootdir",
+            str(nested),
+            "-c",
+            os.devnull,
+            str(nested),
+        ],
+        cwd=nested,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = result.stdout + result.stderr
+    assert "1 passed" in output, output
+    assert result.returncode == pytest.ExitCode.TESTS_FAILED, output
+    assert "reached the operator's real runtime root outside a test body" in output, output
+    assert not (tmp_path / "operator" / "runtime").exists()
