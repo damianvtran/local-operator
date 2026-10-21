@@ -1235,7 +1235,7 @@ class Incident:
         # answering at all. With it, the card carries both halves the operator
         # needs: the selection, and the target that returned this error.
         if self.failover_from and self.failover_from != f"{self.provider}/{self.model}":
-            lines.append(
+            lines.append(  # i18n: ignore model-facing incident block
                 f"failed on {self.provider}/{self.model} after failing over from "
                 f"{self.failover_from}"
             )
