@@ -343,7 +343,11 @@ export function SessionTagsSheet({
 										    56px cell spills left across the 44px radio column; min-w-14 is
 										    a floor and whitespace-nowrap lets the cell take its max-content
 										    width while the flex-1 tag label absorbs the difference. */}
-										<span role="status" aria-live="polite" className="min-w-14 shrink-0 whitespace-nowrap text-right text-meta text-ink-dim">
+										<span
+											role={rowPending ? "status" : undefined}
+											aria-live={rowPending ? "polite" : undefined}
+											className="min-w-14 shrink-0 whitespace-nowrap text-right text-meta text-ink-dim"
+										>
 											{rowPending
 												? messageRuntime.t("relay.session.tags.saving")
 												: ""}

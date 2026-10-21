@@ -87,6 +87,9 @@ describe("the catalogue's states", () => {
 		getTags.mockReturnValue(new Promise(() => {}));
 		renderSheet();
 		expect(screen.getByText("loading…")).toBeTruthy();
+		expect(screen.getAllByRole("status").some((node) =>
+			node.textContent?.includes("loading…"),
+		)).toBe(true);
 		expect(screen.queryByRole("checkbox")).toBeNull();
 	});
 
@@ -109,6 +112,9 @@ describe("the catalogue's states", () => {
 		getTags.mockResolvedValueOnce({ tags: CATALOGUE });
 		renderSheet();
 		expect(await screen.findByText("Could not load the tag catalogue.")).toBeTruthy();
+		expect(screen.getAllByRole("alert").some((node) =>
+			node.textContent?.includes("Could not load the tag catalogue."),
+		)).toBe(true);
 		fireEvent.click(screen.getByRole("button", { name: "try again" }));
 		expect(await screen.findByRole("checkbox", { name: "Work" })).toBeTruthy();
 	});
@@ -183,6 +189,9 @@ describe("assignment writes", () => {
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
 		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect(screen.getAllByRole("status").some((node) =>
+			node.textContent?.includes("saving…"),
+		)).toBe(true);
 	});
 
 	it("paints the read-back once the write lands", async () => {
