@@ -2561,6 +2561,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "cleanup.remove_session_dir",
     ),
     (
+        "local_operator/network/mobility.py::_stash_session_roles",
+        "os.replace",
+        "LOH-9 S2's drop path: renames the session's `roles/` SUBTREE out to "
+        "<config>/dropped-session-roles/<id>, which is OUTSIDE sessions/; the "
+        "session directory itself is never this call's source or target — its "
+        "removal stays cleanup.remove_session_dir's",
+    ),
+    (
         "local_operator/network/mobility.py::_promote",
         "<path>.unlink",
         "Removes the move's own ready.json boot marker from the just-adopted session "

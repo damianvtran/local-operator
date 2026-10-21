@@ -1399,6 +1399,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(_sh.move_queue().envelope(locale=help_locale)["text"]),
     )
+    # THE ROLE-DEFINITION GATE'S OPT-OUT (LOH-9 S2). A conversation with session
+    # roles refuses a move by default because v1 does not carry them; this flag is
+    # the explicit "move it anyway, stash the definitions on this device" — never
+    # silent, because the move's receipt and its refusal name the count and path.
+    #
+    # NO `help=` STRING, DELIBERATELY. Every key in ``cli.sessions_help`` is
+    # already recorded as missing for four ACTIVE locales (es/hi/ru/vi); a new
+    # English key would GROW that coverage allowance, which the shrink-only gate
+    # forbids, and translating the 48-key namespace for four locales is a review
+    # wave of its own. The flag is still listed by argparse and its consequences
+    # are stated by the refusal and the receipt, so the gap is the one-line
+    # description only (disclosed in the LOH-9 S2 PR).
+    move_parser.add_argument("--drop-session-roles", action="store_true")
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
@@ -6462,7 +6475,7 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    for key in ("running_notice", "notice", "monitors_notice"):
+    for key in ("running_notice", "notice", "monitors_notice", "session_roles_notice"):
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
@@ -6509,6 +6522,9 @@ def _sessions_move_words(
         # pre-safe-point reading).
         queue = result["queue"]
         phase = str(result.get("phase") or queue.get("phase") or "queued")
+        # A queued DROP still owes the user its stash promise (QA round 2): the
+        # same carry line the finished move prints, from the record-backed carry.
+        stay_lines = _carry_lines(result)
         to_block_q = result.get("to_device") or {}
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
@@ -6527,11 +6543,12 @@ def _sessions_move_words(
         head = f"Queued a move of {session_id} to {target}"
         head += f" — {note}." if note else "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device."]
+            return [head, "It is no longer running on this device.", *stay_lines]
         if shape == "running":
             return [
                 head,
                 f"It can no longer be cancelled; the conversation continues on {target}.",
+                *stay_lines,
             ]
         return [
             head,
@@ -6539,6 +6556,7 @@ def _sessions_move_words(
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
             f"`lop sessions move --cancel-queued {session_id}`.",
+            *stay_lines,
         ]
 
     to_block = result.get("to_device") or {}
@@ -6667,6 +6685,9 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
         # off, the same contract the parser's default gives it.
         queue=bool(getattr(args, "queue", False)),
+        # ``bool(...)`` so a hand-rolled Namespace without the attribute gets the
+        # protective default (the source refuses; nothing is dropped silently).
+        drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
     )
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))

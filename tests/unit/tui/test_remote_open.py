@@ -66,7 +66,23 @@ def test_the_phase_order_is_the_contracts() -> None:
         ("~/src --to pixel-8", MoveTo(error=AMBIGUOUS_MOVE)),
         ("./x --to local", MoveTo(error=AMBIGUOUS_MOVE)),
         ("a b --to local", MoveTo(error=AMBIGUOUS_MOVE)),
-        ("--to x --force", MoveTo(error="/move --to takes only --keep and --queue, not '--force'")),
+        # LOH-9 S2: the role-definition opt-out is accepted anywhere, and the
+        # "only ..." refusal names it so a reader is not told the flag does not
+        # exist by an error that omits it.
+        ("--to pixel-8 --drop-session-roles", MoveTo(to="pixel-8", drop_session_roles=True)),
+        (
+            "--drop-session-roles 9f3ac1e0b7d2 --to local",
+            MoveTo("9f3ac1e0b7d2", "local", drop_session_roles=True),
+        ),
+        (
+            "--to x --force",
+            MoveTo(
+                error=(
+                    "/move --to takes only --keep, --queue and --drop-session-roles, "
+                    "not '--force'"
+                )
+            ),
+        ),
         # ``--wait`` is refused BY NAME, naming the shell route that can honour it:
         # the producer's busy sentence sends readers to a shell for this flag, and a
         # bare "unknown flag" here would be the papercut one surface over.
@@ -323,7 +339,12 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
     order: list[str] = []
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         order.append(f"move {session_id} {to} keep={keep}")
         return dict(_COMMITTED)
@@ -349,6 +370,18 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
         shown = " ".join(_notices(app))
         assert "✓ prepared  ✓ handing off  ✓ committed  ✓ done" in shown, shown
         assert "Moved sess1 to pixel-8. It runs there now." in shown, shown
+        # U10: a finished move rides the SAME muted ink as the queued receipt
+        # for the same request — `info`'s dim token made them two event classes.
+        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+        finished = next(
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "Moved sess1 to pixel-8" in block.text()
+        )
+        # RENDERED ink, not the private token (round 3): read the object the
+        # transcript paints and compare its colour with the theme's `muted`.
+        assert _rendered_in_muted(finished), finished.renderable
 
 
 #: The five refusals the move contract can produce AFTER the current session has
@@ -436,7 +469,12 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
     """
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -481,7 +519,12 @@ async def test_a_refused_move_says_so_and_reopens_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -532,7 +575,12 @@ async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
     from local_operator.network import mobility
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -572,7 +620,12 @@ async def test_a_move_of_a_session_this_tui_holds_in_the_sidebar_is_refused(
     ran: list[str] = []
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         ran.append(session_id)
         return {**_COMMITTED, "session_id": session_id, "new_session_id": session_id}
@@ -621,9 +674,31 @@ class _QueuedFake:
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def __call__(
-        self, session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        self,
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
-        self.calls.append({"session_id": session_id, "to": to, "keep": keep, "queue": queue})
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "to": to,
+                "keep": keep,
+                "queue": queue,
+                "drop_session_roles": drop_session_roles,
+            }
+        )
+        # The QUEUED tense (round 4): the product's notice is future here, and the
+        # fake must be the same sentence or the test cannot catch a tense slip.
+        notice = (
+            "1 session role/team definition will be stashed on laptop at "
+            "/tmp/config/dropped-session-roles/other1 when this queued move "
+            "runs — a mesh move does not carry them"
+        )
+        carry = {"session_roles": 1, "session_roles_notice": notice} if drop_session_roles else {}
         return {
             "ok": True,
             "session_id": session_id,
@@ -642,8 +717,38 @@ class _QueuedFake:
                 "code": "",
                 "request_id": "cli-rq-1",
                 "updated_at": 0.0,
+                "drop_session_roles": drop_session_roles,
+                "session_roles": 1 if drop_session_roles else 0,
+                "session_roles_notice": notice if drop_session_roles else "",
             },
+            **({"carry": carry} if carry else {}),
         }
+
+
+def _rendered_in_muted(block: object) -> bool:
+    """Whether the block's RENDERABLE paints in the theme's `muted` ink.
+
+    Reads the painted object (text style + span styles), not the block's private
+    `_token`: the finding asked for the rendered ink, and a token assertion
+    passes even if the theme mapping changes the colour underneath it.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    text = getattr(block, "renderable", None)
+    target = theme_mod.semantic_color("muted")
+    styles = [getattr(text, "style", None)] + [span.style for span in getattr(text, "spans", [])]
+    for style in styles:
+        if style is None:
+            continue
+        if isinstance(style, str):
+            # A token span resolves through the theme; `muted` is the token whose
+            # ink this check is about.
+            if style == "muted":
+                return True
+            continue
+        if str(getattr(getattr(style, "color", None), "name", "")) == target:
+            return True
+    return False
 
 
 @pytest.mark.asyncio
@@ -671,7 +776,13 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
             if any("Queued a move" in n for n in _notices(app)):
                 break
         assert fake.calls == [
-            {"session_id": "other1", "to": "pixel-8", "keep": False, "queue": True}
+            {
+                "session_id": "other1",
+                "to": "pixel-8",
+                "keep": False,
+                "queue": True,
+                "drop_session_roles": False,
+            }
         ]
         shown = " ".join(_notices(app))
         assert "Queued a move of other1 to pixel-8 — waiting for a safe point." in shown, shown
@@ -690,10 +801,35 @@ async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock) and "Queued a move of other1" in block.text()
         )
-        assert receipt._token == "muted", receipt._token
+        assert _rendered_in_muted(receipt), receipt.renderable
         assert reopened == []
         # No phase row: a queued move has walked no move phase yet.
         assert not any(n.startswith("moving other1") for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_drop_move_reports_the_stash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M4/QA round 2: a queued DROP receipts its stash, like the run will.
+
+    The flag travels on the call, and the receipt prints the carry line the run
+    will honour — a queued drop that said nothing left the user with no
+    statement about definitions they are about to lose from this conversation.
+    """
+    fake = _QueuedFake()
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move other1 --to pixel-8 --queue --drop-session-roles")
+        for _ in range(30):
+            await pilot.pause()
+            if any("Queued a move" in n for n in _notices(app)):
+                break
+        assert fake.calls[0]["drop_session_roles"] is True, fake.calls
+        shown = " ".join(_notices(app))
+        assert "dropped-session-roles/other1" in shown, shown
+        assert "will be stashed on laptop" in shown, shown
+        assert ".." not in shown, shown
 
 
 @pytest.mark.asyncio
@@ -729,7 +865,13 @@ async def test_a_queued_move_stands_the_live_turn_guard_down(
         # from under this viewer) — the guard stood down, the leave did not.
         assert order == ["leave"], order
         assert fake.calls == [
-            {"session_id": "sess1", "to": "pixel-8", "keep": False, "queue": True}
+            {
+                "session_id": "sess1",
+                "to": "pixel-8",
+                "keep": False,
+                "queue": True,
+                "drop_session_roles": False,
+            }
         ]
         assert not any("a turn is still running" in n for n in _notices(app)), _notices(app)
 
@@ -762,7 +904,13 @@ async def test_a_queued_move_stands_the_sidebar_hold_guard_down(
             if fake.calls:
                 break
         assert fake.calls == [
-            {"session_id": "held1", "to": "pixel-8", "keep": False, "queue": True}
+            {
+                "session_id": "held1",
+                "to": "pixel-8",
+                "keep": False,
+                "queue": True,
+                "drop_session_roles": False,
+            }
         ]
         assert any("Queued a move of held1" in n for n in _notices(app)), _notices(app)
 
@@ -780,7 +928,12 @@ async def test_a_viewed_refusal_offers_the_queue_spelling_this_surface_runs(
     from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,

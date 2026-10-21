@@ -4533,6 +4533,17 @@ def _is_bridge_ask_row(row: Any) -> bool:
     return False
 
 
+def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
+    """``result["carry"]`` as a mapping, whatever a peer's frame put there.
+
+    The carry block is optional and produced by the remote side, so a malformed
+    one must read as "no carry" rather than crash a receipt's rendering (LOH-9
+    S2, M4 — the stash notice rides this block).
+    """
+    raw = result.get("carry")
+    return raw if isinstance(raw, dict) else {}
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -19955,24 +19966,21 @@ class OperatorApp(App[None]):
         except Exception:
             return []
         choices: list[ArgumentChoice] = []
+        # ONE ROW PER NAME (agent/QA round 1, Q-5). The composite lists session
+        # rows first, so a tolerated race (an account team created after a
+        # session team of the same name, or a name that is an alias in one store)
+        # keeps the row in force and drops the shadowed one — the rule the agent
+        # picker already applied. Aliases are deliberately NOT merged: two
+        # different names are two different keys to type.
+        seen_names: set[str] = set()
         for team in teams:
-            # ``member_count()``, never ``len(members) + 1`` (D2). The old
-            # arithmetic assumed the manager is not itself on the roster, which
-            # is false for real teams — two of the three on the reference
-            # machine list their manager as a member, so the picker reported 8
-            # roles for a 7-role team. It also collapsed a ``reviewer x2`` slot
-            # to one, understating the roster the user assembled.
-            #
-            # This is the count `org_chart.py` and `lop teams` already use, and
-            # the chart is TWO KEYSTROKES from this row — a picker that
-            # disagrees with the boxes it opens is worse than one that says
-            # nothing.
-            # Defensive access kept from the original: this list is built from
-            # whatever the session's registry yields, and a reduced double
-            # without the method must degrade to a row rather than break the
-            # picker mid-keystroke.
-            counter = getattr(team, "member_count", None)
-            slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
+            key = str(getattr(team, "name", "") or "").strip().casefold()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            # The COUNT is assembled by ``_team_facts`` (D2): ``member_count()``,
+            # never ``len(members) + 1``, the same number `org_chart.py`, the
+            # listing and `lop teams` paint.
             description = (getattr(team, "description", "") or "").strip() or "no description"
             # FROZEN display rule (D2): only a CHOSEN-and-different label earns
             # the description prefix (``enrichment_label``) -- a derived
@@ -20023,7 +20031,7 @@ class OperatorApp(App[None]):
                     # away in the listing and the chart; the description is the
                     # only thing telling the user which team this IS.
                     aliases=aliases,
-                    detail=f"{slots} {'member' if slots == 1 else 'members'}",
+                    detail=self._team_facts(team),
                 )
             )
         return choices
@@ -20391,6 +20399,55 @@ class OperatorApp(App[None]):
         )
         return rows
 
+    def _team_facts(self, team: Any, registry: Any = None, *, led_by: bool = False) -> str:
+        """The facts line EVERY team surface paints: roster size, then scope.
+
+        ONE assembly for the local listing, the argument picker and the block a
+        follower receives over the wire. They used to build the same sentence in
+        three places — the wire twin even hardcoded English beside the keyed local
+        row — so the scope token would have been a fourth spelling to drift.
+        ``registry`` is passed where the caller already proved it answers
+        ``list_teams``; otherwise the session's own registry is read, which is the
+        same one the rows came from.
+        """
+        from local_operator.profile_scope import row_scope
+
+        # Defensive access kept from the original: a doubled registry method is
+        # typed ``object`` through ``getattr``, and the annotation states the one
+        # contract this line needs (a count), so a reduced double still degrades
+        # to a row instead of breaking the picker mid-keystroke.
+        counter: Callable[[], int] | None = getattr(team, "member_count", None)
+        slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
+        parts: list[str] = []
+        if led_by:
+            from local_operator.i18n.keys import tui_app as app_keys
+
+            parts.append(
+                _t(
+                    app_keys.skills_led_by(
+                        manager=str(getattr(team, "manager", "") or ""),
+                        count=slots,
+                        shown=str(slots),
+                    )
+                )
+            )
+        else:
+            # "MEMBERS", never "roles" (R6): the count comes from member_count(),
+            # which excludes the manager, and every sibling surface says members.
+            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+        if registry is None:
+            registry = self._team_registry()
+        # Only a CONVERSATION row is marked: the account is the default a reader
+        # already assumes, and marking every global row would rewrite every
+        # existing listing. Plain registries (desktop account routes) answer
+        # "global", so no token appears there.
+        if row_scope(registry, team) == "session":
+            from local_operator.i18n.keys import tui_authoring as author_keys
+            from local_operator.i18n.text import tr
+
+            parts.append(tr("tui.authoring")(author_keys.scope_conversation()))
+        return " · ".join(parts)
+
     def _team_list_block(self, teams: list[Any]) -> RichBlock:
         """A structured roster list for bare ``/team``.
 
@@ -20408,29 +20465,18 @@ class OperatorApp(App[None]):
         body = Style(color=theme_mod.semantic_color("dim"))
         rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for team in teams:
-            # ``member_count()`` for the D2 reason the picker documents: the
-            # manager is often ON the roster, so `len(members) + 1` overcounts,
-            # and a multi-count slot was collapsed to one. The listing, the
-            # picker and the org chart must agree.
-            slots = team.member_count()
             # The shared display rule, bounded for this row (N1): a long
             # custom label ellipsizes so the KEY keeps its place on the line
             # -- `/team <name>` and the footer both address by the key, so the
             # row must show what to type.
             display = self._team_listing_form(team)
             rows.append(Padding(Text(display, style=heading), (0, 0, 0, 2)))
-            # "members", matching the number (R6) — see the picker's note. This
-            # row names the manager separately ("Led by <manager> · N
-            # members"), so calling the roster count "roles" also double-counted
-            # him in the reader's head.
+            # "members", matching the number (R6) — see the picker's note. The
+            # shared helper names the manager separately ("Led by <manager> · N
+            # members") and appends the scope token for a conversation row in the
+            # same order the picker and the wire twin paint it.
             rows.append(
-                Padding(
-                    Text(
-                        _t(_x.skills_led_by(manager=team.manager, count=slots, shown=str(slots))),
-                        style=body,
-                    ),
-                    (0, 0, 0, 4),
-                )
+                Padding(Text(self._team_facts(team, led_by=True), style=body), (0, 0, 0, 4))
             )
             summary = (team.description or "").strip()
             if summary:
@@ -34593,6 +34639,7 @@ class OperatorApp(App[None]):
                     request.to,
                     keep=request.keep,
                     queue=request.queue,
+                    drop_session_roles=request.drop_session_roles,
                 )
             finally:
                 self._move_in_flight = False
@@ -34742,6 +34789,15 @@ class OperatorApp(App[None]):
                     f"{target}. It can still be cancelled before it starts — ask Local Operator "
                     "to cancel the queued move."
                 )
+            # WHAT STAYED BEHIND (agent review round 1, M4): the queued receipt
+            # carries the same stash promise the run will honour; a TUI that did
+            # not print it left the user with no statement about their roles.
+            carry = _carry_dict(result)
+            stay_note = str(carry.get("session_roles_notice") or "")
+            if stay_note:
+                # The notice is already a full sentence (it ends with its
+                # recovery clause); adding a period produced ".." (round 3, U13).
+                text += f" {stay_note}"
             if phase_notice.is_attached:
                 self._transcript_view().remove_block(phase_notice)
             # `note`, not `info` (design review round 1, D2): these are multi-line
@@ -34773,7 +34829,18 @@ class OperatorApp(App[None]):
             )
         else:
             receipt = f"Moved {session_id} to {target}. It runs there now."
-        self._system_notice(receipt, "info")
+        # THE STASH NOTICE ON A FINISHED MOVE (M4): the CLI printed this from
+        # ``_carry_lines``; the TUI read only the phase row, so a drop move was
+        # silent about where its definitions went.
+        carry = _carry_dict(result)
+        stay_note = str(carry.get("session_roles_notice") or "")
+        if stay_note:
+            # No appended period: the notice carries its own (round 3, U13).
+            receipt += f" {stay_note}"
+        # `note`, not `info` (round 3, U10): the queued receipt for the same
+        # request rides `note`'s muted ink, and a finished move should not look
+        # like a different class of event than the queue it came through.
+        self._system_notice(receipt, "note")
         if str(result.get("phase") or "") not in ("committed", "done"):
             return
         # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both
@@ -37783,9 +37850,18 @@ class OperatorApp(App[None]):
             page.receipt(translate(keys.registry_missing()))
             return
         try:
+            from local_operator.profile_scope import scope_store
+
             fields = TeamEditFields(**plan.changes)
+            # A NEW TEAM FROM THIS FORM IS THE USER'S OWN ACT, so it lands in the
+            # account store (design §3.4) — the TUI may hold a composite, and the
+            # default scope there would otherwise make the team conversation-only.
+            # An EDIT follows the row's owner instead: the listing shows session
+            # rows too, and redirecting an edit into the account would mint a
+            # duplicate rather than change the row the user opened.
+            store = scope_store(registry, "global")
             if team_id is None:
-                registry.create_team(fields)
+                store.create_team(fields)
             else:
                 registry.update_team(
                     team_id,
@@ -37945,7 +38021,15 @@ class OperatorApp(App[None]):
             payload = {"op": "create" if creating else "update", "name": draft.name, **plan.changes}
             params = AgentParams(**payload)
             write_profile(
-                registry, params, creating=creating, expected_definition_revision=revision
+                registry,
+                params,
+                creating=creating,
+                # The form is the user's own act: a new profile is saved for
+                # every conversation, and an edit follows the row's owner (the
+                # shared writer resolves it). A composite registry must not turn
+                # this save into a conversation-only row by defaulting session.
+                scope="global",
+                expected_definition_revision=revision,
             )
         except DefinitionRevisionMismatch:
             page.receipt(translate(keys.revision_changed()))
@@ -54796,8 +54880,7 @@ class OperatorApp(App[None]):
             items = [
                 (
                     self._team_listing_form(team),
-                    f"Led by {team.manager} · {team.member_count()} "
-                    f"{'member' if team.member_count() == 1 else 'members'}",
+                    self._team_facts(team, registry, led_by=True),
                     (team.description or "").strip(),
                 )
                 for team in teams

@@ -279,6 +279,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/network/mobility.py": (
+        1,
+        "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
+        "``--drop-session-roles`` move puts a conversation's role/team definitions in "
+        "before the commit deletes the session directory. Deliberately a sibling of "
+        "``sessions/``, never an entry inside one: the copy set must not carry it, no "
+        "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
     "local_operator/paths.py": (
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "

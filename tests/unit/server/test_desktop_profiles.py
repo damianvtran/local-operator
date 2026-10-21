@@ -66,7 +66,7 @@ async def test_corrupt_installed_profile_cannot_fall_back_during_read_or_start(a
 
     client, root = api
     registry = AgentRegistry(root)
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
     assert installed is not None and installed[0].agent_id is not None
     path = root / "agents" / installed[0].agent_id / "agent.yml"
     original = path.read_text()
@@ -101,7 +101,7 @@ async def test_repair_resolves_edited_definition_and_keeps_the_durable_goal(api)
 
     client, root = api
     registry = AgentRegistry(root)
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
     assert installed is not None and installed[0].agent_id is not None
     # Edited through the real PATCH route, so the fixture cannot diverge from
     # how an operator actually customises an installed role.
@@ -527,7 +527,7 @@ async def test_sync_route_reports_seed_and_hub_verdicts(api, monkeypatch) -> Non
 
     monkeypatch.setattr("local_operator.agents._fetch_hub_profile", unreachable)
     registry = AgentRegistry(root)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     registry.create_agent(
         _profile_row(name="hunter", description="d", tags=["role", "hub:abc-123"])
     )
@@ -610,7 +610,7 @@ async def test_profile_payloads_carry_the_class_in_its_effective_spelling(api):
 
     client, root = api
     registry = AgentRegistry(root)
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
 
     detail = await client.get("/v1/desktop/profiles/reviewer")
     assert detail.status_code == 200, detail.text
@@ -662,7 +662,7 @@ async def test_profile_detail_exposes_definition_revision_and_stale_write_is_409
     client, root = api
     from local_operator.agent_profiles import install_seed
 
-    install_seed("reviewer", registry=AgentRegistry(root))
+    install_seed("reviewer", registry=AgentRegistry(root), scope="global")
     detail = (await client.get("/v1/desktop/profiles/reviewer")).json()["result"]
     token = detail["definition_revision"]
     assert isinstance(token, str) and token.startswith("definition-revision:v1:")
@@ -850,6 +850,7 @@ async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
             effort="med",
         ),
         creating=True,
+        scope="global",
     )
     created = await client.post(
         "/v1/desktop/teams",
@@ -1017,7 +1018,7 @@ async def test_a_slot_whose_role_pins_the_session_model_reports_the_session_mode
 
     client, root = api
     _write_tiers(root, hi={"model": "anthropic/claude-opus-4-5", "effort": "max"})
-    assert install_seed("coder", registry=AgentRegistry(root)) is not None
+    assert install_seed("coder", registry=AgentRegistry(root), scope="global") is not None
     created = await client.post(
         "/v1/desktop/teams",
         json=mutation(
@@ -1036,3 +1037,22 @@ async def test_a_slot_whose_role_pins_the_session_model_reports_the_session_mode
     assert row["tier"] == {"value": None, "source": "row"}
     assert row["model"] == {"value": None, "source": "session"}
     assert row["available"] is True and row["reason"] == ""
+
+
+async def test_team_catalogue_and_detail_carry_the_additive_scope(api) -> None:
+    """Design §3.3 (LOH-9 S2): the team catalogue and detail rows carry ``scope``.
+
+    These routes stay ACCOUNT-ONLY — they are handed the plain global registry,
+    and the session composite is only behind ``/command-entities`` — so the fact
+    here is always ``global``. The field rides the shared projection so a client
+    renders a team badge without a second row shape.
+    """
+    client, _root = api
+    created = await client.post("/v1/desktop/teams", json=mutation(name="audit", manager="manager"))
+    assert created.status_code == 200, created.text
+
+    listed = (await client.get("/v1/desktop/teams")).json()["result"]["teams"]
+    assert [row["scope"] for row in listed if row.get("name") == "audit"] == ["global"]
+
+    detail = (await client.get("/v1/desktop/teams/audit")).json()["result"]
+    assert detail["scope"] == "global"

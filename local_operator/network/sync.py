@@ -332,7 +332,8 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # would leave roles behind silently; the S2 PR carries that gate.
     "roles": (
         "session-scoped role definitions are not carried by a mesh move in v1; "
-        "S2 stays read-only for this tree until S3's refusal/notice lands with or before it"
+        "``_source_prepare`` refuses such a move by default and names the roles, "
+        "and ``--drop-session-roles`` is the explicit opt-out (LOH-9 S2)"
     ),
     # The tail anchor (``session.tail_anchor``): a hint about the SOURCE's own
     # journal bytes — an inode number and the offset of the end of its last
