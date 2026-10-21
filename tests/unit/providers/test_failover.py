@@ -8012,7 +8012,7 @@ class TestAFailureIsAttributedToTheTargetThatProducedIt:
         assert str(error) == f"transient provider error: {self.REFUSAL}"
         assert error.describe() == f"failed on openai/gpt-5: {str(error)}"
 
-    def test_a_hop_is_named_as_a_hop(self) -> None:
+    async def test_a_hop_is_named_as_a_hop(self) -> None:
         """A fallback target's error says what it failed over FROM."""
         error = failover_module._attribute_failure(
             ProviderError(None, self.REFUSAL, retryable=True),
@@ -8024,7 +8024,7 @@ class TestAFailureIsAttributedToTheTargetThatProducedIt:
             "failed on openai/gpt-5 after failing over from anthropic/claude-opus-5-5"
         )
 
-    def test_a_primary_failure_states_no_hop(self) -> None:
+    async def test_a_primary_failure_states_no_hop(self) -> None:
         error = failover_module._attribute_failure(
             ProviderError(None, self.REFUSAL, retryable=True),
             FallbackTarget("anthropic/claude-opus-5-5", None),
@@ -8033,9 +8033,57 @@ class TestAFailureIsAttributedToTheTargetThatProducedIt:
         assert error.failover_from == ""
         assert error.provenance == "failed on anthropic/claude-opus-5-5"
 
-    def test_an_unattributed_error_degrades_to_its_old_text(self) -> None:
+    async def test_an_unattributed_error_degrades_to_its_old_text(self) -> None:
         """Nothing constructed outside the walk gains a sentence."""
         error = ProviderError(429, "quota exceeded", retryable=True)
         assert error.selector == ""
         assert error.provenance == ""
         assert error.describe() == str(error)
+
+    async def test_a_mid_stream_failure_from_a_fallback_is_attributed(self) -> None:
+        """The arm that raised BEFORE the reported slot was ever offered.
+
+        A fallback that forwarded bytes cannot be retried, so the walk
+        re-raises the provider's error directly. That exit skipped `record()`
+        entirely and left the error unattributed — the same misattribution,
+        one arm further along (agent review round 1, MAJOR 1).
+        """
+
+        class _DeltaThenRaise:
+            def __init__(self, error: ProviderError) -> None:
+                self._error = error
+
+            async def stream(
+                self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ):
+                # A TEXT delta, not a start event: ``_RETRY_SAFE_STREAM_EVENTS``
+                # lets the walk replay a stream whose only output is acceptance,
+                # and this arm is specifically the one the caller has SEEN.
+                yield StreamTextDelta(delta="The answer so far")
+                raise self._error
+
+        refusal = ProviderError(None, self.REFUSAL, retryable=True)
+
+        def client_for(spec: ModelSpec) -> Any:
+            if spec.model_id == "gpt-5":
+                return _DeltaThenRaise(refusal)
+            return ScriptedClient(ProviderError(429, "quota exceeded", retryable=True))
+
+        auth = FakeAuth({"anthropic": ["k1"], "openai": ["k2"]})
+        settings = {
+            "retry": {
+                "baseDelayMs": 1,
+                "maxRetries": 0,
+                "fallbackChains": {"default": ["openai/gpt-5"]},
+            }
+        }
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5-5"), auth, settings, client_for
+            ):
+                pass
+
+        error = excinfo.value
+        assert error.selector == "openai/gpt-5"
+        assert error.failover_from == "anthropic/claude-opus-5-5"
+        assert "cyber_policy" in str(error)

@@ -4652,6 +4652,14 @@ async def stream_with_failover(
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:
+                # ATTRIBUTE FIRST, before every exit from this handler. Three of
+                # them raise past the walk without ever reaching `record()` —
+                # `fail_closed`, the mid-stream `forwarded_any` re-raise, and
+                # the provider-specific re-asks below — and an unattributed
+                # error is the exact defect this PR exists to fix, one arm
+                # further along. Stamping here rather than at each `raise` is
+                # what keeps the next exit someone adds from inheriting it.
+                exc = _attribute_failure(exc, target, primary_selector)
                 if not request.isolated:
                     _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
                 if exc.fail_closed:
