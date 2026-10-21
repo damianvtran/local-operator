@@ -1778,6 +1778,33 @@ def _destination_move(
             ),
             "",
         )
+    except Moved as refusal:
+        # A PEER-LINK FAILURE MID-COPY IS A REFUSAL, NOT AN EXCEPTION. ``sync_from``'s
+        # ``ask`` raises ``Moved`` when the source stops answering between chunks —
+        # measured live on 2026-10-21, where the escape tore down the relay's
+        # ``mesh-control-conn`` thread and the CLI read a wedged relay
+        # (``relay_unavailable``) while the source kept a ``prepared`` journal that
+        # refused every retry. Nothing has committed here (the owner only commits on
+        # the later ``ready``), so the partial staging is swept exactly as a
+        # ``SyncRefused`` is. The sentence has to say the SOURCE still holds the
+        # conversation: that is what makes a retry safe, and why the source's own
+        # journal may need its relay restarted before it can be re-prepared.
+        _roll_back_destination(server, session_id, staging)
+        holder = owner_name or owner_device or "the source"
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                refusal.code or "unreachable",
+                f"{refusal.message}. This device rolled its partial copy back; "
+                f"{holder} still holds the conversation, so nothing was lost. If a "
+                f"retry reports a prepared handoff on {holder}, restart the relay "
+                f"on {holder} (`lop network restart`) first.",
+                phase_reached="prepared",
+                changed=False,
+            ),
+            "",
+        )
 
     # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
     # holds over the same function the owner uses (``sync.copy_content_digest``),
@@ -3420,6 +3447,7 @@ def _source_prepare(
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_PREPARED,
+        clear_handoff_entry,
         handoff_in_flight,
         write_handoff_entry,
     )
@@ -3480,6 +3508,34 @@ def _source_prepare(
         except Exception:  # noqa: BLE001
             existing = None
         if existing:
+            phase = str(existing.get("phase") or "")
+            asking = _asking_device(link, frame)
+            # A PREPARED HANDOFF NEVER COMMITTED, SO THE SAME DESTINATION ASKING
+            # AGAIN IS A RETRY, NOT A SECOND MOVER (live defect, 2026-10-21).
+            # The copy phase can fail after this device journaled the plan — a
+            # dead peer link raised ``Moved`` on the destination — and a
+            # destination that retries then found its OWN entry refusing it
+            # ``in_progress`` until this relay restarted, because reconcile
+            # skips an entry written by the live instance. ``prepared`` means
+            # only that the source stopped its runtime and wrote a plan; no
+            # byte was committed anywhere, so clearing the entry rolls nothing
+            # back. The tombstone check keeps a committed handoff refused: an
+            # entry plus a tombstone is not a retry, it is a disagreement.
+            same_destination = (
+                bool(asking)
+                and str(existing.get("to_device") or "") == asking
+                and not _tombstone(server.root, session_id)
+            )
+            if phase == HANDOFF_PHASE_PREPARED and same_destination:
+                logger.warning(
+                    "mobility: clearing a prepared handoff of %s to %s left by a "
+                    "failed copy; the same destination is asking again",
+                    session_id,
+                    asking,
+                )
+                clear_handoff_entry(server.root, session_id)
+                existing = None
+        if existing:
             # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
             # this device is holding may be a handoff that is genuinely under way, or
             # one whose destination died — and until it is settled, every route to
@@ -3498,6 +3554,11 @@ def _source_prepare(
             # entry's writer is alive — and that gap is recorded, not guessed at.
             phase = str(existing.get("phase") or "")
             age = _handoff_age(existing)
+            # THE DEVICE, NOT "this device": the reader is the DESTINATION, so
+            # "this device" named the wrong machine and its remedy (restart the
+            # destination's relay) cleared nothing. The journal is device-local,
+            # so the holder for an entry here is always this relay's own device.
+            holder = str(server._own_label())  # noqa: SLF001
             # THE ESCAPE IS NAMED, because it is not derivable from the state. An
             # entry written by this device's LIVE relay is skipped by every reconcile
             # (the instance rule that stops a merely slow peer losing an in-flight
@@ -3512,10 +3573,10 @@ def _source_prepare(
                 "result": "refused",
                 "code": "in_progress",
                 "message": (
-                    "a handoff of that conversation is already in progress on this "
-                    f"device (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    "changed; if the other device has stopped answering, restart this "
-                    "device's relay (`lop network restart`) and try the move again"
+                    "a handoff of that conversation is already in progress on "
+                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    f"changed; if it is stuck, restart the relay on {holder} "
+                    "(`lop network restart`) and try the move again"
                 ),
                 "session_id": session_id,
             }
@@ -5225,29 +5286,53 @@ def local_move_handler(server: "RelayServer") -> Any:
             reconcile(server.root, server=server, only=session_id)
         except Exception:  # noqa: BLE001 — recovery is best effort
             logger.debug("mobility: reconcile before a move failed", exc_info=True)
-        if to == "local":
-            return _recall(
+        try:
+            if to == "local":
+                return _recall(
+                    server,
+                    session_id,
+                    keep=keep,
+                    wait_s=wait_s,
+                    engage_on_arrival=engage_on_arrival,
+                    queue=queue,
+                    drop_session_roles=drop_session_roles,
+                    request_id=request_id,
+                    resume_queued=resume_queued,
+                )
+            return _offload(
                 server,
                 session_id,
+                to=to,
                 keep=keep,
                 wait_s=wait_s,
                 engage_on_arrival=engage_on_arrival,
                 queue=queue,
-                drop_session_roles=drop_session_roles,
                 request_id=request_id,
-                resume_queued=resume_queued,
+                drop_session_roles=drop_session_roles,
             )
-        return _offload(
-            server,
-            session_id,
-            to=to,
-            keep=keep,
-            wait_s=wait_s,
-            engage_on_arrival=engage_on_arrival,
-            queue=queue,
-            request_id=request_id,
-            drop_session_roles=drop_session_roles,
-        )
+        except Moved as refusal:
+            # THE CONTROL CONNECTION MAY NOT DIE ON A MOVEMENT FAILURE. Every
+            # ``ask`` the recall/offload path makes can raise ``Moved`` on a dead
+            # or refusing peer, and an escape here unwound the relay's
+            # ``mesh-control-conn`` thread — the CLI then reported
+            # ``relay_unavailable`` about a relay that was still serving, which is
+            # exactly the "wedged relay" a failed move may not impersonate. The
+            # callers below already turn the peer's answers into refusals; this is
+            # the last arm, and it never swallows anything but ``Moved``.
+            logger.warning(
+                "mobility: %s of %s failed on the peer link (%s); answering a "
+                "refusal instead of dropping the control connection",
+                "recall" if to == "local" else "offload",
+                session_id,
+                refusal.code or "unreachable",
+                exc_info=True,
+            )
+            return _move_refusal(
+                session_id,
+                refusal.code or "unreachable",
+                refusal.message,
+                changed=False,
+            )
 
     return _handle
 
