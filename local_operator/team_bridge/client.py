@@ -697,6 +697,17 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
     )
 
 
+def _refuses_field(refusal: BridgeRefusal, field: str) -> bool:
+    """Whether ``refusal`` is a 400 validation refusal naming exactly ``field``.
+
+    Narrow on purpose: only a refusal that names the optional field may trigger
+    the re-send without it. Any other 400 (a bad label, a bad state) is the
+    user's or the caller's to see, and retrying it would hide it.
+    """
+
+    return refusal.http_status == 400 and refusal.details.get("field") == field
+
+
 def _local_settings_snapshot(config_dir: Path | None) -> TeamBridgeSettings | None:
     """The directory-scoped watcher's last-good local settings, or None.
 
@@ -1190,6 +1201,7 @@ class TeamBridgeClient:
         consent_version: str | None = None,
         consented_via: str | None = None,
         label: str | None = None,
+        agent_name: str | None = None,
         endpoint: Any = _UNKNOWN_ENDPOINT,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1206,6 +1218,18 @@ class TeamBridgeClient:
         request would be refused and the member could not pause during exactly
         the incident pause exists for. ``label`` with a non-``active`` state is
         therefore a caller bug, refused here before it reaches the wire.
+
+        ``agent_name`` is the chief of staff's CURRENT display name
+        (:func:`local_operator.team_bridge.cos_name.cos_display_name`), an
+        ADDITIVE, non-unique field teammates see beside the endpoint label
+        ("Aida (Ben)"). It follows ``label``'s rule — ``active`` only — because
+        it is a name change too, and bundling one into a pause is what rule 2
+        forbids. Omitted entirely when ``None``, so the body is byte-identical
+        to the pre-field shape. The field must never cost the enable it rides
+        on: today's server ignores unknown fields (§6.6, plain
+        ``json.Unmarshal``), and if a server instead REFUSES the field
+        (``400`` naming ``field: agent_name``) the same request is re-sent ONCE
+        without it — a 400 wrote nothing, so the retry cannot double-apply.
 
         ``expected_account_id`` is the captured-account guard (§5.2's local
         desktop receipt; review round 1, R6/Q1): when supplied, the pinned
@@ -1234,7 +1258,7 @@ class TeamBridgeClient:
             raise ValueError(
                 f"consented_via must be one of {VALID_CONSENTED_VIA!r}; got {consented_via!r}"
             )
-        if label is not None and state != "active":
+        if (label is not None or agent_name is not None) and state != "active":
             raise ValueError(
                 "a pause or opt-out must be sent alone (RFC §5.2): send the name change "
                 "as its own request"
@@ -1255,9 +1279,20 @@ class TeamBridgeClient:
             body["consented_via"] = consented_via
         if label is not None:
             body["label"] = label
+        if agent_name is not None:
+            body["agent_name"] = agent_name
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
-        result = await self._send("PUT", "/messaging/settings", body=body, access=access)
+        try:
+            result = await self._send("PUT", "/messaging/settings", body=body, access=access)
+        except BridgeRefusal as refusal:
+            if "agent_name" not in body or not _refuses_field(refusal, "agent_name"):
+                raise
+            # The decoration was refused, not the write: re-send the user's
+            # request without it, on the SAME pinned access (no second account
+            # resolution between the two attempts).
+            body.pop("agent_name")
+            result = await self._send("PUT", "/messaging/settings", body=body, access=access)
         self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
@@ -2300,6 +2335,11 @@ class StatusDiscipline:
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        #: ``endpoint_id -> agent_name`` this process last re-sent. The
+        #: debounce for :meth:`_sync_agent_name`: one attempt per (endpoint,
+        #: name), so a server that keeps echoing an older name (or refuses
+        #: the field) is not re-PUT on every fresh status read.
+        self._agent_name_sent: dict[str, str] = {}
 
     @property
     def base_url(self) -> str:
@@ -2432,6 +2472,7 @@ class StatusDiscipline:
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
+        await self._sync_agent_name(check, access)
         self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
         return check
 
@@ -2535,6 +2576,84 @@ class StatusDiscipline:
         if owner is not None and owner.account_id == check.account_id:
             self._sync_designation(store, owner, local.session)
         return check
+
+    async def _sync_agent_name(self, check: StatusCheck, access: OAuthAccess) -> None:
+        """Re-send the chief of staff's name after a rename, at a status boundary.
+
+        WHY HERE. A rename lands in ``aida.name`` from many writers (``/aida
+        rename``, ``/settings``, a session rename synced by ``aida.naming``) in
+        any process, none of which holds a bridge client. The status read is
+        the existing, already-rate-limited boundary (§5.1: boundaries only,
+        ≥ :data:`STATUS_CACHE_TTL_S` apart, coalesced per account), so this
+        runs only on a FRESH read — never from the cache, never on a timer.
+
+        WHY SO GUARDED. ``PUT /messaging/settings`` is a state ASSERTION with
+        no precondition field: a re-sync must send ``state=active``, and if the
+        member paused on another surface between this read and the PUT, the
+        PUT would resume them. So this fires only when every one holds:
+
+        * the answer is READY and its selected tenant is eligible with an
+          ACTIVE endpoint (never resumes a paused/disabled one it can see);
+        * the endpoint block ECHOES ``agent_name`` (the key present, null or a
+          string) — proof the server supports the field; against a server that
+          does not, nothing is ever sent, so the race window cannot open;
+        * the echo differs from the resolved name, and this process has not
+          already tried that name for that endpoint (the debounce);
+        * this machine holds the committed owner for THIS account and
+          endpoint — the user consented here, so publishing the CoS name is
+          part of the enrollment they chose, not a status read enrolling.
+
+        No ``consent_version`` is sent, so ``_commit_explicit_enable`` commits
+        nothing (consent hold, #2712), and the captured account pins the write.
+        Best-effort: any failure leaves the status answer untouched.
+        """
+
+        if self._config_dir is None or check.state != STATE_READY:
+            return
+        selected = select_tenant(check.payload)
+        endpoint = selected.get("endpoint") if selected is not None else None
+        if (
+            selected is None
+            or not bool(selected.get("eligible"))
+            or not isinstance(endpoint, Mapping)
+            or endpoint.get("state") != "active"
+            or "agent_name" not in endpoint
+        ):
+            return
+        endpoint_id = endpoint.get("id")
+        tenant_id = selected.get("tenant_id")
+        if not isinstance(endpoint_id, str) or not isinstance(tenant_id, str):
+            return
+        from local_operator.team_bridge.cos_name import cos_display_name
+
+        wanted = cos_display_name(self._config_dir)
+        if wanted is None or wanted == endpoint.get("agent_name"):
+            return
+        if self._agent_name_sent.get(endpoint_id) == wanted:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+
+            owner = Store(self._config_dir).active_owner()
+        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
+            return
+        if (
+            owner is None
+            or owner.account_id != access.account_id
+            or owner.endpoint_id != endpoint_id
+        ):
+            return
+        self._agent_name_sent[endpoint_id] = wanted
+        try:
+            await self._client.put_settings(
+                state="active",
+                tenant_id=tenant_id,
+                agent_name=wanted,
+                endpoint=endpoint,
+                expected_account_id=access.account_id,
+            )
+        except Exception:  # noqa: BLE001 - a display name never fails a status read
+            return
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.
