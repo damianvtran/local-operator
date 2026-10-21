@@ -991,7 +991,7 @@ def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[In
     """Drop the invite entries that are dead and past retention; return the dropped.
 
     THE INVITE HALF OF :func:`prune`, split out because it is the half a live relay
-    runs (:meth:`relay.RelayServer._sweep_invites`) and the tombstone half is not:
+    runs (:meth:`relay.RelayServer._sweep_invites_once`) and the tombstone half is not:
     a tombstone row is part of ``members_digest_of``, the fact two devices compare
     to tell "same members" from "same count", so pruning it on one device's clock
     is a membership change, not housekeeping. An invite is this device's own

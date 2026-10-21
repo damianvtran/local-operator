@@ -1475,7 +1475,10 @@ def _cmd_show(args: argparse.Namespace) -> int:
     payload["invites"] = [
         {
             "invite_id": invite.invite_id,
-            "state": invite.listed_state(time.time()),
+            # Same split as the relay's ``net_show``: stored ``state``, display
+            # ``listed_state``.
+            "state": invite.state,
+            "listed_state": invite.listed_state(time.time()),
             "role": invite.role,
         }
         for invite in record.invites
@@ -1510,7 +1513,10 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
             f"{', '.join(member['capabilities'])}{suspect}"
         )
     for invite in payload.get("invites") or []:
-        lines.append(f"  invite {invite['invite_id']}  {invite['role']}  {invite['state']}")
+        # ``listed_state`` when the payload carries it; a relay on an older build
+        # sends only ``state``.
+        shown = invite.get("listed_state") or invite["state"]
+        lines.append(f"  invite {invite['invite_id']}  {invite['role']}  {shown}")
     return lines
 
 

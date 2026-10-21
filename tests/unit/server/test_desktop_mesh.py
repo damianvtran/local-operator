@@ -2208,3 +2208,68 @@ async def test_networks_keep_this_devices_own_revoked_row(
     self_row = _member(result["networks"][0], PEER)
     assert self_row["active"] is False
     assert REJOINED_OLD not in {m["device_id"] for m in result["networks"][0]["members"]}
+
+
+def _revocation_record(root: Path, gone: network_types.MemberRecord) -> None:
+    """Self + one live peer + ``gone``, removed: a revocation with no re-join twin."""
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="home", self_device_id=PEER, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=PEER, name="mine", role="admin", capabilities=["admin"]
+        )
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=REJOINED_NEW,
+            name="cloud-node-1",
+            capabilities=["list", "drive"],
+            endpoints=["127.0.0.1:4097", "10.0.0.5:4097"],
+        )
+    )
+    record.members.append(gone)
+    record.removed_ids.append(gone.device_id)
+    network_store.save(record, root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "endpoints", "kept"),
+    [
+        # A plain revocation: nothing in common with any active member. The Mesh tab
+        # draws it as revoked (dashed edge, "· 1 revoked"), so it must stay on the wire.
+        ("old-laptop", ["10.0.0.9:4097"], True),
+        # Loopback names no machine: every relay can advertise it.
+        ("old-laptop", ["127.0.0.1:4097"], True),
+        # Renamed on re-join, same routable address: still the same machine.
+        ("cloud-node-old", ["10.0.0.5:4097"], False),
+        # Same name, case and padding aside: the re-join signature.
+        (" Cloud-Node-1 ", [], False),
+    ],
+    ids=["plain-revocation", "loopback-only-overlap", "shared-endpoint", "same-name"],
+)
+async def test_networks_keep_a_revocation_and_drop_only_a_superseded_tombstone(
+    mesh_api, monkeypatch: pytest.MonkeyPatch, name: str, endpoints: list[str], kept: bool
+) -> None:
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _revocation_record(
+        root,
+        network_types.MemberRecord(
+            device_id=REJOINED_OLD,
+            name=name,
+            capabilities=["list", "drive"],
+            endpoints=endpoints,
+            removed_at=1792428275.1,
+            removed_by=PEER,
+            lifecycle="expired",
+        ),
+    )
+    monkeypatch.setattr(network_store, "find_own_relay", lambda root=None: None)
+    result = (await client.get("/v1/desktop/networks")).json()["result"]
+    by_id = {member["device_id"]: member for member in result["networks"][0]["members"]}
+    assert (REJOINED_OLD in by_id) is kept, by_id
+    if kept:
+        assert by_id[REJOINED_OLD]["active"] is False, "a revocation is marked, not hidden"
+    assert by_id[REJOINED_NEW]["active"] is True

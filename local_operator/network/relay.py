@@ -12292,7 +12292,11 @@ class RelayServer:
         base["invites"] = [
             {
                 "invite_id": invite.invite_id,
-                "state": invite.listed_state(time.time()),
+                # ``state`` IS THE STORED LEDGER (minted/redeemed/consumed) and stays
+                # so on the wire; ``listed_state`` is the display word, which says
+                # ``expired`` for a minted row past its TTL (review round 1, R5).
+                "state": invite.state,
+                "listed_state": invite.listed_state(time.time()),
                 "role": invite.role,
                 "bound_device": invite.device_id,
                 "expires_at": invite.expires_at,
