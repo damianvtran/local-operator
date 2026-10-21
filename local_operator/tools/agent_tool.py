@@ -99,6 +99,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.profile_scope import Scope
 from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
     INHERIT_EFFORT,
@@ -124,9 +125,9 @@ class AgentParams(BaseModel):
     # audit item 2): this description rode every request while being read once,
     # and `read tool://agent` renders the same blurbs on demand. The enum
     # literals stay, so the op set is still learnable from the wire.
-    op: Literal["list", "show", "search", "install", "reset", "create", "update", "sync"] = Field(
-        description="The op to run."
-    )
+    op: Literal[
+        "list", "show", "search", "install", "reset", "create", "update", "sync", "delete"
+    ] = Field(description="The op to run.")
     # The no-spaces guidance is a modularity contract, not registry law: the
     # registry itself accepts any string, but a role/specialist name is also a
     # `/agent <name> <message>` argument parsed at the first whitespace, so a
@@ -256,6 +257,15 @@ class AgentParams(BaseModel):
             "create: 'role' (default; a reusable task(agent=...) target) or "
             "'specialist' (a durable named agent, may sit on a team roster). "
             "Ignored on update: kind cannot change."
+        ),
+    )
+    scope: Literal["global", "session"] | None = Field(
+        default=None,
+        description=(
+            "create/update/delete/reset/install: where the role lives. Omit for "
+            "'session' — this conversation only, gone with it. 'global' changes "
+            "the user's account and needs their confirmation; this host may be "
+            "unable to ask, in which case the call is refused with the way forward."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
@@ -899,13 +909,21 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
             f"starters: {', '.join(list_seeds())}",
         )
     try:
-        installed = install_seed(name, registry=registry)
+        # A TOOL INSTALL IS THE MODEL'S OWN ACT, so it lands in THIS
+        # conversation (design §3.4). The account store is reachable only through
+        # a user surface, or through op='reset' of a row that is already there.
+        installed = install_seed(name, registry=registry, scope="session")
     except NameTakenError:
         return _error(
             tool_call_id,
             "agent",
             _name_taken_message(name, installing=True, context=context),
         )
+    except ValueError as error:
+        # ``scope_store`` refuses a session write on a host with no conversation
+        # store ("never silently global"); a shadowed name is refused by the
+        # composite. Both are actionable sentences, not tool faults.
+        return _error(tool_call_id, "agent", str(error))
     if installed is None:
         return _error(
             tool_call_id,
@@ -948,7 +966,9 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
     )
 
 
-async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+async def _op_reset(
+    context: ToolContext | None, tool_call_id: str, name: str, *, scope: Scope
+) -> ToolResult:
     """Restore a packaged seed over an installed role, echoing what it replaced.
 
     Separate from ``install`` on purpose. ``install`` runs incidentally (a
@@ -1024,6 +1044,22 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
             "tool cannot delete or rename agents.",
         )
 
+    # RESET WRITES WHERE THE ROW ALREADY LIVES. A conversation row is reset in
+    # place; a row in the ACCOUNT store is a model-initiated mutation of shared
+    # state, so it is refused while no host can ask for that specific write —
+    # reset is a WRITE, not a read, exactly like update/delete.
+    from local_operator.profile_scope import row_scope
+
+    target: Scope = row_scope(registry, existing) if existing is not None else scope
+    if context is not None and target == "global":
+        return _error(
+            tool_call_id,
+            "agent",
+            "resetting a role saved in the user's account needs their confirmation, and "
+            "this run cannot ask for it. Ask the user first, then use the desktop "
+            "Profiles editor, the TUI /agent form, or `lop agents sync --replace`.",
+        )
+
     previous = profile_from_agent(registry, existing) if existing is not None else None
     diverged = seed_divergence(previous, seed) if previous is not None else ()
     # PROVENANCE, not name collision. A role the operator authored under a
@@ -1085,7 +1121,7 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
         )
 
     try:
-        installed = install_seed(seed.name, registry=registry, overwrite=True)
+        installed = install_seed(seed.name, registry=registry, scope=target, overwrite=True)
     except NameTakenError:  # pragma: no cover - guarded above, kept for safety
         return _error(
             tool_call_id,
@@ -1233,6 +1269,7 @@ def write_profile(
     params: AgentParams,
     *,
     creating: bool,
+    scope: "Scope",
     expected_definition_revision: str | None = None,
     context: ToolContext | None = None,
 ) -> tuple[str, str, str]:
@@ -1244,7 +1281,22 @@ def write_profile(
     row the write actually replaces rather than a snapshot taken earlier.
     Returning structured identity keeps transport adapters out of tool prose.
     The registry remains the only storage authority.
+
+    ``scope`` is REQUIRED, and never defaulted inside here: a tool create lands
+    where its caller chose (the tool's default is ``session``) while every user
+    adapter — the desktop route, the TUI form — passes ``global`` because the
+    user IS the actor. An update follows the row's OWNER (S1 dispatches by id),
+    so editing a conversation row can never rewrite the account's row of that
+    name.
+
+    A TOOL-ISSUED write (any call with a ``context``) that would land in the
+    ACCOUNT store is refused here: the consent seam that can authorize one is
+    not installed in S2, and the user surfaces are the way to make that change.
     """
+    from local_operator.profile_scope import row_scope, scope_store
+
+    if scope not in ("session", "global"):
+        raise ValueError(f"unknown scope {scope!r}; use 'session' or 'global'.")
     from local_operator.agents import (
         HUB_ORIGIN_PREFIX,
         HUB_SHA256_PREFIX,
@@ -1517,8 +1569,26 @@ def write_profile(
 
         return check
 
+    # WHERE THIS WRITE LANDS. A create goes where the caller asked; an update
+    # goes to the row's owner. The export layer and the TUI both rely on this
+    # being the same answer the composite's update uses.
+    target: str = row_scope(registry, existing) if existing is not None else scope
+    if context is not None and target == "global":
+        # THE TOOL-ISSUED ACCOUNT WRITE, refused until a host can ask. The
+        # question is specific (a durable write of THIS name), so it cannot ride
+        # the session-scoped "approve all" shortcut; until that door exists the
+        # user surfaces are the only route.
+        what = "role" if kind == "role" else "agent"
+        raise ValueError(
+            f"saving a {what} for every conversation needs the user's confirmation, and "
+            "this run cannot ask for it. To keep it for THIS conversation only, retry "
+            "without scope (or with scope='session'). To add it to the user's account "
+            "yourself, use the desktop Profiles editor, the TUI /agent form, or "
+            "`lop agents`."
+        )
+
     if existing is None:
-        agent = registry.create_agent(
+        agent = scope_store(registry, scope).create_agent(
             _fields(
                 name=name,
                 description=profile.description,
@@ -1562,9 +1632,27 @@ async def _op_write(
     *,
     creating: bool,
 ) -> ToolResult:
+    from local_operator.profile_scope import row_scope
+
+    registry = _registry(context)
+    if registry is None:
+        return _error(
+            tool_call_id, "agent", "no agent registry attached to this session; cannot save roles."
+        )
+    name = (params.name or "").strip()
+    scope = params.scope or "session"
+    try:
+        existing = registry.get_agent_by_name(name)
+    except Exception:  # noqa: BLE001 — an unreadable owner is treated as the account
+        existing = None
+    target = row_scope(registry, existing) if existing is not None else scope
     try:
         name, kind, action_class = write_profile(
-            _registry(context), params, creating=creating, context=context
+            registry,
+            params,
+            creating=creating,
+            scope=scope,  # type: ignore[arg-type]
+            context=context,
         )
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
@@ -1589,11 +1677,83 @@ async def _op_write(
         )
     elif params.action_class == "reactive":
         class_clause = " Class: reactive — proactive behaviour stopped."
+    # THE RECEIPT NAMES THE STORE IN PLAIN WORDS (design §3.5): "in your account"
+    # vs "in this conversation" is the one fact a reader needs to know whether the
+    # thing they just made is visible everywhere. ``details`` carries the same
+    # answer in machine form plus the consent origin, so a transcript audit can
+    # say WHO authorized an account write without parsing prose.
+    from local_operator.profile_scope import scope_words
+
     return _text(
         tool_call_id,
         "agent",
-        f"{verb} {kind} {identifier_text(context, repr(name))}; {how}.{class_clause}",
-        details={"name": name, "kind": kind, "class": action_class},
+        f"{verb} {kind} {identifier_text(context, repr(name))} "
+        f"in {scope_words(target)}; {how}.{class_clause}",
+        details={
+            "name": name,
+            "kind": kind,
+            "class": action_class,
+            "scope": target,
+            "authorized_by": None,
+        },
+    )
+
+
+async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+    """Delete a CONVERSATION-scoped role or specialist. Global rows refuse.
+
+    The model gets a cleanup affordance for a role it authored for a turn that
+    no longer needs it, WITHOUT acquiring any authority over the user's account:
+    deleting a durable row stays on the user surfaces that already own it. The
+    refusal names those surfaces rather than pretending the verb is absent.
+    """
+    from local_operator.profile_scope import row_scope, scope_words
+
+    registry = _registry(context)
+    if registry is None:
+        return _error(
+            tool_call_id, "agent", "no agent registry attached to this session; cannot delete."
+        )
+    try:
+        row = registry.get_agent_by_name(name)
+    except Exception as error:  # noqa: BLE001 — an unreadable registry is a refusal
+        return _error(tool_call_id, "agent", f"could not read the agent registry: {error}")
+    if row is None:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"no role or specialist named {identifier_text(context, repr(name))} to delete.",
+        )
+    if not (is_role(row) or is_specialist(row)):
+        # An ordinary conversational agent is not this tool's to remove, and the
+        # refusal has to say where that deletion lives.
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{identifier_text(context, repr(name))} is a conversation, not a role or "
+            "specialist; this tool cannot delete it. `local-operator agents delete "
+            f"--name {name}` at the shell deletes an agent and its history.",
+        )
+    target = row_scope(registry, row)
+    if target != "session":
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{identifier_text(context, repr(name))} is saved in the user's account, so "
+            "this tool cannot delete it. Delete it from the desktop Profiles editor, the "
+            "TUI /agent listing, or `lop agents delete` — all of which ask their own "
+            "confirmation.",
+        )
+    try:
+        registry.delete_agent(str(row.id))
+    except Exception as error:  # noqa: BLE001 — the registry's own refusal text is better
+        return _error(tool_call_id, "agent", f"could not delete the role: {error}")
+    return _text(
+        tool_call_id,
+        "agent",
+        f"deleted {identifier_text(context, repr(name))} from {scope_words(target)}; "
+        "the user's account is unchanged.",
+        details={"name": name, "scope": target, "authorized_by": None},
     )
 
 
@@ -1622,7 +1782,7 @@ async def execute_agent(
         return _validation_error(tool_call_id, "agent", exc)
 
     if (
-        params.op in {"show", "install", "reset", "create", "update"}
+        params.op in {"show", "install", "reset", "create", "update", "delete"}
         and not (params.name or "").strip()
     ):
         return _error(tool_call_id, "agent", f"op={params.op!r} needs 'name'.")
@@ -1638,7 +1798,11 @@ async def execute_agent(
     if params.op == "install":
         return await _op_install(context, tool_call_id, str(params.name))
     if params.op == "reset":
-        return await _op_reset(context, tool_call_id, str(params.name))
+        return await _op_reset(
+            context, tool_call_id, str(params.name), scope=params.scope or "session"
+        )
+    if params.op == "delete":
+        return await _op_delete(context, tool_call_id, str(params.name))
     if params.op == "sync":
         return await _op_sync(
             context, tool_call_id, str(params.name) if params.name else None, params.resolve or None
@@ -1729,6 +1893,12 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         # instructions the operator wrote, so it prints them back in its result
         # and an op='update' with that text restores the prior state exactly.
         approval_tier="read",
+        # ONE op is destructive and must not ride the read tier: `delete` removes
+        # a row, so the host's write gate asks before it runs. Every other op
+        # keeps today's read tier — a role authored into THIS conversation is
+        # trivially reversible and gating it was the friction that kept the
+        # registry empty (see the tier comment above).
+        call_approval_tier=lambda args: "write" if args.get("op") == "delete" else "read",
         concurrency="exclusive",
         interruptible=False,
         execute=_with_advertised_effort(

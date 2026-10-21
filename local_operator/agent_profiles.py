@@ -71,6 +71,7 @@ from local_operator.action_class import normalize as normalize_action_class
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.agents import AgentData, AgentRegistry
+    from local_operator.profile_scope import Scope
 
 logger = logging.getLogger(__name__)
 
@@ -807,6 +808,7 @@ def install_seed(
     name: str,
     *,
     registry: "AgentRegistry",
+    scope: "Scope",
     overwrite: bool = False,
 ) -> tuple[AgentProfile, bool] | None:
     """Copy a packaged seed into the registry; return ``(profile, already_installed)``.
@@ -844,6 +846,15 @@ def install_seed(
     NOT a role. Returning that row (which is what this used to do) reported a
     successful install while writing nothing, so an operator recovering from a
     misbehaving role was told the fix had landed when it had not.
+
+    ``scope`` IS REQUIRED, with no default, for the same reason the registries
+    have none: every caller knows who is acting (the tool's install is the
+    model's conversation-scoped default; a user's ``/agent class`` and the
+    desktop routes are account writes), and a forgotten argument must be a type
+    error at review rather than a seed silently landing in the wrong store. The
+    CREATE goes through :func:`profile_scope.scope_store`; an OVERWRITE writes
+    through the row's own store (``registry.update_agent`` dispatches by owner),
+    so resetting a session role can never rewrite an account row.
     """
 
     seed = load_seed(name)
@@ -949,7 +960,9 @@ def install_seed(
         return AgentEditFields(**base)
 
     if existing is None:
-        agent = registry.create_agent(_fields(name=seed.name))
+        from local_operator.profile_scope import scope_store
+
+        agent = scope_store(registry, scope).create_agent(_fields(name=seed.name))
     else:
         agent = existing
         # An overwrite restores the seed's ROLE FIELDS too, not just its prose.
@@ -2294,7 +2307,9 @@ def _sync_one_seed(
         install still reset a chosen label and lost a user's own tags).
         """
 
-        return install_seed(agent.name, registry=registry, overwrite=True) is not None
+        return (
+            install_seed(agent.name, registry=registry, scope="global", overwrite=True) is not None
+        )
 
     def _apply_clean() -> bool:
         """The unattended-safe writer: only the fields the seed owns.

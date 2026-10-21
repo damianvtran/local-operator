@@ -66,7 +66,7 @@ async def test_corrupt_installed_profile_cannot_fall_back_during_read_or_start(a
 
     client, root = api
     registry = AgentRegistry(root)
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
     assert installed is not None and installed[0].agent_id is not None
     path = root / "agents" / installed[0].agent_id / "agent.yml"
     original = path.read_text()
@@ -101,7 +101,7 @@ async def test_repair_resolves_edited_definition_and_keeps_the_durable_goal(api)
 
     client, root = api
     registry = AgentRegistry(root)
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
     assert installed is not None and installed[0].agent_id is not None
     # Edited through the real PATCH route, so the fixture cannot diverge from
     # how an operator actually customises an installed role.
@@ -527,7 +527,7 @@ async def test_sync_route_reports_seed_and_hub_verdicts(api, monkeypatch) -> Non
 
     monkeypatch.setattr("local_operator.agents._fetch_hub_profile", unreachable)
     registry = AgentRegistry(root)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     registry.create_agent(
         _profile_row(name="hunter", description="d", tags=["role", "hub:abc-123"])
     )
@@ -610,7 +610,7 @@ async def test_profile_payloads_carry_the_class_in_its_effective_spelling(api):
 
     client, root = api
     registry = AgentRegistry(root)
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
 
     detail = await client.get("/v1/desktop/profiles/reviewer")
     assert detail.status_code == 200, detail.text
@@ -662,7 +662,7 @@ async def test_profile_detail_exposes_definition_revision_and_stale_write_is_409
     client, root = api
     from local_operator.agent_profiles import install_seed
 
-    install_seed("reviewer", registry=AgentRegistry(root))
+    install_seed("reviewer", registry=AgentRegistry(root), scope="global")
     detail = (await client.get("/v1/desktop/profiles/reviewer")).json()["result"]
     token = detail["definition_revision"]
     assert isinstance(token, str) and token.startswith("definition-revision:v1:")
@@ -850,6 +850,7 @@ async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
             effort="med",
         ),
         creating=True,
+        scope="global",
     )
     created = await client.post(
         "/v1/desktop/teams",

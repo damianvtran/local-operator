@@ -37783,9 +37783,18 @@ class OperatorApp(App[None]):
             page.receipt(translate(keys.registry_missing()))
             return
         try:
+            from local_operator.profile_scope import scope_store
+
             fields = TeamEditFields(**plan.changes)
+            # A NEW TEAM FROM THIS FORM IS THE USER'S OWN ACT, so it lands in the
+            # account store (design §3.4) — the TUI may hold a composite, and the
+            # default scope there would otherwise make the team conversation-only.
+            # An EDIT follows the row's owner instead: the listing shows session
+            # rows too, and redirecting an edit into the account would mint a
+            # duplicate rather than change the row the user opened.
+            store = scope_store(registry, "global")
             if team_id is None:
-                registry.create_team(fields)
+                store.create_team(fields)
             else:
                 registry.update_team(
                     team_id,
@@ -37945,7 +37954,15 @@ class OperatorApp(App[None]):
             payload = {"op": "create" if creating else "update", "name": draft.name, **plan.changes}
             params = AgentParams(**payload)
             write_profile(
-                registry, params, creating=creating, expected_definition_revision=revision
+                registry,
+                params,
+                creating=creating,
+                # The form is the user's own act: a new profile is saved for
+                # every conversation, and an edit follows the row's owner (the
+                # shared writer resolves it). A composite registry must not turn
+                # this save into a conversation-only row by defaulting session.
+                scope="global",
+                expected_definition_revision=revision,
             )
         except DefinitionRevisionMismatch:
             page.receipt(translate(keys.revision_changed()))

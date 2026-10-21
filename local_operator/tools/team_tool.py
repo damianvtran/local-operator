@@ -148,6 +148,15 @@ class TeamParams(BaseModel):
             "team name or another team's alias."
         ),
     )
+    scope: Literal["global", "session"] | None = Field(
+        default=None,
+        description=(
+            "create/update: where the team lives. Omit for 'session' — this "
+            "conversation only, gone with it. 'global' saves it for every "
+            "conversation and needs the user's confirmation; this host may be "
+            "unable to ask, in which case the call is refused with the way forward."
+        ),
+    )
     overrides: list[TeamOverride] | None = Field(
         default=None,
         description=(
@@ -413,6 +422,24 @@ async def _op_write(
         existing = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
+    from local_operator.profile_scope import row_scope, scope_store, scope_words
+
+    scope = params.scope or "session"
+    # WHERE THIS WRITE LANDS: a create goes where the caller asked, an update to
+    # the row's owner. A tool-issued write into the ACCOUNT store is refused by
+    # ``_op_write``'s target check below while no host can ask for it; the
+    # TUI/desktop hand a plain registry and no context because the user is the
+    # actor there.
+    target = row_scope(registry, existing) if existing is not None else scope
+    if context is not None and target == "global":
+        return _error(
+            tool_call_id,
+            "team",
+            "saving a team for every conversation needs the user's confirmation, and "
+            "this run cannot ask for it. To keep it for THIS conversation only, retry "
+            "without scope (or with scope='session'). To add it to the user's account "
+            "yourself, use the desktop Teams editor, the TUI /team form, or `lop teams`.",
+        )
     if creating and existing is not None:
         # Q1: a create whose name collides with an ALIAS must say so in the
         # registry's own words -- "already exists" sends the model looking
@@ -484,7 +511,7 @@ async def _op_write(
         if creating:
             if not (params.manager or "").strip():
                 fields.manager = "manager"
-            team = registry.create_team(fields)
+            team = scope_store(registry, scope).create_team(fields)
             verb = "created"
         else:
             assert existing is not None  # guarded above
@@ -515,12 +542,20 @@ async def _op_write(
     return _text(
         tool_call_id,
         "team",
-        f"{verb} team {identifier_text(context, repr(team.name))}. "
+        f"{verb} team {identifier_text(context, repr(team.name))} in {scope_words(target)}. "
         f"{identifier_text(context, team.manager)} leads it; "
         f"{len(team.members)} member slot(s)."
         + (f" {pinned} carries a model/effort override." if pinned else "")
         + note
         + f" Launch with /team {identifier_text(context, team.name)} <request>.",
+        # The team receipt used to carry no details at all, so a transcript audit
+        # could not tell where a team was written. Same fields as the agent
+        # receipt: the store, and the consent origin for an account write.
+        details={
+            "name": team.name,
+            "scope": target,
+            "authorized_by": None,
+        },
     )
 
 
@@ -554,13 +589,33 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
             "team_delete",
             f"no team named {identifier_text(context, repr(name))} to delete.",
         )
+    from local_operator.profile_scope import row_scope, scope_words
+
+    # RESOLVED SESSION-FIRST, THEN REFUSED IF IT IS THE ACCOUNT'S. The model may
+    # remove a team it authored for this conversation; deleting one the user
+    # saved for every conversation stays on the user surfaces, which ask their
+    # own confirmation. A plain registry (no scopes) reads as global, so a
+    # headless tool cannot delete one either.
+    target = row_scope(registry, team)
+    if target != "session":
+        return _error(
+            tool_call_id,
+            "team_delete",
+            f"team {identifier_text(context, repr(name))} is saved in the user's account, "
+            "so this tool cannot delete it. Delete it from the desktop Teams editor, the "
+            "TUI /team listing, or `lop teams delete`.",
+        )
     try:
         registry.delete_team(team.id)
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team_delete", f"could not delete team: {exc}")
-    # Identifier field: the delete receipt names the team the caller targeted.
+    # Identifier field: the delete receipt names the team and the store it left.
     return _text(
-        tool_call_id, "team_delete", f"deleted team {identifier_text(context, repr(name))}."
+        tool_call_id,
+        "team_delete",
+        f"deleted team {identifier_text(context, repr(name))} from {scope_words(target)}; "
+        "the user's account is unchanged.",
+        details={"name": name, "scope": target, "authorized_by": None},
     )
 
 

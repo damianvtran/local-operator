@@ -22,8 +22,18 @@ from local_operator.tools.agent_tool import AgentParams, build_agent_tool, execu
 
 
 @pytest.fixture()
-def registry(tmp_path) -> AgentRegistry:
-    return AgentRegistry(tmp_path)
+def registry(tmp_path) -> Any:
+    """The SESSION's composite, which is what a real tool always sees.
+
+    S1 wires ``scope_agent_registry`` into every session, so a plain global
+    registry here would make the tool's default (conversation-scoped) create
+    refuse with "no conversation store" — the correct answer for an embedder
+    without one, but not the surface these tests exercise. ``.global_registry``
+    is the account store for the few tests that seed or inspect it directly.
+    """
+    from local_operator.profile_scope import scope_agent_registry
+
+    return scope_agent_registry(AgentRegistry(tmp_path), tmp_path / "session")
 
 
 @pytest.fixture(autouse=True)
@@ -165,7 +175,9 @@ async def test_list_and_show_include_specialists_with_instructions(context) -> N
 async def test_list_ignores_agents_that_are_not_roles(context, registry) -> None:
     """A registry also holds ordinary conversational agents; listing those as
     delegation targets would be noise at best and a privacy leak at worst."""
-    registry.create_agent(_edit_fields(name="my-private-notes", description="personal"))
+    registry.global_registry.create_agent(
+        _edit_fields(name="my-private-notes", description="personal")
+    )
     body = await call(context, op="list")
     assert "my-private-notes" not in body
 
@@ -485,7 +497,9 @@ async def test_an_explicit_empty_tools_list_still_clears_the_allowlist(context, 
 async def test_install_refuses_a_name_owned_by_a_non_role(context, registry) -> None:
     """C4: it used to report a successful install while writing nothing, which
     is the worst possible answer to someone recovering from a broken role."""
-    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    agent = registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="my chat agent")
+    )
     registry.set_agent_system_prompt(agent.id, "Be agreeable.")
 
     body = await call(context, op="install", name="reviewer")
@@ -499,7 +513,9 @@ async def test_install_refuses_a_name_owned_by_a_non_role(context, registry) -> 
 async def test_authoring_refuses_a_name_owned_by_a_non_role(context, registry, op: str) -> None:
     """An ordinary agent must not silently become a role, and on the update
     path converting one would be the same fail-open hijack."""
-    registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="my chat agent")
+    )
     body = await call(context, op=op, name="reviewer", description="d", instructions="x")
     assert "not a role" in body
 
@@ -540,7 +556,9 @@ async def test_the_tool_returns_an_error_result_instead_of_raising(context, regi
     def explode(*args, **kwargs):
         raise PermissionError("agents dir is read-only")
 
-    registry.create_agent = explode  # type: ignore[method-assign]
+    # The tool writes a conversation-scoped row by default, so the store whose
+    # write must raise is the session store's (S2), not the composite's.
+    registry.session_registry.create_agent = explode  # type: ignore[method-assign]
     result = await execute_agent(
         "tc",
         {"op": "create", "name": "x", "description": "d", "instructions": "i"},
@@ -893,7 +911,9 @@ async def test_reset_refuses_a_name_owned_by_a_non_role(context, registry) -> No
     """`install_seed(overwrite=True)` skips its own non-role guard by design (the
     kwarg means "the caller has decided"), so this check is load-bearing: without
     it a reset would rewrite an ordinary chat agent's prompt with role guidance."""
-    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    agent = registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="my chat agent")
+    )
     registry.set_agent_system_prompt(agent.id, "Be agreeable.")
 
     body = await call(context, op="reset", name="reviewer")
@@ -1151,7 +1171,7 @@ def _legacy_role_row(registry: AgentRegistry, name: str, **overrides: Any):
         effort=seed.effort,
         may_delegate=seed.may_delegate,
     )
-    agent = registry.create_agent(
+    agent = registry.store_for("session").create_agent(
         _edit_fields(
             name=name,
             description=seed.when_to_use or seed.description,
@@ -1252,7 +1272,9 @@ async def test_refusals_name_only_commands_that_exist(context, registry) -> None
     """U7: the old text sent readers to a rename and a delete this tool does not
     have, and the guide's `install` workaround errored. Naming a command that
     does not exist is the dead-end failure #141 was filed about."""
-    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    agent = registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="my chat agent")
+    )
     registry.set_agent_system_prompt(agent.id, "Be agreeable.")
 
     non_role = await call(context, op="reset", name="reviewer")
@@ -1309,7 +1331,7 @@ def test_a_freshly_installed_starter_reports_no_divergence(tmp_path, name: str) 
     )
 
     registry = AgentRegistry(tmp_path)
-    install_seed(name, registry=registry)
+    install_seed(name, registry=registry, scope="global")
     seed = load_seed(name)
     assert seed is not None
     row = registry.get_agent_by_name(name)
@@ -1339,7 +1361,7 @@ def test_a_provenance_marker_naming_another_role_is_ignored(tmp_path) -> None:
     from local_operator.agent_profiles import install_seed, seed_origin
 
     registry = AgentRegistry(tmp_path)
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
     agent = registry.get_agent_by_name("reviewer")
     assert agent is not None
     assert seed_origin(agent) == "reviewer"
@@ -1405,7 +1427,9 @@ async def test_the_non_role_refusal_names_an_escape_that_runs(context, registry)
     work — `install` takes only packaged names and nothing renames — leaving a
     history-destroying shell delete as the only named route on the one path that
     has a safe in-tool answer."""
-    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    agent = registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="my chat agent")
+    )
     registry.set_agent_system_prompt(agent.id, "Be agreeable.")
 
     body = await call(context, op="reset", name="reviewer")
@@ -1651,7 +1675,7 @@ async def test_sync_degrades_the_hub_arm_per_row_and_never_fails_the_run(
 
     # Hermetic: without this the public check would reach the real hub.
     monkeypatch.setattr("local_operator.agents._fetch_hub_profile", unreachable)
-    registry.create_agent(
+    registry.global_registry.create_agent(
         _edit_fields(name="hunter", description="d", tags=["role", "hub:abc-123"])
     )
 
@@ -1670,7 +1694,7 @@ async def test_sync_reports_no_credential_for_an_organization_row(
     from local_operator.hub_sync import provenance as prov
 
     monkeypatch.delenv("RADIENT_API_KEY", raising=False)
-    row = registry.create_agent(
+    row = registry.global_registry.create_agent(
         _edit_fields(name="hunter", description="d", tags=["role", "hub:abc-123"])
     )
     prov.record_agent_baseline(
@@ -1838,3 +1862,93 @@ async def test_a_role_still_stores_the_role_fields_it_is_asked_for(context, regi
     assert profile.effort == "hi"
     assert profile.may_delegate is True
     assert set(profile.tools or ()) == {"read", "grep"}
+
+
+# ---------------------------------------------------------------------------
+# LOH-9 S2 — scope on writes, consent for the account store, and cleanup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_tool_create_defaults_to_this_conversation(context, registry) -> None:
+    body = await call(context, op="create", name="one-off", instructions="Do one thing.")
+
+    assert "in this conversation" in body
+    assert registry.global_registry.get_agent_by_name("one-off") is None
+    assert registry.store_for("session").get_agent_by_name("one-off") is not None
+
+    result = await execute_agent(
+        "tc",
+        {"op": "create", "name": "one-off-2", "instructions": "Do another."},
+        None,
+        None,
+        context,
+    )
+    assert result.details is not None
+    assert result.details["scope"] == "session"
+    assert result.details["authorized_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_tool_cannot_create_in_the_account_without_the_host(context, registry) -> None:
+    """The default host has no consent seam, so scope='global' is refused.
+
+    The refusal must name the user surfaces AND the retry path, or the model is
+    left guessing at scope values.
+    """
+    body = await call(context, op="create", name="durable", scope="global", instructions="x")
+
+    assert "needs the user's confirmation" in body
+    assert "desktop Profiles editor" in body
+    assert "retry without scope" in body
+    assert registry.global_registry.get_agent_by_name("durable") is None
+    assert registry.store_for("session").get_agent_by_name("durable") is None
+
+
+@pytest.mark.asyncio
+async def test_an_account_update_is_a_global_write_and_needs_consent(context, registry) -> None:
+    """S1 routes an update to the row's owner; that makes a model-initiated
+    update of an ACCOUNT row a global mutation, even with no scope argument."""
+    row = registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="mine", tags=["role"])
+    )
+    registry.global_registry.set_agent_system_prompt(row.id, "Original.")
+
+    body = await call(context, op="update", name="reviewer", instructions="Changed.")
+
+    assert "needs the user's confirmation" in body
+    assert registry.global_registry.get_agent_system_prompt(row.id) == "Original."
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_only_a_conversation_row(context, registry) -> None:
+    await call(context, op="create", name="temp", instructions="temporary")
+
+    result = await execute_agent("tc", {"op": "delete", "name": "temp"}, None, None, context)
+
+    assert not result.is_error
+    assert "from this conversation" in result.text
+    assert "account is unchanged" in result.text
+    assert registry.get_agent_by_name("temp") is None
+    assert registry.global_registry.get_agent_by_name("temp") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_an_account_row(context, registry) -> None:
+    registry.global_registry.create_agent(
+        _edit_fields(name="durable", description="mine", tags=["role"])
+    )
+
+    body = await call(context, op="delete", name="durable")
+
+    assert "saved in the user's account" in body
+    assert registry.global_registry.get_agent_by_name("durable") is not None
+
+
+def test_delete_is_write_tier_and_every_other_op_stays_read(context) -> None:
+    tool = build_agent_tool(context)
+    assert tool is not None and tool.approval_tier == "read"
+    assert tool.call_approval_tier is not None
+    assert tool.call_approval_tier({"op": "delete"}) == "write"
+    assert tool.call_approval_tier({"op": "create"}) == "read"
+    assert tool.call_approval_tier({"op": "list"}) == "read"

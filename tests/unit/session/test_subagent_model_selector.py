@@ -36,6 +36,7 @@ def setup(tmp_path, monkeypatch, *, choice="model"):
         registry,
         AgentParams(op="create", name="designer", instructions="Design it", effort="hi"),
         creating=True,
+        scope="global",
     )
     session = make_session(tmp_path)
     session.agent_registry = registry

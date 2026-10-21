@@ -34,6 +34,7 @@ additive ``scope`` key, so stored YAML, exports and mesh rows are untouched.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,10 +45,194 @@ SESSION_ROLES_DIRNAME = "roles"
 
 Scope = Literal["global", "session"]
 
+#: Every scope, in the order a message names them.
+SCOPES: tuple[Scope, ...] = ("session", "global")
+
 
 def scope_dir_for(session_dir: str | Path) -> Path:
     """``<session>/roles`` — the root both scoped registries point at."""
     return Path(session_dir) / SESSION_ROLES_DIRNAME
+
+
+def scope_words(scope: Scope) -> str:
+    """The PLAIN WORDS a receipt or a refusal uses for one store.
+
+    Receipts say where a write landed, so the two scopes must never be named by
+    their identifiers: a user reading a transcript sees "in your account" or
+    "in this conversation", never ``global``/``session`` (design §3.5).
+    """
+    return "your account" if scope == "global" else "this conversation"
+
+
+def row_scope(registry: Any, row: Any) -> Scope:
+    """Which store owns ``row``. A registry with no scopes owns everything.
+
+    The fallback is ``global`` on purpose: a plain ``AgentRegistry`` is the
+    account's store, and treating an unknown owner as session-scoped would let
+    a tool delete a durable row through a host whose registry it cannot
+    inspect. Only the composite, which can answer ``scope_of``, may say
+    ``session``.
+    """
+    scope_of = getattr(registry, "scope_of", None)
+    return scope_of(row) if callable(scope_of) else "global"
+
+
+def scope_store(registry: Any, scope: Scope) -> Any:
+    """The store a write at ``scope`` must go through. NEVER a silent default.
+
+    Both write entry points (``tools.agent_tool.write_profile`` and
+    ``tools.team_tool._op_write``) call this with the scope the CALLER chose, so
+    a missed adapter is a visible refusal rather than a write that lands in the
+    wrong store. On a composite it returns that scope's write adapter (which
+    takes the composite's create lock); on a plain registry ``global`` returns
+    the registry itself.
+
+    ``session`` on a plain registry is REFUSED, not downgraded to global: a host
+    with no persistent session directory has no conversation scope (design
+    §3.2), and writing the row account-wide while the caller asked for
+    conversation-only is the exact leak this module exists to prevent.
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"unknown scope {scope!r}; use 'session' or 'global'.")
+    store_for = getattr(registry, "store_for", None)
+    if callable(store_for):
+        return store_for(scope)
+    if scope == "global":
+        return registry
+    raise ValueError(
+        "this run has no conversation store, so a role or team cannot be kept for "
+        "this conversation only. Save it for every conversation instead "
+        "(scope='global', which needs the user's confirmation), or create it in "
+        "the desktop Profiles editor, the TUI /agent or /team form, or `lop agents` "
+        "or `lop teams`."
+    )
+
+
+def _shadow_refusal(kind: str, name: str) -> str:
+    """Refuse a conversation-only row whose name already exists in the account.
+
+    A session row SHADOWS the account's row with the same name, so allowing this
+    create would silently change what `task(agent=<name>)` or `/team <name>`
+    launches in this conversation — the reuse-first ladder inverted. The caller
+    is told both ways forward: use the row that already exists, or pick a name
+    that says what makes this version different.
+    """
+    launch = f"/team {name}" if kind == "team" else f"task(agent={name!r})"
+    return (
+        f"a {kind} named {name!r} already exists in your account, so this conversation "
+        f"already has it: launch it as it is ({launch}). Choose a different name for "
+        "the conversation-only version; copying one into your account is a separate step."
+    )
+
+
+class _ScopedAgentWrites:
+    """The agent-registry write surface over ONE store.
+
+    Reads are answered by the store it wraps, NOT by the composite on purpose: a
+    create's name check has to see the rows of the store the new row will sit in.
+    The composite's reads are the picker's view; this is the writer's view, and a
+    global-scope write must not be refused because a conversation row happens to
+    share the name.
+
+    Writes take the OWNER's ``write_lock``, so a create's uniqueness check and the
+    row it writes are one critical section, across both stores (see
+    ``ScopedAgentRegistry.__init__``).
+    """
+
+    def __init__(self, owner: "ScopedAgentRegistry", scope: Scope) -> None:
+        self._owner = owner
+        self.scope: Scope = scope
+        self._store = owner.session_registry if scope == "session" else owner.global_registry
+
+    # -- reads: the wrapped store only ---------------------------------------
+    def list_agents(self) -> list[Any]:
+        return self._store.list_agents()
+
+    def get_agent(self, agent_id: str) -> Any:
+        return self._store.get_agent(agent_id)
+
+    def get_agent_by_name(self, name: str) -> Any | None:
+        return self._store.get_agent_by_name(name)
+
+    def get_agent_system_prompt(self, agent_id: str) -> str:
+        return self._store.get_agent_system_prompt(agent_id)
+
+    def definition_revision_fields(self, agent_id: str) -> dict[str, Any]:
+        return self._store.definition_revision_fields(agent_id)
+
+    # -- writes --------------------------------------------------------------
+    def set_agent_system_prompt(self, agent_id: str, system_prompt: str) -> None:
+        with self._owner.write_lock:
+            self._store.set_agent_system_prompt(agent_id, system_prompt)
+
+    def create_agent(self, fields: Any) -> Any:
+        with self._owner.write_lock:
+            if self.scope == "session":
+                # A conversation row SHADOWS the account's row of the same name,
+                # so this create would silently change what `task(agent=<name>)`
+                # launches here. Refuse and say both ways forward (design §3.2
+                # "name collisions"); S4's promotion is the copy-in door, not a
+                # create that looks like one.
+                name = str(getattr(fields, "name", "") or "").strip()
+                shadow = self._owner.global_registry.get_agent_by_name(name)
+                if shadow is not None:
+                    raise ValueError(_shadow_refusal("agent", name))
+            return self._store.create_agent(fields)
+
+    def save_agent(self, metadata: Any) -> Any:
+        with self._owner.write_lock:
+            return self._store.save_agent(metadata)
+
+    def update_agent(self, agent_id: str, fields: Any, *, precondition: Any = None) -> Any:
+        with self._owner.write_lock:
+            return self._store.update_agent(agent_id, fields, precondition=precondition)
+
+    def delete_agent(self, agent_id: str) -> None:
+        with self._owner.write_lock:
+            self._store.delete_agent(agent_id)
+
+    def clone_agent(self, agent_id: str, new_name: str) -> Any:
+        with self._owner.write_lock:
+            return self._store.clone_agent(agent_id, new_name)
+
+
+class _ScopedTeamWrites:
+    """The team twin of :class:`_ScopedAgentWrites`."""
+
+    def __init__(self, owner: "ScopedTeamRegistry", scope: Scope) -> None:
+        self._owner = owner
+        self.scope: Scope = scope
+        self._store = owner.session_registry if scope == "session" else owner.global_registry
+
+    def list_teams(self, *, recovery_wait: float | None = None) -> list[Any]:
+        return self._store.list_teams(recovery_wait=recovery_wait)
+
+    def get_team(self, team_id: str, *, recovery_wait: float | None = None) -> Any:
+        return self._store.get_team(team_id, recovery_wait=recovery_wait)
+
+    def get_team_by_name(self, name: str, *, recovery_wait: float | None = None) -> Any | None:
+        return self._store.get_team_by_name(name, recovery_wait=recovery_wait)
+
+    def create_team(self, fields: Any) -> Any:
+        with self._owner.write_lock:
+            if self.scope == "session":
+                name = str(getattr(fields, "name", "") or "").strip()
+                shadow = self._owner.global_registry.get_team_by_name(name)
+                if shadow is not None:
+                    raise ValueError(_shadow_refusal("team", name))
+            return self._store.create_team(fields)
+
+    def save_team(self, team: Any) -> Any:
+        with self._owner.write_lock:
+            return self._store.save_team(team)
+
+    def update_team(self, team_id: str, fields: Any, *, precondition: Any = None) -> Any:
+        with self._owner.write_lock:
+            return self._store.update_team(team_id, fields, precondition=precondition)
+
+    def delete_team(self, team_id: str) -> None:
+        with self._owner.write_lock:
+            self._store.delete_team(team_id)
 
 
 class ScopedAgentRegistry:
@@ -70,6 +255,25 @@ class ScopedAgentRegistry:
         self.global_registry = global_registry
         self.session_registry = session_registry
         self.scope_dir = Path(scope_dir)
+        # ONE create lock for BOTH scopes. Two subagents creating the same name
+        # must not both pass the uniqueness check: the stores have their own
+        # locks, but a session create also checks the GLOBAL store for a shadow,
+        # and that check plus the write is one critical section across stores.
+        self._write_lock = threading.RLock()
+        self._stores: dict[Scope, _ScopedAgentWrites] = {
+            scope: _ScopedAgentWrites(self, scope) for scope in SCOPES
+        }
+
+    def store_for(self, scope: Scope) -> "_ScopedAgentWrites":
+        """The write adapter for ``scope`` — see :func:`scope_store`."""
+        if scope not in SCOPES:
+            raise ValueError(f"unknown scope {scope!r}; use 'session' or 'global'.")
+        return self._stores[scope]
+
+    @property
+    def write_lock(self) -> Any:
+        """The cross-store lock every write adapter takes around a mutation."""
+        return self._write_lock
 
     # -- facts existing callers derive from a registry --------------------------
     @property
@@ -140,23 +344,29 @@ class ScopedAgentRegistry:
         self.session_registry.refresh_now()
         self.global_registry.refresh_now()
 
-    # -- writes (S1: global unless the row is already a session row) ----------
-    def create_agent(self, fields: Any) -> Any:
-        return self.global_registry.create_agent(fields)
+    # -- writes: the SCOPE IS THE CALLER'S, never a default in here -----------
+    # A default here would be the silent leak this module exists to prevent: a
+    # caller that forgot to choose would write account-wide and look correct.
+    def create_agent(self, fields: Any, *, scope: Scope) -> Any:
+        return self.store_for(scope).create_agent(fields)
 
     def save_agent(self, metadata: Any) -> Any:
-        return self._owner_for_id(getattr(metadata, "id", "")).save_agent(metadata)
+        with self._write_lock:
+            return self._owner_for_id(getattr(metadata, "id", "")).save_agent(metadata)
 
     def update_agent(self, agent_id: str, fields: Any, *, precondition: Any = None) -> Any:
-        return self._owner_for_id(agent_id).update_agent(
-            agent_id, fields, precondition=precondition
-        )
+        with self._write_lock:
+            return self._owner_for_id(agent_id).update_agent(
+                agent_id, fields, precondition=precondition
+            )
 
     def delete_agent(self, agent_id: str) -> None:
-        self._owner_for_id(agent_id).delete_agent(agent_id)
+        with self._write_lock:
+            self._owner_for_id(agent_id).delete_agent(agent_id)
 
     def clone_agent(self, agent_id: str, new_name: str) -> Any:
-        return self._owner_for_id(agent_id).clone_agent(agent_id, new_name)
+        with self._write_lock:
+            return self._owner_for_id(agent_id).clone_agent(agent_id, new_name)
 
     # -- helpers --------------------------------------------------------------
     def _session_row(self, agent_id: str) -> Any | None:
@@ -188,6 +398,23 @@ class ScopedTeamRegistry:
         self.global_registry = global_registry
         self.session_registry = session_registry
         self.scope_dir = Path(scope_dir)
+        # See ``ScopedAgentRegistry.__init__``: one lock across both stores,
+        # because a session create checks the global store for a shadow.
+        self._write_lock = threading.RLock()
+        self._stores: dict[Scope, _ScopedTeamWrites] = {
+            scope: _ScopedTeamWrites(self, scope) for scope in SCOPES
+        }
+
+    def store_for(self, scope: Scope) -> "_ScopedTeamWrites":
+        """The write adapter for ``scope`` — see :func:`scope_store`."""
+        if scope not in SCOPES:
+            raise ValueError(f"unknown scope {scope!r}; use 'session' or 'global'.")
+        return self._stores[scope]
+
+    @property
+    def write_lock(self) -> Any:
+        """The cross-store lock every write adapter takes around a mutation."""
+        return self._write_lock
 
     @property
     def config_dir(self) -> Path:
@@ -218,18 +445,23 @@ class ScopedTeamRegistry:
             return row
         return self.global_registry.get_team_by_name(name, recovery_wait=recovery_wait)
 
-    # -- writes (S1: global unless the row is already a session row) ----------
-    def create_team(self, fields: Any) -> Any:
-        return self.global_registry.create_team(fields)
+    # -- writes: the SCOPE IS THE CALLER'S, never a default in here -----------
+    def create_team(self, fields: Any, *, scope: Scope) -> Any:
+        return self.store_for(scope).create_team(fields)
 
     def save_team(self, team: Any) -> Any:
-        return self._owner_for_id(getattr(team, "id", "")).save_team(team)
+        with self._write_lock:
+            return self._owner_for_id(getattr(team, "id", "")).save_team(team)
 
     def update_team(self, team_id: str, fields: Any, *, precondition: Any = None) -> Any:
-        return self._owner_for_id(team_id).update_team(team_id, fields, precondition=precondition)
+        with self._write_lock:
+            return self._owner_for_id(team_id).update_team(
+                team_id, fields, precondition=precondition
+            )
 
     def delete_team(self, team_id: str) -> None:
-        self._owner_for_id(team_id).delete_team(team_id)
+        with self._write_lock:
+            self._owner_for_id(team_id).delete_team(team_id)
 
     # -- helpers --------------------------------------------------------------
     def _session_row(self, team_id: str) -> Any | None:

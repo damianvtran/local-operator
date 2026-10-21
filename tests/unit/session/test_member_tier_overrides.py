@@ -191,6 +191,7 @@ def pin_role(registry: AgentRegistry, name: str, effort: str) -> None:
             effort=effort,
         ),
         creating=True,
+        scope="global",
     )
 
 
@@ -1151,6 +1152,7 @@ async def test_a_worker_of_a_settled_team_launch_manager_takes_the_managers_row_
             delegate=True,
         ),
         creating=True,
+        scope="global",
     )
     registry = TeamRegistry(config)
     make_team(registry, "pod", [TeamMember(role="worker")], manager="lead")

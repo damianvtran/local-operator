@@ -220,7 +220,7 @@ def test_the_seed_version_key_rides_the_installed_row_as_a_stamp(tmp_path):
 
     registry = AgentRegistry(tmp_path / "config")
     for name in list_seeds():
-        installed = install_seed(name, registry=registry)
+        installed = install_seed(name, registry=registry, scope="global")
         assert installed is not None, name
         profile, already_installed = installed
         assert already_installed is False, name
@@ -244,7 +244,7 @@ def test_the_seed_version_key_rides_the_installed_row_as_a_stamp(tmp_path):
         assert seed is not None
         assert seed_divergence(profile, seed) == (), name
         before = list(row.tags)
-        install_seed(name, registry=registry)
+        install_seed(name, registry=registry, scope="global")
         again = registry.get_agent_by_name(name)
         assert again is not None
         assert again.tags == before, name
