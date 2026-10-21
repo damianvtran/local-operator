@@ -2683,6 +2683,10 @@ def _after_source_commit(root: Path, session_id: str) -> None:
     them, and so the queue record folds to ``resumed`` on the same step that
     observes the commit. Best effort: the commit has landed either way, and the
     indexes self-heal on the next open (``network/carry.py``).
+
+    IT MUST RUN WHATEVER THE TOMBSTONE DID (review round 3, R3-1): the queue fold
+    below is this function's, and a record left live here is one the queue driver
+    fails terminally, after which no reconcile can repair it.
     """
     try:
         from local_operator.network import carry, move_queue
@@ -2715,16 +2719,28 @@ def _settle_source_commit(
     sweep the VERIFIED STAGING it holds — which is the only copy left once this one
     is gone. So each step is individually guarded and the outcome is returned.
 
-    THE TOMBSTONE IS THE ONE STEP THAT DECIDES WHAT COMES NEXT, which is why it is
-    the only one whose failure shortens the work: without it the id is not durably
-    the destination's, so the journal is LEFT AT ``handing-off`` — the phase forbids
-    a rollback — and :func:`_complete_handoff` writes it on the next reconcile.
-    ``True`` means the tombstone landed; the steps after it are derived state and
-    the commit holds either way.
+    THE TOMBSTONE DECIDES WHAT COMES NEXT FOR THE JOURNAL, not for the commit: without
+    it the id is not durably the destination's, so the journal is LEFT AT
+    ``handing-off`` — the phase forbids a rollback — and :func:`_complete_handoff`
+    writes it on the next reconcile. ``True`` means the tombstone landed; the steps
+    after it are derived state and the commit holds either way.
+
+    THE DERIVED-STATE STEP RUNS ON EVERY COMMIT, tombstone or not (review round 3,
+    R3-1). It is the only caller of ``move_queue.note_committed``, and that fold is
+    what takes a queued move's record from ``copying`` to ``resumed``. Skipping it
+    when the tombstone write fails leaves the record live, and the queue driver's
+    tombstone-only watch then folds it terminally ``failed`` after ``COPY_WATCH_S``
+    — "this device still holds the conversation" — while the directory here is gone
+    and the destination holds the only copy. Terminal is write-once, so the reconcile
+    that later writes the tombstone cannot repair the record. The rename already
+    proved what the fold records, so the tombstone's outcome must not gate it; the
+    journal is the one thing still kept back, because it is how reconcile knows to
+    write the tombstone it did not get to write.
     """
     from local_operator.network.projection import write_tombstone
     from local_operator.session.placement import clear_handoff_entry
 
+    tombstoned = True
     try:
         write_tombstone(
             session_id,
@@ -2734,31 +2750,33 @@ def _settle_source_commit(
             config_dir=root,
         )
     except Exception:  # noqa: BLE001 — a commit reported as a refusal loses the only copy
+        tombstoned = False
         logger.exception(
             "mobility: %s left the store but its tombstone could not be written; the "
             "journal stays handing-off so reconcile completes the handoff",
             session_id,
         )
-        return False
-    try:
-        clear_handoff_entry(root, session_id)
-    except Exception:  # noqa: BLE001 — a stale entry is cleared from the tombstone
-        logger.exception(
-            "mobility: %s committed but its journal entry could not be cleared; the "
-            "next reconcile clears it from the tombstone",
-            session_id,
-        )
+    else:
+        try:
+            clear_handoff_entry(root, session_id)
+        except Exception:  # noqa: BLE001 — a stale entry is cleared from the tombstone
+            logger.exception(
+                "mobility: %s committed but its journal entry could not be cleared; the "
+                "next reconcile clears it from the tombstone",
+                session_id,
+            )
     # The directory is gone, so the source's derived state goes with it — the same F5
     # prune the ordinary commit runs, or the moved session's wakes would stay armed on
-    # a device that no longer holds it. Already best effort internally; the guard is
-    # this function's own promise that no failure here reaches the wire.
+    # a device that no longer holds it, and its queue record would stay live for the
+    # driver to fail. Already best effort internally; the guard is this function's own
+    # promise that no failure here reaches the wire.
     try:
         _after_source_commit(root, session_id)
     except Exception:  # noqa: BLE001 — derived state; the commit already landed
         logger.exception(
             "mobility: %s committed but its derived state could not be cleared", session_id
         )
-    return True
+    return tombstoned
 
 
 def _note_committed(server: "RelayServer", session_id: str, to_device: str) -> None:
