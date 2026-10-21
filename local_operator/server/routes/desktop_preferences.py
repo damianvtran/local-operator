@@ -46,6 +46,7 @@ from local_operator.server.sidebar_layout import (
     read_layout,
     write_layout,
 )
+from local_operator.session.store_failures import display_root
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +60,23 @@ def write_refusal(config_dir: Path) -> str:
     real ``OSError`` with its traceback (``_store_refusal``'s rule in
     ``desktop_sessions``), because a store error names absolute file paths and
     a temp-file name - facts about this machine, not a user-facing message.
-    What the client paints is vetted and stable, and names the ONE thing the
-    operator can act on: the config root the preference lives in. Retrying is
-    not offered as the remedy here because a failed replace is a mode, volume
-    or mount problem, not contention.
+    What the client paints is vetted and stable, and names the ONE place the
+    operator can act on, ``~``-relative like every sibling refusal
+    (``display_root``, the rule ``receipts_refusal`` states).
+
+    BOTH likely causes are named and retrying is NOT ruled out: a failed
+    replace is most often a full volume (free space, then retrying IS the fix)
+    or a read-only/unwritable config root (make it writable) - the sibling
+    ladder splits those into two arms because it can classify the errno; this
+    store does not, so one honest sentence covers both instead of borrowing
+    the out-of-space arm's instruction or asserting that a retry cannot help
+    when for ENOSPC it does (agent review round 2, R2-2).
     """
+    where = display_root(config_dir)
     return (
-        "The sidebar layout could not be saved. Retrying will not help; "
-        f"check {config_dir} and the disk it is on."
+        "The sidebar layout could not be saved. Free some space on the volume "
+        f"holding {where} if it is full, and check that {where} is writable, "
+        "then try again."
     )
 
 
