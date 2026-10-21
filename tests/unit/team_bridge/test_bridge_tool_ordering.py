@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from types import SimpleNamespace
 
+from local_operator.harness.types import ToolContext
 from local_operator.team_bridge.tool import build_bridge_tool
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -57,6 +57,20 @@ def _assigns_bridge_runtime(node: ast.stmt) -> bool:
     )
 
 
+def _installs_runtime_on_context(node: ast.stmt) -> bool:
+    """`tool_context.bridge_runtime = bridge_runtime` as a direct statement."""
+
+    if not isinstance(node, ast.Assign):
+        return False
+    return any(
+        isinstance(t, ast.Attribute)
+        and t.attr == "bridge_runtime"
+        and isinstance(t.value, ast.Name)
+        and t.value.id == "tool_context"
+        for t in node.targets
+    )
+
+
 def _builds_tool_table(node: ast.stmt) -> bool:
     """`tools = create_tools(tool_context)` as a direct statement."""
 
@@ -73,18 +87,29 @@ def _builds_tool_table(node: ast.stmt) -> bool:
 
 
 def test_runtime_is_resolved_before_the_tool_table_is_built() -> None:
-    """The regression itself: createIf reads presence, so order is the contract."""
+    """The regression itself: createIf reads presence, so order is the contract.
+
+    Both orderings are pinned, because they fail independently: resolving the
+    runtime early but installing it on the context after ``create_tools`` leaves
+    the tool dropped exactly as the original defect did.
+    """
 
     body = _prepare_body()
     runtime_at = _first_index(body, _assigns_bridge_runtime)
+    context_at = _first_index(body, _installs_runtime_on_context)
     tools_at = _first_index(body, _builds_tool_table)
 
     assert runtime_at != -1, "the bridge runtime is no longer resolved in _prepare"
+    assert context_at != -1, "tool_context.bridge_runtime is no longer installed in _prepare"
     assert tools_at != -1, "the tool table is no longer built in _prepare"
     assert runtime_at < tools_at, (
         "bridge_runtime must be resolved BEFORE tools = create_tools(tool_context); "
         "building the table first drops the createIf `bridge` tool from every "
-        "session that has a bridge (the 0.84.1 defect)"
+        "session that has a bridge"
+    )
+    assert context_at < tools_at, (
+        "tool_context.bridge_runtime must be installed BEFORE create_tools inspects "
+        "the context; resolving it early is not enough on its own"
     )
 
 
@@ -93,16 +118,7 @@ def test_the_same_runtime_is_installed_on_the_tool_context() -> None:
 
     body = _prepare_body()
     assignments = [
-        node
-        for node in body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(t, ast.Attribute)
-            and t.attr == "bridge_runtime"
-            and isinstance(t.value, ast.Name)
-            and t.value.id == "tool_context"
-            for t in node.targets
-        )
+        node for node in body if _installs_runtime_on_context(node)
     ]
     assert assignments, (
         "tool_context must carry bridge_runtime before create_tools runs: that "
@@ -113,8 +129,8 @@ def test_the_same_runtime_is_installed_on_the_tool_context() -> None:
 def test_create_if_needs_presence_only() -> None:
     """The semantics the ordering depends on: presence, not truthiness of a gate."""
 
-    assert build_bridge_tool(SimpleNamespace(bridge_runtime=None)) is None
+    assert build_bridge_tool(ToolContext(bridge_runtime=None)) is None
 
-    offered = build_bridge_tool(SimpleNamespace(bridge_runtime=object()))
+    offered = build_bridge_tool(ToolContext(bridge_runtime=object()))
     assert offered is not None
     assert offered.name == "bridge"

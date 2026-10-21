@@ -4720,8 +4720,10 @@ async def _prepare(
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
     # The classification roster's ``tool`` kind is deliberately NOT populated
-    # here: this context carries none of the session-owned ``createIf`` gates,
-    # so a snapshot would miss ``sessions``/``task``/``wait``/``jobs``/``hub``
+    # here: this context carries none of the session-owned ``createIf`` gates
+    # (``bridge_runtime`` is the exception — it is installed above because the
+    # tool table is built from this context), so a snapshot would miss
+    # ``sessions``/``task``/``wait``/``jobs``/``hub``
     # (agent review round 1, PR #1863). ``Session.set_knowledge_hooks``
     # refreshes the roster from the session's FINAL inventory instead.
 
@@ -4745,10 +4747,11 @@ async def _prepare(
     # H5d: the bridge runtime must be resolved BEFORE the tool table is built,
     # because `build_bridge_tool` is createIf — it returns None unless
     # ``tool_context.bridge_runtime`` is PRESENT — so building the table first
-    # drops the `bridge` tool from every session that has a bridge. Until 0.84.2
-    # the resolution sat ~150 lines below this point: enrollment was committed,
-    # the runtime was attached to the Session, the executor would have worked,
-    # and the model had no tool to call. Nothing outside observed the gap.
+    # drops the `bridge` tool from every session that has a bridge. Before this
+    # fix the resolution sat ~150 lines below this point: enrollment was
+    # committed, the runtime was attached to the Session, the executor would
+    # have worked, and the model had no tool to call. Nothing outside observed
+    # the gap.
     #
     # The resolution needs the transcript (the designation is the session
     # directory name), which is why it lives here and not beside the
