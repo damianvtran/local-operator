@@ -12057,12 +12057,33 @@ class Session:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.decline(ask_id, by=by)
 
-    def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """Remove a timed-out ask from the view. Injects nothing, ever."""
+    def dismiss_ask(
+        self, ask_id: str, *, by: str = "unknown", reason: str | None = None
+    ) -> dict[str, Any]:
+        """Put an ask away from the view. Starts no turn, ever.
+
+        An OPEN ask is accepted only while :meth:`ask_agent_running` is False (D6).
+        """
         queue = self.ask_queue()
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
-        return queue.dismiss(ask_id, by=by)
+        return queue.dismiss(ask_id, by=by, reason=reason)
+
+    def ask_agent_running(self) -> bool:
+        """Whether agent work may be running — the D6 gate for dismissing an OPEN ask.
+
+        The session is STOPPED (so not running) when the operator's stop is pending
+        and no turn is in flight: ``_abort_requested`` is set by :meth:`abort`
+        (sticky across the continuation gap, cleared only by a fresh prompt or
+        non-residue arrival — ``prompt()`` and ``_prompt_messages``), and
+        ``_is_streaming`` / ``_turn_lock`` are the turn itself. A pending abort with
+        a turn still unwinding is NOT stopped yet. Anything else — idle, mid-turn —
+        is running: an idle runtime can begin a turn at any moment, so only the
+        stopped state is a stable "no work is running".
+        """
+        if self._abort_requested and not self._is_streaming and not self._turn_lock.locked():
+            return False
+        return True
 
     def withdraw_ask(
         self,
@@ -16226,7 +16247,17 @@ class Session:
             return False
         return all(
             isinstance(message, CustomMessage)
-            and message.custom_type in _STOPPED_WORK_RESIDUE_TYPES
+            and (
+                message.custom_type in _STOPPED_WORK_RESIDUE_TYPES
+                # D2 (design §15): the receipt of the operator tidying an ask is not
+                # a new instruction, so it must not clear the stop and restart work.
+                # A decline stays fresh intent (it hands the decision back).
+                or (
+                    message.custom_type == ASK_RESPONSE_MESSAGE_TYPE
+                    and isinstance(message.details, dict)
+                    and message.details.get("status") == "dismissed"
+                )
+            )
             for message in initial
         )
 

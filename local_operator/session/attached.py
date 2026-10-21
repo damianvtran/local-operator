@@ -3668,10 +3668,12 @@ class AttachedSession:
             lambda: self._ask_client_method("ask_decline", ask_id, None, by=by)
         )
 
-    async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+    async def dismiss_ask(
+        self, ask_id: str, *, by: str = "unknown", reason: str | None = None
+    ) -> dict[str, Any]:
+        """Take an ask out of the view. Injects nothing, ever."""
         return await self._ask_verdict(
-            lambda: self._ask_client_method("ask_dismiss", ask_id, None, by=by)
+            lambda: self._ask_client_method("ask_dismiss", ask_id, None, by=by, reason=reason)
         )
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
@@ -3728,6 +3730,7 @@ class AttachedSession:
         by: str,
         images: Sequence[Mapping[str, Any]] | None = None,
         tail: tuple[str, ...] = (),
+        reason: str | None = None,
     ) -> str:
         """Bind an owner if needed, then send ONE ask op on the wire.
 
@@ -3757,6 +3760,8 @@ class AttachedSession:
             if images:
                 return await method(ask_id, body, by=by, images=[dict(i) for i in images])
             return await method(ask_id, body, by=by)
+        if name == "ask_dismiss" and reason:
+            return await method(ask_id, by=by, reason=reason)
         return await method(ask_id, by=by)
 
     def move_will_wait(self) -> bool:

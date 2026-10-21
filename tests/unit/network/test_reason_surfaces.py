@@ -95,6 +95,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the operator's own stored hold reason, printed in this device's listing",
     ),
+    # The ``ask_dismiss`` ``reason`` (design ``ask-nonblocking.md`` §15): a closed
+    # operator token, ``answered_in_chat`` | ``moot``, validated against that set in
+    # ``mobile/types.py`` and forwarded to the engine, where it picks the agent-facing
+    # copy. It is never rendered to a person as a reason and carries no peer prose.
+    ("local_operator/mobile/daemon.py", "build_app", "reason"): (
+        2,
+        "ask_dismiss closed-set operator token (cold + dial arms), never rendered",
+    ),
+    ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
+        1,
+        "ask_dismiss closed-set operator token forwarded to the session, never rendered",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # The hub-links CLI is a HUB surface, not a mesh one, and these tokens come
