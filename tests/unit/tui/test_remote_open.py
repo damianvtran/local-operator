@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -882,6 +884,37 @@ def test_an_offload_to_a_peer_that_is_not_answering_is_refused_and_one_that_cann
     )
 
 
+def test_the_offload_pre_check_reads_the_listing_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-4: the offload half forces a read, exactly like the recall half.
+
+    A TTL-cached listing answers "who was silent when the sidebar last polled",
+    and refusing a move on that refuses on a fact that may have changed since —
+    the asymmetry the recall half already avoided by reading on a miss. The
+    forced read is the assertion: a cache hit could hide a peer that has
+    answered, and the two halves of one command must be equally fresh.
+    """
+    from local_operator.network.peers import KnownPeer
+    from local_operator.tui.app import _offload_target_refusal
+
+    seen: list[dict[str, Any]] = []
+
+    def listing(root: Any = None, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return (), ()
+
+    monkeypatch.setattr(
+        "local_operator.network.peers.known_peers",
+        lambda root=None: [KnownPeer("d_cloud", "cloud-node-1")],
+    )
+    monkeypatch.setattr("local_operator.session.peer_rows.read_listing", listing)
+    assert (
+        _offload_target_refusal("cloud-node-1", "other1", Path("/nowhere"), leaving=False) is None
+    )
+    assert seen == [{"ttl_s": 0}], seen
+
+
 @pytest.mark.asyncio
 async def test_the_initial_phase_line_says_the_request_is_being_made() -> None:
     """Clause 2's wording: "requesting" until a phase proves something started."""
@@ -960,8 +993,8 @@ async def test_only_a_completed_move_says_moved_and_reopens(
         else:
             assert reopened == [], "an in-progress move reopened the destination"
             assert (
-                "The move of other1 to pixel-8 is still in progress (prepared); "
-                "it has not landed there yet." in shown
+                "The move of other1 to pixel-8 is still in progress — preparing the handoff. "
+                "It has not landed there yet." in shown
             ), shown
             assert "Moved other1" not in shown, shown
 
@@ -1222,6 +1255,470 @@ async def test_a_queued_move_stands_the_sidebar_hold_guard_down(
             }
         ]
         assert any("Queued a move of held1" in n for n in _notices(app)), _notices(app)
+
+
+@dataclass(frozen=True)
+class _PeerFacts:
+    """Enough owner facts for ``_remote_owner_facts`` to name the home device."""
+
+    device_id: str = "d_peer"
+    device_name: str = "pixel-8"
+
+
+class _OwnedRemote(FakeSession):
+    """A viewer of a PEER's conversation: an id, and the device that holds it.
+
+    ``runtime_locality`` is the one fact ``_remote_owner_facts`` branches on, and
+    the owner's ``facts`` block is the same source the band and the prompt router
+    read — a test double for the facade, not a second lookup invented here.
+    """
+
+    runtime_locality = "another-machine"
+
+    def __init__(self, session_id: str = "ux-session") -> None:
+        super().__init__()
+        self._sid = session_id
+        self._owner = SimpleNamespace(facts=_PeerFacts())
+
+    @property
+    def session_id(self) -> str:
+        return self._sid
+
+
+def _queued_recall(session_id: str = "ux-session") -> dict[str, Any]:
+    """The receipt a RECALL that had to wait answers with (``mobility``'s shape).
+
+    A recall runs on the destination, so ``from_device`` is the peer that still
+    holds the conversation and ``to_device`` is this device — the opposite of
+    ``_QueuedFake``, which is shaped for an offload.
+    """
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "new_session_id": session_id,
+        "mode": "move",
+        "from_device": {"device_id": "d_peer", "name": "pixel-8"},
+        "to_device": {"device_id": "d_me", "name": "laptop"},
+        "phase": "queued",
+        "phases": [{"phase": "queued", "at": 0.0}],
+        "queue": {
+            "phase": "queued",
+            "phases": [{"phase": "queued", "at": 0.0}],
+            "to_device": "d_me",
+            "to_name": "laptop",
+            "detail": "",
+            "code": "",
+            "request_id": "cli-rq-recall",
+            "updated_at": 0.0,
+        },
+        "state": "in_progress",
+    }
+
+
+def _patch_the_peer(monkeypatch: pytest.MonkeyPatch, *, sid: str = "ux-session") -> list[str]:
+    """Make ``sid`` a reachable peer session and record every remote open."""
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_and_silence",
+        lambda session_id, root: (
+            (_row(session_id, remote=True), ()) if session_id == sid else (None, ())
+        ),
+    )
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_for",
+        lambda session_id, root: _row(session_id, remote=True) if session_id == sid else None,
+    )
+    opened: list[str] = []
+
+    async def fake_open(session_id: str, **kwargs: Any) -> Any:
+        opened.append(session_id)
+        return _OwnedRemote(session_id)
+
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", fake_open)
+    return opened
+
+
+@pytest.mark.asyncio
+async def test_the_target_check_is_visible_while_it_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U1(a): the mesh read can block for the probe budget — the screen must say so.
+
+    Before the fix nothing was appended until the read answered, so the one state
+    a user is most likely to retry (a move that appears to have done nothing) was
+    also the one state with no feedback at all.
+    """
+    gate = asyncio.Event()
+    ran: list[Any] = []
+
+    async def held_check(session_id: str, request: MoveTo, *, leaving: bool) -> str | None:
+        await gate.wait()
+        return "other1 is on pixel-8, which is unreachable."
+
+    monkeypatch.setattr(
+        "local_operator.tui.app.run_session_move",
+        lambda *args, **kwargs: ran.append(args) or dict(_COMMITTED),
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._move_target_refusal = held_check  # type: ignore[method-assign]
+        app._run_slash_command("/move other1 --to pixel-8")
+        for _ in range(30):
+            await pilot.pause()
+            if any("checking whether" in notice for notice in _notices(app)):
+                break
+        assert "checking whether pixel-8 can take other1…" in _notices(app), _notices(app)
+        # NOTHING CLAIMS THE MOVE STARTED while the check is held: the phase row
+        # is built but not painted, because no target has accepted yet.
+        assert not any(n.startswith("requesting a move") for n in _notices(app)), _notices(app)
+        gate.set()
+        for _ in range(30):
+            await pilot.pause()
+            if any("unreachable" in notice for notice in _notices(app)):
+                break
+        shown = _notices(app)
+        assert not any("checking whether" in n for n in shown), shown
+        assert any("unreachable" in n for n in shown), shown
+        assert not any(n.startswith("requesting a move") for n in shown), shown
+        assert ran == [], "the CLI ran after a refused pre-check"
+
+
+@pytest.mark.asyncio
+async def test_the_phase_row_is_readable_in_the_session_the_leave_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U1(b) + D1: the pending row lives on the SURVIVING transcript, at AA ink.
+
+    The row was appended to the transcript the real ``_leave_for_move`` then
+    replaced, so the whole pending request ran on an empty new conversation
+    (measured: ``notices=[]``). Nothing here stubs the leave or the reload — the
+    CLI is held open so the frame can be read while the request is in flight.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def held_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        started.set()
+        if not release.wait(30):
+            raise AssertionError("the test never released the CLI")
+        return dict(_COMMITTED)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", held_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        before = app._session
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(80):
+            await pilot.pause()
+            if started.is_set():
+                break
+        assert started.is_set(), "the CLI never ran"
+        # THE REAL LEAVE RAN — a different session object is current — and the
+        # row is on the transcript the user is now looking at.
+        assert app._session is not before
+        shown = " ".join(_notices(app))
+        assert (
+            "requesting a move of sess1 to pixel-8 — waiting for pixel-8 to accept" in shown
+        ), shown
+        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+        pending = next(
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+            and block.text().startswith("requesting a move of sess1")
+        )
+        # D1: `note`'s muted ink, not `info`'s dim (3.77:1 on light paper).
+        assert _rendered_in_muted(pending), pending.renderable
+        release.set()
+        for _ in range(80):
+            await pilot.pause()
+            if any("Moved sess1 to pixel-8" in notice for notice in _notices(app)):
+                break
+        assert any("Moved sess1 to pixel-8" in n for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_recall_survives_the_real_remote_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2: the queue receipt is on the FINAL screen, not only "opened … on …".
+
+    The real adoption path runs here (``_select_sidebar_session`` →
+    ``_open_remote_session`` → ``_adopt_built_viewer``); only the peer's own
+    transport seams are faked. Before the fix the receipt was painted into the
+    fresh local transcript and then replaced: the user lost the one durable
+    answer to "did my move happen?" — and its cancel route with it.
+    """
+    opened = _patch_the_peer(monkeypatch)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", lambda *a, **k: _queued_recall())
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local --queue")
+        for _ in range(80):
+            await pilot.pause()
+            if any("opened ux-session" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "opened ux-session on pixel-8" in shown, shown
+        # THE RECEIPT, in the design's own words, on the reopened conversation.
+        assert "Queued a move of ux-session to this device." in shown, shown
+        assert "Nothing has moved yet; you are still on pixel-8." in shown, shown
+        assert "Ask Local Operator to cancel the queued move before it starts." in shown, shown
+        # The window-disconnection explanation survives after it.
+        assert "Windows open on it are told first" in shown, shown
+        assert opened == ["ux-session"], opened
+        assert "Moved ux-session" not in shown, shown
+
+
+@pytest.mark.asyncio
+async def test_a_late_failed_recall_is_readable_after_the_remote_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2: a refusal that arrives AFTER the leave is not erased by the way back.
+
+    Same real adoption; the producer's ``unreachable`` refusal is the one the UX
+    measured. The sentence must name the device, say nothing moved, and say where
+    the composer still sends — on the final screen.
+    """
+    opened = _patch_the_peer(monkeypatch)
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": "pixel-8 is not answering right now; nothing was changed",
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local")
+        for _ in range(80):
+            await pilot.pause()
+            if any("opened ux-session" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "opened ux-session on pixel-8" in shown, shown
+        assert (
+            "Could not move ux-session: pixel-8 did not answer. Nothing moved; you are "
+            "still in the conversation on pixel-8." in shown
+        ), shown
+        assert opened == ["ux-session"], opened
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_still_reaches_a_local_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2's local CONTROL cell: the done-callback seam delivers, and delivers once.
+
+    A local id returns the sidebar's navigation task (not ``None`` like a peer's
+    id), and the carry is spent by that task's done callback. This fixture keeps
+    the source current — the same-id pick commits without a swap — so it passes
+    against the pre-fix code as well; what it pins is that the local seam does
+    not DROP the carry and does not post it twice. The remote cells above are
+    the discriminating ones for the defect itself.
+    """
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "relay_unavailable",
+            "message": "this device's relay is not running",
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(80):
+            await pilot.pause()
+            if app._sidebar_navigation.committed_id == "sess1":
+                break
+        for _ in range(20):
+            await pilot.pause()
+            if any("Could not move" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "Could not move sess1: this device's relay is not running." in shown, shown
+        assert "You are back on sess1 — it did not move." in shown, shown
+        # SINGLE USE: the seam that posts must consume the carry, or a second
+        # transition would print the same refusal again.
+        repeats = [n for n in _notices(app) if "this device's relay is not running" in n]
+        assert len(repeats) == 1, repeats
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_refusal_says_where_the_composer_now_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3: "copy here" and the visible composer are two different conversations."""
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "duplicate",
+            "message": "both this device and pixel-8 list sess1",
+            "session_id": session_id,
+            "phase_reached": "committed",
+            "changed": True,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(60):
+            await pilot.pause()
+            if any("Could not move" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert (
+            "This window is now on a new local conversation, not either copy of sess1. "
+            "Wait for cleanup to finish before reopening sess1." in shown
+        ), shown
+        assert reopened == [], "an ambiguous duplicate was reopened automatically"
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_recall_keeps_the_local_copy_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-2/Q-1: a lost commit reply must not claim the user is back on the source.
+
+    The producer keeps the verified copy in staging and says a retry is unsafe;
+    the source may already have handed the id away, so the old ``changed=True``
+    tail — "You are back on <id>" — is a claim nobody can support. The recall
+    branch must stay on the fresh local conversation (where the copy will land)
+    and must not navigate to a source that may be gone.
+    """
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "unconfirmed",
+            "message": (
+                f"the verified copy of {session_id} is kept under /staging/{session_id}: "
+                "pixel-8 did not answer the commit"
+            ),
+            "session_id": session_id,
+            "phase_reached": "handing_off",
+            "changed": True,
+        }
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move --to local")
+        for _ in range(60):
+            await pilot.pause()
+            if any("Could not move" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "the verified copy of sess1 is kept under /staging/sess1" in shown, shown
+        assert (
+            "This window is on a new local conversation; the verified copy is held here "
+            "and will finish when the other device answers." in shown
+        ), shown
+        assert "You are back on sess1" not in shown, shown
+        assert reopened == [], "an unconfirmed recall reopened a source that may be gone"
+
+
+@pytest.mark.asyncio
+async def test_an_in_progress_move_after_the_leave_says_where_the_composer_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U3: an unlanded handoff says what is happening and where input now goes."""
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "new_session_id": session_id,
+            "mode": "move",
+            "from_device": {"device_id": "d_me", "name": "laptop"},
+            "to_device": {"device_id": "d_peer", "name": "pixel-8"},
+            "phase": "handing_off",
+            "state": "in_progress",
+            "phases": [{"phase": "handing_off", "at": 0.0}],
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(60):
+            await pilot.pause()
+            if any("still in progress" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert (
+            "The move of sess1 to pixel-8 is still in progress — finishing the handoff. "
+            "This window is on a new local conversation; sess1 is not ready to reopen yet." in shown
+        ), shown
+        assert "handing_off" not in shown, shown
+        assert "Moved sess1" not in shown, shown
+        assert reopened == [], "an unlanded destination was reopened"
+
+
+@pytest.mark.asyncio
+async def test_the_tui_reads_the_shared_receipt_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N1: the TUI must ask ``mobility.move_receipt_state``, not re-derive it.
+
+    A completed-looking receipt is answered ``in_progress`` by the ONE function
+    both surfaces read. The local derivation this replaces (``state`` plus a
+    phase gate) agreed with the CLI only for as long as nobody changed either
+    vocabulary — this proves the TUI has stopped having its own.
+    """
+    monkeypatch.setattr(
+        "local_operator.network.mobility.move_receipt_state", lambda result: "in_progress"
+    )
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", lambda *a, **k: dict(_COMMITTED))
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move other1 --to pixel-8")
+        for _ in range(60):
+            await pilot.pause()
+            if any("still in progress" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "The move of other1 to pixel-8 is still in progress" in shown, shown
+        assert "Moved other1" not in shown, shown
+        assert reopened == [], reopened
 
 
 @pytest.mark.asyncio
