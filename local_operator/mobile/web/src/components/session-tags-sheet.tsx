@@ -262,8 +262,9 @@ export function SessionTagsSheet({
 							/* THE PRIMARY COLUMN'S LEGEND. The radios sit in a column of their
 							   own, and without a header the isolated control reads as an
 							   unexplained dot beside a row. It mirrors the row geometry exactly
-							   (flex-1 label, w-11 radio column, w-14 status column) so it stays
-							   over the controls it names; each radio keeps its own
+							   (flex-1 label, w-11 radio column, min-w-14 status column) so the
+							   header stays over the controls it names; the status cell may grow
+							   under a localized saving label, and each radio keeps its own
 							   `make {name} the primary tag` label, so this legend is visual
 							   scaffolding and stays out of the accessibility tree. */
 							<div

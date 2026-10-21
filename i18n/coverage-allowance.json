@@ -4277,7 +4277,25 @@
       "owner": "i18n-translator lane",
       "payoff": "2027-02-28",
       "missing": [
-        "relay.session.tags.action",        "relay.session.tags.cancel",        "relay.session.tags.done",        "relay.session.tags.empty",        "relay.session.tags.empty_hint",        "relay.session.tags.limit_hint",        "relay.session.tags.load_error",        "relay.session.tags.loading",        "relay.session.tags.make_primary",        "relay.session.tags.missing",        "relay.session.tags.more",        "relay.session.tags.pin_and_tags_hint",        "relay.session.tags.primary",        "relay.session.tags.remove_all",        "relay.session.tags.remove_all_confirm",        "relay.session.tags.retry",        "relay.session.tags.save_error",        "relay.session.tags.saving",        "relay.session.tags.sheet_title"
+        "relay.session.tags.action",
+        "relay.session.tags.cancel",
+        "relay.session.tags.done",
+        "relay.session.tags.empty",
+        "relay.session.tags.empty_hint",
+        "relay.session.tags.limit_hint",
+        "relay.session.tags.load_error",
+        "relay.session.tags.loading",
+        "relay.session.tags.make_primary",
+        "relay.session.tags.missing",
+        "relay.session.tags.more",
+        "relay.session.tags.pin_and_tags_hint",
+        "relay.session.tags.primary",
+        "relay.session.tags.remove_all",
+        "relay.session.tags.remove_all_confirm",
+        "relay.session.tags.retry",
+        "relay.session.tags.save_error",
+        "relay.session.tags.saving",
+        "relay.session.tags.sheet_title"
       ]
     },
     {
@@ -11757,7 +11775,25 @@
       "owner": "i18n-translator lane",
       "payoff": "2027-03-31",
       "missing": [
-        "relay.session.tags.action",        "relay.session.tags.cancel",        "relay.session.tags.done",        "relay.session.tags.empty",        "relay.session.tags.empty_hint",        "relay.session.tags.limit_hint",        "relay.session.tags.load_error",        "relay.session.tags.loading",        "relay.session.tags.make_primary",        "relay.session.tags.missing",        "relay.session.tags.more",        "relay.session.tags.pin_and_tags_hint",        "relay.session.tags.primary",        "relay.session.tags.remove_all",        "relay.session.tags.remove_all_confirm",        "relay.session.tags.retry",        "relay.session.tags.save_error",        "relay.session.tags.saving",        "relay.session.tags.sheet_title"
+        "relay.session.tags.action",
+        "relay.session.tags.cancel",
+        "relay.session.tags.done",
+        "relay.session.tags.empty",
+        "relay.session.tags.empty_hint",
+        "relay.session.tags.limit_hint",
+        "relay.session.tags.load_error",
+        "relay.session.tags.loading",
+        "relay.session.tags.make_primary",
+        "relay.session.tags.missing",
+        "relay.session.tags.more",
+        "relay.session.tags.pin_and_tags_hint",
+        "relay.session.tags.primary",
+        "relay.session.tags.remove_all",
+        "relay.session.tags.remove_all_confirm",
+        "relay.session.tags.retry",
+        "relay.session.tags.save_error",
+        "relay.session.tags.saving",
+        "relay.session.tags.sheet_title"
       ]
     },
     {

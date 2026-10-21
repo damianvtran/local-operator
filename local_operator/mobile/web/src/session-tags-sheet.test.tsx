@@ -493,11 +493,11 @@ describe("the frame race", () => {
 
 describe("copy and storage", () => {
 	/* The tag copy lives in its OWN namespace (``relay.session.tags``), so the
-		  bundle assertion checks that namespace rather than filtering the parent:
-		  a key that drifted back into ``relay.session`` would pass a prefix filter
-			 here while the SPA's runtime lookup missed it. 19 keys is the whole slice:
-		  the 18 sheet/list strings plus the list's long-press discoverer. */
-		it("ships every tag key in the English bundle under its own namespace", () => {
+	   bundle assertion checks that namespace rather than filtering the parent:
+	   a key that drifted back into ``relay.session`` would pass a prefix filter
+	   here while the SPA's runtime lookup missed it. 19 keys is the whole slice:
+	   the 18 sheet/list strings plus the list's long-press discoverer. */
+	it("ships every tag key in the English bundle under its own namespace", () => {
 		const messages = BUNDLED_OWNED["relay.session.tags"] ?? {};
 		const keys = Object.keys(messages);
 		expect(keys).toHaveLength(19);
