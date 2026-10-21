@@ -571,6 +571,11 @@ EXIT_RECORD_KIND = "runtime-exit"
 #: fields — ``ExitRecord.from_json`` refuses an unknown one rather than
 #: half-reading a future row.
 EXIT_RECORD_VERSION = 1
+#: The largest magnitude a pressure byte count may carry before the record is
+#: refused. Not a policy about disks: it is the bound that keeps a hostile
+#: 400-digit literal from reaching a float coercion (review round 3, R3-1).
+#: One exabyte is far beyond any real store and far below ``float`` overflow.
+_MAX_PRESSURE = 10**18
 
 #: How far an exit record's ``started_at`` may differ from a run key read from
 #: another artifact, in seconds. Same allowance (and the same reasoning — the key
@@ -701,11 +706,18 @@ class ExitRecord:
                 # One try for both: whichever field is corrupt, the record is.
                 free = None if raw_free is None else int(raw_free)
                 load = None if raw_load is None else float(raw_load)
+                # AND THE FINITENESS CHECKS LIVE INSIDE IT (review round 3,
+                # R3-1). ``math.isfinite`` coerces its argument to a float, and a
+                # 400-digit integer literal — accepted by ``json.loads`` and by
+                # ``int()`` — raises OverflowError there, OUT of this reader.
+                # ``free`` is an int, so finiteness is trivially true for every
+                # value that survives ``int()``; the check is kept only for the
+                # float reading, and the int is bounded by the coercion catch.
+                if load is not None and not math.isfinite(load):
+                    return None
+                if free is not None and not -_MAX_PRESSURE <= free <= _MAX_PRESSURE:
+                    return None
             except (TypeError, ValueError, OverflowError):
-                return None
-            if free is not None and not math.isfinite(free):
-                return None
-            if load is not None and not math.isfinite(load):
                 return None
         return cls(
             session_id=str(data.get("session_id") or ""),

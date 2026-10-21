@@ -417,6 +417,7 @@ def test_a_non_finite_pressure_reading_refuses_the_record(tmp_path: Path) -> Non
     path = journal.exit_record_path(directory)
     base = {"v": 1, "session_id": "abc123", "pid": 1, "started_at": 1.0, "at": 1.0, "reason": "x"}
 
+    huge = int("9" * 400)
     for bad in (
         {**base, "pressure": {"free_disk_bytes": float("inf"), "load_1m": None}},
         {**base, "pressure": {"free_disk_bytes": None, "load_1m": float("nan")}},
@@ -424,6 +425,15 @@ def test_a_non_finite_pressure_reading_refuses_the_record(tmp_path: Path) -> Non
         {**base, "pressure": {"free_disk_bytes": None, "load_1m": float("inf")}},
         # The literals themselves, as the writer would see them on disk.
         {**base, "pressure": {"free_disk_bytes": 1, "load_1m": "-Infinity"}},
+        # ROUND 3, R3-1: ``int()`` accepts arbitrary precision, and
+        # ``math.isfinite`` coerces to FLOAT — so a 400-digit integer reached it
+        # and raised OverflowError out of this reader. The magnitude bound now
+        # refuses it as an int, with no float coercion, and the string form is
+        # an int once ``int()`` has parsed it.
+        {**base, "pressure": {"free_disk_bytes": huge, "load_1m": None}},
+        {**base, "pressure": {"free_disk_bytes": "9" * 400, "load_1m": None}},
+        {**base, "pressure": {"free_disk_bytes": None, "load_1m": 1e400}},
+        {**base, "pressure": {"free_disk_bytes": None, "load_1m": "9" * 400}},
     ):
         path.write_text(json.dumps(bad))
         assert journal.read_exit_record(directory) is None, bad
