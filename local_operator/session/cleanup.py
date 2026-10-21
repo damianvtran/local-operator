@@ -1734,6 +1734,17 @@ def _has_open_asks(directory: Path) -> bool:
     ``[]`` (it runs beside live writers), which without this probe would read as
     "no asks" and let both cleanup passes delete an answerable question
     (QA Q-1, reproduced with ``chmod 000``).
+
+    RELAYS ARE READ FROM THE WATCHER'S OWN LOG, NEVER THE ORIGIN'S (#2673,
+    R1-3). A relay's status is normally DERIVED from the origin by the live
+    queue, and that derivation is unreachable here BY DESIGN: this probe runs on
+    a directory whose runtime is gone, and the queue is the only reader allowed
+    to open another session's log. So a relay whose origin was answered while
+    the watcher was stopped still folds ``open`` and holds its directory — the
+    conservative answer, since a pointer is cheap to keep and destroying a
+    session that still shows a card is not recoverable. What this probe CAN see
+    is folded: a locally withdrawn or dismissed relay reads settled
+    (``store._relay_record``), so the ordinary way to retire one works.
     """
     try:
         from local_operator.asks import store as ask_store

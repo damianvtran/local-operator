@@ -106,6 +106,7 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 # module, so the vocabulary cannot be defined here or in the modules that own
 # it (``harness/message_types.py`` carries the full reasoning).
 from local_operator.harness.message_types import (
+    ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
@@ -10148,7 +10149,8 @@ class Session:
         if (
             queue is None
             or not isinstance(message, CustomMessage)
-            or message.custom_type not in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE)
+            or message.custom_type
+            not in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE, ASK_RELAY_MESSAGE_TYPE)
             or not row_id
         ):
             # H5a (F3): a NEWLY written bridge row is the ONLY place a request
@@ -11539,17 +11541,27 @@ class Session:
             self._ask_gate_diverts.popitem(last=False)
 
     def _enqueue_ask(
-        self, questions: list[Any], timeout: Any = None, tool_call_id: str = ""
+        self,
+        questions: list[Any],
+        timeout: Any = None,
+        tool_call_id: str = "",
+        relay: str | None = None,
     ) -> dict[str, Any]:
         """Queue one ask and return the tool's receipt (or a refusal).
 
         Thin by design: the caps, the log write, the index and the deadline row
         all live in ``AskQueue.enqueue``, and the tool layer never learns about
-        any of them.
+        any of them. ``relay`` (#2520) selects the POINTER entry point instead —
+        one reference to another session's ask, whose status is derived — and
+        the questions list is then empty by construction (the validator forbids
+        both); the origin owns the deadline, so ``timeout`` is not consulted on
+        that arm.
         """
         queue = self.ask_queue()
         if queue is None:  # pragma: no cover — the tool only calls this when set
             return {"ok": False, "error": "this session has no queued-ask engine"}
+        if relay is not None:
+            return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
         return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
 
     #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
@@ -11849,6 +11861,13 @@ class Session:
             # The same hop the blocking path used: it keeps the raw bytes out of
             # the model's context by substituting the key name, announces the new
             # key to later turns, and reports a refused store as NOT PROVIDED.
+            #
+            # A RELAY CANNOT TAKE THIS HOP, and that is a SECURITY property, not
+            # an optimisation (#2520): ``enqueue_relay`` refuses any origin that
+            # carries a secret question (``RELAY_SECRET_ORIGIN``), so the
+            # questions copied onto a relay row are never secret and this test is
+            # false for one. A credential's value is typed only against the card
+            # of the session that asked for it.
             from local_operator.asks.render import apply_secret_answers
 
             merged.update(

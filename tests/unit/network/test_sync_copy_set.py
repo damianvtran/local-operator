@@ -595,10 +595,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a path or an entry of a session directory",
     ),
     "local_operator/asks/store.py": (
-        4,
+        5,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the two row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``), "
+        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "and ``ask-relay-``, the watcher's settle-note row), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
