@@ -656,6 +656,16 @@ class ExitRecord:
         the epoch. ``int('inf')``-typed payloads raise ``OverflowError``, which is
         caught here — a numeric field a reader cannot use is the same answer as a
         missing one, and neither may escape as an exception on a listing path.
+
+        THE SAME RULE COVERS ``pressure`` (review round 2, MINOR-1), and it is a
+        correction rather than a widening: ``json.loads`` accepts the bare
+        ``Infinity``/``NaN``/``-Infinity`` literals, so ``free_disk_bytes: Infinity``
+        reached ``int()`` and raised ``OverflowError`` OUT of this reader — one
+        corrupt field took ``lop sessions --all`` down, which is precisely the
+        failure the tolerant contract exists to prevent. A pressure reading a
+        reader cannot trust is corruption of the record, so the record reads as
+        "no record": degrading the pair to nulls would keep a row alive that can
+        no longer say whether it was even written by this build.
         """
         if not isinstance(data, dict):
             return None
@@ -682,18 +692,21 @@ class ExitRecord:
         if not reason:
             return None
         pressure = data.get("pressure")
-        free = load = None
+        free: int | None = None
+        load: float | None = None
         if isinstance(pressure, dict):
             raw_free = pressure.get("free_disk_bytes")
             raw_load = pressure.get("load_1m")
             try:
+                # One try for both: whichever field is corrupt, the record is.
                 free = None if raw_free is None else int(raw_free)
-            except (TypeError, ValueError):
-                free = None
-            try:
                 load = None if raw_load is None else float(raw_load)
-            except (TypeError, ValueError):
-                load = None
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if free is not None and not math.isfinite(free):
+                return None
+            if load is not None and not math.isfinite(load):
+                return None
         return cls(
             session_id=str(data.get("session_id") or ""),
             pid=pid,

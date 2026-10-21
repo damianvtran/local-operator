@@ -1296,12 +1296,17 @@ async def _clean_exit(
         boot.label() if boot is not None else "<unknown>",
     )
     _note_journal_exit(handle, reason)
-    _note_exit_record(handle, runtime, reason=reason, detail=detail, requested=requested)
+    wrote = _note_exit_record(handle, runtime, reason=reason, detail=detail, requested=requested)
     # THE RUN RECORD GOES NOW, while this run still owns the lease (dispose
     # releases it below). An absent run record and a written exit record are the
     # pair that says "this session's latest run left through its own exit path";
-    # clearing first would let a kill before the write leave neither.
-    _clear_run_record(handle, runtime)
+    # clearing first would let a kill before the write leave neither. AND IT GOES
+    # ONLY IF THE RECORD LANDED (review round 2, MINOR-2): a failed write leaves
+    # the previous run's record on disk, and a cleared marker would make the
+    # listing present it as this departure's — the borrowed-history verdict the
+    # fence exists to stop. Keeping the marker turns that case into "unknown".
+    if wrote:
+        _clear_run_record(handle, runtime)
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -1550,8 +1555,16 @@ def _note_exit_record(
     reason: str,
     detail: str,
     requested: bool | None = None,
-) -> None:
+) -> bool:
     """Write this run's durable exit record. Best-effort, never raises.
+
+    Returns whether a record LANDED. The caller needs that answer to decide
+    whether it may also retire the run marker (``_clear_run_record``): the
+    listing reads "run marker absent" as the clean-exit pair and will then show
+    whatever exit record it finds, so clearing the marker after a FAILED write
+    would let the PREVIOUS run's record explain this departure (review round 2,
+    MINOR-2). A missing marker is honest only when the record beside it is
+    this run's own.
 
     THE SAME SHAPE AS ``_note_journal_exit``, one rung stronger: the journal is
     the statement about the TURN, this is the statement about the PROCESS, and
@@ -1582,10 +1595,10 @@ def _note_exit_record(
 
         identity = _run_identity(handle, runtime)
         if identity is None:
-            return
+            return False
         session_id, directory, _pid, started_at = identity
         boot = getattr(runtime, "_boot_build", None)
-        journal.write_exit_record(
+        landed = journal.write_exit_record(
             session_id,
             conversation_dir=directory,
             pid=_pid,
@@ -1597,8 +1610,10 @@ def _note_exit_record(
             ),
             build=boot.label() if boot is not None else "",
         )
+        return landed is not None
     except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
         logger.debug("session runtime: could not write its exit record", exc_info=True)
+        return False
 
 
 def _note_run_start(handle: object, runtime: object) -> None:
@@ -1615,6 +1630,17 @@ def _note_run_start(handle: object, runtime: object) -> None:
     construction: a kill there leaves no marker for that attempt, so a listing in
     that instant can still show an older record. Nothing above that line holds the
     run's ``started_at``, so writing earlier is not possible.
+
+    A FAILED WRITE HERE IS THE SECOND BOUND, and it is stated at the call site
+    because no reader can see it (review round 2, MINOR-2): with no marker on
+    disk, the listing takes the absent-marker/record pair as a clean exit and can
+    surface an OLDER run's record. It is the same degraded-store class as a
+    failed exit-record write (disk full, read-only config root) and no positive
+    marker is cheap here — a second durable write would fail on exactly the store
+    that just refused the first. The alternative — degrading every listing by
+    requiring a marker that legitimately never exists on a store that predates
+    this build — would turn history into permanent unknowns to cover a store that
+    is already broken.
     """
     try:
         from local_operator.session.runtime import journal
@@ -5691,7 +5717,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # saying so here is the truth, and every other trigger keeps ``None`` so
         # an unattributed SIGTERM stays False.
         why = trigger.get("why") or "unknown"
-        _note_exit_record(
+        wrote = _note_exit_record(
             handle,
             runtime,
             reason=why,
@@ -5700,8 +5726,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
         )
         # The run record goes with the exit record on this path too: absent run
         # record + written exit record is the pair a listing reads as a completed
-        # departure, and a SIGTERM/socket stop is one.
-        _clear_run_record(handle, runtime)
+        # departure, and a SIGTERM/socket stop is one. Gated on the record having
+        # LANDED, for the reason in ``_clean_exit`` (review round 2, MINOR-2).
+        if wrote:
+            _clear_run_record(handle, runtime)
         try:
             handle._deny_pending_gates()
         except Exception:  # noqa: BLE001 — shutdown must proceed
