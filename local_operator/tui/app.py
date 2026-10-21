@@ -68,7 +68,7 @@ from textual.events import (
     Resize,
     TextSelected,
 )
-from textual.geometry import Size
+from textual.geometry import Region, Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
@@ -3750,6 +3750,15 @@ class _AttachBehindSend:
 
 
 RESIZE_REFIT_DELAY_S = 0.05
+
+#: How often, and for how long, `_watch_overlay_ground` re-checks the dock's
+#: arranged region after a terminal resize. The arrange lands after the resize
+#: event (measured 4-70 ms here, later under fleet load), and a height-only
+#: resize sends no later dock event at all, so the settle is observed rather
+#: than assumed. 1.5 s is ~20x the local worst case and still short enough that
+#: a dead poll ends inside one interaction.
+RESIZE_SETTLE_POLL_S = 0.016
+RESIZE_SETTLE_WINDOW_S = 1.5
 
 #: How often, and for how long, to re-check ``sessions/last-cleanup.json``
 #: after adoption. The startup cleanup pass is dispatched at session
@@ -23291,6 +23300,66 @@ class OperatorApp(App[None]):
         # cards over whatever the band settled to, which is the order those two
         # already depend on.
         self.call_after_refresh(self._refresh_band)
+        # The cards' ground lives in the dock, whose arranged region is only
+        # readable after this handler returns. Watch it settle rather than
+        # guessing a delay; see `_watch_overlay_ground`.
+        self._watch_overlay_ground()
+
+    #: The short-lived watcher armed by `on_resize`, if one is running.
+    _ground_watch_timer: object | None = None
+
+    def _watch_overlay_ground(self) -> None:
+        """Re-fit the overlay cards as soon as the dock's arranged ground moves.
+
+        The cards are hosted in ``width: auto`` containers and are never resized
+        by the terminal, so they measure their ground from the DOCK's region
+        (``overlay.rows_above_dock``). That region is assigned by the screen's
+        arrange pass, which runs AFTER ``App.on_resize``: measuring from the
+        resize handler reads the PREVIOUS frame's dock. Measured on the goal
+        card at 100x40 -> 80x12, the handler and the 50 ms debounce both read
+        ``rows_above_dock == 29`` (then 33) on a 12-row screen, kept the card's
+        9-row height and its gutter, and left it over the composer at row 6
+        until an unrelated pass re-measured ~0.7 s later — the recorded CI
+        signature ``card bottom 22 covers the composer at 6``.
+
+        A HEIGHT-ONLY resize is why an event on the dock cannot be the seam (QA
+        round 1, Q-1): the bottom-docked composer keeps its size (75x5 across
+        100x40 -> 100x12) and only moves; Textual's one ``Resize`` arrives
+        before the arrange and no later one is sent. Nor is a message posted
+        from that arrange delivered — measured, the queue drained with the
+        handler never called. So this WATCHES the arranged ground for a bounded
+        window after the resize and re-measures on a change. The window covers
+        the arrange (measured 4-70 ms locally, longer under load); a drag-resize
+        restarts it, and it stops itself so no poll survives a settled screen
+        for longer than ``RESIZE_SETTLE_WINDOW_S``.
+
+        The re-measure does not move the dock, so a settled screen produces no
+        further report: the watcher is a bounded settle check, not a poll loop.
+        """
+        timer = self._ground_watch_timer
+        if timer is not None:
+            timer.stop()  # type: ignore[attr-defined]
+        last = self._dock_ground()
+        deadline = time.monotonic() + RESIZE_SETTLE_WINDOW_S
+
+        def tick() -> None:
+            nonlocal last
+            ground = self._dock_ground()
+            if ground is not None and ground != last:
+                last = ground
+                self._sync_overlay_layout(force=True)
+            if time.monotonic() >= deadline:
+                timer.stop()  # type: ignore[attr-defined]
+                self._ground_watch_timer = None
+
+        self._ground_watch_timer = timer = self.set_interval(RESIZE_SETTLE_POLL_S, tick)
+
+    def _dock_ground(self) -> tuple[Size, Region] | None:
+        """The terminal size and the docked composer's box, if there is one."""
+        try:
+            return (self.size, self.screen.query_one("#input-shell").region)
+        except Exception:  # noqa: BLE001 - a stripped harness or a modal screen
+            return None
 
     def _sync_subagent_compact_layout(self, screen_height: int) -> None:
         """Keep narrow detail pages useful by yielding secondary dock rows."""
