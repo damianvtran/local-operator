@@ -10155,10 +10155,16 @@ class RelayServer:
         if stream.dial is not None:
             stream.dial.close()
         if stream.viewer_sock is not None:
+            # The control thread can be blocked in LineReader.recv for an hour.
+            # On Linux, close() in this thread drops the descriptor but does not
+            # end the socket while that read holds it: the viewer sees no EOF,
+            # never starts recovery, and stays frozen after its mesh link dies.
+            # shutdown() wakes the reader and sends EOF before releasing our fd.
             try:
-                _close_quietly(stream.viewer_sock)
+                stream.viewer_sock.shutdown(socket.SHUT_RDWR)
             except OSError:
-                pass
+                pass  # Already gone: still release the descriptor below.
+            _close_quietly(stream.viewer_sock)
         self._report_stream_closed(stream, cause)
         if notify_peer and stream.link is not None:
             stream.link.send({"op": "net_stream", "action": "close", "stream": stream_id})

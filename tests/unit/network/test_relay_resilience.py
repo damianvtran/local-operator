@@ -10,6 +10,7 @@ drive two REAL relays on loopback through a drop and a restore.
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -501,3 +502,48 @@ def test_worker_live_lookup_cannot_erase_a_newer_link_close(
     assert not server.links
     assert server.redial.snapshot(link.device_id)["state"] == redial.RECONNECTING
     assert server.redial.tracked() == [link.device_id]
+
+
+@pytest.mark.parametrize("already_shutdown", [False, True])
+def test_closing_viewer_stream_shuts_down_socket_before_close(already_shutdown: bool) -> None:
+    """Closing from the mesh thread must wake the control thread's blocked read.
+
+    Linux retains an in-flight recv's socket after another thread closes its fd.
+    Pin shutdown-before-close on every host; the real socket verifies peer EOF,
+    and an already-dead socket must still release its descriptor.
+    """
+    owned, viewer = socket.socketpair()
+    calls: list[str] = []
+
+    class ObservedSocket:
+        def shutdown(self, how: int) -> None:
+            calls.append("shutdown")
+            assert how == socket.SHUT_RDWR
+            if already_shutdown:
+                raise OSError("already shut down")
+            owned.shutdown(how)
+
+        def close(self) -> None:
+            calls.append("close")
+            owned.close()
+
+    server: Any = object.__new__(relay.RelayServer)
+    server._streams_lock = threading.Lock()
+    stream = SimpleNamespace(
+        closed=False,
+        dial=None,
+        viewer_sock=ObservedSocket(),
+        link=None,
+    )
+    server._streams = {"s_synthetic": stream}
+    server._report_stream_closed = lambda *args: None
+    try:
+        server._close_stream("s_synthetic", notify_peer=False, cause="no-peer-link")
+        assert calls == ["shutdown", "close"]
+        assert stream.closed and not server._streams
+        assert owned.fileno() == -1
+        viewer.settimeout(1)
+        assert viewer.recv(1) == b""
+    finally:
+        owned.close()
+        viewer.close()
