@@ -171,7 +171,7 @@ async def retry_due_holds(
                 settings=settings,
             )
         action = outcome.get("action")
-        if action in ("delivered", "bounce", "delivered_metadata_only", "skipped"):
+        if action in ("delivered", "bounce", "delivered_unadmitted", "skipped"):
             _RETRY_ATTEMPTS.pop(message_id, None)
         elif action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)

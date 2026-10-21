@@ -463,7 +463,7 @@ def test_denied_body_stays_metadata_only(tmp_path, monkeypatch) -> None:
     )
     out = _run(a, config_dir)
 
-    assert out["handled"][0]["action"] == "delivered_metadata_only"
+    assert out["handled"][0]["action"] == "delivered_unadmitted"
     assert out["handled"][0]["code"] == "screening_bounce"
     card = transcripts["sess_a"][0]["payload"]
     assert "hello from the channel" not in card
@@ -490,7 +490,7 @@ def test_mutated_body_is_not_screened_admitted_or_rendered(tmp_path, monkeypatch
     )
     out = _run(a, config_dir)
 
-    assert out["handled"][0]["action"] == "delivered_metadata_only"
+    assert out["handled"][0]["action"] == "delivered_unadmitted"
     assert out["handled"][0]["code"] == "body_hash_mismatch"
     assert screen_calls == [] and server.admits == []
     card = transcripts["sess_a"][0]["payload"]

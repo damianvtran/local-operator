@@ -223,7 +223,7 @@ async def handle_conversation_available(
     """Screen one conversation message and deliver its card (or hold/skip).
 
     Returns metadata only. ``action`` is one of ``delivered`` (admitted body),
-    ``delivered_metadata_only`` (denied or unverifiable body), ``hold``,
+    ``delivered_unadmitted`` (denied or unverifiable body), ``hold``,
     ``badge_only``, ``claimed_elsewhere`` or ``skipped`` (the message is no
     longer in the conversation's history).
     """
@@ -354,7 +354,7 @@ async def handle_conversation_available(
             )
             terminal = True
             return {
-                "action": "delivered_metadata_only",
+                "action": "delivered_unadmitted",
                 "message_id": message_id,
                 "code": "body_hash_mismatch",
                 "session": designation,
@@ -406,7 +406,7 @@ async def handle_conversation_available(
             )
             terminal = True
             return {
-                "action": "delivered_metadata_only",
+                "action": "delivered_unadmitted",
                 "message_id": message_id,
                 "code": "screening_bounce",
                 "session": designation,
