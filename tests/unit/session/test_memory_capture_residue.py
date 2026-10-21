@@ -7,8 +7,16 @@ its locator tokens are removed. It first shipped with an ASCII-only word rule
 (``[A-Za-z]{3,}``), so a CJK, Japanese or Cyrillic decision left a non-empty
 residue the rule could not match: the section was dropped as an admission skip
 while the pass was still recorded as a success with ZERO facts. Nothing failed
-loudly, and no test asserted that non-ASCII knowledge produces facts, so the
-defect survived four review/QA rounds.
+loudly, and no test asserted that non-ASCII knowledge produces facts at the
+time, so the defect survived four review/QA rounds.
+
+``test_memory_capture.py::test_knowledge_in_any_script_is_captured`` is the
+end-to-end guard that landed WITH the fix, so this file is not the only thing
+standing between the rule and a silent regression. What it adds is the NAMED
+home for the residue rule itself (``_substantive``, which no test called by
+name before) and four shapes the end-to-end test does not pin: kana, an
+ASCII-free mixed-script body, a CJK path as a locator negative, and bare
+version/number negatives that catch an over-broad word rule.
 
 These tests pin the observable behaviour rather than the pattern: real
 knowledge in each script MUST yield a fact row, while locator-only and
