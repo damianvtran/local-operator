@@ -1508,9 +1508,7 @@ def test_refresh_unit_migrates_a_pre_oom_unit(
     _shim_rig(tmp_path, monkeypatch)
     unit = _unit(linux_host)
     unit.parent.mkdir(parents=True, exist_ok=True)
-    legacy = relay.render_systemd().replace(
-        f"OOMScoreAdjust={relay.RELAY_OOM_SCORE_ADJUST}\n", ""
-    )
+    legacy = relay.render_systemd().replace(f"OOMScoreAdjust={relay.RELAY_OOM_SCORE_ADJUST}\n", "")
     assert "OOMScoreAdjust" not in legacy
     unit.write_text(legacy, encoding="utf-8")
     monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)

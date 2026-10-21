@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -141,7 +141,8 @@ def test_a_late_push_for_an_ended_stream_is_dropped_without_a_refusal() -> None:
         route_stream_closed=lambda link, frame: False,
         dispatch=lambda link, frame: dispatched.append(frame) or {"op": "error"},
     )
-    link = SimpleNamespace(server=server, late_stream_frames=0, send=sent.append)
+    # A duck-typed link: only the attributes ``_handle`` reads on this path.
+    link: Any = cast(Any, SimpleNamespace(server=server, late_stream_frames=0, send=sent.append))
     for _ in range(26):
         relay.PeerLink._handle(link, {"op": "net_stream", "action": "push", "stream": "s1"})
     relay.PeerLink._handle(link, {"op": "net_stream", "action": "closed", "stream": "s1"})
@@ -156,9 +157,12 @@ def test_a_late_push_for_an_ended_stream_is_dropped_without_a_refusal() -> None:
 
 
 def test_an_observed_endpoint_is_a_last_resort_dial_candidate() -> None:
-    member = SimpleNamespace(
-        endpoints=["99.79.190.164:4097", "172.31.22.23:4097"],
-        observed_endpoint="3.96.223.236:4097",
+    member: Any = cast(
+        Any,
+        SimpleNamespace(
+            endpoints=["99.79.190.164:4097", "172.31.22.23:4097"],
+            observed_endpoint="3.96.223.236:4097",
+        ),
     )
     assert relay._dial_candidates(member) == [
         "99.79.190.164:4097",
@@ -207,7 +211,7 @@ def test_link_activity_persists_last_seen_throttled(
         assert member is not None
         return member.last_seen_at
 
-    link = SimpleNamespace(
+    link: Any = SimpleNamespace(
         network_id=record.network_id,
         device_id=device_b,
         last_frame_at=time.time() + 5_000.0,

@@ -167,11 +167,7 @@ class RedialTracker:
         """Device ids whose next redial time has come, oldest-due first."""
         with self._lock:
             now = self._clock()
-            rows = [
-                peer
-                for peer in self._peers.values()
-                if peer.next_retry_at <= now
-            ]
+            rows = [peer for peer in self._peers.values() if peer.next_retry_at <= now]
             rows.sort(key=lambda peer: peer.next_retry_at)
             return [peer.device_id for peer in rows]
 
