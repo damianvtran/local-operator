@@ -3105,6 +3105,18 @@ class LoopConfig(BaseModel):
     # becomes a message. ``None`` means no credentials are stored.
     redact_tool_result: Callable[[str], str] | None = Field(default=None, exclude=True)
 
+    #: Mask credentials out of tool-call ARGUMENTS before the retained copy is
+    #: journaled and replayed. A SEPARATE hook from ``redact_tool_result`` because
+    #: arguments are CODE that the harness executes and the model later reads back:
+    #: a heuristic rewrite there is a rewrite of the program (session
+    #: 6ccea512c372: a Python keyword masked in a ``bash`` call was copied into new
+    #: cells, which died with ``NameError``). This pass runs the session's exact-value
+    #: scrub first and then a shape pass with a value-level confidence floor, so only
+    #: HIGH-CONFIDENCE credential values are masked; it never registers what it finds.
+    #: ``None`` means no argument scrubbing, and the loop then falls back to
+    #: ``redact_tool_result`` for backwards compatibility.
+    redact_tool_arguments: Callable[[str], str] | None = Field(default=None, exclude=True)
+
     #: Report one tool call's outcome to the host, as
     #: ``(tool_name, origin, fault, duration_ms)``. A CALLBACK rather than a
     #: direct analytics call because this package has no analytics dependency
