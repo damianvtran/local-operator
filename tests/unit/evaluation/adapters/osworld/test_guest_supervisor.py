@@ -3918,6 +3918,16 @@ def test_a_busy_but_active_server_is_never_touched(tmp_path: Path) -> None:
     is systemd's statement that the process is still there, so silence is an
     OBSERVATION: over a sustained window no kill, start, reset, stop or
     dispatch may be issued, and no attempt may be spent.
+
+    ACCEPTED COST (the reason this is a rule and not a heuristic): a listener
+    that accepts and never answers while the unit stays ``active`` -- main.py
+    alive, worker hung, socket held -- is now repaired by neither the guest nor
+    the host, so that episode is lost. The alternative kills the identical
+    shape a busy server presents, which is one episode against every episode.
+    Revisiting it needs a record of ``unresponsive`` with ``attempts: 0`` over
+    many cycles WHILE the host sees ``active`` for the same window -- and then
+    a discriminator stronger than silence (socket-owner identity), never a
+    shorter probe.
     """
     record, calls, elapsed = _execute_watchdog(
         tmp_path / "busy",
@@ -3926,7 +3936,6 @@ def test_a_busy_but_active_server_is_never_touched(tmp_path: Path) -> None:
         answering=[False],
         probe_timeouts=True,
         cycles=30,
-        clock_start=1000.0,
     )
     assert _dispatches(calls) == []
     assert not any(
@@ -3937,7 +3946,12 @@ def test_a_busy_but_active_server_is_never_touched(tmp_path: Path) -> None:
     assert record["intervened"] is False
     assert record["events"] == []
     assert record["last_observation"] == "unresponsive"
-    # Sustained, not one lucky sample: the shipped interval across the window.
+    # SUSTAINED, and proved by ITERATION COUNT rather than the wall of a
+    # seeded clock: the fake clock starts at 0 (the harness returns it
+    # absolutely), and every silent cycle issues exactly one unit query, so a
+    # window that collapsed to a cycle or two cannot satisfy this.
+    shows = [args for args in calls if len(args) > 1 and args[1] == "show"]
+    assert len(shows) >= 25, f"only {len(shows)} cycles ran; the window is not sustained"
     assert elapsed >= guest_supervisor.WATCHDOG_INTERVAL_S * 25
 
     # NEGATIVE CONTROL: the SAME silence with the unit not running must
@@ -3950,7 +3964,6 @@ def test_a_busy_but_active_server_is_never_touched(tmp_path: Path) -> None:
         answering=[False],
         probe_timeouts=True,
         cycles=1,
-        clock_start=1000.0,
     )
     assert len(_dispatches(control_calls)) == 1
     assert control["attempts"] == 1

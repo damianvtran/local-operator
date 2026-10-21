@@ -238,18 +238,35 @@ persist()
 #:   a state systemd will not report -> none; observed as ``unknown``
 #:
 #: ``ActiveState`` IS THE ONLY DESTRUCTIVE GATE, AND IT MUST BE. ``failed`` or
-#: ``inactive`` is systemd's own statement that no process is left to lose;
-#: anything else is a server that owns processes the kill would take away. A
-#: listener that does not answer while the unit is ``active`` is therefore a
-#: BUSY or wedged server, never a dead one: a 1280x720 screenshot or a long page
-#: load can outlast any probe, and a probe bound is a guess about scheduling,
-#: not evidence about life. Earlier revisions treated two consecutive silences
-#: as death and were measured killing healthy servers mid-episode -- the
-#: adapter's in-flight action then dies with a transport error and the episode
-#: is lost, so a missed repair (one episode) is always the cheaper error than a
-#: kill (every episode). The observation is still recorded, so a genuinely
-#: wedged-but-active server is visible in the host's evidence rather than
-#: silently indistinguishable from a healthy one.
+#: ``inactive`` is systemd's own statement that no MainPID is left to serve; a
+#: unit it reports running still has one, and the all-process kill takes every
+#: member of its cgroup with it, not just that MainPID. A listener that does
+#: not answer while the unit is ``active`` is therefore a BUSY or wedged server,
+#: never a dead one: a 1280x720 screenshot or a long page load can outlast any
+#: probe, and a probe bound is a guess about scheduling, not evidence about
+#: life. Earlier revisions treated two consecutive silences as death and were
+#: measured killing healthy servers mid-episode -- the adapter's in-flight
+#: action then dies with a transport error and the episode is lost, so a missed
+#: repair (one episode) is always the cheaper error than a kill (every episode).
+#: The observation is still recorded, so a genuinely wedged-but-active server is
+#: visible in the host's evidence rather than silently indistinguishable from a
+#: healthy one.
+#:
+#: THE ACCEPTED COST, STATED SO IT IS NOT REDISCOVERED AS AN OVERSIGHT. A
+#: listener that accepts on the port and never answers, while ``ActiveState``
+#: stays ``active`` -- main.py alive, its worker hung, the socket still held --
+#: is now repaired by NEITHER side: this watchdog acts only on
+#: ``failed``/``inactive``, and the host's ``_restart_supervisor_unit`` runs only
+#: after a successful probe. That episode is lost. Acting on that state instead
+#: would kill the identical shape a busy-but-healthy server presents, which is
+#: the production failure this rule exists to stop, so the trade is one episode
+#: (hung) against every episode (killed). REVISIT ONLY WITH EVIDENCE THAT
+#: DISTINGUISHES THEM: a record showing ``last_observation: unresponsive`` with
+#: ``attempts: 0`` across many cycles WHILE the host separately sees the unit
+#: ``active`` for the same window -- hung, not slow. The discriminator then has
+#: to be the identity of the process holding the socket (a changed owner or
+#: start tick proves a restart; silence proves nothing), never a shorter probe:
+#: shortening it only moves which slow actions get mislabelled.
 #:
 #: THE VERDICT IS DERIVED FROM THE PAYLOAD, NEVER FROM A FIELD THE SCRIPT DOES
 #: NOT WRITE. ``RESTART_SOURCE`` reports observations (pids, start ticks,
@@ -297,12 +314,14 @@ MAX_ATTEMPTS = 5
 MAX_INEFFECTIVE = 2
 ABSENT_GRACE_S = 30.0
 EVENT_CAP = 8
-#: The liveness probe's bound, and NOTHING ELSE. It is far longer than one
-#: action (a screenshot, a page load) so ordinary work is never mislabelled as
-#: silence -- but even a mislabel cannot cost anything: the probe only chooses
-#: between the ``serving`` and ``unresponsive`` OBSERVATIONS, and only
-#: ``ActiveState`` can authorise a dispatch.
-PROBE_TIMEOUT_S = 30.0
+#: The liveness probe's bound, and NOTHING ELSE. It stays under ``INTERVAL_S``
+#: so one cycle cannot push the next one late: both address families (v4, and
+#: v6 only when v4 is refused) fit inside a single interval. Five seconds is
+#: longer than a normal action but is NOT claimed to outlast every one -- a
+#: screenshot or page load that overruns it is recorded as ``unresponsive``,
+#: which is an OBSERVATION, so a mislabel costs evidence fidelity and nothing
+#: else. That is why it does not need to be generous.
+PROBE_TIMEOUT_S = 5.0
 RESTART_TIMEOUT_S = 15.0
 
 #: ``unresponsive`` is RETIRED as a trigger and retained in the vocabulary so
