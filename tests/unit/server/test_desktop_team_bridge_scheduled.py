@@ -14,6 +14,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -41,15 +42,16 @@ CREATE = {
 @pytest.fixture
 def proxy(tmp_path, monkeypatch):
     calls = []
-    state = {"row": None, "error": None, "malformed": False}
+    state: dict[str, Any] = {"row": None, "error": None, "malformed": False}
 
     class Hub(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: object) -> None:
             pass  # The body and bearer must never appear in fixture logs either.
 
         def dispatch(self):
             payload = self.rfile.read(int(self.headers.get("content-length", 0)))
-            body = json.loads(payload) if payload else None
+            body: Any = json.loads(payload) if payload else None
+            out: dict[str, Any]
             calls.append((self.command, self.path, body, self.headers.get("authorization")))
             code = 200
             if state["error"]:
@@ -61,6 +63,8 @@ def proxy(tmp_path, monkeypatch):
                 }
             elif state["malformed"]:
                 out = {"msg": "Missing read result"}
+                if state["malformed"] == "list-result":
+                    out["result"] = []
             elif self.command == "POST":
                 state["row"] = {
                     "id": SID,
@@ -83,7 +87,9 @@ def proxy(tmp_path, monkeypatch):
                     "msg": "Schedules",
                     "result": {"scheduled": [state["row"]] if state["row"] else []},
                 }
-            encoded = json.dumps(out).encode()
+            encoded = (
+                b"not json" if state["malformed"] == "invalid-json" else json.dumps(out).encode()
+            )
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
@@ -248,3 +254,14 @@ def test_upstream_auth_refresh_once_then_signin(proxy):
     assert response.json()["detail"]["code"] == "bridge_signin_required"
     assert len(calls) == 2
     assert any(force for _, force in store.refresh_calls)
+
+
+@pytest.mark.parametrize("resource", ["scheduled", "conversations"])
+@pytest.mark.parametrize("malformed", ["missing-result", "list-result", "invalid-json"])
+def test_invalid_upstream_success_is_bad_gateway(proxy, resource, malformed):
+    client, calls, state, _ = proxy
+    state["malformed"] = malformed
+    response = client.get(f"/v1/desktop/team-bridge/{resource}?tenant_id=org-a")
+    assert len(calls) == 1
+    assert response.json()["detail"]["code"] == "bridge_invalid_response"
+    assert response.status_code == 502, response.text

@@ -629,7 +629,9 @@ def _envelope_result(response: httpx.Response) -> dict[str, Any]:
     """The ``result`` object from the house ``{msg, result}`` envelope.
 
     A 2xx that is not that shape is a protocol violation, not a refusal: it earns
-    its own code so a surface does not render an empty success.
+    its own code so a surface does not render an empty success. Map it to a
+    gateway failure: retaining the upstream 2xx here makes desktop HTTP clients
+    treat a protocol error as success even though the body contains a refusal.
     """
 
     try:
@@ -638,14 +640,14 @@ def _envelope_result(response: httpx.Response) -> dict[str, Any]:
         raise BridgeRefusal(
             "bridge_invalid_response",
             "Radient returned an invalid response.",  # i18n: ignore, no code
-            http_status=response.status_code,
+            http_status=502,
         ) from None
     result = envelope.get("result") if isinstance(envelope, dict) else None
     if not isinstance(result, dict):
         raise BridgeRefusal(
             "bridge_invalid_response",
             "Radient returned an invalid response.",  # i18n: ignore, no code
-            http_status=response.status_code,
+            http_status=502,
         )
     return result
 
