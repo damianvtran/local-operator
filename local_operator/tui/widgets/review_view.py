@@ -490,19 +490,28 @@ class ReviewView(Vertical):
         self._paint_hints()
         self._body_text.update(self._body_rich())
         self._scroll_to_cursor()
-        # ...and AGAIN once the body has measured the text just handed to it.
-        # `_scroll_to_cursor` clamps its target against the body's virtual size,
-        # and `Static.update` does not recompute that until the next layout
-        # pass. On the first paint (and whenever the new body is taller than the
-        # previous one) the immediate call therefore clamps against the OLD
-        # height, silently leaves the offset at 0, and clips the selected row's
-        # first line — its identity — above the fold. CI measured the compact
-        # page at 60x20 as `scroll_offset.y == 0` against a row starting at 1;
-        # the clamp had been applied before the four-line body existed. The
-        # `call_after_refresh` is the same one the refresh path already uses,
-        # so it costs one extra scroll of a few rows and cannot compound: the
-        # helper returns without scrolling when the row is already in view.
-        self.call_after_refresh(self._scroll_to_cursor)
+        # ...and AGAIN if the body MEASURED a different height once it laid the
+        # text out. `_scroll_to_cursor` clamps its target against the body's
+        # virtual size, and `Static.update` does not recompute that until the
+        # next layout pass. On the first paint (and whenever the new body is
+        # taller than the previous one) the immediate call therefore clamps
+        # against the OLD height, silently leaves the offset at 0, and clips the
+        # selected row's first line — its identity — above the fold. CI measured
+        # the compact page at 60x20 as `scroll_offset.y == 0` against a row
+        # starting at 1; the clamp had been applied before the four-line body
+        # existed.
+        #
+        # The guard is what keeps the retry from re-anchoring a paint that did
+        # not need it: only a changed measurement means the first call could
+        # have been clamped astray, so an ordinary repaint (or a wheel scroll
+        # landing in the same frame) is left alone.
+        measured = self._body.virtual_size.height
+
+        def _reapply_after_layout() -> None:
+            if self._body.virtual_size.height != measured:
+                self._scroll_to_cursor()
+
+        self.call_after_refresh(_reapply_after_layout)
 
     def _paint_hints(self) -> None:
         visible = self._hint_labels()
