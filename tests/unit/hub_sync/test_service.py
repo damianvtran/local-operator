@@ -1698,4 +1698,4 @@ def test_a_refresh_cannot_clobber_a_concurrent_config_write(
 
     assert not refresher.is_alive()
     assert manager.get_config_value("theme") == "dark", "memory fell behind a newer write"
-    assert read_config_values(tmp_path)["theme"] == "dark"
+    assert (read_config_values(tmp_path) or {})["theme"] == "dark"
