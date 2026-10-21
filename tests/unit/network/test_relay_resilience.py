@@ -428,3 +428,74 @@ def test_refusal_coalescing_keeps_proof_and_mode_transitions(tmp_path: Any) -> N
     assert len(rows) == 3
     assert [r["actor"] for r in rows] == ["unknown", "d_synthetic", "d_synthetic"]
     assert [r["detail"]["mode"] for r in rows] == ["member", "member", "invite"]
+
+
+def test_worker_live_lookup_cannot_erase_a_newer_link_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actual worker and close methods, paused at a stale live-link lookup.
+
+    A due snapshot can outlive admission of a replacement. When that replacement
+    closes after the worker's lookup, only admission/close own the transitions;
+    the worker must leave the newly recorded loss scheduled for the next tick.
+    """
+    server: Any = object.__new__(relay.RelayServer)
+    server.root = None
+    server._links_lock = threading.RLock()
+    server._streams_lock = threading.Lock()
+    server._streams = {}
+    server.redial = redial.RedialTracker()
+    server.redial.seed("d_synthetic")
+    link: Any = SimpleNamespace(
+        link_id="l_synthetic",
+        device_id="d_synthetic",
+        network_id="n_synthetic",
+        alive=True,
+        closing=False,
+        last_frame_at=time.time(),
+        epoch=1,
+        frames_in=0,
+        frames_out=0,
+    )
+    server.links = {link.link_id: link}
+    server.note_link_activity = lambda *args, **kwargs: None
+    server.fail_replies = lambda link: 0
+    server.identity_use = SimpleNamespace(released=lambda *args: None)
+    server.audit = SimpleNamespace(record=lambda event: None)
+    ticks = iter((False, True))
+    server._stop = SimpleNamespace(wait=lambda delay: next(ticks), is_set=lambda: False)
+    monkeypatch.setattr(store, "list_networks", lambda root: [])
+    looked_up = threading.Event()
+    closed = threading.Event()
+    failures: list[BaseException] = []
+    lookup = server._link_for
+
+    def paused_lookup(device: str) -> Any:
+        held = lookup(device)
+        if held is not None:
+            looked_up.set()
+            assert closed.wait(5), "reader did not close after live lookup"
+        return held
+
+    server._link_for = paused_lookup
+
+    def worker() -> None:
+        try:
+            server._redial_loop()
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=worker, name="synthetic-redial-worker")
+    thread.start()
+    try:
+        assert looked_up.wait(5), "worker never observed the replacement"
+        # The real close removes ownership and records loss while the worker
+        # holds a stale returned link. Close's own lookup sees an empty table.
+        server.link_closed(link, "timeout")
+    finally:
+        closed.set()
+        thread.join(5)
+    assert not thread.is_alive() and not failures, failures
+    assert not server.links
+    assert server.redial.snapshot(link.device_id)["state"] == redial.RECONNECTING
+    assert server.redial.tracked() == [link.device_id]

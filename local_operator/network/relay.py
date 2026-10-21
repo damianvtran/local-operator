@@ -5412,7 +5412,10 @@ class RelayServer:
                 if self._stop.is_set():
                     return
                 if self._link_for(device_id) is not None:
-                    self.redial.connected(device_id)
+                    # Admission already owns the connected transition under
+                    # _links_lock. This lookup is only a scheduling hint: the link
+                    # may close before we act on it, so resetting here would erase
+                    # that newer loss and strand the peer without a retry (C2).
                     continue
                 if not any(self._redial_candidates(m) for m in self._members_named(device_id)):
                     # NOTHING THIS DEVICE MAY DIAL: the peer is dial-only (it declared
