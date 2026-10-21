@@ -94,6 +94,7 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/cli.py", "sessions_holds_command", "reason"): (
         1,
         "the operator's own stored hold reason, printed in this device's listing",
+    ),
     # The ``ask_dismiss`` ``reason`` (design ``ask-nonblocking.md`` §15): a closed
     # operator token, ``answered_in_chat`` | ``moot``, validated against that set in
     # ``mobile/types.py`` and forwarded to the engine, where it picks the agent-facing

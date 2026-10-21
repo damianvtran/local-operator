@@ -408,6 +408,15 @@ DISMISS_AGENT_RUNNING = (
 #: answered again), but dismissing one is a different act and the answer is in.
 DISMISS_ALREADY_ANSWERED = "this ask was already answered."
 
+#: A RELAY (#2520) points at an ask that lives in another session's log, where its
+#: model is the reader. Dismissing it here is only the user closing a lapsed card
+#: (local, view-only, tells no agent), so it stays timed-out-only like a bridge
+#: request: an open relay is answered at its origin.
+DISMISS_RELAY_OPEN = (
+    "this ask is relayed from another session — answer it there, or dismiss it here "
+    "once it has timed out."
+)
+
 #: An unknown ``reason`` on a dismissal, refused before anything is written.
 DISMISS_BAD_REASON = "reason must be 'answered_in_chat' or 'moot'."
 
@@ -452,6 +461,8 @@ def dismiss_refusal(
     if status == store.STATUS_TIMED_OUT:
         return ""
     if status == store.STATUS_OPEN:
+        if isinstance(record.get("relay"), Mapping):
+            return DISMISS_RELAY_OPEN
         if any(
             str(question.get("question_id") or "")
             for question in (record.get("questions") or ())

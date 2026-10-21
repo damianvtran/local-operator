@@ -489,3 +489,19 @@ def test_the_secret_dismissal_names_no_value(reason: str):
     assert text.startswith("The user dismissed the credential ask a-9 without entering a value")
     assert render.DISMISS_REASON_LABELS[reason] in text
     assert "Key?" not in text
+
+
+def test_an_open_relay_is_dismissible_only_after_it_times_out():
+    """#2520 relays stay timed-out-only: an open one is answered at its origin, and a
+    timed-out one is the user closing a lapsed card, as on main."""
+    from local_operator.asks import store
+
+    relay = {"ask_id": "a-r", "questions": [], "relay": {"session_id": "s", "ask_id": "a"}}
+    assert render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}) == (
+        render.DISMISS_RELAY_OPEN
+    )
+    assert (
+        render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}, agent_running=False)
+        == render.DISMISS_RELAY_OPEN
+    )
+    assert render.dismiss_refusal({**relay, "status": store.STATUS_TIMED_OUT}) == ""
