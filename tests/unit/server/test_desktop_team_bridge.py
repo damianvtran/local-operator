@@ -590,6 +590,10 @@ class FakeClient:
         )
         return self._answer("conversation_admit")
 
+    async def conversation_react(self, conversation_id, message_id, emoji, **kwargs):
+        FakeClient.behavior["last_react"] = (conversation_id, message_id, emoji, kwargs)
+        return self._answer("conversation_react")
+
     async def conversation_read(
         self,
         conversation_id: str,
@@ -2854,3 +2858,44 @@ async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
         json={"decision": "accept", "consent_version": "bridge_consent_v1"},
     )
     assert response.status_code == 422, response.text
+
+
+async def test_conversation_reactions_forward_and_preserve_summary(api):
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    summary = {
+        "message_id": "bcmsg_abcdef12",
+        "reactions": [{"emoji": "👍", "count": 2, "reacted_by_me": True, "sample_labels": ["Bea"]}],
+    }
+    FakeClient.behavior["conversation_react"] = summary
+    path = (
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+        + quote("👍", safe="")
+    )
+    response = await client.put(path, json={"tenant_id": "tnt_1"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == summary
+    assert FakeClient.behavior["last_react"] == (
+        "bcv_abc12345",
+        "bcmsg_abcdef12",
+        "👍",
+        {"active": True, "tenant_id": "tnt_1"},
+    )
+    response = await client.delete(path + "?tenant_id=tnt_1")
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_react"][3] == {"active": False, "tenant_id": "tnt_1"}
+
+
+async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_input(api):
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    response = await client.put(path + quote("👍"), json={"actor_endpoint_id": "bep_other"})
+    assert response.status_code == 422
+    response = await client.put(path + quote("😀" * 33), json={})
+    assert response.status_code == 422
+    response = await client.delete(path + quote("👍") + "?actor_endpoint_id=bep_other")
+    assert response.status_code == 422
+    assert FakeClient.instances == []

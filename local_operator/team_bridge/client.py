@@ -63,6 +63,7 @@ import json
 import re
 import time
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -1850,6 +1851,44 @@ class TeamBridgeClient:
             body=body,
             access=access,
         )
+
+    async def conversation_react(
+        self,
+        conversation_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        active: bool,
+        tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Set (``active=True`` -> PUT) or clear (DELETE) one emoji reaction.
+
+        Both verbs are idempotent on the hub and answer the message's full
+        reaction summary for the caller, ``{"message_id", "reactions": [...]}``.
+        The emoji is a path segment, so it is percent-encoded with NO safe
+        characters: an emoji is never allowed to contribute a ``/`` or ``?`` to
+        the upstream path. The hub alone decides whether it is one RGI emoji.
+
+        ``actor_endpoint_id`` reacts AS that agent member (the hub requires an
+        ``allow`` admission for the message first). It rides in the body for
+        PUT and in the query for DELETE, because a DELETE body is not reliably
+        forwarded by every proxy between here and the hub.
+        """
+
+        path = (
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+            f"/reactions/{urllib.parse.quote(emoji, safe='')}"
+        )
+        fields: dict[str, Any] = {}
+        if tenant_id:
+            fields["tenant_id"] = tenant_id
+        if actor_endpoint_id:
+            fields["actor_endpoint_id"] = actor_endpoint_id
+        if active:
+            return await self._send("PUT", path, body=fields, access=access)
+        return await self._send("DELETE", path, params=fields or None, access=access)
 
     async def conversation_read(
         self,
