@@ -580,7 +580,16 @@ def remote_session_rows(
                 "code": _remote_status_code(row),
                 "label": _remote_status_label(row),
             },
-            "binding": {"agent": None, "team": None},
+            # THE OWNER'S ANSWER (operator report, 2026-10-21): this used to be a
+            # constant ``None``/``None``, so a remote session running under a team
+            # painted no team badge while the identical local session painted one.
+            # The peer stamps its own sidecar onto the row (``relay._row_binding``);
+            # a peer too old to send it is the same ``None`` as before — no claim,
+            # never a guess about a store this device does not hold.
+            "binding": {
+                "agent": str(getattr(row, "agent", "") or "") or None,
+                "team": str(getattr(row, "team", "") or "") or None,
+            },
         }
         if last_user_at > 0:
             emitted["last_user_at"] = last_user_at

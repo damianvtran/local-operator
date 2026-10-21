@@ -2273,3 +2273,32 @@ async def test_networks_keep_a_revocation_and_drop_only_a_superseded_tombstone(
     if kept:
         assert by_id[REJOINED_OLD]["active"] is False, "a revocation is marked, not hidden"
     assert by_id[REJOINED_NEW]["active"] is True
+
+
+def test_a_remote_rows_binding_is_the_owners_answer_and_absence_is_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidebar's team badge reads ``binding.team``, so a remote row must carry it.
+
+    Operator report, 2026-10-21: this projection hardcoded ``None``/``None`` for
+    every remote row, so a session running under a team on a peer drew no team
+    badge while the same session held locally drew one. The owner's claim now
+    rides (``SessionRow.team``/``agent``); a row with no claim — an older peer —
+    is the same ``None`` as before, never a guessed team.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    teamed = SessionRow(OTHER, 1789400000.0, "under a team", team="lopdev")
+    agented = SessionRow("c" * 12, 1789400000.0, "under an agent", agent="coder")
+    older = SessionRow("d" * 12, 1789400000.0, "older peer")
+    monkeypatch.setattr(
+        peer_rows_mod, "peer_session_rows", lambda root=None, **kwargs: (teamed, agented, older)
+    )
+
+    rows = remote_session_rows(tmp_path, pins=set())
+
+    assert rows[0]["binding"] == {"agent": None, "team": "lopdev"}
+    assert rows[1]["binding"] == {"agent": "coder", "team": None}
+    assert rows[2]["binding"] == {"agent": None, "team": None}

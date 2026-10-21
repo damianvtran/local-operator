@@ -4851,3 +4851,65 @@ def test_a_promptless_create_answers_before_its_runtime_has_joined(
     finally:
         released.set()
         link.close("test")
+
+
+def test_listing_rows_carry_the_sessions_own_team_binding(root: Path) -> None:
+    """The peer stamps WHO answers each session onto its listing row.
+
+    Operator report, 2026-10-21: a remote session started under a team drew no
+    team badge in the origin's sidebar, because the row a peer publishes never
+    said which team the session was attached to — and the origin cannot read
+    the sidecar, which lives on the peer. Both the LIVE half and the STORED half
+    must carry it (a cold session under a team is still that team's), read from
+    the same ``attachment.json`` the local listing reads; an unattached session
+    is the explicit no-claim ``None``/``None``.
+    """
+    import os
+
+    from local_operator.harness.types import Message
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    def _typed_journal(session_id: str) -> Path:
+        directory = root / "sessions" / session_id
+        directory.mkdir(parents=True)
+        message = Message.user("a typed prompt")
+        entry = TranscriptEntry(
+            message.id, 1789400000.0, ENTRY_MESSAGE, encode_message_payload(message)
+        )
+        (directory / "transcript.jsonl").write_text(entry.to_json() + "\n", encoding="utf-8")
+        return directory
+
+    live, cold, bare = "1ea41ea41ea4", "c01dc01dc01d", "ba5eba5eba5e"
+    write_session_attachment(_typed_journal(live), team="lopdev", agent="", goal="")
+    write_session_attachment(_typed_journal(cold), team="", agent="coder", goal="")
+    _typed_journal(bare)
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=live,
+            conversation_name="live under a team",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+        ),
+        root,
+    )
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    rows = {item["session_id"]: item for item in server.local_session_rows()}
+
+    assert rows[live]["state"] == "live", "the cell needs a live row to mean anything"
+    assert rows[live]["binding"] == {"agent": None, "team": "lopdev"}
+    assert rows[cold]["state"] == "stored", "the cell needs a stored row to mean anything"
+    assert rows[cold]["binding"] == {"agent": "coder", "team": None}
+    assert rows[bare]["binding"] == {"agent": None, "team": None}, "no sidecar is no claim"

@@ -6817,6 +6817,10 @@ class RelayServer:
                     ),
                     "origin": dict(stamp.origin) if stamp is not None and stamp.origin else None,
                     "archived": None,
+                    # WHO ANSWERS THIS SESSION, from its own sidecar (see
+                    # ``_row_binding``): the origin's sidebar paints a team
+                    # badge from it exactly as it does for a local row.
+                    "binding": self._row_binding(record.session_id),
                 }
             )
         for row in self._stored_rows():
@@ -6839,6 +6843,32 @@ class RelayServer:
         for row in self._mesh_hosted_rows(seen):
             rows.append(row)
         return rows
+
+    def _row_binding(self, session_id: str) -> dict[str, str | None]:
+        """The agent/team this session is attached to, for its listing row.
+
+        WHY THE PEER STAMPS IT (operator report, 2026-10-21). The desktop sidebar
+        draws a team badge from ``binding.team``, and for a LOCAL row that value is
+        read from the session's ``attachment.json`` (``DesktopSessions.list``). A
+        REMOTE row's sidecar lives on THIS device, so the origin cannot read it —
+        and this listing did not carry it, so every remote row painted no badge
+        even when the session ran under a team. This device is the only one that
+        can answer, so it answers here, with the SAME reader and the same
+        ``"" -> None`` spelling the local projection uses.
+
+        One small JSON read per row, the cost the local listing already pays per
+        row. Never raises: ``read_session_attachment`` is tolerant by contract,
+        and an unreadable or absent sidecar is the honest ``None``/``None`` (no
+        claim). A peer on a build that predates this key omits it entirely, which
+        the origin reads the same way (``PeerRow.from_json``).
+        """
+        from local_operator.resume import read_session_attachment
+
+        stored = read_session_attachment(self.root / "sessions" / session_id)
+        return {
+            "agent": (stored.agent or None) if stored else None,
+            "team": (stored.team or None) if stored else None,
+        }
 
     def _mesh_hosted_rows(self, seen: set[str]) -> list[dict[str, Any]]:
         """Sessions this device hosts FOR the mesh that no other half lists yet.
@@ -6916,6 +6946,7 @@ class RelayServer:
                     "placement": stamp.placement.to_json(),
                     "origin": dict(stamp.origin) if stamp.origin else None,
                     "archived": None,
+                    "binding": self._row_binding(entry.name),
                 }
             )
         return rows
@@ -7024,6 +7055,7 @@ class RelayServer:
                     ),
                     "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
                     "archived": None,
+                    "binding": self._row_binding(session_id),
                 }
             )
         return rows
@@ -7777,6 +7809,47 @@ class RelayServer:
         # Applied loudly: a silent override of an explicit request is the shape this whole
         # change exists to remove.
         override = self._profile_overrides_flag(identity, wanted_model)
+        # WHAT THE SESSION ACTUALLY IS, built ONCE for BOTH replies below (operator
+        # report, 2026-10-21). Only the prompt-ful reply used to carry it, while the
+        # PROMPTLESS reply — the one every desktop ``/new`` gets, since it sends no
+        # first prompt — omitted it, so the origin's create route read the missing
+        # ``team`` as ``binding.team = null`` and the sidebar drew no team badge for a
+        # session that WAS attached to a team here (receipt for 6105807f6241: body
+        # ``target: team lopdev``, reply ``team: null``). The binding is a fact of the
+        # create, not of the turn, so it rides whichever reply the create answers with.
+        # It lets the requester show the binding it asked for instead of guessing it
+        # from its own registries — a claim about a store that does not hold this
+        # session (the desktop route already makes that argument for its local half).
+        identity_blocks: dict[str, Any] = {
+            "agent": (
+                {
+                    "name": identity.agent_name,
+                    "id": identity.agent_id,
+                    "kind": identity.agent_kind,
+                    "digest": identity.agent_digest,
+                    # The honest half: a legacy row that is not an attachable persona
+                    # contributes its ROUTING here, and its instructions do not travel
+                    # into the session. Said, never implied.
+                    "instructions_applied": bool(attachment_agent),
+                    "detail": (
+                        ""
+                        if attachment_agent
+                        else (
+                            "this agent's instructions are not attachable (it is not a role or "
+                            "a specialist), so the session runs its own instructions on that "
+                            "agent's model"
+                        )
+                    ),
+                }
+                if identity.agent_name
+                else None
+            ),
+            "team": (
+                {"name": identity.team_name, "id": identity.team_id, "digest": identity.team_digest}
+                if identity.team_name
+                else None
+            ),
+        }
         if not prompt:
             if frame.get("images"):
                 # Images with no text are not a turn. Refused rather than silently
@@ -7833,6 +7906,7 @@ class RelayServer:
                         else _model_choice_refusal(frame.get("model"))
                     ),
                 },
+                **identity_blocks,
                 "record": self._row_for(session_id),
             }
 
@@ -7873,34 +7947,7 @@ class RelayServer:
             # asked for instead of guessing it from its own registries — a claim
             # about a store that does not hold this session (the desktop route already
             # makes that argument for its local half).
-            "agent": (
-                {
-                    "name": identity.agent_name,
-                    "id": identity.agent_id,
-                    "kind": identity.agent_kind,
-                    "digest": identity.agent_digest,
-                    # The honest half: a legacy row that is not an attachable persona
-                    # contributes its ROUTING here, and its instructions do not travel
-                    # into the session. Said, never implied.
-                    "instructions_applied": bool(attachment_agent),
-                    "detail": (
-                        ""
-                        if attachment_agent
-                        else (
-                            "this agent's instructions are not attachable (it is not a role or "
-                            "a specialist), so the session runs its own instructions on that "
-                            "agent's model"
-                        )
-                    ),
-                }
-                if identity.agent_name
-                else None
-            ),
-            "team": (
-                {"name": identity.team_name, "id": identity.team_id, "digest": identity.team_digest}
-                if identity.team_name
-                else None
-            ),
+            **identity_blocks,
             "record": self._row_for(session_id),
         }
 
