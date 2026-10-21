@@ -428,6 +428,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "fe606423a803c2075ceaf8b4c0ef4aa2aaaf0792",
+        "version": "1.3.0",
+        "instructions_sha256": "f2da4166c78a9f9aa246631ffef9a9b5e5a96e9e3574ef8f337f9c697696fde7",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": "default",
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
