@@ -4166,6 +4166,19 @@ class StreamEndEvent(BaseModel):
     #: request's model (after a sticky handoff or driver fallback the request
     #: can name A while B served the failure).
     attempted_selector: "ModelSpec | None" = None
+    #: Effective API selector of the attempt that produced THIS error end.
+    #: FAULT-ONLY, stamped by ``providers/failover.py`` on any end carrying
+    #: ``error``.
+    #:
+    #: The in-band twin of ``attempted_selector``, and it exists because the
+    #: other provenance carriers do not reach this frame: no exception is raised
+    #: (``clients.py`` composes a content-filter refusal onto the end event) and
+    #: ``StreamModelEvent`` is published only when the budget changed or the
+    #: credential is OAuth — never on an ordinary API-key hop. Without this
+    #: field an in-band refusal from a fallback was attributed to the SELECTED
+    #: model, which is the reported defect. ``None`` means UNKNOWN, and every
+    #: consumer then falls back to its previous behaviour rather than guessing.
+    failing_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):

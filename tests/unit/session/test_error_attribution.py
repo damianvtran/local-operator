@@ -195,20 +195,42 @@ async def test_a_failed_turn_journals_the_refusing_model_end_to_end(tmp_path):
 
 
 class _InBandRefusalStream:
-    """A client that dispatches on a fallback and ENDS the stream with a refusal.
+    """The real walk, with a client that ENDS the stream instead of raising.
 
-    This is how a real content filter arrives: ``clients.py`` composes the
-    refusal text on the END event rather than raising, so there is no exception
-    to carry provenance. The serving spec is only visible on
-    ``StreamModelEvent`` — which the failover republishes on every dispatch —
-    and reading the request's model instead is what reported the refusal
-    against the selection.
+    This is how a content filter actually arrives: ``clients.py`` composes the
+    refusal prose onto the END event, so there is no exception to carry
+    provenance. The client publishes NO ``StreamModelEvent`` either — that frame
+    is emitted only when the context budget changed or the credential is OAuth,
+    so an ordinary API-key hop produces none. Attribution therefore has to come
+    from the stamp the walk puts on the end event itself (agent review round 2:
+    the previous version of this test fabricated a ``StreamModelEvent`` no real
+    client emits, and passed for that reason alone).
     """
 
+    def __init__(self) -> None:
+        self.refusal = StreamEndEvent(stop_reason="refusal", error=REFUSAL)
+
     def __call__(self, request, signal):
+        routed = request.model_copy(
+            update={"model": ModelSpec(provider="openai", model_id="gpt-5")}
+        )
+        refusal = self.refusal
+
+        async def client_for(spec):
+            class _Client:
+                async def stream(self, request, api_key, oauth_access=None):
+                    yield refusal
+
+            return _Client()
+
         async def gen():
-            yield StreamModelEvent(model=ModelSpec(provider="openai", model_id="gpt-5"))
-            yield StreamEndEvent(stop_reason="refusal", error=REFUSAL)
+            async for event in stream_with_failover(
+                routed,
+                _Auth(),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 0, "fallbackChains": {"default": []}}},
+                client_for,
+            ):
+                yield event
 
         return gen()
 

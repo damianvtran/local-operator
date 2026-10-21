@@ -4256,16 +4256,20 @@ class AgentLoop:
                         # those are how real clients report a content filter
                         # (``clients.py`` composes the refusal text on exactly
                         # this frame). No exception exists to carry provenance,
-                        # so without this the session fell back to the SELECTED
-                        # model — the same misattribution, on the path that
-                        # produces most content refusals at all.
+                        # so the walk stamps the attempt's own selector here.
                         #
-                        # ``model`` is the serving spec: the walk republishes it
-                        # through ``StreamModelEvent`` on every dispatch
-                        # (including a fallback hop), and it is READ HERE rather
-                        # than ``request_model``, which still names the model the
-                        # request was BUILT from.
-                        failure_selector = f"{model.provider}/{model.model_id}"
+                        # READ THE STAMP, not ``model``: ``StreamModelEvent`` is
+                        # published only when the budget changed or the
+                        # credential is OAuth, so on an ordinary API-key hop
+                        # ``model`` is still the SELECTION — which is the defect
+                        # (agent review round 2). No stamp means UNKNOWN, and the
+                        # session then falls back to its old behaviour rather
+                        # than to a guess dressed as provenance.
+                        stamped_selector = getattr(event, "failing_selector", None)
+                        if stamped_selector is not None:
+                            failure_selector = (
+                                f"{stamped_selector.provider}/{stamped_selector.model_id}"
+                            )
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):
