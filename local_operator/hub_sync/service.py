@@ -3604,8 +3604,13 @@ def _materialize_published_skill(
                 except OSError:
                     same = False
                 if not same:
+                    # Publish's OWN pre-check, reached before the storage
+                    # chokepoint. Same fact there (an unowned copy holds the
+                    # alias), but here the user can also pick another name.
                     raise LinkError(
-                        "origin-conflict", "refusing to overwrite an unknown local skill"
+                        "origin-conflict",
+                        f"a skill named {alias!r} already exists on this machine outside "
+                        "the hub; publish under a different name, or move the local copy",
                     )
                 if SkillDocument.from_directory(destination).fingerprint != draft.fingerprint:
                     raise LinkError(
