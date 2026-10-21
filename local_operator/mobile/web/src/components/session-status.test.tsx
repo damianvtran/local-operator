@@ -256,7 +256,7 @@ describe("SessionStatus — the published spend object (PR-2)", () => {
 		expect(marker?.textContent).toBe(" included");
 	});
 
-	it("states an untracked session in plain words, never an implied $0", () => {
+	it("states an untracked session behind `cost detail`, never an implied $0", () => {
 		const { container } = render(
 			<SessionStatus
 				projection={projection({
@@ -270,14 +270,20 @@ describe("SessionStatus — the published spend object (PR-2)", () => {
 				})}
 			/>,
 		);
+		/* Zero total, so there is no spend figure to press; the disclosure is
+		   still reachable through a control that names the facts, and it is
+		   absent from the row until that control is pressed. */
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		expect(container.querySelector('[data-testid="session-status-spend"]')).toBeNull();
+		const detail = container.querySelector('[data-testid="session-status-cost-detail"]');
+		expect(detail?.tagName).toBe("BUTTON");
+		expect(detail?.textContent).toContain("cost detail");
+		fireEvent.click(detail as HTMLElement);
 		expect(
 			container
 				.querySelector('[data-testid="session-status-channels-untracked"]')
 				?.textContent?.trim(),
 		).toBe("channels not tracked");
-		/* A zero total has no spend figure to press, so there is no control — the
-		   facts stay visible instead of hiding behind a button that cannot exist. */
-		expect(container.querySelector('[data-testid="session-status-spend"]')).toBeNull();
 	});
 
 	it("keeps the untracked disclosure silent when nothing is missing (M-4)", () => {
@@ -355,12 +361,15 @@ describe("SessionStatus — the published spend object (PR-2)", () => {
 		expect(channels?.textContent).toContain("· +2 more");
 	});
 
-	it("shows no breakdown line at all without a published object", () => {
+	it("shows no breakdown line and no control without a published object", () => {
 		const { container } = render(<SessionStatus projection={projection()} />);
 		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
-		expect(container.querySelector('[data-testid="session-status-spend"]')?.textContent).toBe(
-			"$1.25",
-		);
+		const spend = container.querySelector('[data-testid="session-status-spend"]');
+		expect(spend?.textContent).toBe("$1.25");
+		/* A legacy daemon publishes no object, so there is nothing behind a
+		   control: the spend cell stays a plain SPAN, not a dead button. */
+		expect(spend?.tagName).toBe("SPAN");
+		expect(container.querySelector('[data-testid="session-status-cost-detail"]')).toBeNull();
 	});
 });
 
@@ -392,6 +401,8 @@ describe("SessionStatus — the spend drill-down (state, not telemetry)", () => 
 		const spend = container.querySelector('[data-testid="session-status-spend"]');
 		expect(spend?.tagName).toBe("BUTTON");
 		expect(spend?.getAttribute("aria-expanded")).toBe("false");
+		/* No dangling reference while the panel does not exist (R1-7). */
+		expect(spend?.getAttribute("aria-controls")).toBeNull();
 		expect(spend?.className).toContain("min-h-11");
 		/* The accessible name carries the figure the eye sees and what the press
 		   opens — the chevron is decoration, not the name. */
@@ -422,7 +433,7 @@ describe("SessionStatus — the spend drill-down (state, not telemetry)", () => 
 		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
 	});
 
-	it("collapses on a scroll anywhere in the transcript", () => {
+	it("ignores layout-driven scroll — tail-follow must not close the panel", () => {
 		const { container } = render(
 			<SessionStatus projection={projection({ spend_channels: populated() })} />,
 		);
@@ -430,11 +441,51 @@ describe("SessionStatus — the spend drill-down (state, not telemetry)", () => 
 		fireEvent.click(spend);
 		expect(container.querySelector('[data-testid="session-status-channels"]')).not.toBeNull();
 
-		/* Capture-phase on window: `scroll` does not bubble, and the transcript's
-		   scroller is a descendant. */
+		/* THE REGRESSION R1-1/U3/Q1: at the bottom of a long transcript the
+		   panel's own 61px insertion changes the scroll extent, the browser's
+		   tail-follow emits `scroll`, and a scroll listener closed the panel
+		   before it could be read. A layout-driven scroll is not the reader
+		   scrolling away, so it must not dismiss anything. */
+		const scroller = container.querySelector('[data-testid="session-status-channels"]');
+		fireEvent.scroll(scroller as Element);
 		fireEvent.scroll(window);
+		expect(container.querySelector('[data-testid="session-status-channels"]')).not.toBeNull();
+		expect(spend.getAttribute("aria-expanded")).toBe("true");
+		expect(spend.getAttribute("aria-controls")).toBe(
+			container.querySelector('[data-testid="session-status-channels"]')?.id,
+		);
+	});
+
+	it("collapses on a touch drag, the reader's own gesture", () => {
+		const { container } = render(
+			<SessionStatus projection={projection({ spend_channels: populated() })} />,
+		);
+		const spend = container.querySelector('[data-testid="session-status-spend"]') as HTMLElement;
+		fireEvent.click(spend);
+		fireEvent.touchMove(window);
 		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
 		expect(spend.getAttribute("aria-expanded")).toBe("false");
+	});
+
+	it("collapses on a wheel gesture, but not on a page key typed into the composer", () => {
+		const { container } = render(
+			<SessionStatus projection={projection({ spend_channels: populated() })} />,
+		);
+		const spend = container.querySelector('[data-testid="session-status-spend"]') as HTMLElement;
+		fireEvent.click(spend);
+		/* Typing in a text field is not a page-scroll intent even when the key
+		   is `End`; the listener excludes text entry before it considers keys. */
+		const field = document.createElement("input");
+		document.body.appendChild(field);
+		fireEvent.keyDown(field, { key: "End" });
+		expect(container.querySelector('[data-testid="session-status-channels"]')).not.toBeNull();
+
+		fireEvent.keyDown(window, { key: "PageDown" });
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		fireEvent.click(spend);
+		fireEvent.wheel(window);
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		field.remove();
 	});
 
 	it("qualifies a shared channel label with the row's model, then provider", () => {
@@ -483,5 +534,71 @@ describe("SessionStatus — the spend drill-down (state, not telemetry)", () => 
 		const spend = container.querySelector('[data-testid="session-status-spend"]');
 		expect(spend?.tagName).toBe("SPAN");
 		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+	});
+
+	it("keeps a zero-total breakdown behind `cost detail`, never on by default", () => {
+		/* R1-2/U1: a published breakdown with no figure to print — a zero total
+		   here — used to render its panel permanently because there was no spend
+		   figure to put the control on. The facts must stay reachable, but the
+		   default row is still one line. */
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					cumulative_parent_cost: null,
+					context_tokens: null,
+					spend_channels: {
+						version: 1,
+						tracked: true,
+						total_micro: 0,
+						knowledge: "exact",
+						rows: [{ channel: "image", amount_micro: 0, basis: ["estimated"] }],
+					},
+				})}
+			/>,
+		);
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		const detail = container.querySelector('[data-testid="session-status-cost-detail"]');
+		expect(detail?.tagName).toBe("BUTTON");
+		expect(detail?.className).toContain("min-h-11");
+		expect(detail?.getAttribute("aria-expanded")).toBe("false");
+		/* With no context either, the row contains only that control. */
+		expect(container.querySelector('[data-testid="session-status-context"]')).toBeNull();
+		expect(container.querySelector('[data-testid="session-status-spend"]')).toBeNull();
+		fireEvent.click(detail as HTMLElement);
+		expect(
+			container.querySelector('[data-testid="session-status-channel"]')?.textContent?.trim(),
+		).toBe("image $0.0000");
+	});
+
+	it("keeps an unpriceable breakdown behind `cost detail` too", () => {
+		/* The other no-figure shape: unknown knowledge with no billed tokens, so
+		   `publishedSpend` has no `$—` to print. Rows still exist and still need
+		   a labelled door. */
+		const { container } = render(
+			<SessionStatus
+				projection={projection({
+					cumulative_parent_cost: null,
+					spend_channels: {
+						version: 1,
+						tracked: true,
+						total_micro: 0,
+						knowledge: "unknown",
+						rows: [
+							{ channel: "tts", provider: "radient", amount_micro: null, basis: [] },
+						],
+					},
+				})}
+			/>,
+		);
+		expect(container.querySelector('[data-testid="session-status-channels"]')).toBeNull();
+		const detail = container.querySelector('[data-testid="session-status-cost-detail"]');
+		/* `cumulative_parent_cost: null` leaves context as the only other cell; the
+		   control sits on its own.
+		 */
+		expect(detail).not.toBeNull();
+		fireEvent.click(detail as HTMLElement);
+		expect(
+			container.querySelector('[data-testid="session-status-channel"]')?.textContent?.trim(),
+		).toBe("tts $—");
 	});
 });

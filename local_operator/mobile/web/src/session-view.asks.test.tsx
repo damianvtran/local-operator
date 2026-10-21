@@ -336,7 +336,9 @@ describe("SessionScreen header", () => {
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
-		const needs = screen.getByRole("button", { name: "approvals in this session" });
+		const needs = screen.getByRole("button", {
+			name: "needs you — approvals in this session",
+		});
 		expect(needs.textContent).toBe("needs you");
 	});
 });

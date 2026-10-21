@@ -17,6 +17,11 @@ WHAT EACH FRAME IS FOR:
   panel absent from the DOM (not hidden).
 * ``-menu`` — the ⋮ sheet: Pin session, Wide view and Approvals…, each stating
   its current value.
+* ``-operator-spend-long-*`` — the long-tail repro (R1-1/U3/Q1): at the
+  bottom of 60 entries, the panel stays open through 0/100/500/1000ms while
+  the browser tail-follows, then closes on a real touch drag.
+* ``-operator-spend-zero-*`` — a published breakdown with no spend figure:
+  one `cost detail` control in the row, the facts only after the tap.
 * ``-asks-header`` / ``-stacked-approval-header`` — the header at rest:
   back/title/menu, and `needs you` only where a gate actually blocks.
 
@@ -73,6 +78,30 @@ SPEND_PROBE = """
       .map((chip) => chip.textContent.trim()),
     untracked: text(document.querySelector('[data-testid="session-status-channels-untracked"]')),
     more: panel ? (panel.textContent.match(/\\u00b7 \\+\\d+ more/) || [null])[0] : null,
+    costDetail: (() => {
+      const detail = document.querySelector('[data-testid="session-status-cost-detail"]');
+      return detail
+        ? {
+            rect: rect(detail),
+            text: detail.textContent.trim(),
+            label: detail.getAttribute('aria-label'),
+            expanded: detail.getAttribute('aria-expanded'),
+          }
+        : null;
+    })(),
+    /* The transcript scroller's own position: the long-tail repro is about
+       what happens to this number while the panel is inserted. */
+    scroll: (() => {
+      const scroller = [...document.querySelectorAll('.lo-scroll')]
+        .find((el) => el.scrollHeight > el.clientHeight + 1);
+      return scroller
+        ? {
+            top: Math.round(scroller.scrollTop),
+            height: Math.round(scroller.scrollHeight),
+            client: Math.round(scroller.clientHeight),
+          }
+        : null;
+    })(),
     headerControls: [...document.querySelectorAll('header button')].map((button) => ({
       label: button.getAttribute('aria-label'),
       text: button.textContent.trim(),
@@ -99,10 +128,18 @@ MENU_PROBE = """
 })()
 """
 
-SPEND = 'document.querySelector(\'[data-testid="session-status-spend"]\')'
-MENU_TRIGGER = 'document.querySelector(\'header button[aria-label="session menu"]\')'
+SPEND = "document.querySelector('[data-testid=\"session-status-spend\"]')"
+MENU_TRIGGER = "document.querySelector('header button[aria-label=\"session menu\"]')"
 MENU_CLOSE = 'document.querySelector(\'[role="dialog"] button[aria-label="close sheet"]\')'
-ANY_DIALOG = 'Boolean(document.querySelector(\'[role="dialog"]\'))'
+ANY_DIALOG = "Boolean(document.querySelector('[role=\"dialog\"]'))"
+COST_DETAIL = "document.querySelector('[data-testid=\"session-status-cost-detail\"]')"
+SCROLL_TOP = """
+(() => {
+  const scroller = [...document.querySelectorAll('.lo-scroll')]
+    .find((el) => el.scrollHeight > el.clientHeight + 1);
+  return scroller ? Math.round(scroller.scrollTop) : -1;
+})()
+"""
 
 
 def probe(page: Page) -> dict[str, Any]:
@@ -190,6 +227,67 @@ def main() -> None:
             tap(page, MENU_CLOSE)
             time.sleep(0.3)
 
+            # THE LONG-TAIL REPRO (R1-1/U3/Q1). Reach the bottom with REAL
+            # touch drags, then open the panel and sample it while the browser
+            # is free to tail-follow/anchor the insertion. A programmatic
+            # `scroll` must not close it; only a reader gesture may.
+            page.goto(f"{base}/#/s/operator-spend-long")
+            time.sleep(1.5)
+            for _ in range(12):
+                was = page.js(SCROLL_TOP)
+                page.swipe(width // 2, height - 150, 500)
+                if page.js(SCROLL_TOP) == was:
+                    break
+            page.shot(outdir / f"{label}-{viewport}-operator-spend-long-collapsed.png")
+            long_before = probe(page)
+            tap(page, SPEND)
+            started = time.time()
+            long_samples = []
+            for target_ms in (0, 100, 500, 1000):
+                delay = target_ms / 1000 - (time.time() - started)
+                if delay > 0:
+                    time.sleep(delay)
+                long_samples.append({"ms": target_ms, "probe": json.loads(page.js(SPEND_PROBE))})
+            page.shot(outdir / f"{label}-{viewport}-operator-spend-long-expanded.png")
+            for sample in long_samples:
+                if not sample["probe"]["panelPresent"]:
+                    failures.append(f"{viewport}: long-tail panel vanished at {sample['ms']}ms")
+                if sample["probe"]["spendExpanded"] != "true":
+                    failures.append(
+                        f"{viewport}: long-tail aria-expanded at {sample['ms']}ms "
+                        f"is {sample['probe']['spendExpanded']!r}"
+                    )
+            # A REAL USER GESTURE still dismisses it (touchmove is the intent
+            # signal now, where a layout-driven `scroll` is not).
+            page.swipe(width // 2, height - 200, 320)
+            time.sleep(0.4)
+            long_after = probe(page)
+            page.shot(outdir / f"{label}-{viewport}-operator-spend-long-after-swipe.png")
+            if long_after["panelPresent"]:
+                failures.append(f"{viewport}: long-tail panel survived a user swipe")
+
+            # THE NO-FIGURE STATE (R1-2/U1): a zero total with a zero-amount
+            # row, and no context reading, so `cost detail` is the row's only
+            # content and the facts stay behind it.
+            page.goto(f"{base}/#/s/operator-spend-zero")
+            time.sleep(1.2)
+            page.shot(outdir / f"{label}-{viewport}-operator-spend-zero-collapsed.png")
+            zero = probe(page)
+            zero_open = zero
+            if zero["panelPresent"]:
+                failures.append(f"{viewport}: zero-state panel is on by default")
+            if not zero["costDetail"]:
+                failures.append(f"{viewport}: zero-state has no cost detail control")
+            else:
+                tap(page, COST_DETAIL)
+                time.sleep(0.35)
+                page.shot(outdir / f"{label}-{viewport}-operator-spend-zero-expanded.png")
+                zero_open = probe(page)
+                if not zero_open["panelPresent"]:
+                    failures.append(f"{viewport}: cost detail did not open the panel")
+                if zero_open["costDetail"] and zero_open["costDetail"]["expanded"] != "true":
+                    failures.append(f"{viewport}: cost detail aria-expanded stayed false")
+
             page.goto(f"{base}/#/s/asks")
             time.sleep(1.2)
             # The asks session opens its sheet by policy; the frame this script
@@ -212,6 +310,12 @@ def main() -> None:
                 "expanded": expanded,
                 "collapsed_again": collapsed,
                 "menu": menu,
+                "long": {
+                    "before": long_before,
+                    "samples": long_samples,
+                    "after_swipe": long_after,
+                },
+                "zero": {"collapsed": zero, "expanded": zero_open},
                 "asks_header": asks["headerControls"],
                 "stacked_approval_header": stacked["headerControls"],
             }
@@ -222,12 +326,20 @@ def main() -> None:
     for viewport, data in report.items():
         before = data["before"]
         expanded = data["expanded"]
+        long_presence = [
+            (sample["ms"], sample["probe"]["panelPresent"], sample["probe"]["scroll"])
+            for sample in data["long"]["samples"]
+        ]
         print(
             f"{viewport} spend={before['spendText']!r} label={before['spendLabel']!r} "
             f"spendRect={before['spend']} expandedRect={expanded['spend']} "
             f"panel={expanded['panel']} chips={expanded['chips']} "
             f"untracked={expanded['untracked']!r} more={expanded['more']!r} "
             f"menuRows={[(r['label'] or r['text'], r['pressed']) for r in data['menu']['rows']]} "
+            f"longPresence={long_presence} "
+            f"longAfterSwipePanel={data['long']['after_swipe']['panelPresent']} "
+            f"zeroPanel={data['zero']['collapsed']['panelPresent']} "
+            f"zeroDetail={bool(data['zero']['collapsed']['costDetail'])} "
             f"asksHeader={data['asks_header']} "
             f"blockedHeader={data['stacked_approval_header']}"
         )
