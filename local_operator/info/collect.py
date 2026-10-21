@@ -774,7 +774,23 @@ def _stored_lines(
         # runtime was SIGKILLed has no record, and the three fields stay
         # ``None``/""/``None`` so the table can print "unknown" instead of a
         # time nobody observed.
-        exit_record = journal.read_exit_record(root / "sessions" / session_id)
+        directory = root / "sessions" / session_id
+        exit_record = journal.read_exit_record(directory)
+        # THE RECORD MUST BELONG TO THE RUN THAT DIED (review round 1, MAJOR-1).
+        # A session can exit cleanly (run A leaves a record), be resumed, and have
+        # run B killed — and A's record is still on disk, naming A's pid and A's
+        # time. Surfacing it would report a clean ``idle-exit`` for a run nobody
+        # has an exit record for, which is the wrong-history direction this whole
+        # change exists to stop. The run record is written at every boot and
+        # removed only by that run's own clean exit, so a run key that DISAGREES
+        # with the exit record means the latest run never reported leaving:
+        # unknown, exactly like a session with no record at all.
+        if exit_record is not None:
+            run_record = journal.read_run_record(directory)
+            if run_record is not None and not run_record.covers_run(
+                exit_record.pid, exit_record.started_at
+            ):
+                exit_record = None
         lines.append(
             SessionLine(
                 pid=0,

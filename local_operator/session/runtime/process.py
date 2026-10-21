@@ -1236,7 +1236,12 @@ def _should_exit(handle: object, runtime: object) -> bool:
 
 
 async def _clean_exit(
-    handle: object, runtime: object, *, reason: str = "idle-exit", detail: str = ""
+    handle: object,
+    runtime: object,
+    *,
+    reason: str = "idle-exit",
+    detail: str = "",
+    requested: bool | None = None,
 ) -> None:
     """Dispose the quiescent session, then unpublish its owner record.
 
@@ -1273,6 +1278,15 @@ async def _clean_exit(
     saying it was already on its way out — the exact ambiguity this record
     exists to remove. It is best-effort and never raises, like every instrument
     here.
+
+    ``requested`` IS THE CALLER'S OWN VERDICT when it has one; ``None`` means
+    "ask the durable evidence" (``_deliberate_stop_covers``). The socket ``stop``
+    rung needs that override: the ladder deliberately stages its stop marker
+    AFTER the target's ack (``control._graceful_stop``), so a runtime reading the
+    marker at the instant it starts exiting races the write and reports
+    ``requested: false`` for a stop a client demonstrably asked for — measured
+    3/3 before this parameter existed. A signal keeps ``None``: its marker IS
+    staged before the signal, and an unattributed SIGTERM must stay False.
     """
     boot = getattr(runtime, "_boot_build", None)
     logger.info(
@@ -1282,7 +1296,12 @@ async def _clean_exit(
         boot.label() if boot is not None else "<unknown>",
     )
     _note_journal_exit(handle, reason)
-    _note_exit_record(handle, runtime, reason=reason, detail=detail)
+    _note_exit_record(handle, runtime, reason=reason, detail=detail, requested=requested)
+    # THE RUN RECORD GOES NOW, while this run still owns the lease (dispose
+    # releases it below). An absent run record and a written exit record are the
+    # pair that says "this session's latest run left through its own exit path";
+    # clearing first would let a kill before the write leave neither.
+    _clear_run_record(handle, runtime)
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -1500,21 +1519,46 @@ def _note_journal_exit(handle: object, cause: str) -> None:
         note(cause)
 
 
-def _note_exit_record(handle: object, runtime: object, *, reason: str, detail: str) -> None:
+def _run_identity(handle: object, runtime: object) -> "tuple[str, Path, int, float] | None":
+    """``(session_id, conversation_dir, pid, started_at)`` for THIS run, or ``None``.
+
+    ONE SPELLING of the run key, because three artifacts now have to agree about
+    it: the exit record (what happened), the run record it clears (which run was
+    the latest), and the boot-time run record the listing compares against. The
+    cheap ``getattr`` chain is the same one ``_note_exit_record`` always used.
+
+    ``None`` means this handle has no conversation to report about — an
+    in-process session, a reduced test double, a runtime whose transcript has no
+    directory. That guard is also what keeps the 40 ms exit-path timing tests
+    untouched: they run against handles with no ``_session`` at all.
+    """
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    record = getattr(runtime, "_record", None)
+    session_id = str(getattr(session, "session_id", "") or getattr(record, "session_id", "") or "")
+    if not session_id or directory is None:
+        return None
+    started_raw = getattr(record, "started_at", 0.0)
+    started_at = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+    return session_id, Path(directory), os.getpid(), started_at
+
+
+def _note_exit_record(
+    handle: object,
+    runtime: object,
+    *,
+    reason: str,
+    detail: str,
+    requested: bool | None = None,
+) -> None:
     """Write this run's durable exit record. Best-effort, never raises.
 
     THE SAME SHAPE AS ``_note_journal_exit``, one rung stronger: the journal is
     the statement about the TURN, this is the statement about the PROCESS, and
     it is the one that answers the question a ``stored`` row raises — when did it
     stop, and did anybody ask. ``journal.write_exit_record`` owns the artifact,
-    its staging and its schema; this function only collects the four facts the
+    its staging and its schema; this function only collects the facts the
     runtime itself holds and refuses to write a record it cannot qualify.
-
-    NO IDENTITY, NO RECORD. An in-process session, a reduced test handle, or a
-    runtime whose transcript has no directory has no conversation to report
-    about, and inventing one would put a stop row on a session that never had a
-    runtime. That guard is also what keeps the 40 ms exit-path timing tests
-    untouched: they run against handles with no ``_session`` at all.
 
     ``requested`` IS READ HERE rather than in the writer, because only this
     process holds the run key (its own pid and its record's start), and the
@@ -1522,32 +1566,92 @@ def _note_exit_record(handle: object, runtime: object, *, reason: str, detail: s
     the far side of. A marker naming a PREVIOUS run of the same session must not
     brand this departure as the user's own act — the wrong-verdict hole QA round
     1 found in the attribution path.
+
+    THE ``requested`` PARAMETER IS THE CALLER'S OWN VERDICT (review round 1,
+    BLOCKER). The socket ``stop`` rung asks the target to stop and stages its
+    marker only after the target's ack (argued in ``control._graceful_stop``), so
+    a runtime that reads the marker while starting its exit — the same tick —
+    finds nothing and reports ``requested: false`` for a stop a client
+    demonstrably requested. Measured 3/3 before this parameter existed. The
+    caller that knows (the amain trigger naming ``socket-stop``) states it; every
+    other path passes ``None`` and gets the durable-evidence answer, which is
+    what keeps an unattributed SIGTERM at False.
     """
     try:
         from local_operator.session.runtime import journal
 
-        session = getattr(handle, "_session", None)
-        directory = getattr(getattr(session, "_transcript", None), "directory", None)
-        record = getattr(runtime, "_record", None)
-        session_id = str(
-            getattr(session, "session_id", "") or getattr(record, "session_id", "") or ""
-        )
-        if not session_id or directory is None:
+        identity = _run_identity(handle, runtime)
+        if identity is None:
             return
-        started_raw = getattr(record, "started_at", 0.0)
-        started_at = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+        session_id, directory, _pid, started_at = identity
         boot = getattr(runtime, "_boot_build", None)
         journal.write_exit_record(
             session_id,
-            conversation_dir=Path(directory),
+            conversation_dir=directory,
+            pid=_pid,
             started_at=started_at,
             reason=reason,
             detail=detail,
-            requested=_deliberate_stop_covers(Path(directory), started_at),
+            requested=(
+                _deliberate_stop_covers(directory, started_at) if requested is None else requested
+            ),
             build=boot.label() if boot is not None else "",
         )
     except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
         logger.debug("session runtime: could not write its exit record", exc_info=True)
+
+
+def _note_run_start(handle: object, runtime: object) -> None:
+    """Announce this run in the conversation directory. Best-effort, never raises.
+
+    Called the moment the run has an identity (``RuntimeServer`` constructed) and
+    before the serving plane can make the process addressable. It is the boot half
+    of the pair the listing reads: a stored row is only allowed to show the exit
+    record when THIS marker names the same run (see ``info.collect._stored_lines``),
+    so a run that was killed instead of exiting leaves its marker behind and the
+    row reads unknown rather than borrowing the previous run's departure.
+
+    The bound is the window between process entry and ``RuntimeServer``'s
+    construction: a kill there leaves no marker for that attempt, so a listing in
+    that instant can still show an older record. Nothing above that line holds the
+    run's ``started_at``, so writing earlier is not possible.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        identity = _run_identity(handle, runtime)
+        if identity is None:
+            return
+        session_id, directory, pid, started_at = identity
+        journal.write_run_record(
+            session_id,
+            conversation_dir=directory,
+            pid=pid,
+            started_at=started_at,
+        )
+    except Exception:  # noqa: BLE001 — boot must not fail over an instrument
+        logger.debug("session runtime: could not write its run record", exc_info=True)
+
+
+def _clear_run_record(handle: object, runtime: object) -> None:
+    """Remove THIS run's boot-time run record on a clean exit. Best-effort.
+
+    Called BETWEEN the exit record's write and the dispose, while the lease is
+    still this process's: the pair "record written, run record gone" is what a
+    later listing reads as a completed departure, and a process killed before the
+    unlink still matches the record's run key (same pid, same start), so it is
+    never mistaken for an unexplained death.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        identity = _run_identity(handle, runtime)
+        if identity is None:
+            return
+        _session_id, directory, pid, started_at = identity
+        journal.clear_run_record(directory, pid=pid, started_at=started_at)
+    except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
+        logger.debug("session runtime: could not clear its run record", exc_info=True)
 
 
 def _deliberate_stop_covers(directory: Path, started_at: float) -> bool:
@@ -5232,6 +5336,18 @@ async def amain(operator_cap: bytes | None = None) -> int:
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
     runtime = RuntimeServer(handle, kind=RUNTIME_RECORD_KIND, operator_cap=operator_cap)
+    # THE RUN KEY AT ITS OTHER END, announced the moment the run has an identity
+    # and before the serving plane can make this process addressable. Removed only
+    # by this run's own clean exit (``_clear_run_record``). A later listing
+    # compares it with the exit record and treats a different key as "a run died
+    # without one", which is what keeps a killed run from wearing its
+    # predecessor's time and reason (review round 1, MAJOR-1).
+    #
+    # ITS WINDOW IS BOUNDED AND STATED: a kill between process entry and this line
+    # leaves no run record for that attempt, so a listing in that instant can still
+    # show an older departure. It cannot be earlier than this, because the run key
+    # is the record's own ``started_at`` and nothing above ``RuntimeServer`` has it.
+    _note_run_start(handle, runtime)
     # EVERY WAY THIS RUNTIME CAN BE ASKED TO LEAVE IS ARMED HERE, BEFORE THE
     # SERVING PLANE CAN MAKE IT ADDRESSABLE. That order is the fix for a
     # measured race, not tidiness.
@@ -5567,12 +5683,25 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # ``reason`` is the trigger's own token (``SIGTERM``/``SIGINT``/
         # ``socket-stop``); ``detail`` is the receipt's sentence, which is the
         # only human explanation this path computed.
+        #
+        # ``requested`` FOR THE SOCKET RUNG IS THE CALLER'S FACT, not the marker's
+        # (review round 1, BLOCKER): ``control._graceful_stop`` stages its marker
+        # after the ack this handler is answering, so the durable evidence is not
+        # on disk yet when the exit starts. A client asked this runtime to stop;
+        # saying so here is the truth, and every other trigger keeps ``None`` so
+        # an unattributed SIGTERM stays False.
+        why = trigger.get("why") or "unknown"
         _note_exit_record(
             handle,
             runtime,
-            reason=trigger.get("why") or "unknown",
+            reason=why,
             detail=described,
+            requested=True if why == "socket-stop" else None,
         )
+        # The run record goes with the exit record on this path too: absent run
+        # record + written exit record is the pair a listing reads as a completed
+        # departure, and a SIGTERM/socket stop is one.
+        _clear_run_record(handle, runtime)
         try:
             handle._deny_pending_gates()
         except Exception:  # noqa: BLE001 — shutdown must proceed

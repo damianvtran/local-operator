@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -643,12 +644,19 @@ class ExitRecord:
         pass, and a torn or future row means "no evidence", never an exception.
         A record with no ``reason`` is refused rather than read as an empty
         reason — the reason is the one field the file exists for.
+
+        NON-FINITE AND NON-POSITIVE STAMPS ARE REFUSED, not tolerated (review
+        round 1, minor): the listing renders an age from ``at``, and ``inf``
+        renders as a fabricated ``20747d`` while a zero renders a departure before
+        the epoch. ``int('inf')``-typed payloads raise ``OverflowError``, which is
+        caught here — a numeric field a reader cannot use is the same answer as a
+        missing one, and neither may escape as an exception on a listing path.
         """
         if not isinstance(data, dict):
             return None
         try:
             version = int(data.get("v") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         if version != EXIT_RECORD_VERSION:
             return None
@@ -656,7 +664,14 @@ class ExitRecord:
             pid = int(data["pid"])
             started_at = float(data.get("started_at") or 0.0)
             at = float(data.get("at") or 0.0)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(started_at) or not math.isfinite(at):
+            return None
+        # A RUN HAS A POSITIVE PID AND A REAL DEPARTURE TIME; ``started_at`` may be
+        # 0.0 only where the writer had no record to read it from, which
+        # ``covers_run`` treats as "no run key" rather than as 1970.
+        if pid <= 0 or at <= 0 or started_at < 0:
             return None
         reason = str(data.get("reason") or "")
         if not reason:
@@ -698,13 +713,22 @@ class ExitRecord:
         The same run-key rule every other durable artifact applies, and for the
         same reason: a session can exit cleanly and be resumed, and the record of
         that PREVIOUS departure must not explain a later, unexplained death.
+
+        THE PID-ONLY BRANCH IS DELIBERATE AND ITS BOUND IS STATED (review round
+        1, nit). When either side has no start stamp — a writer whose record
+        could not be read (``0.0``), or a reader classifying a boot record with
+        no start — the pid match is all the evidence there is. It is accepted
+        rather than refused because the only caller that can produce that shape
+        is a reduced host, and refusing would delete an explanation on no
+        evidence (the wrong-verdict direction this module forbids elsewhere).
+        The pid is recyclable, so the bound is: on such a host a same-pid
+        stranger could in principle satisfy this check; every path that HAS a
+        start stamp — every real runtime — is compared within
+        ``EXIT_RUN_KEY_TOLERANCE_S``.
         """
         if int(pid) != self.pid:
             return False
         if not started_at:
-            # No run key on the reader's side is no evidence to refuse on — the
-            # pid match is what is left, and refusing there would delete an
-            # explanation rather than protect one.
             return True
         if not self.started_at:
             return True
@@ -801,14 +825,205 @@ def read_exit_record(conversation_dir: Path | None) -> "ExitRecord | None":
     shows, never over the whole store. A malformed file is ``None`` (see
     ``ExitRecord.from_json``), so an unreadable artifact degrades to "unknown"
     rather than to a failed listing.
+
+    THE DIRECTORY IS THE AUTHORITY ON WHICH SESSION THIS IS (review round 1,
+    nit): a record whose own ``session_id`` disagrees with the directory it sits
+    in describes some other conversation — a hand-copied file, a torn write from
+    a tool that renamed a directory — and its time must not be attached to this
+    row. A mismatch is refused as no evidence.
     """
     if conversation_dir is None:
         return None
+    directory = Path(conversation_dir)
     try:
-        data = json.loads(exit_record_path(Path(conversation_dir)).read_text())
+        data = json.loads(exit_record_path(directory).read_text())
     except (OSError, ValueError):
         return None
-    return ExitRecord.from_json(data)
+    record = ExitRecord.from_json(data)
+    if record is None:
+        return None
+    if record.session_id and record.session_id != directory.name:
+        return None
+    return record
+
+
+# ---------------------------------------------------------------------------
+# The run record
+# ---------------------------------------------------------------------------
+
+#: WHICH RUN THIS SESSION'S LAST DEPARTURE BELONGS TO — written at boot, removed
+#: by that run's own clean exit.
+#:
+#: WHY A SECOND ARTIFACT, when the exit record already carries ``pid`` and
+#: ``started_at``: a stored row has to be able to tell "the exit record on disk
+#: IS the last thing that happened here" from "an earlier run exited cleanly and
+#: the one after it was killed". The listing has no record of the dead run at all
+#: — its record file was reaped — so without a statement about the LATEST run it
+#: would borrow the previous departure's time and reason, which is the
+#: wrong-history defect review round 1 measured: idle-exit run A, resume, SIGKILL
+#: run B, and the row still reports A's ``idle-exit`` at A's time.
+#:
+#: The boot record's asymmetry is the same shape, one namespace over, but
+#: ``run/host`` is pid-keyed and PRUNED — a later boot removes a dead pid's
+#: record, so it cannot answer a question asked days later. This one lives in the
+#: conversation directory, is overwritten by the next boot (so it always names
+#: the latest run), and is removed only by that run's own clean exit.
+#:
+#: ABSENT IS "NO RUN TO COMPARE" and is what a session that exited cleanly looks
+#: like; PRESENT with a key that differs from the exit record's is a death nobody
+#: has an exit record for, and the listing reads it as unknown.
+RUN_RECORD_NAME = "runtime-run.json"
+RUN_RECORD_KIND = "runtime-run"
+RUN_RECORD_VERSION = 1
+
+
+def run_record_path(conversation_dir: Path) -> Path:
+    """Where one conversation's run record lives. A resolver: never creates."""
+    return Path(conversation_dir) / RUN_RECORD_NAME
+
+
+@dataclass
+class RunRecord:
+    """The latest run of this session: pid, start, and when it was announced.
+
+    Deliberately smaller than a boot record: it answers exactly one question
+    ("which run is the newest here") and is compared, not narrated.
+    """
+
+    session_id: str
+    pid: int
+    started_at: float
+    at: float = field(default_factory=_now)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "v": RUN_RECORD_VERSION,
+            "kind": RUN_RECORD_KIND,
+            "session_id": self.session_id,
+            "pid": self.pid,
+            "started_at": self.started_at,
+            "at": self.at,
+        }
+
+    @classmethod
+    def from_json(cls, data: Any) -> "RunRecord | None":
+        """A stored row, or ``None`` for anything that cannot identify a run."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            if int(data.get("v") or 0) != RUN_RECORD_VERSION:
+                return None
+            pid = int(data["pid"])
+            started_at = float(data.get("started_at") or 0.0)
+            at = float(data.get("at") or 0.0)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(started_at) or not math.isfinite(at):
+            return None
+        if pid <= 0 or started_at < 0:
+            return None
+        return cls(
+            session_id=str(data.get("session_id") or ""),
+            pid=pid,
+            started_at=started_at,
+            at=at,
+        )
+
+    def covers_run(self, pid: int, started_at: float) -> bool:
+        """Whether this row names the run ``(pid, started_at)``.
+
+        The pid-only branch is the same documented bound ``ExitRecord.covers_run``
+        carries: a missing start stamp on either side leaves the pid as the only
+        evidence, and refusing there would delete an explanation rather than
+        protect one.
+        """
+        if int(pid) != self.pid:
+            return False
+        if not started_at or not self.started_at:
+            return True
+        return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
+
+
+def write_run_record(
+    session_id: str,
+    *,
+    conversation_dir: Path | None,
+    pid: int | None = None,
+    started_at: float = 0.0,
+) -> Path | None:
+    """Publish this run's run record at boot. Returns where it landed, or ``None``.
+
+    NEVER RAISES, on the same rule as the boot record: a runtime that cannot
+    write its own account must still run. The write is ``registry._staged_write``
+    so a concurrent listing sees the old row or the new one, and the directory is
+    not created (a runtime with no session directory has nothing to report).
+    """
+    if conversation_dir is None:
+        return None
+    directory = Path(conversation_dir)
+    try:
+        if not directory.is_dir():
+            return None
+        record = RunRecord(
+            session_id=str(session_id),
+            pid=os.getpid() if pid is None else int(pid),
+            started_at=float(started_at or 0.0),
+        )
+        target = run_record_path(directory)
+        registry._staged_write(target, record.to_json(), prefix=f".{RUN_RECORD_NAME}.")
+        return target
+    except Exception:  # noqa: BLE001 — boot must not fail over an instrument
+        logger.debug("session runtime: could not write its run record", exc_info=True)
+        return None
+
+
+def read_run_record(conversation_dir: Path | None) -> "RunRecord | None":
+    """The latest run this session announced, or ``None`` when none is on disk.
+
+    Tolerant and one small read, exactly like ``read_exit_record``. The
+    directory's name is the authority on the session, so a row naming another
+    conversation is refused.
+    """
+    if conversation_dir is None:
+        return None
+    directory = Path(conversation_dir)
+    try:
+        data = json.loads(run_record_path(directory).read_text())
+    except (OSError, ValueError):
+        return None
+    record = RunRecord.from_json(data)
+    if record is None:
+        return None
+    if record.session_id and record.session_id != directory.name:
+        return None
+    return record
+
+
+def clear_run_record(
+    conversation_dir: Path | None, *, pid: int | None = None, started_at: float = 0.0
+) -> None:
+    """Remove THIS run's run record on a clean exit. Best-effort.
+
+    ONLY ITS OWN, compared by run key: this is called before the dispose releases
+    the lease, so a successor cannot normally exist yet, but a reduced host
+    without a lease could race one — and deleting a successor's marker would make
+    its eventual death read as a clean exit.
+
+    Unlink rather than a write: an absent file is the state a clean exit means,
+    and it leaves nothing for a later reader to misread as a live run.
+    """
+    if conversation_dir is None:
+        return
+    directory = Path(conversation_dir)
+    try:
+        record = read_run_record(directory)
+        if record is None:
+            return
+        if not record.covers_run(os.getpid() if pid is None else int(pid), started_at):
+            return
+        run_record_path(directory).unlink()
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

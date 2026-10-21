@@ -407,6 +407,83 @@ def test_a_stored_row_without_a_record_reports_unknown(monkeypatch: Any, tmp_pat
     assert stored.stop_requested is None
 
 
+def test_a_stored_row_wears_no_previous_runs_exit_record(monkeypatch: Any, tmp_path: Path) -> None:
+    """THE RESUME→KILL CASE (review round 1, MAJOR-1).
+
+    Run A exits cleanly and leaves ``runtime-exit.json`` naming A. The session is
+    resumed and run B is SIGKILLed. The row is stored again, and A's record is
+    still on disk — reporting it would tell the operator this session idled out
+    at A's time, which is a departure B never made. The run record written at B's
+    boot is what distinguishes them: a run key that disagrees with the exit
+    record means the latest run reported no exit, so the row reads unknown.
+    """
+    from local_operator.session.runtime import journal
+
+    _stored(monkeypatch, [_StoredRow("dead00000003", "resumed then killed", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000003"
+    directory.mkdir(parents=True)
+    journal.write_exit_record(
+        "dead00000003",
+        conversation_dir=directory,
+        pid=111,
+        started_at=100.0,
+        reason="idle-exit",
+        detail="no work, no viewer, no wake within 90s",
+    )
+    # The later, killed run announced itself at boot and never reported leaving.
+    journal.write_run_record("dead00000003", conversation_dir=directory, pid=222, started_at=900.0)
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=2000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stopped_at_s is None
+    assert stored.stop_reason == ""
+    assert stored.stop_requested is None
+
+
+def test_the_run_record_of_the_same_run_does_not_hide_its_exit_record(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The pre-clear window is not a false negative.
+
+    ``_clean_exit`` writes the exit record and then removes the run record, while
+    the lease still belongs to this process. A listing landing between the two
+    reads both rows with the SAME run key, which is this run — so the record is
+    still the truth about the last departure.
+    """
+    from local_operator.session.runtime import journal
+
+    _stored(monkeypatch, [_StoredRow("dead00000004", "just left", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000004"
+    directory.mkdir(parents=True)
+    journal.write_exit_record(
+        "dead00000004",
+        conversation_dir=directory,
+        pid=333,
+        started_at=300.0,
+        reason="idle-exit",
+    )
+    journal.write_run_record("dead00000004", conversation_dir=directory, pid=333, started_at=300.0)
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=2000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stop_reason == "idle-exit"
+    assert stored.stopped_at_s is not None
+
+
 def test_a_live_row_never_wears_a_previous_lifes_exit_record(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
