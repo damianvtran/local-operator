@@ -2239,6 +2239,19 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: frame old readers already accept.
     cut_off: str = ""
     cut_off_cause: str = ""
+    #: WHICH model produced ``error``, as ``provider/model``, and the selector
+    #: the request started from when the failure came from a DIFFERENT target.
+    #:
+    #: The failover stamps this on the ``ProviderError`` it raises; the loop
+    #: copies it here. Without it the REPORTING layer could only read the
+    #: session's selected model, which is how an OpenAI ``cyber_policy``
+    #: refusal reached the operator attributed to Anthropic — a provider the
+    #: turn had already failed over FROM and never reached. Additive with a
+    #: ``""`` default: ``AgentEvent`` is ``extra="allow"``, so an old viewer
+    #: keeps them as extras and an old runtime's event simply carries no
+    #: attribution (the same story ``cut_off`` tells above).
+    failing_model: str = ""
+    failover_from: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
@@ -4165,6 +4178,19 @@ class StreamEndEvent(BaseModel):
     #: request's model (after a sticky handoff or driver fallback the request
     #: can name A while B served the failure).
     attempted_selector: "ModelSpec | None" = None
+    #: Effective API selector of the attempt that produced THIS error end.
+    #: FAULT-ONLY, stamped by ``providers/failover.py`` on any end carrying
+    #: ``error``.
+    #:
+    #: The in-band twin of ``attempted_selector``, and it exists because the
+    #: other provenance carriers do not reach this frame: no exception is raised
+    #: (``clients.py`` composes a content-filter refusal onto the end event) and
+    #: ``StreamModelEvent`` is published only when the budget changed or the
+    #: credential is OAuth — never on an ordinary API-key hop. Without this
+    #: field an in-band refusal from a fallback was attributed to the SELECTED
+    #: model, which is the reported defect. ``None`` means UNKNOWN, and every
+    #: consumer then falls back to its previous behaviour rather than guessing.
+    failing_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):
