@@ -29,6 +29,8 @@ classifies it by status and code rather than by prose.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,7 +47,27 @@ from local_operator.server.sidebar_layout import (
     write_layout,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["Desktop preferences"], dependencies=[Depends(require_desktop)])
+
+
+def write_refusal(config_dir: Path) -> str:
+    """The client's sentence for a save that did not happen.
+
+    THE LOG RECORD IS THE DELIVERABLE, not this sentence: the route logs the
+    real ``OSError`` with its traceback (``_store_refusal``'s rule in
+    ``desktop_sessions``), because a store error names absolute file paths and
+    a temp-file name - facts about this machine, not a user-facing message.
+    What the client paints is vetted and stable, and names the ONE thing the
+    operator can act on: the config root the preference lives in. Retrying is
+    not offered as the remedy here because a failed replace is a mode, volume
+    or mount problem, not contention.
+    """
+    return (
+        "The sidebar layout could not be saved. Retrying will not help; "
+        f"check {config_dir} and the disk it is on."
+    )
 
 
 class SidebarLayoutBody(Input):
@@ -81,16 +103,25 @@ async def put_sidebar_layout(
 
     The answer is the STORED record (never the request echoed back), so a
     client that sent a valid subset sees the same normalised shape on the next
-    read. An ``OSError`` is a 500: the preference was not saved, and the client
-    must say so rather than pretend.
+    read. A ``GET`` answer may be sent back unchanged: the body accepts the
+    optional ``version`` it carries and the store writes its own (agent review
+    round 1, R1-3).
+
+    An ``OSError`` is a 500: the preference was not saved, and the client must
+    say so rather than pretend. The route logs the real error where it is
+    still live and answers with :func:`write_refusal`'s sentence - never the
+    exception text, which names this machine's absolute paths (agent review
+    round 1, R1-2).
     """
+    config_dir = config_manager.config_dir
     try:
-        stored = write_layout(config_manager.config_dir, body.layout.model_dump())
-    except OSError as error:
+        stored = write_layout(config_dir, body.layout.model_dump())
+    except OSError:
+        logger.exception("sidebar layout: could not write under %s", config_dir)
         raise HTTPException(
             500,
-            _wd.desktop_refusal(error=f"The sidebar layout could not be saved: {error}").envelope(
+            _wd.desktop_refusal(error=write_refusal(config_dir)).envelope(
                 code="sidebar_layout_write_failed"
             ),
-        ) from error
+        ) from None
     return reply({"layout": stored})

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -144,6 +145,33 @@ def test_an_unreadable_file_degrades_to_the_defaults(tmp_path: Path) -> None:
 def test_a_write_does_not_leave_a_temporary_file_behind(tmp_path: Path) -> None:
     write_layout(tmp_path, {"visible": ["aida"], "more": []})
     assert sorted(path.name for path in tmp_path.iterdir()) == [SIDEBAR_LAYOUT_FILE]
+
+
+def test_a_failed_replace_removes_the_temporary_file(tmp_path: Path, monkeypatch) -> None:
+    """The cleanup arm is the one that matters, and only a failure reaches it.
+
+    The success test above cannot exercise ``write_layout``'s
+    ``except BaseException: os.unlink`` branch. A surviving
+    ``.sidebar-layout.json.*.tmp`` is litter in the config root and a file a
+    later scan could mistake for state, so the branch is pinned directly
+    (agent review round 1, R1-5).
+    """
+
+    def refuse(_source: str, _target: Path) -> None:
+        raise OSError("replace refused")
+
+    monkeypatch.setattr("local_operator.server.sidebar_layout.os.replace", refuse)
+    with pytest.raises(OSError):
+        write_layout(tmp_path, {"visible": ["aida"], "more": []})
+    assert sorted(tmp_path.iterdir()) == []
+
+
+def test_the_store_refuses_a_version_it_does_not_write(tmp_path: Path) -> None:
+    """An echoed GET version is accepted; a future one is refused, not ignored."""
+    with pytest.raises(ValidationError):
+        write_layout(tmp_path, {"version": 2, "visible": ["aida"], "more": []})
+    stored = write_layout(tmp_path, {"version": 1, "visible": ["aida"], "more": []})
+    assert stored == {"version": 1, "visible": ["aida"], "more": []}
 
 
 def test_an_invalid_layout_is_never_persisted(tmp_path: Path) -> None:
@@ -267,22 +295,76 @@ async def test_a_missing_region_is_a_422(desktop) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_write_is_a_500_with_its_code(desktop, monkeypatch) -> None:
-    """A save the user was told succeeded and did not is worse than an error."""
+async def test_the_read_answer_can_be_sent_back_as_the_write_body(desktop) -> None:
+    """A read-modify-write client round-trips the document it was handed.
+
+    ``GET`` answers ``{version, visible, more}``; ``PUT`` used to refuse that
+    exact object because ``version`` was an unknown key, so the route's own
+    answer was invalid input (agent review round 1, R1-3). The echoed version
+    is validated and never stored from the body.
+    """
+    client, _root = desktop
+    read = await client.get("/v1/desktop/sidebar-layout")
+    assert read.status_code == 200, read.text
+    layout = read.json()["result"]["layout"]
+    assert layout["version"] == 1
+    written = await client.put("/v1/desktop/sidebar-layout", json={"layout": layout})
+    assert written.status_code == 200, written.text
+    assert written.json()["result"]["layout"] == layout
+    assert (await client.get("/v1/desktop/sidebar-layout")).json()["result"]["layout"] == layout
+
+
+@pytest.mark.asyncio
+async def test_a_future_version_in_the_body_is_a_422(desktop) -> None:
+    """Accepting the read answer must not become accepting any schema."""
+    client, _root = desktop
+    body = {"layout": {"version": 2, "visible": ["aida"], "more": []}}
+    assert (await client.put("/v1/desktop/sidebar-layout", json=body)).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_is_a_500_with_a_vetted_sentence(desktop) -> None:
+    """A save the user was told succeeded and did not is worse than an error.
+
+    The failure is REAL — a directory sits where the file belongs, so
+    ``os.replace`` raises — which is what makes the cleanup assertion
+    meaningful: the staged temp file must be gone, and the answer must be the
+    route's vetted sentence naming the config root, never the exception text
+    (agent review round 1, R1-2/R1-5).
+    """
     client, root = desktop
-
-    def refuse(_config_dir: Path, _layout: dict) -> dict:
-        raise OSError("No space left on device")
-
-    monkeypatch.setattr(desktop_preferences, "write_layout", refuse)
+    target = root / SIDEBAR_LAYOUT_FILE
+    target.mkdir()
     response = await client.put(
         "/v1/desktop/sidebar-layout", json={"layout": {"visible": ["aida"], "more": []}}
     )
     assert response.status_code == 500, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "sidebar_layout_write_failed"
-    assert "No space left on device" in detail["text"]
-    assert not (root / SIDEBAR_LAYOUT_FILE).exists()
+    assert detail["text"] == desktop_preferences.write_refusal(root)
+    assert str(root) in detail["text"]
+    assert "Errno" not in detail["text"]
+    assert target.is_dir()
+    assert not [path for path in root.iterdir() if path.name.endswith(".tmp")]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_logs_the_real_error(desktop, monkeypatch, caplog) -> None:
+    """The client's copy never carries the exception; the log must (R1-2)."""
+    client, _root = desktop
+
+    def refuse(_config_dir: Path, _layout: dict[str, Any]) -> dict[str, Any]:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(desktop_preferences, "write_layout", refuse)
+    with caplog.at_level("ERROR", logger="local_operator.server.routes.desktop_preferences"):
+        response = await client.put(
+            "/v1/desktop/sidebar-layout", json={"layout": {"visible": ["aida"], "more": []}}
+        )
+    assert response.status_code == 500, response.text
+    assert "No space left on device" not in response.json()["detail"]["text"]
+    assert "No space left on device" in caplog.text
+    assert any(record.exc_info for record in caplog.records if record.levelname == "ERROR")
 
 
 # ---------------------------------------------------------------------------
