@@ -15,6 +15,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,33 @@ from local_operator.memory_inspect import (
 
 SENSITIVE_TITLE = "Card number 4111 1111 1111 1111"
 SENSITIVE_BODY = "Backup credentials: SSN 123-45-6789"
+
+#: Serialises the module-level stamp below; the store's rows are inserted from
+#: whichever thread the test draws, and the counter is shared across all of them.
+_STAMP_LOCK = threading.Lock()
+_last_stamp_ms = 0
+
+
+def _strict_ms() -> int:
+    """A strictly increasing millisecond stamp for the ops this module hand-builds.
+
+    ``ops`` carries ``UNIQUE(origin,seq)`` and every legacy row seeded here claims
+    the same origin (``legacy-device``), so two rows minted inside one millisecond
+    collide on the production invariant. Raw ``int(time.time() * 1000)`` does
+    exactly that on a fast runner: consecutive inserts complete in the same
+    millisecond, and the second raises ``sqlite3.IntegrityError``. The clock alone
+    cannot be the source of a sequence; it only SEEDS one.
+
+    ``max(clock, last + 1)`` is the idiom the store itself uses for its persisted
+    ``clock`` (``memory.py``, ``put``/``forget``), and the counter half is what an
+    HLC does when the wall clock does not advance: the value stays time-shaped (a
+    legacy row's seq really is a clock reading on the device that wrote it) while
+    never repeating.
+    """
+    global _last_stamp_ms
+    with _STAMP_LOCK:
+        _last_stamp_ms = max(int(time.time() * 1000), _last_stamp_ms + 1)
+        return _last_stamp_ms
 
 
 @pytest.fixture
@@ -102,8 +130,8 @@ def _seed_legacy_row(
         "op_id": op_id,
         "entity_id": entity,
         "origin_device": "legacy-device",
-        "seq": int(time.time() * 1000),
-        "hlc": [int(time.time() * 1000), 0, "legacy-device"],
+        "seq": _strict_ms(),
+        "hlc": [_strict_ms(), 0, "legacy-device"],
         "parents": [],
         "kind": "put",
         "scope": scope,
@@ -177,8 +205,10 @@ def _apply_imported_row(
                 "op_id": op_id,
                 "entity_id": entity_id,
                 "origin_device": origin,
+                # Left at 1: ``apply_ops(contiguous=True)`` requires exactly
+                # ``max(seq)+1`` for the origin, and every call here uses a fresh one.
                 "seq": 1,
-                "hlc": [int(time.time() * 1000), 0, origin],
+                "hlc": [_strict_ms(), 0, origin],
                 "parents": [],
                 "kind": "put",
                 "scope": scope,
