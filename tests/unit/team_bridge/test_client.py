@@ -990,3 +990,32 @@ async def test_a_resume_without_a_consent_echo_commits_nothing(tmp_path: Path):
     from local_operator.team_bridge.store import Store
 
     assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_conversation_react_percent_encodes_and_uses_delete_query():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return _ok({"message_id": "bcmsg_abc12345", "reactions": []})
+
+    client = _make_client(handler)
+    longest = "🧑🏻\u200d❤️\u200d💋\u200d🧑🏼"
+    await client.conversation_react(
+        "bcv_abc12345",
+        "bcmsg_abc12345",
+        longest,
+        active=True,
+        tenant_id="tnt_1",
+        actor_endpoint_id="bep_1",
+    )
+    assert seen[0].method == "PUT"
+    assert seen[0].url.path.endswith("/reactions/" + longest)
+    assert b"%F0" in seen[0].url.raw_path
+    assert json.loads(seen[0].content) == {"tenant_id": "tnt_1", "actor_endpoint_id": "bep_1"}
+    await client.conversation_react(
+        "bcv_abc12345", "bcmsg_abc12345", "👍", active=False, tenant_id="tnt_1"
+    )
+    assert seen[1].method == "DELETE"
+    assert seen[1].url.params["tenant_id"] == "tnt_1"
+    assert not seen[1].content
