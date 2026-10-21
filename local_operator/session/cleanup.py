@@ -241,6 +241,17 @@ STORE_MARKER_NAME = ".local-operator-store"
 #: question after "why": who did it.
 CLEANUP_LOG_NAME = ".cleanup-log.jsonl"
 
+#: Where a committed mesh handoff parks the source directory until it is deleted
+#: (``<config>/network/handed-away/``), and how long an entry may sit there before
+#: :func:`sweep_handed_away` removes it.
+#:
+#: OUTSIDE ``sessions/`` ON PURPOSE: the rename out of the store is the commit point
+#: of a move (``docs/design/mesh-move-outcome.md`` clause 1), so the tree it leaves
+#: behind must be invisible to every scanner, listing and resume — while still being
+#: recoverable by hand for a day if the deletion itself failed.
+HANDED_AWAY_DIRNAME = "handed-away"
+HANDED_AWAY_MAX_AGE_S = 24 * 3600.0
+
 #: The operator's VALUE HOLDS, beside the log: ``{"schema": 1, "holds": {id:
 #: {"reason", "by", "at", "kind"}}}``. A hold is the one statement a removal
 #: cannot argue with — not an age, not a size, not a policy switch — so it is
@@ -1047,6 +1058,160 @@ def remove_session_dir(
         except Exception:  # noqa: BLE001 — the sweep is the backstop
             logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
     return True
+
+
+def hand_off_session_dir(
+    target: Path,
+    *,
+    config_dir: Path,
+    reason: str,
+    actor: str,
+    title: str = "",
+) -> bool:
+    """Atomically take a session directory OUT of the store, then delete it.
+
+    THE COMMIT POINT OF A MESH MOVE (``docs/design/mesh-move-outcome.md`` clause 1).
+    ``_source_commit`` used to write the tombstone first and delete afterwards, and a
+    delete that the guards refused still answered ``committed`` — so the destination
+    adopted a second copy of an id the source still listed, which is exactly the
+    state INV-1 exists to prevent (measured on a real two-device run). The rename
+    below is what makes "exactly one copy" atomic: from it on, no scanner, listing,
+    picker or resume on this device can see a live conversation for the id, and it
+    happens BEFORE the tombstone tells the destination anything.
+
+    ORDER, and each step's failure has its own meaning:
+
+    1. ``True`` when ``target`` is already absent. That IS the desired post-state —
+       a retry after a crash between the rename and the tombstone must not be read
+       as a failure to hand the directory away.
+    2. The same :func:`_refusal` guard :func:`remove_session_dir` uses. A directory
+       this module may not touch is left exactly where it is and the caller rolls
+       the move back.
+    3. The cleanup-log record, BEFORE the rename (as the removal path does), so a
+       process that dies mid-handoff still leaves a receipt naming the policy and
+       the reason. A record that cannot be written refuses: a handoff nobody can
+       describe afterwards is the incident shape this module exists to prevent.
+    4. The rename into ``<config>/network/handed-away/`` on the same filesystem, so
+       it is atomic. Only a failure HERE raises: the caller's move has not committed
+       and must roll back. Everything after is cleanup.
+    5. Best-effort deletion of the quarantined tree by the one bounded removal. A
+       failure logs and leaves the tree for :func:`sweep_handed_away` — it must not
+       fail a move whose commit has already landed.
+
+    ``mark_store`` is called here for the reason ``_remove_handed_away`` documents:
+    a device that ADOPTED a session over the mesh may never have created one, so its
+    store carries no marker and every guard below would refuse. This is the product
+    path that decided the conversation lives here, which is the same authority
+    ``session_factory`` and ``_promote`` exercise when they mark a store.
+    """
+    target = Path(target)
+    if not target.exists():
+        return True
+    mark_store(target.parent)
+    refusal = _refusal(target, Path(config_dir))
+    if refusal:
+        logger.warning(
+            "session cleanup: REFUSED to hand %s away: %s (policy=%s reason=%s actor=%s)",
+            target,
+            refusal,
+            MESH_MOVE_POLICY,
+            reason,
+            actor,
+        )
+        return False
+    try:
+        contents: dict[str, Any] = measure_session_dir(target)
+    except Exception as exc:  # noqa: BLE001 — the decision is the guards'
+        contents = {"contents_error": f"{type(exc).__name__}: {exc}"}
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": target.name,
+        "title": title,
+        "policy": MESH_MOVE_POLICY,
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+        "path": os.fspath(target.absolute()),
+        **contents,
+    }
+    if not _append_cleanup_log(target.parent, record):
+        logger.error(
+            "session cleanup: REFUSED to hand %s away: its receipt could not be written to %s",
+            target,
+            target.parent / CLEANUP_LOG_NAME,
+        )
+        return False
+    quarantine_root = Path(config_dir) / "network" / HANDED_AWAY_DIRNAME
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    # 0700: the tree it holds is a whole conversation on its way out — same user
+    # only, and the name it is filed under carries a pid-independent token so two
+    # handoffs in one nanosecond tick cannot collide.
+    os.chmod(quarantine_root, 0o700)
+    quarantine = quarantine_root / f"{target.name}.{time.time_ns()}.{os.urandom(4).hex()}"
+    # THE COMMIT: no raise is caught here. An OSError is the one failure the caller
+    # must see, because nothing has been told to anybody yet and the source still
+    # holds the whole conversation.
+    os.replace(target, quarantine)
+    logger.warning(
+        "session cleanup: handed %s away to %s; policy=%s reason=%s actor=%s "
+        "bytes=%s entries=%s transcript_bytes=%s (record: %s)",
+        target.name,
+        quarantine,
+        MESH_MOVE_POLICY,
+        reason,
+        actor,
+        contents.get("bytes", "?"),
+        contents.get("entries", "?"),
+        contents.get("transcript_bytes", "?"),
+        target.parent / CLEANUP_LOG_NAME,
+    )
+    try:
+        _bounded_rmtree(quarantine)
+    except OSError:
+        logger.warning(
+            "session cleanup: %s was quarantined but could not be deleted; "
+            "sweep_handed_away will remove it once it ages out",
+            quarantine,
+            exc_info=True,
+        )
+    return True
+
+
+def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AGE_S) -> list[str]:
+    """Delete quarantined handoffs older than ``max_age_s``. Never raises.
+
+    The BACKSTOP for :func:`hand_off_session_dir`'s best-effort deletion: a tree
+    that could not be removed at commit time sits outside ``sessions/`` where no
+    reader can mistake it for a live conversation, so leaving it is safe and
+    removing it later is housekeeping. Age, not presence, decides: the window has
+    to be long enough that an operator recovering a bad move can still find the
+    bytes by hand (a day), and short enough that a stuck deletion cannot grow
+    without bound.
+
+    Called from the relay's start-up recovery and from ``reconcile``'s entry. Both
+    are best-effort by contract, so a failure here is logged at debug and the entry
+    stays for the next hour's attempt.
+    """
+    root = Path(config_dir) / "network" / HANDED_AWAY_DIRNAME
+    swept: list[str] = []
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return swept
+    cutoff = time.time() - max_age_s
+    for child in children:
+        try:
+            if child.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            _bounded_rmtree(child)
+        except OSError:
+            logger.debug("session cleanup: could not sweep %s", child, exc_info=True)
+            continue
+        swept.append(child.name)
+    return swept
 
 
 def remove_fresh_session_dir(
