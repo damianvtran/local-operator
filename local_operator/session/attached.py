@@ -6842,7 +6842,16 @@ class AttachedSession:
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
-        self._apply_frontend_facades(state, changed_fields=set(update.changes))
+        # A per-ROW roster delta moves the roster just as surely as a full
+        # replacement does, and the facades are keyed by FIELD name: without
+        # this, ``apply_update`` merged the rows into canonical state and the
+        # viewer's job list never refreshed — the roster would appear frozen
+        # until some unrelated full frame arrived. ``changed_fields`` is the
+        # facade contract, not the wire's, so the name stays "jobs".
+        changed_fields = set(update.changes)
+        if update.job_deltas.get("upserted") or update.job_deltas.get("removed"):
+            changed_fields.add("jobs")
+        self._apply_frontend_facades(state, changed_fields=changed_fields)
         if update.degraded:
             # The owner shed this delta's body to keep the line under the socket
             # limit. The sequence was consumed on both sides, so the gap check
