@@ -578,6 +578,81 @@ async def test_an_unconfirmable_preview_cannot_be_confirmed_by_its_receipt(api) 
     assert list(prov.iter_baselines(root)) == []
 
 
+async def test_a_preview_names_an_occupied_alias_as_its_own_reason(api) -> None:
+    """The PREVIEW is the surface a colliding user actually meets.
+
+    An unowned personal skill holding the target alias answered
+    ``origin-conflict``, which the desktop renderer maps to its merge-lineage
+    sentence -- the wrong story for a name collision. The route must carry the
+    new ``alias-occupied`` reason through unchanged (the renderer keys on it),
+    with Confirm disabled, and Confirm's own re-check must refuse the same way
+    before the hub is ever asked to create a row.
+    """
+
+    client, root, holder = api
+    write_authored_skill(root / "skills", SOURCE)
+    personal = write_authored_skill(
+        root / "skills", "personal", description="My own copy, not the hub's."
+    )
+    before = (personal / "SKILL.md").read_bytes()
+    hub = PublishClient(base_url(root))
+    holder["client"] = hub
+
+    result = await preview(client, local_alias="personal")
+
+    assert result["link"] is None
+    assert result["preview"]["can_confirm"] is False
+    assert result["preview"]["reason"] == "alias-occupied"
+    # No link state, no hub call, and the personal copy is byte-identical.
+    assert list(prov.iter_baselines(root)) == []
+    assert hub.calls == []
+    assert (personal / "SKILL.md").read_bytes() == before
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/publish",
+        json=confirm_body(result, local_alias="personal"),
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "alias-occupied"
+    assert hub.calls == []
+    assert list(prov.iter_baselines(root)) == []
+    assert (personal / "SKILL.md").read_bytes() == before
+
+
+async def test_an_alias_owned_by_a_link_is_still_an_origin_conflict(api) -> None:
+    """Only an UNOWNED copy is a name collision; a linked alias is an origin conflict.
+
+    ``alias_owner`` means a hub LINK owns the name, present or absent on disk --
+    reusing it is the lineage conflict the renderer already has language for,
+    and it must not be folded into the new ``alias-occupied`` reason.
+    """
+
+    client, root, holder = api
+    write_authored_skill(root / "skills", SOURCE)
+    from dataclasses import replace
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    base = configured_radient_base_url(ConfigManager(root))
+    identity = LinkIdentity("skill", "skl-taken", base, "public", None, "sk-taken")
+    record = replace(
+        prov.make_record("skill", "skl-taken", "sk-taken", None, manifest("taken"), "pull"),
+        identity=identity,
+        local_alias="taken",
+        recorded_by="pull",
+        lineage="clean",
+    )
+    prov.write_baseline(root, record)
+    hub = PublishClient(base_url(root))
+    holder["client"] = hub
+
+    result = await preview(client, local_alias="taken")
+
+    assert result["preview"]["can_confirm"] is False
+    assert result["preview"]["reason"] == "origin-conflict"
+    assert hub.calls == []
+
+
 def attest_skill_capability(root: Path) -> None:
     """Credit the configured base with the skill capability as a real check does."""
 
