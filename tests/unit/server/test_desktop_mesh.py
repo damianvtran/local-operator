@@ -1052,6 +1052,50 @@ async def test_create_on_a_peer_forwards_the_target_and_answers_the_peers_bindin
 
 
 @pytest.mark.asyncio
+async def test_a_peer_agent_whose_instructions_were_not_applied_is_not_bound(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The create's binding agrees with the listing the sidebar polls next.
+
+    Review round 1, R2 on #2754: the peer names a legacy (non-attachable) agent
+    in its reply with ``instructions_applied: false`` but records no agent on the
+    session's attachment, so its listing reads ``agent: null``. Binding the name
+    here drew a badge that the next poll took away.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": "9f3ac1e0b7d2",
+                "agent": {
+                    "name": "legacy-helper",
+                    "id": "",
+                    "kind": "agent",
+                    "instructions_applied": False,
+                    "detail": "",
+                },
+                "team": None,
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={
+            "request_id": REQUEST_ID,
+            "cwd": str(root),
+            "peer": PEER,
+            "target": {"kind": "agent", "name": "legacy-helper"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["result"]
+    assert body["binding"] == {"agent": None, "team": None}
+    assert body["identity"]["agent"]["instructions_applied"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_config_auto_create_on_a_peer_requests_unattended(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:

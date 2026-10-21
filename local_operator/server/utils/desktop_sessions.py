@@ -8633,6 +8633,13 @@ class DesktopSessions:
             projected: dict[str, dict[str, Any]] = {}
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
+                # ``SessionRow.team``/``agent`` carry a PEER row's binding into the
+                # picker. A local row answers that question in ``binding`` below,
+                # from its own attachment, so the empty top-level copies are
+                # dropped rather than published as a second, contradicting answer
+                # (review round 1, R1 on #2754).
+                row.pop("team", None)
+                row.pop("agent", None)
                 stored = read_session_attachment(self.root / "sessions" / entry.id)
                 # Read once per row: the ownership stamp is the durable carrier of
                 # placement, and its ABSENCE is the statement "no mesh has ever

@@ -484,3 +484,39 @@ def test_the_set_model_hop_carries_the_desktops_reasoning_effort(
     assert result == {"applied": True, "detail": ""}
     assert frames[0]["provider"] == "deepseek" and frames[0]["model_id"] == "deepseek-flash"
     assert frames[0].get("effort") == sent, frames[0]
+
+
+def test_effort_rides_the_model_choice_so_a_team_only_create_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--model p/m --effort max`` must reach the owner's ``set_model`` hop.
+
+    QA round 1, Q1 on #2754: the frame-level ``effort`` is applied only through
+    ``resolve_create_identity`` into ``identity.birth``, which a ``--team``-only
+    create never reaches, so the level was dropped and the runtime ran its
+    seed. The model choice is the one carrier every create path applies
+    (``relay._set_model_on``). It is sent under both spellings for owners on
+    older builds. The frame-level key stays for the identity path.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    recorder = _Recorder({"session_id": SESSION})
+    monkeypatch.setattr(net_cli, "_relay_answer", recorder)
+
+    rc = net_cli.main(
+        _parse(["--team", "lopdev", "--model", "test/claude-opus-5", "--effort", "max"])
+    )
+    assert rc == 0, capsys.readouterr()
+    sent = recorder.calls[0]
+    assert sent["model"] == {
+        "provider": "test",
+        "model_id": "claude-opus-5",
+        "reasoning_effort": "max",
+        "effort": "max",
+    }
+    assert sent["effort"] == "max"
+
+    # No --effort: the choice stays the bare pair, so the runtime's own default
+    # applies exactly as before.
+    rc = net_cli.main(_parse(["--model", "test/claude-opus-5"]))
+    assert rc == 0, capsys.readouterr()
+    assert recorder.calls[1]["model"] == {"provider": "test", "model_id": "claude-opus-5"}
