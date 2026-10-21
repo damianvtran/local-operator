@@ -942,6 +942,17 @@ def feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
+        # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
+        # rows above the `More` fold and the rows below it). ADDITIVE — an older
+        # renderer never calls either route — so it gates nothing for an old
+        # client; it is how a renderer learns the surface EXISTS before it
+        # offers drag handles or a row menu whose save would 404. Absent, the
+        # client MUST NOT offer customisation at all and draws the fixed default
+        # order: a drag the backend cannot persist is worse than no drag.
+        # `1` is the first contract revision; a future stored field is additive
+        # and does not bump it.
+        "sidebar_layout": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a

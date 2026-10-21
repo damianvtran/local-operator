@@ -453,6 +453,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # The DESKTOP sidebar layout store (`local_operator/server/sidebar_layout.py`),
+    # the same config-root shape as the pin store above and argued the same way:
+    # `write_layout` joins the config ROOT with the fixed basename
+    # `sidebar-layout.json`, or with a `.sidebar-layout.json.<random>.tmp` name
+    # `mkstemp` minted in that same directory. Neither path is derived from a
+    # session id, a transcript or any caller-chosen component, so neither can
+    # resolve under `sessions/`. The replace target is that one preference FILE;
+    # the unlink target is the sibling temp REGULAR FILE this call just created,
+    # on the failure path. (Agent review round 2, R2-1a.)
+    (
+        "local_operator/server/sidebar_layout.py::write_layout",
+        "os.replace",
+        "Atomic replace of <config_dir>/sidebar-layout.json; a fixed config-root name, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/sidebar_layout.py::write_layout",
+        "os.unlink",
+        "Only the sibling mkstemp temp FILE this call created in <config_dir>; "
+        "never a session, transcript or directory",
+    ),
     (
         "local_operator/session/session_tags.py::_write",
         "os.replace",
