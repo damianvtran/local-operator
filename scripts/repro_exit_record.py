@@ -181,7 +181,7 @@ def _wait_gone(child: subprocess.Popen[bytes], timeout: float = 120.0) -> float:
     return time.time()
 
 
-def _json_file(path: Path) -> dict | None:
+def _json_file(path: Path) -> dict[str, object] | None:
     try:
         return json.loads(path.read_text())
     except (OSError, ValueError):
