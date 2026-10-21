@@ -297,16 +297,23 @@ summarize_status() {
         if ($channel | type) != "object"
           then "<not an object: \($channel | type) value=\(scalar($channel | tojson))>"
         else
-          try
+          # The whole body is parenthesised because jq 1.8 changed binding
+          # precedence (jq 1.8.0 NEWS, jqlang/jq#3053): an unparenthesised
+          # `try E as $x | body catch ...` compiled on 1.7 but is a syntax error
+          # on 1.8, which blanked every status line once ubuntu-latest shipped
+          # jq 1.8.1. On 1.7 the `try` already guarded the binding AND the body,
+          # so the parentheses keep that scope and the output on both versions.
+          try (
             ([ (["crxVersion", "version", "deployPercentage"][]) as $key
                | select($channel[$key] != null)
                | "\($key)=\(scalar($channel[$key]))" ]
              + [ select($channel.deployInfos != null)
                  | "deployInfos=\(scalar($channel.deployInfos | tojson))" ]) as $fields
-          | if ($fields | length) == 0
-            then "<unrecognised shape: \(scalar($channel | tojson))>"
-            else $fields | join(" ")
-            end
+            | if ($fields | length) == 0
+              then "<unrecognised shape: \(scalar($channel | tojson))>"
+              else $fields | join(" ")
+              end
+          )
           catch "<unrenderable entry: \(scalar($channel | tojson))>"
         end;
       def channels($list):
