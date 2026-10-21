@@ -276,6 +276,12 @@ def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[
     removed, never renamed: every key the three clients read survives (the table
     in the PR names each read and the file it was found in).
     """
+    from local_operator.harness.rows import is_binding_notice_row
+
+    if is_binding_notice_row(entry):
+        # Apply the same display-only rule on direct open-frame reads as on
+        # ordinary desktop/peer history. Never rewrite the stored transcript.
+        return None
     etype = str(entry.get("type") or "")
     payload = entry.get("payload")
     payload = dict(payload) if isinstance(payload, Mapping) else {}

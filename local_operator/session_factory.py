@@ -5749,6 +5749,16 @@ def attach_credential_binding(
     sink = getattr(auth_store, "set_serve_sink", None)
     if callable(sink):
         sink(recorder.observe_serve)
+    get_credential = getattr(auth_store, "get_credential", None)
+    install_account = getattr(recorder, "set_account_resolver", None)
+    if callable(get_credential) and callable(install_account):
+        # A LOCAL serve's stable identity is read off the row it served (a
+        # mesh copy's origin marker), so a sync re-copy that replaces the row
+        # does not read as an account switch. One in-process row read, and only
+        # when a binding row is being built.
+        from local_operator.session.credential_binding import mesh_copy_account
+
+        install_account(lambda credential_id: mesh_copy_account(get_credential(credential_id)))
     reader = getattr(auth_store, "set_binding_reader", None)
     if callable(reader):
         reader(recorder.recall_for)
