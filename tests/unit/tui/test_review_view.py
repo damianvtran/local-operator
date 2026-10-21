@@ -925,7 +925,7 @@ async def test_a_paint_restores_the_anchor_after_the_body_has_measured(refreshes
         view._body.scroll_to(y=0, animate=False, immediate=True)
         view._body_text.update(Text())
         await pilot.pause()
-        assert not view._body_text.content.plain
+        assert not _plain(view._body_text)
         assert view._body.virtual_size.height == view._body.size.height
 
         view._paint()

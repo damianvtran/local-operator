@@ -23305,9 +23305,6 @@ class OperatorApp(App[None]):
         # guessing a delay; see `_watch_overlay_ground`.
         self._watch_overlay_ground()
 
-    #: The dock ground the overlay cards were fitted against most recently.
-    _overlay_ground: tuple[Size, Region] | None = None
-
     #: The short-lived watcher armed by `on_resize`, if one is running.
     _ground_watch_timer: object | None = None
 

@@ -640,11 +640,11 @@ async def test_a_resize_while_open_repaints_the_card_for_the_new_ground() -> Non
         # So the wait now has three parts: the app must REPORT the new size, the
         # card must have re-fit to it, and the invariant the card owes — never
         # cover a docked surface — is asserted on EVERY pass, not only at the
-        # end. The product's `ComposerDock.BoxChanged` seam repaints the card
-        # from the dock's OWN resize (after its region is real) rather than only
-        # from the 50 ms debounce, so the invariant holds from the first settled
-        # frame; a regression that returns to measuring the pre-resize dock
-        # fails here on the first pass instead of surviving to the final assert.
+        # end. The app's ground watcher re-measures the card from the dock's
+        # ARRANGED region rather than only from the 50 ms debounce, so the
+        # invariant holds from the first settled frame; a regression that
+        # returns to measuring the pre-resize dock fails here on the first pass
+        # instead of surviving to the final assert.
         for _ in range(200):
             await pilot.pause()
             card_bottom = panel.region.y + panel.region.height
@@ -670,7 +670,7 @@ async def test_a_resize_while_open_repaints_the_card_for_the_new_ground() -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_resize_refits_the_card_from_the_dock_without_the_debounce(
+async def test_a_resize_refits_the_card_from_the_ground_watcher_without_the_debounce(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dock's own resize is the authoritative re-fit trigger, not a 50 ms guess.
@@ -682,11 +682,11 @@ async def test_a_resize_refits_the_card_from_the_dock_without_the_debounce(
     ground and its gutter, covering the composer at row 6, until a later pass
     happened to measure real numbers: 0.7 s in the archived CI trace.
 
-    `ComposerDock` now reports its own `Resize` (`BoxChanged`) and the app
-    re-measures the overlay cards there, after the dock's region is real. With
-    the timer out of the picture nothing else can repair the overlap, so a
-    regression that drops the dock seam reopens it here rather than passing on
-    a timer that happened to win the race.
+    `App.on_resize` now arms a bounded watcher over the dock's ARRANGED
+    region and re-measures on a change. With the timer out of the picture
+    nothing else can repair the overlap, so a regression that drops the
+    watcher reopens it here rather than passing on a timer that happened to
+    win the race.
     """
     monkeypatch.setattr(app_module, "RESIZE_REFIT_DELAY_S", 30.0)
     session = _armed()
@@ -699,7 +699,7 @@ async def test_a_resize_refits_the_card_from_the_dock_without_the_debounce(
             await pilot.pause()
             bottom = panel.region.y + panel.region.height
             assert bottom <= shell.region.y, (
-                "the debounce is 30 s, so only the dock's BoxChanged can re-fit; "
+                "the debounce is 30 s, so only the ground watcher can re-fit; "
                 f"the card bottom is {bottom} over the composer at {shell.region.y}"
             )
             if panel.has_class("-squeezed") and app.size == (80, 12):
