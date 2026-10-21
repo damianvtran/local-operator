@@ -1036,6 +1036,143 @@ async def get_message(
 # deliberately no store call in this section: conversations are read live.
 
 
+# Schedules are server-owned: this proxy returns the author's unsent body only
+# for the current request, never writes it to the local conversation store, and
+# never starts a timer. The server alone arbitrates tenant/author access and the
+# edit/cancel race with its delivery worker.
+_SCHEDULED_ID = re.compile(r"^bsch_[0-9a-f]{32}$")
+_RFC3339 = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+    r"(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+)
+
+
+def _validate_schedule_time(value: str) -> None:
+    # Keep the moving 1-minute/120-day window authoritative on the server, whose
+    # clock will also fire the message; only reject malformed wire dates here.
+    if _RFC3339.fullmatch(value) is None:
+        raise ValueError("send_at must be RFC3339")
+    datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+class ScheduledMentionIn(_Strict):
+    kind: Literal["human", "agent"]
+    account_id: str = Field(min_length=1, max_length=128)
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ScheduledCreateIn(_Strict):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(pattern=CONVERSATION_ID_PATTERN)
+    client_ref: str = Field(min_length=1, max_length=128)
+    body: str = Field(min_length=1)
+    send_at: str
+    mentions: list[ScheduledMentionIn] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _date(self) -> "ScheduledCreateIn":
+        _validate_schedule_time(self.send_at)
+        return self
+
+
+class ScheduledUpdateIn(_Strict):
+    body: str | None = Field(default=None, min_length=1)
+    send_at: str | None = None
+
+    @model_validator(mode="after")
+    def _edit(self) -> "ScheduledUpdateIn":
+        if not self.model_fields_set or any(
+            getattr(self, name) is None for name in self.model_fields_set
+        ):
+            raise ValueError("a schedule edit requires body or send_at")
+        if self.send_at is not None:
+            _validate_schedule_time(self.send_at)
+        return self
+
+
+def _scheduled_selector(request: Request, scheduled_id: str | None = None) -> str:
+    # Reject duplicate/unknown selectors rather than letting a URL parser choose
+    # a tenant differently from the upstream server.
+    values = request.query_params.getlist("tenant_id")
+    if (
+        set(request.query_params) != {"tenant_id"}
+        or len(values) != 1
+        or not values[0].strip()
+        or len(values[0]) > 128
+        or (scheduled_id is not None and _SCHEDULED_ID.fullmatch(scheduled_id) is None)
+    ):
+        _raise_read("invalid_request")
+    return values[0]
+
+
+async def _scheduled_body(request: Request, model: Any) -> Any:
+    # Parse explicitly so validation errors never echo an unsent body (or a
+    # custom validator's input) into FastAPI's default 422 response.
+    try:
+        return model.model_validate(await request.json())
+    except ValueError:
+        _raise_read("invalid_request")
+
+
+@router.get("/v1/desktop/team-bridge/scheduled", response_model=CRUDResponse[Any])
+async def scheduled_list(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_list(tenant_id=tenant_id)
+        )
+    )
+
+
+@router.post("/v1/desktop/team-bridge/scheduled", response_model=CRUDResponse[Any])
+async def scheduled_create(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    if request.query_params:
+        _raise_read("invalid_request")
+    body = await _scheduled_body(request, ScheduledCreateIn)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_create(
+                body.model_dump(exclude_unset=True)
+            )
+        )
+    )
+
+
+@router.patch("/v1/desktop/team-bridge/scheduled/{scheduled_id}", response_model=CRUDResponse[Any])
+async def scheduled_update(
+    scheduled_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request, scheduled_id)
+    body = await _scheduled_body(request, ScheduledUpdateIn)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_update(
+                scheduled_id, tenant_id=tenant_id, body=body.model_dump(exclude_unset=True)
+            )
+        )
+    )
+
+
+@router.delete("/v1/desktop/team-bridge/scheduled/{scheduled_id}", response_model=CRUDResponse[Any])
+async def scheduled_cancel(
+    scheduled_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request, scheduled_id)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_cancel(scheduled_id, tenant_id=tenant_id)
+        )
+    )
+
+
 class ConversationMemberIn(_Strict):
     account_id: str = Field(min_length=1, max_length=128)
     kind: Literal["human", "agent"] = "human"
