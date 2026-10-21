@@ -89,6 +89,7 @@ def _state_provider(state: dict[str, Any], tools: list[Any]):
             credentials=state["credentials"],
             host_has_browser=False,
             host_has_console=False,
+            voice=state.get("voice", False),
         )
 
     setattr(provider, "append_only_state", True)
@@ -176,6 +177,33 @@ async def test_a_cleared_section_ships_as_an_explicit_empty_section(tmp_path) ->
     assert records[-1].details["blocks"] == {"3": {"team": ""}}
     # Silence would read as "unchanged", not as "gone"; the record says empty.
     assert "## Team\n(empty)" in str(records[-1].details["text"])
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_voice_on_then_off_journals_one_record_per_toggle(tmp_path) -> None:
+    state = _initial_state()
+    state["voice"] = False
+    tools: list[Any] = []
+    stream = RecordingStream()
+    session = _make_session(tmp_path / "sess", stream, state, tools)
+    await session.prompt("freeze the prefix")
+
+    state["voice"] = True
+    await session.prompt("voice on")
+    records = _state_records(session)
+    assert len(records) == 1
+    assert list(records[-1].details["blocks"].values())[0].keys() == {"voice"}
+    assert "<voice>" in str(records[-1].details["text"])
+
+    state["voice"] = False
+    await session.prompt("voice off")
+    records = _state_records(session)
+    assert len(records) == 2
+    blocks = records[-1].details["blocks"]
+    # Authoritative empty section (like a cleared team), not an advisory one.
+    assert list(blocks.values()) == [{"voice": ""}]
+    assert "## Voice mode\n(empty)" in str(records[-1].details["text"])
     await session.dispose()
 
 

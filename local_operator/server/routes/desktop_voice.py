@@ -183,7 +183,8 @@ router = APIRouter(
 _REQUEST_ID = TypeAdapter(RequestID)
 
 #: Where a caller's words came from, when it names that (R3, kept by Q2): the
-#: rig's Parakeet final. Recorded as the message's ``input_path``. CLOSED, so an
+#: rig's Parakeet final (``qwen_s2s``) or the local Moonshine final
+#: (``local_moonshine``). Recorded as the message's ``input_path``. CLOSED, so an
 #: origin is a vocabulary the session's history can be read by, not free text.
 TEXT_ORIGINS = frozenset({"qwen_s2s", "local_moonshine"})
 
