@@ -305,3 +305,21 @@ def test_clean_exit_without_identity_writes_nothing(tmp_path: Path) -> None:
 
     assert handle.disposed is True
     assert list(tmp_path.rglob("runtime-exit.json")) == []
+
+
+def test_a_non_boolean_requested_is_never_a_requested_stop(tmp_path: Path) -> None:
+    """The one direction this field must not err in.
+
+    A payload carrying the STRING ``"false"`` is truthy under ``bool()``. Read
+    that as a request and a crash would be narrated as the user's own act — the
+    wrong-verdict class the attribution path was fixed for. Only a JSON ``true``
+    counts.
+    """
+    directory = _session_dir(tmp_path)
+    journal.exit_record_path(directory).write_text(
+        json.dumps({"v": 1, "pid": 1, "at": 1.0, "reason": "idle-exit", "requested": "false"})
+    )
+
+    record = journal.read_exit_record(directory)
+    assert record is not None
+    assert record.requested is False
