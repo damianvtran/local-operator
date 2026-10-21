@@ -892,3 +892,23 @@ def test_a_requested_record_is_not_this_rung(tmp_path: Path, alive: set[int]) ->
     )
 
     assert _verdict(tmp_path, sid) == "fire"
+
+
+def test_an_exit_record_that_cannot_be_keyed_does_not_explain_the_death(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """A record we cannot key to THIS run falls through to the ladder (NIT-2).
+
+    ``covers_run`` requires both start stamps, the same rule the stop-marker rung
+    applies: a death record with no start stamp (a boot record parsed without one)
+    cannot be matched to any exit record, and the safe direction is the ladder —
+    which FIREs for an unattributed ``error/disposed`` — not an "explained" skip
+    that would hide a crash.
+    """
+    sid = "999900005555"
+    _session_dir(tmp_path, sid)
+    _record(tmp_path, sid, pid=DEAD_PID, started_at=0.0, heartbeat_at=HEARTBEAT)
+    _completions(tmp_path, [(f"session/{sid}", "error", "disposed", "the session was disposed")])
+    _exit_record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, reason="idle-exit")
+
+    assert _verdict(tmp_path, sid) == "fire"

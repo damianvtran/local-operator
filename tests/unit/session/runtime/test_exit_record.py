@@ -215,10 +215,11 @@ def test_covers_run_refuses_a_previous_life(tmp_path: Path) -> None:
     assert record.covers_run(10, 100.5)
     assert not record.covers_run(11, 100.0)
     assert not record.covers_run(10, 500.0)
-    # A missing run key on either side is no evidence to refuse on: the pid match
-    # is what is left, and refusing there would delete an explanation rather than
-    # protect one.
-    assert record.covers_run(10, 0.0)
+    # BOTH STAMPS ARE REQUIRED — the marker rung's rule (review round 1, NIT-2).
+    # A caller with no start stamp cannot prove this record describes the run it
+    # is classifying, and the rung this feeds must FALL THROUGH (rescue fires)
+    # rather than explain a death it cannot key.
+    assert not record.covers_run(10, 0.0)
 
 
 # --- the writer on the exit path -------------------------------------------
