@@ -219,6 +219,27 @@ def test_a_refusal_stops_a_watchdog_this_attempt_started_even_if_it_existed(
     assert "stop" in verbs and "disable" in verbs
 
 
+def test_a_second_install_after_a_refused_first_succeeds(tmp_path: Path) -> None:
+    """A refusal must leave no half-installation that blocks the next attempt."""
+    refused, _ = _script_guest(
+        tmp_path,
+        watchdog_props={"ControlGroup": "/system.slice/action-server.service"},
+    )
+    with pytest.raises(RuntimeError, match="shares the action-server cgroup"):
+        refused()
+    root = tmp_path / "var/lib/lop-action-supervisor"
+    for name in ("watchdog.py", "restart.py", "capture.py", "action-server.service.json"):
+        assert not (root / name).exists(), name
+    assert not (tmp_path / "etc/systemd/system/lop-action-watchdog.service").exists()
+
+    shutil.rmtree(tmp_path / "proc")
+    retry, calls = _script_guest(tmp_path)
+    retry()
+    assert (root / "watchdog.py").exists()
+    assert (root / "restart.py").exists()
+    assert ("systemctl", "start", guest_supervisor.WATCHDOG_UNIT) in calls
+
+
 def test_a_watchdog_that_survives_stop_is_killed_on_rollback(tmp_path: Path) -> None:
     """The rollback asserts death, not the verbs it issued."""
     install, calls = _script_guest(
@@ -2627,6 +2648,8 @@ def _execute_restart_script(
     hang_kill: bool = False,
     dispatch_argv: list[str] | None = None,
     seed_receipt: bool = True,
+    reset_ok: bool = True,
+    unit_failed: bool = True,
 ) -> tuple[dict[str, Any], list[Any], float]:
     """Run the shipped RESTART_SOURCE against a redirected /proc and fake systemd.
 
@@ -2661,7 +2684,11 @@ def _execute_restart_script(
         if args[1] == "show":
             if "NRestarts" in args:
                 return "NRestarts=1\nActiveEnterTimestampMonotonic=200"
+            if "ActiveState" in args:
+                return "ActiveState=" + ("failed" if unit_failed else "active")
             return "MainPID=%d" % state["main"]
+        if args[1] == "reset-failed" and not reset_ok:
+            raise OSError("start limit not cleared")
         if args[1] == "kill":
             if hang_kill:
                 # Consume the whole per-call bound, then fail as a hung
@@ -2713,6 +2740,49 @@ def _execute_restart_script(
     )
     result_path = tmp_path / str(guest_supervisor.RESTART_RESULT_PATH).lstrip("/")
     return json.loads(result_path.read_text()), calls, state["now"]
+
+
+def test_a_live_unit_is_not_reset_and_keeps_its_restart_counters(
+    tmp_path: Path,
+) -> None:
+    """reset-failed zeroes NRestarts on a LIVE unit too (measured on 255).
+
+    The host reconciles ``systemd_nrestarts - baseline == captured_exits`` on
+    every ordinary restart, so clearing counters there would break every
+    host-initiated recovery. Only a failed unit has a latch to clear.
+    """
+    payload, calls, _ = _execute_restart_script(
+        tmp_path,
+        unit_failed=False,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
+    )
+    order = [args[1] for args in calls if args[1] in {"reset-failed", "kill", "start"}]
+    assert order == ["kill", "start"], "no reset on a unit without a latch"
+    assert payload["start_limit_cleared"] is True
+    receipt = payload["receipt"]
+    assert receipt["systemd_nrestarts"] - receipt["baseline_nrestarts"] == receipt["captured_exits"]
+
+
+def test_the_restart_clears_the_start_limit_between_the_scan_and_the_kill(
+    tmp_path: Path,
+) -> None:
+    """A unit latched ``start-limit-hit`` refuses ``start`` until reset-failed.
+
+    QA measured this on systemd 255: the kill succeeded, the start was refused
+    with "Start request repeated too quickly", and the server stayed down. The
+    order is the contract: scan the holders, clear the latch, kill, start.
+    """
+    payload, calls, _ = _execute_restart_script(
+        tmp_path,
+        on_kill=lambda proc: _write_listeners(proc, {}),
+        on_start=lambda proc: _serve(proc, 9100, 4343, 1, 101000),
+    )
+    order = [args[1] for args in calls if args[1] in {"reset-failed", "kill", "start"}]
+    assert order == ["reset-failed", "kill", "start"], "the latch clears before the start"
+    assert payload["start_limit_cleared"] is True
+    assert payload["new_main_pid"] == 9100
+    assert guest_supervisor.restart_record(json.dumps(payload))["status"] == "verified"
 
 
 def test_restart_script_kills_all_then_starts_and_reports_a_fresh_mainpid(
@@ -3606,7 +3676,13 @@ def _execute_watchdog(
 
 
 def _real_restart_verdict(
-    tmp_path: Path, *, token: int, stale: bool = False, unit: str = "action-server.service"
+    tmp_path: Path,
+    *,
+    token: int,
+    stale: bool = False,
+    unit: str = "action-server.service",
+    reset_ok: bool = True,
+    unit_failed: bool = True,
 ) -> dict[str, Any]:
     """Produce the REAL RESTART_SOURCE document for the watchdog to consume.
 
@@ -3627,6 +3703,8 @@ def _real_restart_verdict(
         ],
         on_kill=None if stale else (lambda proc: _write_listeners(proc, {})),
         on_start=None if stale else (lambda proc: _serve(proc, 9100, 4343, 1, 101000)),
+        reset_ok=reset_ok,
+        unit_failed=unit_failed,
     )
     return payload
 
@@ -3755,6 +3833,26 @@ def test_a_verified_restart_that_fails_is_recorded_as_restart_failed(
     assert record["attempts"] == 1
     assert record["last_action"] == "verified-restart"
     assert record["last_outcome"] == "restart-failed"
+
+
+def test_a_refused_reset_is_a_distinct_outcome_not_a_failed_restart(
+    tmp_path: Path,
+) -> None:
+    """The latch never cleared, so the start could not have been accepted."""
+    token = 1_000_000_000
+    verdict = _real_restart_verdict(tmp_path / "producer", token=token, reset_ok=False)
+    assert verdict["start_limit_cleared"] is False
+    record, _, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[True],
+        answering=[False],
+        cycles=1,
+        clock_start=1000.0,
+        restart_verdict=verdict,
+    )
+    assert record["last_outcome"] == "reset-failed-error"
+    assert record["attempts"] == 1
 
 
 def test_a_verdict_for_another_dispatch_is_not_accepted(tmp_path: Path) -> None:

@@ -455,7 +455,13 @@ def verified_verdict(verdict, token):
     # The host's restart_record rule, applied to the script's raw payload.
     # RESTART_SOURCE writes observations; ``status`` is a HOST-derived field.
     # Reading one here would accept a key the producer never emits, so every
-    # real repair would read as a failure. This mirrors the derivation instead.
+    # real repair would read as a failure. This mirrors the derivation instead,
+    # with ONE deliberate difference: the receipt must exist and carry a
+    # generation, but its counters are the host's reconciliation against a
+    # LIVE systemd. reset-failed zeroes NRestarts, so after a start-limit
+    # recovery those counters can never reconcile; the watchdog's claim is
+    # about the SERVER (a new MainPID and a fresh listener), which is exactly
+    # the fact this path exists to establish.
     if not isinstance(verdict, dict) or verdict.get('schema_version') != 1:
         return False
     if verdict.get('token') != token:
@@ -532,6 +538,10 @@ def verified_restart():
         verdict = json.loads(result_path.read_text())
     except (OSError, ValueError):
         return 'restart-failed'
+    if isinstance(verdict, dict) and verdict.get('start_limit_cleared') is False:
+        # The latch was never cleared, so the start could not have been
+        # accepted: a distinct outcome from a restart that ran and failed.
+        return 'reset-failed-error'
     return 'restarted' if verified_verdict(verdict, token) else 'restart-failed'
 
 def intervene(now, trigger, action):
@@ -796,6 +806,11 @@ created = not path.exists()
 # Set only when THIS attempt issued the start: a unit that was already
 # running is not ours to stop, and one we started must not survive a refusal.
 watchdog_started = False
+# Every file THIS attempt created is removed again on a refusal, and only
+# those: a later install of a changed version must not trip over half of an
+# earlier refused one, and a pre-existing file is never ours to delete.
+capture_created = watchdog_script_created = restart_script_created = False
+receipt_created = False
 if not created:
     if path.read_text() != content or capture.read_text() != sys.argv[1]:
         raise RuntimeError('supervisor installation conflict')
@@ -805,6 +820,7 @@ else:
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if capture.exists() and capture.read_text() != sys.argv[1]:
         raise RuntimeError('supervisor capture conflict')
+    capture_created = not capture.exists()
     capture.write_text(sys.argv[1])
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x') as out:
@@ -841,6 +857,8 @@ else:
         raise RuntimeError('watchdog script conflict')
     if restart_script.exists() and restart_script.read_text() != sys.argv[4]:
         raise RuntimeError('watchdog restart script conflict')
+    watchdog_script_created = not watchdog_script.exists()
+    restart_script_created = not restart_script.exists()
     watchdog_script.write_text(sys.argv[3])
     restart_script.write_text(sys.argv[4])
     with watchdog_path.open('x') as out:
@@ -850,6 +868,7 @@ else:
 receipt = root / (unit + '.json')
 try:
     if not receipt.exists():
+        receipt_created = True
         with receipt.open('x') as out:
             json.dump({'schema_version': 1, 'records': [], 'captured_exits': 0,
                        'baseline_nrestarts': int(props['NRestarts']),
@@ -929,6 +948,17 @@ except Exception:
                 run('systemctl', 'kill', '--kill-whom=all', 'lop-action-watchdog.service')
         except Exception:
             pass
+    for owned in (
+        (capture_created, capture),
+        (watchdog_script_created, watchdog_script),
+        (restart_script_created, restart_script),
+        (receipt_created, receipt),
+    ):
+        if owned[0]:
+            try:
+                owned[1].unlink()
+            except OSError:
+                pass
     if created:
         path.unlink()
     if watchdog_created:
@@ -1111,6 +1141,7 @@ except OSError:
 # process, which is why a non-vanishing OSError marks the scan incomplete and
 # this path refuses BEFORE the disruptive kill.
 pre, pre_complete = owners()
+start_limit_cleared = True
 kill_ticks = 0
 post = []
 post_complete = False
@@ -1120,6 +1151,29 @@ new_main = 0
 new_main_start = 0
 receipt = None
 if pre_complete:
+    # CLEAR THE START-LIMIT LATCH BEFORE THE START, but ONLY on a failed unit.
+    # A unit that hit StartLimitBurst refuses `start` with "Start request
+    # repeated too quickly" and stays failed; reset-failed is the only
+    # operation that clears the latch and its rate-limit counters (measured on
+    # systemd 255). It goes AFTER the pre scan, so the evidence still names the
+    # holders, and BEFORE the kill, so the kill stamp still describes the
+    # signal that follows.
+    #
+    # THE CONDITION IS LOAD-BEARING TOO: reset-failed also zeroes NRestarts on
+    # a LIVE unit (measured), which would break the receipt invariant the host
+    # reconciles (systemd_nrestarts - baseline == captured_exits) on every
+    # ordinary host restart. A unit that is not failed has no latch to clear.
+    try:
+        props = dict(line.split('=', 1) for line in run(
+            'systemctl', 'show', UNIT, '-p', 'ActiveState').splitlines())
+        unit_state = props.get('ActiveState', '')
+    except Exception:
+        unit_state = ''
+    if unit_state == 'failed':
+        try:
+            run('systemctl', 'reset-failed', UNIT)
+        except Exception:
+            start_limit_cleared = False
     # The stamp is taken IMMEDIATELY before the signal. Freshness is then a
     # start time at or after it, not merely a pid absent from the pre set: a
     # holder that forks a worker while dying produces a pid the pre scan could
@@ -1201,6 +1255,7 @@ payload = {
     'pre_restart_pids': pre[:8],
     'pre_restart_count': len(pre),
     'pre_scan_complete': pre_complete,
+    'start_limit_cleared': start_limit_cleared,
     'kill_uptime_ticks': kill_ticks,
     'post_restart_pids': post[:8],
     'post_restart_count': len(post),
