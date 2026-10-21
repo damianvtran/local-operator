@@ -3748,6 +3748,27 @@ class Store:
         except sqlite3.Error:
             return []
 
+    def delete_hold(self, owner: OwnerSnapshot, message_id: str) -> bool:
+        """Clear ONE hold that reached a terminal outcome.
+
+        The screening receipt commit already deletes the hold it owns; the
+        conversation delivery lane keys its hold by the encoded feed ref
+        (it must survive a restart to find the conversation again), so its
+        terminal outcomes need this one explicit clear. Live-owner fenced and
+        conditional on the row existing — a replay that already cleared it is
+        not an error.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            deleted = conn.execute(
+                "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                (_owner_key(owner), message_id),
+            )
+            return bool(deleted.rowcount)
+
     def advance_hold_retry(self, owner: OwnerSnapshot, message_id: str, *, retry_at: float) -> bool:
         """Re-schedule ONE still-held message's next attempt (H4 backoff).
 
