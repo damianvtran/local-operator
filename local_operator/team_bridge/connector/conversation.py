@@ -307,11 +307,14 @@ async def handle_conversation_available(
             return {"action": "hold", "message_id": message_id, "code": "sender_missing"}
         sender_label = sender.get("display_label")
         sender_kind = sender.get("kind")
+        sender_account = sender.get("account_id")
         if (
             not isinstance(sender_label, str)
             or not sender_label.strip()
             or not isinstance(sender_kind, str)
             or sender_kind not in _SENDER_KINDS
+            or not isinstance(sender_account, str)
+            or not sender_account
         ):
             # A card cannot render provenance it cannot verify; a hardcoded
             # kind or an invented label is worse than a retryable hold.
