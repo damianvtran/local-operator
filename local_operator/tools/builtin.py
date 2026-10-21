@@ -29901,9 +29901,7 @@ async def _execute_hub_parent(
                 # its receipt; a resume that stayed silent would be the one
                 # surface where a dropped pick reads as honoured, and a resume
                 # is a launch that costs money.
-                source = str(
-                    getattr(comms.job(new_job_id), "model_selection_source", "") or ""
-                )
+                source = str(getattr(comms.job(new_job_id), "model_selection_source", "") or "")
                 lines.append(
                     _resumed_line(
                         comms,

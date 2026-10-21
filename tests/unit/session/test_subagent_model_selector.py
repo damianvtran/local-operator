@@ -509,9 +509,7 @@ async def test_a_pick_this_machine_cannot_use_is_not_applied_rather_than_refused
 
 
 @pytest.mark.asyncio
-async def test_a_hub_resume_of_a_pinned_role_says_the_pick_was_not_applied(
-    tmp_path, monkeypatch
-):
+async def test_a_hub_resume_of_a_pinned_role_says_the_pick_was_not_applied(tmp_path, monkeypatch):
     """R1-2: a resume is a launch, so its receipt owes the same note.
 
     ``SubagentComms.resume`` re-resolves the model from current state under the
@@ -549,9 +547,7 @@ async def test_a_hub_resume_of_a_pinned_role_says_the_pick_was_not_applied(
 
 
 @pytest.mark.asyncio
-async def test_an_inherit_pick_on_a_pinned_role_is_not_reported_as_dropped(
-    tmp_path, monkeypatch
-):
+async def test_an_inherit_pick_on_a_pinned_role_is_not_reported_as_dropped(tmp_path, monkeypatch):
     """R1-3: ``model='inherit'`` is not a pick that failed to apply.
 
     The wire spelling means "no specific model", and the child a sentinel role
