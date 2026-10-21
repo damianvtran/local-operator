@@ -92,6 +92,29 @@ EVENT_REVISED = "revised"
 #: everywhere.
 EVENT_WITHDRAWN = "withdrawn"
 
+#: THE RELAY EVENTS (issue #2520). A watcher session W that re-raises another
+#: session S's pending ask records a REFERENCE here rather than a copy: ``S``'s
+#: log stays the single source of truth and W's row status is DERIVED from it
+#: (``AskQueue._apply_relay_derivation``), so one answer settles both by
+#: construction.
+#:
+#: * :data:`EVENT_RELAYED` is appended to the WATCHER's log and names ``(
+#:   session_id, ask_id)`` in the ORIGIN's log. Its own ``ask_id`` is the relay's
+#:   new id in W.
+#: * :data:`EVENT_RELAY_SURFACED` is appended to the ORIGIN's log so S can show
+#:   "also raised in W". Its ``ask_id`` is the ORIGIN's ask; ``by`` names the
+#:   watcher and the relay row. It never changes S's fold (it is not a status
+#:   event), which is why the source of truth stays S's own rows.
+#:
+#: Both are ADDITIVE under this module's "unknown kind is ignored" contract
+#: (stated at :data:`EVENT_WITHDRAWN`): an older fold skips a kind it does not
+#: branch on, so a log carrying these rows stays readable everywhere. The relay
+#: row itself is only produced by a fold that knows the kind — which is the
+#: correct degradation, because an old reader cannot derive a status it has no
+#: origin-reader for.
+EVENT_RELAYED = "relayed"
+EVENT_RELAY_SURFACED = "relay-surfaced"
+
 #: Every status a folded ask can hold (design §2.2, §4).
 STATUS_OPEN = "open"
 STATUS_ANSWERED = "answered"
@@ -140,6 +163,11 @@ LAPSED_STATUSES = frozenset({STATUS_TIMED_OUT})
 #: a crash can lose.
 RESPONSE_ROW_PREFIX = "ask-response-"
 TIMEOUT_ROW_PREFIX = "ask-timeout-"
+#: The one-line note the WATCHER session gets when its relay settles (#2520).
+#: Its own prefix so ``has_entry`` can tell the three ask-engine rows apart and
+#: so the note can never be mistaken for a response row belonging to the relay
+#: id (the relay's model was told nothing; the note is about the ORIGIN).
+RELAY_ROW_PREFIX = "ask-relay-"
 
 #: How long past its deadline an ask can still be answered and ATTRIBUTED, and
 #: how long a timeout notice or response is still worth injecting. Defined HERE
@@ -337,6 +365,17 @@ def timeout_row_id(ask_id: str) -> str:
     return f"{TIMEOUT_ROW_PREFIX}{ask_id}"
 
 
+def relay_row_id(ask_id: str) -> str:
+    """The watcher's settle note for the relay row ``ask_id`` (#2520).
+
+    The row IS the delivery marker, exactly like the response/timeout rows: a
+    relay that settles twice (it cannot, but a crash between hand-off and append
+    can re-plan it) is deduped by ``transcript.has_entry`` rather than by a flag
+    a crash could lose.
+    """
+    return f"{RELAY_ROW_PREFIX}{ask_id}"
+
+
 #: The separator in a MIRROR request id (design §4, "legacy mirror"): the
 #: single-slot ``pending_gate``/``pending`` card carries
 #: ``"<ask_id>.<qidx>"`` so an old client's per-question answer can be mapped
@@ -526,12 +565,40 @@ def fold(
     folds to ``withdrawn``. The check sits below every user-act branch (and
     above the deadline branches, which must never judge a retracted ask).
     """
+    # ``relay-surfaced`` rows are collected ONCE (one pass) rather than per ask:
+    # the fold runs for every ask on every refresh, and an O(n*m) scan here would
+    # grow with the number of relays a session has ever seen. Keyed by the
+    # ORIGIN ask id, which is the id those rows carry.
+    surfaced_by_ask: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if event.get("kind") != EVENT_RELAY_SURFACED:
+            continue
+        by = event.get("by")
+        if not isinstance(by, Mapping):
+            continue
+        surfaced_by_ask.setdefault(str(event.get("ask_id") or ""), []).append(
+            {
+                "session_id": str(by.get("session_id") or ""),
+                "ask_id": str(by.get("ask_id") or ""),
+                "at": int(event.get("at") or 0),
+            }
+        )
     records: list[dict[str, Any]] = []
     for ask_id in _asks_in_order(events):
         queued = _first(events, ask_id, EVENT_QUEUED)
         if queued is None:
-            # An answer for an ask whose `queued` row is missing (a truncated
-            # log) is not reconstructible: skip rather than invent a question.
+            # A relay row has no ``queued`` event by design: the watcher records
+            # only the REFERENCE (#2520), because a copy would be a second truth
+            # and answering one would never settle the other. Anything else
+            # without a ``queued`` row (a truncated log, an answer for an ask
+            # whose question is gone) is not reconstructible: skip rather than
+            # invent one.
+            relayed = _first(events, ask_id, EVENT_RELAYED)
+            if relayed is None:
+                continue
+            relay_row = _relay_record(ask_id, relayed, events, session_id=session_id)
+            if relay_row is not None:
+                records.append(relay_row)
             continue
         answered = _first(events, ask_id, EVENT_ANSWERED)
         declined = _first(events, ask_id, EVENT_DECLINED)
@@ -630,6 +697,12 @@ def fold(
                 and now <= window_end
                 and not record["delivered"]
             )
+        surfaced = surfaced_by_ask.get(ask_id)
+        if surfaced:
+            # ABSENT, never empty (the ``attachments`` rule below): an ordinary
+            # ask's record stays byte-identical, and a reader that has never
+            # heard of relays never sees the key.
+            record["surfaced_in"] = surfaced
         if answered is not None:
             answers = answered.get("answers")
             record["answers"] = {
@@ -666,6 +739,72 @@ def fold(
                     }
         records.append(record)
     return records
+
+
+def _relay_record(
+    ask_id: str,
+    relayed: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    *,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """The fold's record for a watcher's relay row (#2520), or ``None``.
+
+    Minimal ON PURPOSE: a relay has no deadline, no questions and no answers of
+    its own — those are the ORIGIN's and are filled in by the queue's derivation
+    (``AskQueue._apply_relay_derivation``), which is the only reader allowed to
+    open another session's log. The base status is ``open`` and the queue
+    replaces it from the origin's fold, so an unresolvable reference settles
+    rather than lingering as a question nobody can answer.
+
+    THE WATCHER'S OWN SETTLES ARE FOLDED HERE (#2673, R1-2/R1-3), for every
+    reader and not just the queue: ``withdrawn`` is the asker retracting its
+    relay, ``dismissed`` the user closing a lapsed card. They are LOCAL and are
+    the only status this log can state about a relay — ``store.fold`` never
+    reads the origin — so without them ``_has_open_asks`` would see a settled
+    relay as permanently open and the session directory would never be prunable,
+    while ``asks/dismiss.py``'s cold door would disagree with the live one about
+    a card the user had already closed. A DISMISSAL OUTRANKS A WITHDRAWAL, the
+    same order §12 fixes for an ordinary ask. Both are only the BASE: the
+    queue's derivation re-reads the origin on every fold, where a USER ACT
+    ORIGIN-side outranks them (``_RELAY_USER_ACT_TERMINALS``).
+
+    A malformed ``relay`` reference contributes no row: the same tolerance the
+    module promises every reader, and the honest answer for a hand-edited line.
+    """
+    ref = relayed.get("relay")
+    if not isinstance(ref, Mapping):
+        return None
+    origin_session = str(ref.get("session_id") or "")
+    origin_ask = str(ref.get("ask_id") or "")
+    if not origin_session or not origin_ask:
+        return None
+    record: dict[str, Any] = {
+        "ask_id": ask_id,
+        "session_id": session_id,
+        "created_at": int(relayed.get("at") or 0),
+        # No deadline of its own: the ORIGIN owns it (the derivation copies its
+        # ``expires_at``), and a relay must never put the watcher's deadline
+        # machinery in charge of a question it does not own.
+        "expires_at": 0,
+        "timeout_s": 0,
+        "urgent": False,
+        "tool_call_id": "",
+        "questions": [],
+        "status": STATUS_OPEN,
+        "delivered": False,
+        "relay": {"session_id": origin_session, "ask_id": origin_ask},
+    }
+    dismissed = _first(events, ask_id, EVENT_DISMISSED)
+    withdrawn = _first(events, ask_id, EVENT_WITHDRAWN)
+    if dismissed is not None:
+        record["relay_dismissed_at"] = int(dismissed.get("at") or 0)
+        record["status"] = STATUS_DISMISSED
+    if withdrawn is not None:
+        record["relay_withdrawn_at"] = int(withdrawn.get("at") or 0)
+        if dismissed is None:
+            record["status"] = STATUS_WITHDRAWN
+    return record
 
 
 def is_outstanding(status: Any) -> bool:
@@ -771,6 +910,20 @@ def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -
         row["attachments"] = {
             str(qid): [dict(ref) for ref in group] for qid, group in dict(refs).items()
         }
+    relay = record.get("relay")
+    if isinstance(relay, Mapping) and relay:
+        # The provenance a surface needs to name WHERE the question lives and HOW
+        # it settled (#2520). ``origin_status`` is written by the queue's
+        # derivation; the fold's own record has only the reference, so this is
+        # copied key-by-key rather than exposed by reference.
+        row["relay"] = {
+            key: relay[key]
+            for key in ("session_id", "ask_id", "origin_status", "origin_gone")
+            if key in relay
+        }
+    surfaced = record.get("surfaced_in")
+    if surfaced:
+        row["surfaced_in"] = [dict(item) for item in surfaced]
     by = record.get("answered_by")
     if by:
         row["answered_by"] = dict(by)
@@ -1087,6 +1240,8 @@ __all__ = [
     "EVENT_DECLINED",
     "EVENT_DISMISSED",
     "EVENT_QUEUED",
+    "EVENT_RELAYED",
+    "EVENT_RELAY_SURFACED",
     "EVENT_WITHDRAWN",
     "INJECTING_STATUSES",
     "DEFAULT_LAPSED_VISIBLE_FOR",
@@ -1123,6 +1278,7 @@ __all__ = [
     "read_entry",
     "read_events",
     "read_index",
+    "relay_row_id",
     "remove_entry",
     "response_row_id",
     "session_dir",

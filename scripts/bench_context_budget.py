@@ -1596,7 +1596,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # prompt rule is "never spell a category the store does not contain" — and the
 # reference vocabulary was kept OFF the wire in ``read tool://tags``, whose
 # ledger entry in tests/unit/tools/test_tool_docs.py moves with this one.
-BUDGET_BILLED_TOKENS = 31_982
+# RAISED 31,982 -> 32,104 for the ask RELAY field (#2520). This raise COMPOSES
+# onto the two above rather than replacing them: the branch's pre-rebase value
+# (31,025 -> 31,160) was measured against a tree that carried neither #2665's
+# channel tool nor the V2-4 tags tool, so merging it as-is would have silently
+# LOWERED the ceiling under two shipped surfaces. Measured on the merged tree,
+# one run per tree on the same host with an isolated HOME:
+#   base (origin/main 2c55ac459b)  88,825 chars = ~31,951 billed
+#   head (this branch)             89,094 chars = ~32,049 billed
+#   delta                             +269 chars = ~+97
+# The whole delta is the ``relay`` property on ``AskParams`` plus its one clause
+# in the queued description. The child arm does not carry ``ask`` and does not
+# move (80,684 chars = ~29,023 vs the 29,053 ceiling), so
+# BUDGET_CHILD_BILLED_TOKENS stays where main put it.
+# Ceiling = measured head + the 55-token band, so the next field-size edit is a
+# deliberate raise rather than silent creep.
+BUDGET_BILLED_TOKENS = 32_104
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's

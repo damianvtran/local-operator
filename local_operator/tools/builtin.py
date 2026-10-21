@@ -30120,9 +30120,26 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
 class AskParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    questions: list[AskQuestion] = Field(
+    # OPTIONAL since #2520, because the same tool now has two sources for the
+    # question: the model's own (``questions``) and ANOTHER SESSION'S pending ask
+    # (``relay``). The validator below holds the line at exactly one — a call
+    # that carried both would have to decide which list the receipt describes,
+    # and a call that carried neither asks nothing.
+    questions: list[AskQuestion] | None = Field(
+        default=None,
         min_length=1,
         description="The questions to ask, put to the user one screen at a time.",
+    )
+
+    # `relay` (#2520): re-raise another session's pending ask in THIS session's
+    # queue by reference. A pointer, not a copy — one answer settles both — so
+    # the ref must name the ask AND the session that owns it.
+    relay: str | None = Field(
+        default=None,
+        description=(
+            "Relay another session's pending ask instead of asking your own: "
+            "'<session_id>/<ask_id>'. One answer settles both."
+        ),
     )
 
     # The `timeout` field ships with the queued-ask engine (design
@@ -30145,6 +30162,23 @@ class AskParams(BaseModel):
             "(24 h). Out-of-range values are rejected, never clamped."
         ),
     )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "AskParams":
+        """EXACTLY ONE of `questions` / `relay` (#2520).
+
+        Enforced as a MODEL validator rather than two `required` fields because
+        the two shapes are alternatives, and a JSON schema that expressed that
+        as `oneOf` would cost the wire more than the sentence does. The message
+        is what the model reads when it gets it wrong, so it names both halves
+        and the remedy.
+        """
+        if (self.questions is not None) == (self.relay is not None):
+            raise ValueError(
+                "exactly one of `questions` or `relay` must be given: ask your own "
+                "questions, or relay another session's pending ask by ref, not both."
+            )
+        return self
 
 
 #: What the tool reports when the user closed the picker without choosing.
@@ -30400,6 +30434,8 @@ _ASK_DESCRIPTION_QUEUED = (
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
     "(floor 2 min); on a timeout notice take your own recommendation and say what "
     "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "To re-raise another session's pending ask instead, pass that one ask's "
+    "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
@@ -30555,6 +30591,35 @@ async def execute_ask(
     if bounds_error is not None:
         return _error(tool_call_id, "ask", bounds_error)
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    if params.relay is not None:
+        # A RELAY NEVER ENTERS THE BLOCKING ARM (#2520). A relay is a pointer at
+        # a row in another session's LOG; with no queue there is no log to point
+        # at and no reconciliation to derive the status, so the honest answer is
+        # the refusal below rather than a `ask_user` call that would re-ask the
+        # origin's question as this session's own (the exact copy #2520 exists to
+        # remove). Bounds were validated above, so a bad `timeout` is still a
+        # bounds error on both arms.
+        from local_operator.asks import render as _ask_render
+
+        if not callable(enqueue):
+            return _error(tool_call_id, "ask", _ask_render.RELAY_NEEDS_QUEUE)
+        relayed: Any = enqueue([], params.timeout, tool_call_id=tool_call_id, relay=params.relay)
+        if not relayed.get("ok"):
+            return _error(
+                tool_call_id,
+                "ask",
+                str(relayed.get("error") or _ask_render.RELAY_ORIGIN_UNKNOWN),
+            )
+        return _text(
+            tool_call_id,
+            "ask",
+            str(relayed.get("text") or ""),
+            details=dict(relayed.get("details") or {}),
+        )
+    # The validator guarantees `questions` here (exactly one of the two fields),
+    # but the narrowing is not in the type: one local list serves every use below
+    # so the blocking arm and the queued arm cannot disagree about what was asked.
+    questions = list(params.questions or ())
     if callable(enqueue):
         # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
         # the unchanged enqueue: one awaited clearance check, whose ONLY
@@ -30577,7 +30642,7 @@ async def execute_ask(
                 # an un-cast ``await`` on that narrowing is a pyright error
                 # about a value whose real shape is an awaited mapping-or-None.
                 verdict: Any = await cast("Any", gate)(
-                    params.questions, params.timeout, tool_call_id=tool_call_id
+                    questions, params.timeout, tool_call_id=tool_call_id
                 )
             except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
                 verdict = None
@@ -30597,7 +30662,7 @@ async def execute_ask(
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
-        outcome: Any = enqueue(params.questions, params.timeout, tool_call_id=tool_call_id)
+        outcome: Any = enqueue(questions, params.timeout, tool_call_id=tool_call_id)
         if not outcome.get("ok"):
             return _error(
                 tool_call_id,
@@ -30614,7 +30679,7 @@ async def execute_ask(
             str(outcome.get("text") or ""),
             details=dict(outcome.get("details") or {}),
         )
-    answers = await ask_user(params.questions)
+    answers = await ask_user(questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):
         # One outcome, whether the host answered None (escaped) or handed back
         # a mapping with nothing in it (confirmed an empty multi-select): the
@@ -30628,17 +30693,17 @@ async def execute_ask(
         # answer — a decline — so the batch reports that instead (UX round 1,
         # U3). A partially answered mixed batch keeps the normal path, where a
         # declined secret is already reported as ASK_SECRET_NOT_PROVIDED.
-        if any(question.secret for question in params.questions):
+        if any(question.secret for question in questions):
             return _text(tool_call_id, "ask", ASK_SECRET_UNANSWERED_TEXT)
         return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
     # Secret answers are stored by the host and reported as the KEY NAME
     # only. The raw value must never ride the tool result: that text is
     # persisted to the transcript and replayed to the provider.
-    reported = _report_secret_answers(params.questions, answers, context)
+    reported = _report_secret_answers(questions, answers, context)
     return _text(
         tool_call_id,
         "ask",
-        _ask_report(params.questions, reported),
+        _ask_report(questions, reported),
         details={"answers": {key: list(value) for key, value in reported.items()}},
     )
 
