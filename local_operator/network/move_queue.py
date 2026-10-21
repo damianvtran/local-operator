@@ -920,9 +920,11 @@ def _watch_for_commit(server: "RelayServer", session_id: str) -> str:
 def note_committed(root: Path | str, session_id: str) -> None:
     """The source's commit observed it directly: fold the record to ``resumed``.
 
-    Called from ``mobility._source_commit`` right after the tombstone lands, so
-    the record reaches its terminal state without waiting for the driver's next
-    poll — and idempotently, because the driver's tombstone watch may win the
+    Called from ``mobility._after_source_commit`` on EVERY commit — after the
+    tombstone when it lands, and even when its write failed, because the rename
+    out of ``sessions/`` already proved the commit and a record left live here
+    is one the driver's tombstone-only watch would fail terminally (review round
+    3, R3-1). The fold is idempotent, because the driver's watch may win the
     race. Terminal is write-once; whoever is second is a no-op.
     """
     transition(root, session_id, QUEUE_PHASE_RESUMED, writer="relay")

@@ -841,14 +841,33 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
 # under test and removes the loaded package while a turn is running.
 
 
+def _link_or_copy(source: str, destination: str, *, follow_symlinks: bool = True) -> str:
+    """Hardlink the install's files when the filesystem allows it, copy otherwise.
+
+    A HARD LINK IS THE POINT ON A NORMAL HOST: ~2 000 files, cheap, and the copy
+    is REAL paths (a symlink would resolve back to the worktree, so removing the
+    copy would remove nothing). A CROSS-DEVICE TEMP ROOT IS THE ONE CASE IT
+    CANNOT SERVE: the GitHub ubuntu runner keeps ``/tmp`` on a different
+    filesystem from the checkout, so ``os.link`` answers ``EXDEV``. Fall back to
+    ``shutil.copy2`` there; the install needs the FILES, not the link, and this
+    test asserts a deleted package tree, not link counts.
+    """
+    try:
+        os.link(source, destination, follow_symlinks=follow_symlinks)
+    except OSError:
+        return shutil.copy2(source, destination, follow_symlinks=follow_symlinks)
+    return destination
+
+
 def _noneditable_install(tmp_path: Path, *, stamp: str) -> tuple[Path, Path]:
     """A throwaway uv-tool-shaped, non-editable install. ``(prefix, tree)``.
 
     No network and no build backend: the package is HARDLINKED out of the tree
-    under test (cheap for ~2 000 files, and REAL paths — a symlink would resolve
-    back to the worktree, so removing the copy would remove nothing), a
-    hand-written ``dist-info`` is what makes ``importlib.metadata`` see a real
-    non-editable distribution, and the dependencies are reached through one
+    under test where the filesystem allows it (cheap for ~2 000 files, and REAL
+    paths — a symlink would resolve back to the worktree, so removing the copy
+    would remove nothing), copied on a cross-device temp root, a hand-written
+    ``dist-info`` is what makes ``importlib.metadata`` see a real non-editable
+    distribution, and the dependencies are reached through one
     ``.pth`` line pointing at the interpreter that runs this test. That line is
     a bare PATH on purpose: ``site`` appends it WITHOUT processing the ``.pth``
     files inside it, so the test venv's editable-install finder is never
@@ -875,7 +894,7 @@ def _noneditable_install(tmp_path: Path, *, stamp: str) -> tuple[Path, Path]:
     )
     site.mkdir(parents=True, exist_ok=True)
     tree = site / "local_operator"
-    shutil.copytree(package, tree, copy_function=os.link)
+    shutil.copytree(package, tree, copy_function=_link_or_copy)
 
     version = importlib.metadata.version("local-operator")
     dist = site / f"local_operator-{version}.dist-info"

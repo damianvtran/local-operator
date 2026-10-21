@@ -325,6 +325,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "LinkTransport.ask",
         "detail",
     ): (1, "the ack's own payload key, not a rendered reason"),
+    # ``hand_off_session_dir``'s ``HandOffOutcome.reason``: a cause THIS device
+    # composed (``session/cleanup.py``'s guard sentence, the receipt failure, the
+    # rename's ``OSError``), put in the refusal sentence so the person who asked for
+    # the move can act on it (QA round 1, Q-4). No peer writes it and nothing
+    # crosses the wire.
+    (
+        "local_operator/network/mobility.py",
+        "_source_commit",
+        "reason",
+    ): (1, "this device's own handoff cause, printed in its own refusal"),
     # The refusing device's code and sentence, handed to ``refusal_from_pairing``, whose
     # code-to-sentence map is what a person reads (Q-R3-3).
     ("local_operator/network/cli.py", "_finish_pairing", "detail"): (

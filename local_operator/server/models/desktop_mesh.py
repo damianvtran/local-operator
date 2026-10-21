@@ -174,9 +174,16 @@ class TransferReceipt(BaseModel):
     #: Where the session lives NOW (this device's id when ``locality == "local"``).
     owner_device: str
     #: True when the source's copy is gone (a ``move``); a ``keep`` never retires it.
+    #: False for an ``in_progress`` receipt too — nothing has been retired yet, and a
+    #: surface that rendered "the copy here is gone" about a queued move is exactly
+    #: the failure ``state`` was added to prevent.
     source_retired: bool
     session_id: str
     #: The id to open: equal to ``session_id`` for a move, new for ``keep``.
     new_session_id: str
     mode: Literal["move", "keep"]
+    #: The move's outcome: ``completed`` only when the destination holds a promoted
+    #: copy and the source let go; ``in_progress`` for a queued move or a committed
+    #: handoff the destination has not adopted yet.
+    state: Literal["completed", "in_progress"]
     replayed: bool = False
