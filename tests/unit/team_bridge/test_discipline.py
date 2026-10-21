@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 import pytest
 
+from local_operator import settings_io
+from local_operator.config import ConfigManager
 from local_operator.team_bridge import availability
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
@@ -42,6 +44,7 @@ from local_operator.team_bridge.client import (
     selected_tenant_id,
     surface_projection,
 )
+from local_operator.team_bridge.settings import TeamBridgeSettings
 from tests.unit.team_bridge.test_client import FakeRow, FakeStore
 
 #: The consent text the server's frozen constant serves (the RFC §5.2 source of
@@ -332,6 +335,7 @@ async def test_served_texts_are_accepted_and_rejected_through_a_real_check(
     counter = _Counter(
         lambda request: httpx.Response(200, json={"msg": "ok", "result": payloads.pop(0)})
     )
+    _set_local(tmp_path, enabled=False)  # this cell pins texts, not enrollment
     discipline = _discipline(counter, tmp_path)
 
     first = await discipline.check(Boundary.APP_START)
@@ -674,6 +678,7 @@ async def test_a_refused_served_consent_never_reaches_the_display_contract(
     counter = _Counter(
         lambda request: httpx.Response(200, json={"msg": "ok", "result": payloads.pop(0)})
     )
+    _set_local(tmp_path, enabled=False)  # this cell pins display, not enrollment
     discipline = _discipline(counter, tmp_path)
 
     first = await discipline.check(Boundary.APP_START)
@@ -912,3 +917,188 @@ def test_surface_projection_matches_the_5_6_matrix():
     assert surface_projection(_check(state=STATE_SIGNED_OUT))["surface_state"] is None
     # H1 exposes no decide surface; the field stays False for every state.
     assert all(proj["can_decide"] is False for proj in (a, b, c, d, e, f, g))
+
+
+# ---------------------------------------------------------------------------
+# the consent hold: a status read never writes an OwnerReceipt (#2712)
+# ---------------------------------------------------------------------------
+
+
+def _ok(result: Any) -> httpx.Response:
+    return httpx.Response(200, json={"msg": "ok", "result": result})
+
+
+def _set_local(root: Path, **values: Any) -> None:
+    """Write real ``team_bridge.*`` values through the real settings writer."""
+
+    manager = ConfigManager(root)
+    for name, value in values.items():
+        settings_io.write_setting(manager, settings_io.BY_KEY[f"team_bridge.{name}"], value)
+
+
+def _local(root: Path) -> TeamBridgeSettings:
+    return TeamBridgeSettings.from_config(ConfigManager(root))
+
+
+def _endpoint_payload(state: str = "active", *, eligible: bool = True) -> dict[str, Any]:
+    return _ready_payload(
+        consent=SERVED_CONSENT,
+        tenants=[
+            {
+                "tenant_id": "tnt_1",
+                "tenant_name": "Org",
+                "eligible": eligible,
+                "endpoint": {"id": "bep_1", "label": "My agent", "state": state},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+    )
+
+
+def _committed_owner(root: Path, *, session: str | None = None):
+    """Commit the real native owner + receipt, so only designation is under test."""
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store
+    from local_operator.team_bridge.types import OwnerSnapshot as Snapshot
+
+    owner = Snapshot(
+        credential_id=1,
+        account_id="acc_1",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://hub.example/v1",
+        enrollment_generation=1,
+    ).validated()
+    store = Store(root)
+    store.commit_enrollment(
+        owner,
+        OwnerReceipt(consent_version=CONSENT_VERSION_V1, consent_ref="bep_1"),
+        cos_session_id=session,
+    )
+    return store, owner
+
+
+@pytest.mark.asyncio
+async def test_an_eligible_state_b_never_consents_on_a_status_read(tmp_path: Path):
+    """State B is a prompt to the USER: the read itself performs zero writes.
+
+    #2712's opt-out default turned this answer into a settings PUT plus a native
+    receipt. The hold restores the rule: a status read is not a user action, so
+    it creates no endpoint, no receipt and no marker.
+    """
+
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT)))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+    assert _local(tmp_path).default_enrollment == {}
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_local_opt_in_does_not_turn_the_read_into_consent(tmp_path: Path):
+    """``team_bridge.enabled: true`` is a machine gate, not a consent flow.
+
+    The row may have been written before the hold (or by hand). The status read
+    still performs no PUT, commits no receipt, and the host gate stays closed.
+    """
+
+    _set_local(tmp_path, enabled=True, session="sess_cos")
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT)))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_marker_never_drives_a_consent_write(tmp_path: Path):
+    """A file from an earlier build must not authorize anything by itself."""
+
+    from local_operator.team_bridge.settings import record_default_enrollment
+
+    record_default_enrollment(tmp_path, "acc_1")
+    _set_local(tmp_path, enabled=True)
+    counter = _Counter(lambda request: _ok(_ready_payload(consent=SERVED_CONSENT)))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "B"
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_an_active_endpoint_without_a_local_receipt_is_not_committed(tmp_path: Path):
+    """State C from server truth is not proof of THIS user's consent.
+
+    An endpoint can be active because another surface or an older build enabled
+    it. Only the explicit settings write may commit the receipt, so a status
+    read leaves the store untouched (badge-only; the runtime stays closed).
+    """
+
+    _set_local(tmp_path, enabled=True, session="sess_cos")
+    counter = _Counter(lambda request: _ok(_endpoint_payload("active")))
+
+    check = await _discipline(counter, tmp_path).check(Boundary.APP_START)
+
+    assert [request.method for request in counter.requests] == ["GET"]
+    assert surface_projection(check)["surface_state"] == "C"
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_designation_still_follows_the_settings_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """The settings row stays live: a chosen session reaches the native record.
+
+    Only a committed owner's designation is reconciled — the read never creates
+    the owner. Clearing the row withdraws wake consent (§13.6 badge-only).
+    """
+
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    store, owner = _committed_owner(tmp_path)
+    _set_local(tmp_path, enabled=True, session="sess_cos")
+    counter = _Counter(lambda request: _ok(_endpoint_payload("active")))
+    discipline = _discipline(counter, tmp_path)
+
+    await discipline.check(Boundary.APP_START)
+    assert store.designated_session_for(owner) == "sess_cos"
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is not None
+    )
+
+    _set_local(tmp_path, session="")
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert store.designated_session_for(owner) is None
+    assert (
+        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
+        is None
+    )

@@ -233,9 +233,16 @@ _WALK_DEPTH_CAP = 2
 # 782 -> 804 (#2509): the tools/effort/delegate descriptions now say WHICH
 # kind may carry them, so the agent doc's rendered schema grew by those
 # qualifiers (the tier arm below moves with it).
+# 1001 -> 1063 (#2520, ask relay): the ``AskParams.relay`` property and the
+# queued tail's one relay clause are the whole move, and BOTH ledgers were
+# re-measured in the same pass — ``scripts/bench_context_budget.py``'s top arm
+# moves 88,825 -> 89,094 chars (+269 = ~+97 billed) and its ceiling with it,
+# while every other entry here is byte-identical. The field is mode-independent,
+# so the blocking arm's bench number moved by the same +269 chars and still
+# passes under that ceiling.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 804,
-    "ask": 1001,
+    "ask": 1063,
     "ask_withdraw": 314,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
@@ -251,7 +258,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # and ack clauses tightened) while this entry kept its H5d value. Measured
     # by this test's own printed table (the ``count_text_tokens`` ledger path)
     # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
-    "bridge": 559,
+    # RE-MEASURED (#2665 round 1): 559 -> 729. The channel lane publishes four
+    # op literals, eleven parameters and the nested ``ChannelMemberParams``
+    # model; its prose was trimmed first (761 -> 729 measured: wire description
+    # 376 -> 240 chars, both model docstrings to one line each). 729 is the
+    # structural floor for a capability the model must be able to call. The
+    # paired start-context raise is stated in scripts/bench_context_budget.py.
+    "bridge": 729,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -355,7 +368,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # entry that moved: every other count above is byte-identical.
     "no_reply": 109,
     "patience": 330,
-    "project": 1098,
+    # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
+    # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
+    # names its occasion (frame/chart/log) and the copy-and-limit contract;
+    # re-measured through this test's own printed table, not pasted.
+    "project": 1143,
     "project_delete": 91,
     "read": 345,
     "read_variable": 67,
@@ -371,6 +388,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
+    # NEW (V2-4 agent tags, 2026-10-20): the ``tags`` doc — the names-only
+    # assignment rule, the caps, the remote refusal and the receipt contract.
+    # Deliberate cost of that reference being one read away; the same tool's
+    # schema is the whole of ``scripts/bench_context_budget.py``'s raise
+    # (measurement recorded there), so the two ledgers move together.
+    # 528 -> 531 in review round 2: the receipt claim is qualified to
+    # ``assign``, because ``create``/``list``/``rename`` name categories only.
+    "tags": 531,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than

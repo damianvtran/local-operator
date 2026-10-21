@@ -498,6 +498,9 @@ def test_the_shared_wire_models_field_sets_are_pinned() -> None:
         "state",
         "unavailable_since",
         "health",
+        "blind",
+        "blind_reason",
+        "suppressed",
     }
     assert set(MonitorEntry.model_fields) == {
         "session_id",

@@ -1,20 +1,36 @@
 /**
- * Session status glance — spend and context, read-only.
+ * Session status glance — spend and context on one line; the per-channel
+ * facts are a drill-down behind the spend figure.
  *
  * The phone's counterpart to the desktop strip's two readings (that repo's
  * `features/chat/session-status/session-cost.ts` + `session-context.ts`),
- * adapted to a 390-px touch layout. Phase 1 of the mobile parity program:
- * nothing here is interactive, so it adds no tap targets and no flow.
+ * adapted to a 390-px touch layout.
+ *
+ * STATE, NOT TELEMETRY (the operator defect this file fixes). The row used to
+ * render a second, wrapping line of per-channel chips under every session, so
+ * a phone lost a row to telemetry that repeated `image` three times at three
+ * prices. The always-visible footprint is now the one line; the chips are
+ * behind the spend reading, and they are absent from the DOM entirely while
+ * collapsed — not hidden, not reserved, not an ellipsis. A phone row is the
+ * budget, and a placeholder saying "something might be here" still spends it.
+ *
+ * THE DESKTOP'S INTERACTION MODEL, NOT ITS ROW LAYOUT. The desktop strip
+ * dispatches `/usage` when its spend cell is clicked: the figure is the door to
+ * the breakdown. The phone reuses that model — tap the figure, tap again to
+ * close — without reusing the row, because the desktop has width for a cell and
+ * a phone does not. The panel expands INLINE, directly below the row, in normal
+ * flow: the row the thumb just tapped must not move, so the panel may only push
+ * what sits below it. That is also why it is not a sheet, modal, toast or
+ * overlay — those cover or replace the reading they explain.
  *
  * PLACEMENT. The desktop tucks its readings into the composer's button row;
  * on a phone that row is a touch surface (attach / model / mic / send), so the
  * readings would either crowd a control strip or invite taps. The header is
- * also width-starved — the name truncates between four controls. This row sits
- * under the header, styled like the gate receipt's line (`text-meta` scale, a
- * hairline bottom border), which is the smallest always-visible footprint: it
- * costs one text line, and it disappears ENTIRELY when there is nothing to
- * say. A fresh session shows neither `$0.0000` nor `0%` — both spellings are
- * refusals the Python sources already make (`_spend_text`'s zero policy and
+ * also width-starved. This row sits under the header, styled like the gate
+ * receipt's line (`text-meta` scale, a hairline bottom border): it costs one
+ * text line, and it disappears ENTIRELY when there is nothing to say. A fresh
+ * session shows neither `$0.0000` nor `0%` — both spellings are refusals the
+ * Python sources already make (`_spend_text`'s zero policy and
  * `context_spelling`'s empty), so "no row" here is the same decision, not a
  * second one.
  *
@@ -31,6 +47,7 @@
  * beside the reading — the desktop strip's convention, per the design round's
  * D2 ruling. See `contextEstimateMarker` for both precedents and the ruling.
  */
+import { useEffect, useId, useState } from "react";
 import { cn } from "../lib/cn";
 import {
 	channelBreakdown,
@@ -63,6 +80,22 @@ const RUNG_CLASS: Record<ContextRung, string> = {
 	danger: "text-danger font-semibold",
 };
 
+/** The disclosure's chevron: one fixed 16px box either way, so the control
+    cannot resize (and the figure cannot shift) when the glyph changes. */
+const CHEVRON_BOX = "grid size-4 shrink-0 place-items-center text-ink-dim";
+
+/** Keys a reader uses to scroll a page, each a deliberate move away from the
+    reading. Text entry is excluded below so typing `End` in the composer does
+    not close a panel the reader never left. */
+const DISMISS_KEYS = new Set(["PageDown", "PageUp", "Home", "End", "ArrowUp", "ArrowDown"]);
+
+function isTextEntry(target: EventTarget | null): boolean {
+	return (
+		target instanceof HTMLElement &&
+		(target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+	);
+}
+
 export function SessionStatus({ projection }: { projection: SessionProjection }) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
 	// already spans this session's inference, its channels AND its children,
@@ -75,22 +108,69 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 		: { text: sessionSpend(projection, projection.usage).text };
 	const context = contextReading(projection);
 	const estimateMarker = contextEstimateMarker(context);
-	// The breakdown line (PR-2): shown only when the published object exists
-	// and has something to say — named rows, an honest remainder count, or the
-	// untracked disclosure. An old daemon sends no object and this line is
-	// absent entirely, so the legacy row is untouched.
+	// The drill-down (PR-2's chips): shown only when the published object
+	// exists and has something to say — named rows, an honest remainder count,
+	// or the untracked disclosure. An old daemon sends no object and the panel
+	// is absent entirely, so the legacy row is untouched.
 	const breakdown = channelBreakdown(projection);
 	const hasBreakdown =
 		breakdown !== null &&
 		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || breakdown.untrackedNotice);
-	const hasRow = Boolean(spend.text || context.spelling);
-	if (!hasRow && !hasBreakdown) return null;
+	const hasReading = Boolean(spend.text || context.spelling);
+	const hasRow = hasReading || hasBreakdown;
+	/* The disclosure is user state, not wire state: the runtime never says
+	   whether a reader has opened the chips, and the next projection must not
+	   re-open what they closed. */
+	const [expanded, setExpanded] = useState(false);
+	const panelId = useId();
+	/* A reading is only a door when there is a panel behind it, and a control
+	   with nothing behind it is the dead control this row must not ship. */
+	const canExpand = hasBreakdown;
+	useEffect(() => {
+		if (!expanded) return;
+		/* USER INTENT ONLY — NEVER `scroll`. This listener used to collapse on
+		   every scroll event, and at the bottom of a long transcript the panel's
+		   own 61px insertion shrank the scroll extent, so the browser's tail-follow
+		   and anchor correction fired `scroll` with no reader input: measured as
+		   scrollTop 3449 -> 3510 -> 3449 inside 20-100ms, the panel opening and
+		   closing before it could be read. A layout-driven scroll is not the
+		   reader scrolling away, so dismissal is keyed to gestures that can only
+		   come from a person: wheel, touch drag, and the page-scroll keys.
+
+		   Capture phase because these events may be targeted at the transcript's
+		   scroller; the listeners exist only while the panel does. */
+		const collapse = () => setExpanded(false);
+		const onKey = (event: KeyboardEvent) => {
+			if (!DISMISS_KEYS.has(event.key) || isTextEntry(event.target)) return;
+			collapse();
+		};
+		window.addEventListener("wheel", collapse, { capture: true, passive: true });
+		window.addEventListener("touchmove", collapse, { capture: true, passive: true });
+		window.addEventListener("keydown", onKey, true);
+		return () => {
+			window.removeEventListener("wheel", collapse, true);
+			window.removeEventListener("touchmove", collapse, true);
+			window.removeEventListener("keydown", onKey, true);
+		};
+	}, [expanded]);
+	if (!hasRow) return null;
+	/* Collapsed means ABSENT, including the no-figure case: a breakdown whose
+	   total cannot be spelled keeps its facts behind the `cost detail` control
+	   rather than spending a permanent second line. */
+	const showPanel = hasBreakdown && expanded;
 	return (
 		<>
 			{hasRow ? (
 				<div
 					data-testid="session-status"
-					className="flex items-center gap-2 border-b border-hairline px-3 py-1 font-mono text-mono-sm tabular-nums"
+					className={cn(
+						"flex items-center gap-2 border-b border-hairline px-3 font-mono text-mono-sm tabular-nums",
+						/* The spend control carries the 44px touch floor; the row's
+						   own vertical padding would add to it, so the padded row is
+						   only for the non-interactive (legacy / no-breakdown) cell.
+						   Same 28px text row as before when there is no control. */
+						canExpand ? "py-0" : "py-1",
+					)}
 				>
 					{/* Reading order is the one both references use — the TUI band's right
 					    group and the desktop strip both read context before spend — and
@@ -111,34 +191,83 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 						</span>
 					) : null}
 					{spend.text ? (
-						<span
-							data-testid="session-status-spend"
-							className="ml-auto min-w-0 truncate text-ink-muted"
+						canExpand ? (
+							<button
+								type="button"
+								data-testid="session-status-spend"
+								aria-expanded={expanded}
+								aria-controls={expanded ? panelId : undefined}
+								/* The visible figure is the first thing a screen reader
+								   should hear; the suffix names what the press opens. */
+								aria-label={`${spend.text} spend breakdown`}
+								onClick={() => setExpanded((open) => !open)}
+								className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+							>
+								<span className="truncate">{spend.text}</span>
+								<span aria-hidden className={CHEVRON_BOX}>
+									{expanded ? "\u25b4" : "\u25be"}
+								</span>
+							</button>
+						) : (
+							/* No panel exists, so the figure is a reading, not a door:
+							   the plain span keeps the legacy spelling and adds no
+							   dead control. */
+							<span
+								data-testid="session-status-spend"
+								className="ml-auto min-w-0 truncate text-ink-muted"
+							>
+								{spend.text}
+							</span>
+						)
+					) : hasBreakdown ? (
+						/* A session with channel facts but no spend figure to print — a
+						   zero total, or rows whose amounts could not be stated with no
+						   billed tokens beside them. The facts still need a door, and the
+						   door cannot be an amount that does not exist; `cost detail` names
+						   what it opens and stays absent from the default row. */
+						<button
+							type="button"
+							data-testid="session-status-cost-detail"
+							aria-expanded={expanded}
+							aria-controls={expanded ? panelId : undefined}
+							aria-label="cost detail"
+							onClick={() => setExpanded((open) => !open)}
+							className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 						>
-							{spend.text}
-						</span>
+							<span className="truncate">cost detail</span>
+							<span aria-hidden className={CHEVRON_BOX}>
+								{expanded ? "\u25b4" : "\u25be"}
+							</span>
+						</button>
 					) : null}
 				</div>
 			) : null}
-			{hasBreakdown && breakdown ? (
-				/* The second line is FACTS, not an alarm: muted like the spend cell
+			{showPanel && breakdown ? (
+				/* The facts are FACTS, not an alarm: muted like the spend cell
 				   above it, wrapping on a 390-px screen rather than shedding chips
 				   silently. Every amount here is the backend's own row amount —
-				   never a re-sum of the total — and `sub-equiv` marks subscription
+				   never a re-sum of the total — and `included` marks subscription
 				   quota so it cannot be read as billed dollars (design §5.1). ROWS
 				   DRAW ALWAYS (the desktop M-4 gate): a marker-less session that
 				   carries recovered rows shows them, and the untracked disclosure
 				   appears BESIDE them only when the object itself shows something
 				   is missing. */
 				<div
+					id={panelId}
 					data-testid="session-status-channels"
-					className="flex flex-wrap items-baseline gap-x-2 border-b border-hairline px-3 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
+					className="flex flex-wrap items-baseline gap-x-2 border-b border-hairline px-3 pt-1 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
 				>
 					{breakdown.chips.map((chip, index) => (
 						<span key={`${chip.label}-${index}`} data-testid="session-status-channel">
-							{chip.label} {chip.text}
+							{/* A shared channel label is qualified with the row's own
+							    serving identity — `image/gpt-image-1 $0.080` beside
+							    `image/gpt-image-2 $0.080` — so three `image` rows stop
+							    being three identical words at three prices. The
+							    qualifier comes from the wire, never from money. */}
+							{chip.qualifier ? `${chip.label}/${chip.qualifier}` : chip.label}{" "}
+							{chip.text}
 							{chip.subEquivalent ? (
-								<span className="text-ink-dim"> sub-equiv</span>
+								<span className="text-ink-dim"> included</span>
 							) : null}
 						</span>
 					))}

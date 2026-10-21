@@ -30,6 +30,11 @@ from local_operator.tools import builtin
 from local_operator.tools.secret_tool import build_secret_tool, execute_secret
 from local_operator.variables import VariableStore, redact_secret_values
 
+# These cells drive the BROKER path itself (a real `lop secret get` child and the
+# §6 redaction sink), so they need a live daemon; the autouse suite gate is for
+# ordinary store reads, which fall back to the key file.
+pytestmark = pytest.mark.allow_secret_broker
+
 
 class BrokerAwareStore(VariableStore):
     """A VariableStore carrying the §6 redaction sink.

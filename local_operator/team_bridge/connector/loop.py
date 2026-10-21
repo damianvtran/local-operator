@@ -32,8 +32,19 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from local_operator.team_bridge.connector.wake import handle_message_available
+from local_operator.team_bridge.connector.conversation import (
+    handle_conversation_available,
+)
+from local_operator.team_bridge.connector.wake import (
+    handle_message_available,
+    parse_event_ref,
+)
 from local_operator.team_bridge.events import plan_feed_refs
+from local_operator.team_bridge.types import (
+    CONVERSATION_FEED_KIND,
+    ConversationFeedRef,
+    parse_conversation_ref_value,
+)
 
 #: Bounded exponential backoff between loop iterations after a FAILURE (a
 #: refused read, a transport error). A 204 timeout is NOT a failure — it
@@ -88,6 +99,18 @@ async def resync_walk(owner: Any, *, config_dir: Path, access: Any) -> dict[str,
     return {"pages": pages}
 
 
+def _conversation_hold_ref(value: str) -> ConversationFeedRef | None:
+    """A hold row that names a conversation delivery, or ``None`` for a pair item."""
+
+    parsed = parse_event_ref(value)
+    if parsed is None:
+        return None
+    event_type, kind, raw = parsed
+    if event_type != "message_available" or kind != CONVERSATION_FEED_KIND:
+        return None
+    return parse_conversation_ref_value(raw)
+
+
 async def retry_due_holds(
     owner: Any,
     *,
@@ -125,16 +148,30 @@ async def retry_due_holds(
     outcomes: list[dict[str, Any]] = []
     for row in due:
         message_id = row["message_id"]
-        outcome = await handle_message_available(
-            owner,
-            message_id,
-            config_dir=config_dir,
-            auth_store=auth_store,
-            access=access,
-            settings=settings,
-        )
+        parsed = _conversation_hold_ref(message_id)
+        if parsed is not None:
+            # A conversation hold is keyed by its encoded feed ref, because a
+            # bare message id cannot name the conversation again after a
+            # restart. Never hand it to the pair spine.
+            outcome = await handle_conversation_available(
+                owner,
+                parsed,
+                config_dir=config_dir,
+                auth_store=auth_store,
+                access=access,
+                settings=settings,
+            )
+        else:
+            outcome = await handle_message_available(
+                owner,
+                message_id,
+                config_dir=config_dir,
+                auth_store=auth_store,
+                access=access,
+                settings=settings,
+            )
         action = outcome.get("action")
-        if action in ("delivered", "bounce"):
+        if action in ("delivered", "bounce", "delivered_unadmitted", "skipped"):
             _RETRY_ATTEMPTS.pop(message_id, None)
         elif action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
@@ -232,6 +269,22 @@ async def run_iteration(
             # screening_holds schedule is the re-drive path now that refs are
             # consumed once-only, so a stuck delivery is never silently lost.
             _persist_hold_backoff(store, owner, message_id, str(outcome.get("code") or "hold"))
+    for conversation_ref in plan.conversation_deliveries:
+        # Conversation deliveries have their OWN card path; the pair inbox
+        # reader above must never see one.
+        outcome = await handle_conversation_available(
+            owner,
+            conversation_ref,
+            config_dir=config_dir,
+            auth_store=auth_store,
+            access=access,
+            settings=settings,
+        )
+        handled.append(outcome)
+        if outcome.get("action") == "hold":
+            _persist_hold_backoff(
+                store, owner, conversation_ref.encode(), str(outcome.get("code") or "hold")
+            )
     # TB-01: ONCE-ONLY consumption — the drained refs were just handled
     # (deliveries) or are state hints the drain itself consumes; deleting them
     # here is what stops the quadratic re-wake/ACK growth across polls and

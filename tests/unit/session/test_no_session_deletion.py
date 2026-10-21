@@ -453,6 +453,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # The DESKTOP sidebar layout store (`local_operator/server/sidebar_layout.py`),
+    # the same config-root shape as the pin store above and argued the same way:
+    # `write_layout` joins the config ROOT with the fixed basename
+    # `sidebar-layout.json`, or with a `.sidebar-layout.json.<random>.tmp` name
+    # `mkstemp` minted in that same directory. Neither path is derived from a
+    # session id, a transcript or any caller-chosen component, so neither can
+    # resolve under `sessions/`. The replace target is that one preference FILE;
+    # the unlink target is the sibling temp REGULAR FILE this call just created,
+    # on the failure path. (Agent review round 2, R2-1a.)
+    (
+        "local_operator/server/sidebar_layout.py::write_layout",
+        "os.replace",
+        "Atomic replace of <config_dir>/sidebar-layout.json; a fixed config-root name, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/sidebar_layout.py::write_layout",
+        "os.unlink",
+        "Only the sibling mkstemp temp FILE this call created in <config_dir>; "
+        "never a session, transcript or directory",
+    ),
     (
         "local_operator/session/session_tags.py::_write",
         "os.replace",
@@ -472,6 +493,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes the fixed-basename <config>/tags/revision marker after both marker "
         "writes fail, so readers fall back to the stats fingerprint; the path is never "
         "a session directory or transcript.",
+    ),
+    # The fork auto-tag sidecar is one REGULAR FILE inside the child's own
+    # session directory. Both paths are that fixed basename joined onto the
+    # directory: the temp is a sibling mkstemp file and the replace target is
+    # `auto-tag.json`, so neither call can rename or remove the directory
+    # itself. `clear` unlinks that same file. See `session/auto_tag.py`.
+    (
+        "local_operator/session/auto_tag.py::record_fork",
+        "os.replace",
+        "Atomic replacement of the fixed-basename auto-tag.json sidecar inside the "
+        "child's session directory; the source is its own sibling mkstemp FILE, "
+        "never a session directory.",
+    ),
+    (
+        "local_operator/session/auto_tag.py::record_fork",
+        "<path>.unlink",
+        "Removes only its own named mkstemp FILE after a failed replacement; never a "
+        "session directory or transcript.",
+    ),
+    (
+        "local_operator/session/auto_tag.py::clear",
+        "<path>.unlink",
+        "Removes only the fixed-basename auto-tag.json sidecar FILE after the naming "
+        "attempt; never a session directory or transcript.",
     ),
     # -- the archive index: the pins store's row, for the pins store's reasons --
     # One file at the config root with a FIXED basename (`archived-sessions.json`
@@ -852,6 +897,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/cleanup.py::_write_record",
         "<path>.unlink",
         "the tmp FILE of a failed record write",
+    ),
+    # The content pass's per-pad manifest. BOTH sides are regular FILES under
+    # `sessions/.cleanup-manifests/`: the target is `<UTC>-<session>.json` and
+    # the temporary is the same name with a leading `.` and a `.tmp` suffix,
+    # renamed in the manifest directory. Neither is a session directory, and
+    # the session's own content goes through `remove_scratchpad_entry`, not
+    # through this call.
+    (
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
+        "os.replace",
+        "tmp FILE -> manifest FILE under sessions/.cleanup-manifests; never a session dir",
+    ),
+    (
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
+        "<path>.unlink",
+        "Only this call's own .<name>.tmp regular FILE after a failed manifest write",
     ),
     # Store-maintenance completion metadata (2026-09-23). Startup passes the
     # AgentRegistry config root to this worker; session directories are its
@@ -2295,6 +2356,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_file_viewer",
+        "<path>.remove",
+        "Textual FileViewer.remove unmounts the page; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_agent_form",
         "<path>.remove",
         "Textual AgentFormPage.remove unmounts the page; no filesystem path",
@@ -3010,6 +3076,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Removes ONLY this operation's own staged tree under <config_dir>/hub/staging/",
     ),
+    # UNPULL. Every path is built from validated pieces: the managed root
+    # <config_dir>/skills/<alias> (``validate_name`` authenticates a single
+    # kebab-case segment), the intent marker <config_dir>/hub/unpull/
+    # skill-<local_id>.json (``baseline_path`` validates the opaque id) and the
+    # tombstone <config_dir>/hub/backups/skill-<local_id>-unpull-<hex>. The
+    # replace MOVES the managed copy into that tombstone, the unlink removes
+    # this id's own marker, and the rmtree removes ONLY our tombstone -- no
+    # call accepts a session id, a sessions/ path or a caller-named directory.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "os.replace",
+        "Moves <config_dir>/skills/<validated alias> to its own hub/backups tombstone",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "<path>.unlink",
+        "Removes this skill id's own intent marker under <config_dir>/hub/unpull/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.unpull",
+        "shutil.rmtree",
+        "Removes ONLY the tombstone this unpull minted under <config_dir>/hub/backups/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
+        "<path>.unlink",
+        "Removes validated skill-unpull markers under <config_dir>/hub/unpull/ (six branches)",
+        6,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_unpull_locked",
+        "shutil.rmtree",
+        "After the state write, removes ONLY the marker's own hub/backups tombstone",
+        2,
+    ),
     # The local transaction journal's one JSON writer. Its ONLY caller passes
     # TransactionJournal._path(op-id): <config_dir>/hub/transactions/<validated id>.json
     # with a same-directory mkstemp temp -- never a session-derived path.
@@ -3022,6 +3123,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/hub_sync/transactions.py::atomic_json",
         "<path>.unlink",
         "Clears this call's own same-directory .transaction-*.tmp on the error path only",
+    ),
+    # The initial-publication preview receipts: one JSON file per opaque token
+    # under <config_dir>/hub/publication-previews/ (a sibling of sessions/).
+    # `_publication_preview_path` refuses any token that is not
+    # [A-Za-z0-9_-]{16,128}, and both the target and the mkstemp temp are formed
+    # from that fixed directory + token; no session id or caller path reaches
+    # either. Pruning globs *.json in that same fixed directory only.
+    (
+        "local_operator/hub_sync/service.py::_write_publication_preview",
+        "os.replace",
+        "Atomic replace of a <config_dir>/hub/publication-previews receipt from a sibling temp",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_write_publication_preview",
+        "os.unlink",
+        "Clears this call's own same-directory preview temp on the error path only",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_prune_publication_previews",
+        "<path>.unlink",
+        "Removes EXPIRED *.json receipts in <config_dir>/hub/publication-previews/ only",
+    ),
+    (
+        "local_operator/hub_sync/service.py::_delete_publication_preview",
+        "<path>.unlink",
+        "Removes ONE reconciled receipt in <config_dir>/hub/publication-previews/",
     ),
     # -- speech-to-text temp scratch (mobile STT) ---------------------------
     # The Radient leg writes the uploaded clip into a directory THIS call
@@ -3160,6 +3287,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tools/memory_tools.py::_run",
         "<path>.move",
         "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
+    # -- the TUI's sidebar grouping toggle: config-root view state ------------
+    # `write_tag_groups` writes `<config>/sidebar-tags.json`, a FIXED path
+    # built from the config root: `os.replace` moves only the sibling mkstemp
+    # file onto it, and the `unlink` removes only that leftover temp sibling
+    # when the replace failed. Neither argument is derived from a session id,
+    # a session directory or caller input, so neither can reach `sessions/`.
+    (
+        "local_operator/tui/sidebar_tags.py::write_tag_groups",
+        "os.replace",
+        "Atomic config-root sidebar-tags.json only; fixed path, never a session entry",
+    ),
+    (
+        "local_operator/tui/sidebar_tags.py::write_tag_groups",
+        "<path>.unlink",
+        "Only the sibling .sidebar-tags-*.tmp leftover; never a session path",
     ),
 )
 
@@ -3349,8 +3492,13 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
+        # never a session directory (the target is a regular file).
+        "local_operator/session/delegated_retention.py::_write_cleanup_manifest",
         # tmp -> tags/<type>/<id>.json under config_dir()/tags, never sessions/
         "local_operator/session/session_tags.py::_write",
+        # tmp -> auto-tag.json, a FILE inside the child's own session directory
+        "local_operator/session/auto_tag.py::record_fork",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
         "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)

@@ -59,6 +59,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from local_operator.asks import policy, render, store
 from local_operator.harness.message_types import (
+    ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
@@ -85,6 +86,32 @@ REVISION_IMAGES_REFUSED = (
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+#: The statuses a relay's settle note is owed for (#2520). ``timed_out`` is
+#: DELIBERATELY absent: it is lapsed, not terminal — the origin still takes a
+#: late answer, and the note's row id is a one-shot marker, so delivering there
+#: would leave the watcher permanently misinformed if that answer arrives. The
+#: watcher is told when the pair can no longer move: an answer (or its absence,
+#: at expiry), a decline, a dismissal, or a retraction.
+_RELAY_SETTLED_STATUSES = frozenset(
+    {
+        store.STATUS_ANSWERED,
+        store.STATUS_DECLINED,
+        store.STATUS_DISMISSED,
+        store.STATUS_WITHDRAWN,
+        store.STATUS_EXPIRED,
+        store.STATUS_LATE,
+    }
+)
+
+#: The USER'S OWN ACTS in the fold's §12 carve-out, applied across the pair: an
+#: answer, decline, dismissal or late answer on the ORIGIN outranks the watcher's
+#: retraction of its relay, in either write order — the same rule
+#: ``store.fold`` applies within one log.
+_RELAY_USER_ACT_TERMINALS = frozenset(
+    {store.STATUS_ANSWERED, store.STATUS_DECLINED, store.STATUS_DISMISSED, store.STATUS_LATE}
+)
 
 
 def _lapsed_visible_ms(config_dir: Path) -> int:
@@ -183,7 +210,15 @@ class AskQueue:
         seen: set[str] = set()
         if callable(has_entry):
             for ask_id in store.ask_ids(events):
-                for row_id in (store.response_row_id(ask_id), store.timeout_row_id(ask_id)):
+                for row_id in (
+                    store.response_row_id(ask_id),
+                    store.timeout_row_id(ask_id),
+                    # The relay settle note (#2520) is a durable row of this
+                    # engine too: without it here, every reconcile would re-plan
+                    # a note it had already appended. One extra has_entry per
+                    # ask, the same cost class as the two existing rows.
+                    store.relay_row_id(ask_id),
+                ):
                     try:
                         if has_entry(row_id):
                             seen.add(row_id)
@@ -192,10 +227,112 @@ class AskQueue:
         return seen
 
     def _fold_state(self, now_ms: int) -> tuple[list[dict[str, Any]], set[str]]:
-        """``(records, present row ids)`` from ONE read of the log."""
+        """``(records, present row ids)`` from ONE read of the log.
+
+        Relay rows are resolved AFTER the local fold (#2520): their status,
+        questions and answers live in the ORIGIN session's log, so the fold here
+        produces the reference and this second pass fills it in. It is the only
+        cross-session read in the engine, and it is done on every read rather
+        than cached: the origin is a file another process appends to, and a
+        cached derivation would report an answer the user has already given.
+        """
         events = store.read_events(self.session_dir)
         present = self._present_row_ids(events)
-        return store.fold(events, now_ms, present_ids=present), present
+        records = store.fold(events, now_ms, present_ids=present)
+        self._apply_relay_derivation(records, now_ms)
+        return records, present
+
+    def _apply_relay_derivation(self, records: list[dict[str, Any]], now_ms: int) -> None:
+        """Fill each relay record in from its ORIGIN's fold (#2520).
+
+        ONE hop only, deliberately. A relay of a relay is refused at creation
+        (``RELAY_OF_RELAY``), so there is no chain to follow; an origin record
+        that is itself a relay can only come from a hand-edited log, and it is
+        treated as gone rather than dereferenced — the alternative is an
+        unbounded walk with no answerable end.
+
+        The ORIGIN'S RULES DECIDE, not the watcher's: questions are copied
+        VERBATIM (``AskQueue.respond``'s whole-ask contract means the watcher
+        cannot reword what the human is answering), the deadline and urgency are
+        the origin's, and the status is the origin's. The LOCAL OVERRIDES are
+        the watcher's own settles — a ``withdrawn`` row (the asker retracting
+        its relay) and a ``dismissed`` row (the user closing a lapsed card) —
+        under the fold's §12 carve-out applied across the pair: a user act on
+        the origin (answered, declined, dismissed, late) outranks them in either
+        order.
+
+        An unresolvable origin SETTLES the relay (``origin_gone``, ``expired``):
+        a pointer with nothing behind it is not outstanding work, and leaving it
+        open would make the watcher's list show a question no one can answer.
+        A local settle already on the row is kept over that ``expired``: the
+        card was closed before the pointer broke, and re-opening it to say the
+        origin is gone would be the same dropped decision R1-1 fixed.
+        """
+        for record in records:
+            ref = record.get("relay")
+            if not isinstance(ref, Mapping):
+                continue
+            # THE WATCHER'S OWN SETTLES (#2673, R1-2/R1-3), read off the stamps
+            # ``store._relay_record`` puts on the base row: a dismissal is the
+            # user's view act, a withdrawal the asker's retraction, and a
+            # dismissal outranks it (§12's order, applied across the pair). They
+            # are LOCAL and view-only — nothing here is written — but they must
+            # survive the origin's status or the card silently re-opens.
+            local_settle = (
+                store.STATUS_DISMISSED
+                if record.get("relay_dismissed_at")
+                else store.STATUS_WITHDRAWN if record.get("relay_withdrawn_at") else ""
+            )
+            origin_session = str(ref.get("session_id") or "")
+            origin_ask = str(ref.get("ask_id") or "")
+            relay: dict[str, Any] = {"session_id": origin_session, "ask_id": origin_ask}
+            origin = (
+                next(
+                    (
+                        candidate
+                        for candidate in store.fold(
+                            store.read_events(store.session_dir(self._config_dir, origin_session)),
+                            now_ms,
+                        )
+                        if candidate.get("ask_id") == origin_ask and not candidate.get("relay")
+                    ),
+                    None,
+                )
+                if origin_session and origin_ask
+                else None
+            )
+            if origin is None:
+                relay["origin_gone"] = True
+                relay["origin_status"] = "missing"
+                record["relay"] = relay
+                record["status"] = local_settle or store.STATUS_EXPIRED
+                continue
+            record["questions"] = [
+                dict(question)
+                for question in (origin.get("questions") or ())
+                if isinstance(question, Mapping)
+            ]
+            record["expires_at"] = int(origin.get("expires_at") or 0)
+            record["timeout_s"] = int(origin.get("timeout_s") or 0)
+            record["urgent"] = bool(origin.get("urgent"))
+            # Copied rather than referenced so a later read of this record cannot
+            # see the origin mutate under it; only keys the origin actually holds
+            # travel, so a still-open relay carries no empty ``answers``.
+            for key in ("answers", "answered_at", "answered_by", "attachments"):
+                if key in origin:
+                    value = origin[key]
+                    record[key] = dict(value) if isinstance(value, Mapping) else value
+            origin_status = str(origin.get("status") or "")
+            relay["origin_status"] = origin_status
+            record["relay"] = relay
+            record["status"] = origin_status
+            if local_settle and origin_status not in _RELAY_USER_ACT_TERMINALS:
+                # A USER ACT ON THE ORIGIN WINS (design §12, across the pair): an
+                # answer, decline, dismissal or late answer there is what
+                # happened to the QUESTION, so the watcher's own closed card must
+                # not hide it. Anything else — the origin merely lapsed, expired
+                # or still open — leaves the local settle standing.
+                record["status"] = local_settle
 
     def records(self, now_ms: int | None = None) -> list[dict[str, Any]]:
         """The folded queue, newest-last, each with its ``delivered`` flag."""
@@ -240,7 +377,14 @@ class AskQueue:
         )
         if cap_refusal:
             return {"ok": False, "error": cap_refusal}
-        open_rows = [row for row in records if row["status"] == store.STATUS_OPEN]
+        open_rows = [
+            row for row in records if row["status"] == store.STATUS_OPEN and not row.get("relay")
+        ]
+        # The duplicate rules below are about the MODEL's own asks. A relay's
+        # questions are the origin's and were copied VERBATIM, so counting them
+        # would refuse a fresh ask in this session for text the model never
+        # wrote; the relay row is excluded with the cap above and for the same
+        # reason (#2520).
         shapes = [_question_shape(q) for q in questions]
         open_secret_keys = {
             str(q.get("id"))
@@ -479,6 +623,227 @@ class AskQueue:
         self.arm()
         return {"ok": True, "text": receipt, "details": details}
 
+    def enqueue_relay(self, relay_ref: str, *, tool_call_id: str = "") -> dict[str, Any]:
+        """Record a RELAY of another session's pending ask (#2520).
+
+        A relay is a POINTER, not a copy: this session's log gets one
+        ``relayed`` row naming the origin ``(session_id, ask_id)`` and the
+        origin's log gets one ``relay-surfaced`` row naming this session, so the
+        origin can show "also raised elsewhere". Nothing about the question,
+        its deadline or its answer is duplicated — the derivation in
+        :meth:`_fold_state` reads them from the origin's fold, which is what
+        makes one answer settle both by construction.
+
+        REFUSAL ORDER is the order a model can act on: shape (correctable),
+        self (answer it here), unknown (wrong id), chain (follow the one hop),
+        settled (nothing left), secret (a boundary), held (already relayed from
+        here), cap (wait). Each is its own sentence in ``render``; a generic
+        failure teaches nothing and is retried.
+
+        The origin's append is BEST-EFFORT (logged, not fatal): the relay is the
+        durable fact and works from this session's log alone, while the surfaced
+        note is a courtesy to a session whose directory this process may not own
+        or be able to write. Failing the relay because a foreign directory is
+        read-only would make the feature unusable for exactly the stopped
+        sessions it exists to surface.
+        """
+        now = self._now()
+        parsed = parse_relay_ref(relay_ref)
+        if parsed is None:
+            return {"ok": False, "error": render.RELAY_BAD_FORM}
+        origin_session, origin_ask = parsed
+        if origin_session == self._session_id:
+            return {"ok": False, "error": render.RELAY_SELF}
+        records = self.records(now)
+        origin_events = store.read_events(store.session_dir(self._config_dir, origin_session))
+        origin = next(
+            (
+                record
+                for record in store.fold(origin_events, now)
+                if record.get("ask_id") == origin_ask
+            ),
+            None,
+        )
+        if origin is None:
+            return {"ok": False, "error": render.RELAY_ORIGIN_UNKNOWN}
+        if origin.get("relay"):
+            return {"ok": False, "error": render.RELAY_OF_RELAY}
+        origin_status = str(origin.get("status") or "")
+        # ``timed_out`` is RELAYABLE: the origin still accepts a late answer
+        # (#2505), and relaying a lapsed ask is exactly how a watcher surfaces
+        # one whose own session has stopped. Every user-act terminal and an
+        # expiry is not.
+        if origin_status not in (store.STATUS_OPEN, store.STATUS_TIMED_OUT):
+            return {"ok": False, "error": render.RELAY_ORIGIN_SETTLED}
+        if any(
+            question.get("secret")
+            for question in (origin.get("questions") or ())
+            if isinstance(question, Mapping)
+        ):
+            # SECURITY, not a preference: a credential may only be typed on the
+            # card of the session that asked for it. See ``RELAY_SECRET_ORIGIN``.
+            return {"ok": False, "error": render.RELAY_SECRET_ORIGIN}
+        # IDEMPOTENCE (#2673, R1-4): a ref this session already relays would
+        # otherwise be minted twice — two pointers, two cards, two ``relayed``
+        # rows and two surfaced notes for ONE question. The ordinary asks above
+        # refuse a duplicate too; the held row's derived status is read here
+        # (``records`` is the derivation), so a relay the user closed locally
+        # does not block a deliberate re-raise.
+        if any(
+            record.get("relay")
+            and str((record.get("relay") or {}).get("session_id") or "") == origin_session
+            and str((record.get("relay") or {}).get("ask_id") or "") == origin_ask
+            and record["status"] in (store.STATUS_OPEN, store.STATUS_TIMED_OUT)
+            for record in records
+        ):
+            return {"ok": False, "error": render.RELAY_ALREADY_HELD}
+        open_relays = [
+            record
+            for record in records
+            if record.get("relay") and record["status"] == store.STATUS_OPEN
+        ]
+        if len(open_relays) >= policy.RELAY_CAP:
+            return {
+                "ok": False,
+                "error": render.RELAY_CAP_REFUSAL.format(cap=policy.RELAY_CAP),
+            }
+        ask_id = self._mint_ask_id({record["ask_id"] for record in records})
+        event = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_RELAYED,
+            "ask_id": ask_id,
+            "at": now,
+            "relay": {"session_id": origin_session, "ask_id": origin_ask},
+        }
+        if not store.append_event(self.session_dir, event):
+            return {
+                "ok": False,
+                "error": "the relay could not be recorded on this session's ask log.",
+            }
+        surfaced = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_RELAY_SURFACED,
+            "ask_id": origin_ask,
+            "at": now,
+            "by": {"session_id": self._session_id, "ask_id": ask_id},
+        }
+        try:
+            surfaced_ok = store.append_event(
+                store.session_dir(self._config_dir, origin_session), surfaced
+            )
+        except OSError:  # pragma: no cover — only a foreign-dir permission failure
+            surfaced_ok = False
+        if not surfaced_ok:
+            logger.warning(
+                "ask relay %s: could not record the surfaced note on %s",
+                ask_id,
+                origin_session,
+            )
+        self._refresh(now)
+        self.arm()
+        return {
+            "ok": True,
+            "text": render.relay_receipt(
+                ask_id,
+                origin_session,
+                origin_ask,
+                reach=self._reach(),
+            ),
+            "details": {
+                "ask_id": ask_id,
+                "status": "queued",
+                "relay": {
+                    "session_id": origin_session,
+                    "ask_id": origin_ask,
+                    "origin_status": origin_status,
+                },
+                "reach": self._reach(),
+            },
+        }
+
+    def _relay_respond(
+        self,
+        record: Mapping[str, Any],
+        answers: Mapping[str, Sequence[str]],
+        *,
+        by: str,
+        tool_call_id: str,
+        attachments: Mapping[str, Sequence[ImageContent]] | None,
+    ) -> dict[str, Any]:
+        """Route an answer on a relay row to the ORIGIN's log (#2520).
+
+        Nothing is appended to the watcher's log: the relay has no answer of its
+        own, and a local ``answered`` row would be a second winner the origin
+        never learns about. The origin's ``respond`` decides everything — the
+        whole-ask completeness check, secrets, images, and the single-winner
+        refusal on a second answer — because its log is the only place an answer
+        is recorded.
+
+        A refusal comes back with the origin's wording VERBATIM behind a lead
+        that names WHERE it came from (``render.relay_refused_by_origin``): the
+        same sentence unlabelled reads like the watcher's own rule, and a human
+        who taps the wrong card then has no way to tell which ask refused.
+        """
+        relay = record.get("relay") or {}
+        origin_session = str(relay.get("session_id") or "")
+        origin_ask = str(relay.get("ask_id") or "")
+        origin = AskQueue(
+            None,
+            config_dir=self._config_dir,
+            session_id=origin_session,
+            clock=self._now,
+        )
+        result = origin.respond(
+            origin_ask,
+            answers,
+            by=by,
+            tool_call_id=tool_call_id,
+            attachments=attachments,
+        )
+        if not result.get("ok"):
+            result["error"] = render.relay_refused_by_origin(
+                origin_session, origin_ask, str(result.get("error") or "")
+            )
+            return result
+        # THIS session's wire still has to move: its row derives ``answered`` from
+        # the origin on the next fold, and the settle note is owed once. The
+        # origin's own write already refreshed the origin's index inside
+        # ``respond`` -> ``_settled``.
+        self._refresh(self._now())
+        self._kick()
+        return result
+
+    def _relay_decline(self, record: Mapping[str, Any], *, by: str) -> dict[str, Any]:
+        """Route a DECLINE on a relay row to the ORIGIN's log (#2673, R1-1).
+
+        Decline is the other TERMINAL settle, so it takes the same route an
+        answer does: the origin's ``decline`` decides and writes, and nothing is
+        appended here — the relay's status is derived from the origin on every
+        fold, so a local ``declined`` row would be a second winner the origin
+        never learns about (and would re-derive back to ``open``).
+
+        A refusal comes back labelled by ``relay_refused_by_origin`` for the
+        reason :meth:`_relay_respond` gives.
+        """
+        relay = record.get("relay") or {}
+        origin_session = str(relay.get("session_id") or "")
+        origin_ask = str(relay.get("ask_id") or "")
+        origin = AskQueue(
+            None,
+            config_dir=self._config_dir,
+            session_id=origin_session,
+            clock=self._now,
+        )
+        result = origin.decline(origin_ask, by=by)
+        if not result.get("ok"):
+            result["error"] = render.relay_refused_by_origin(
+                origin_session, origin_ask, str(result.get("error") or "")
+            )
+            return result
+        self._refresh(self._now())
+        self._kick()
+        return result
+
     def respond(
         self,
         ask_id: str,
@@ -527,6 +892,20 @@ class AskQueue:
         record = self._find(ask_id, now)
         if record is None:
             return {"ok": False, "error": render.refusal_copy(None)}
+        if isinstance(record.get("relay"), Mapping):
+            # A RELAY'S ANSWER BELONGS TO THE ORIGIN (#2520). Before the ordinary
+            # refusal ladder, because every rule on that ladder is stated about
+            # the ORIGIN's log: the relay's own derived status already says what
+            # that log holds, and letting the ladder speak here would (a) lose
+            # the answer when the relay is open and (b) report the watcher's
+            # derivation, not the origin's own refusal copy, for a settled one.
+            return self._relay_respond(
+                record,
+                answers,
+                by=by,
+                tool_call_id=tool_call_id,
+                attachments=attachments,
+            )
         refusal = render.refusal_copy(record)
         if refusal:
             # F5-1: a bridge carriage's declined/dismissed row is a same-uid
@@ -871,6 +1250,11 @@ class AskQueue:
         record = next((item for item in records if item["ask_id"] == ask_id), None)
         if record is None:
             return None, render.refusal_copy(None)
+        if isinstance(record.get("relay"), Mapping):
+            # A relay has no answer row of its own to supersede (#2520): the
+            # answer (and therefore its revision window) lives on the origin, so
+            # a local ``revised`` event would be a write no reader ever consults.
+            return record, render.RELAY_REVISE_UNSUPPORTED
         status = record.get("status")
         if status in (store.STATUS_OPEN, store.STATUS_TIMED_OUT):
             return record, ""
@@ -988,11 +1372,20 @@ class AskQueue:
         return sorted(self._drafts.get(str(ask_id), {}))
 
     def decline(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """Terminal-on-write: append ``declined`` (today's Esc, made explicit)."""
+        """Terminal-on-write: append ``declined`` (today's Esc, made explicit).
+
+        A RELAY takes the origin's route instead (#2673, R1-1): its status is
+        derived from the ORIGIN's log, so a local ``declined`` row would be
+        silently re-derived away and the user's terminal decision would come
+        back as a still-open card. Before the refusal ladder, for the reason
+        :meth:`respond` gives — every rule on it is stated about the origin.
+        """
         now = self._now()
         record = self._find(ask_id, now)
         if record is None:
             return {"ok": False, "error": render.refusal_copy(None)}
+        if isinstance(record.get("relay"), Mapping):
+            return self._relay_decline(record, by=by)
         refusal = render.refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -1016,6 +1409,14 @@ class AskQueue:
         reconcile :meth:`_settled` schedules delivers that like any other row. The
         refusal comes from :func:`asks.render.dismiss_refusal`, shared with the cold
         door (``asks/dismiss.py``), so a surface cannot tell which one answered it.
+
+        A RELAY'S DISMISSAL IS LOCAL (#2673, R1-2): the dismissal is a view act on
+        this session's card, so the row written here is the whole fact — the
+        fold's relay record applies it (``store._relay_record``) and the
+        derivation keeps it over a merely lapsed origin. The COLD door cannot
+        know the origin lapsed (only the live derivation may read it), so the
+        state it reads after this tap is the same ``dismissed`` row, not a
+        silently re-opened card.
         """
         now = self._now()
         record = self._find(ask_id, now)
@@ -1097,6 +1498,15 @@ class AskQueue:
             return {"ok": False, "error": render.refusal_copy(None)}
         status = str(record.get("status") or "")
         settled = status not in (store.STATUS_OPEN, store.STATUS_TIMED_OUT)
+        if isinstance(record.get("relay"), Mapping) and reason != "moot":
+            # ANSWERED_IN_CHAT ON A RELAY IS REFUSED (#2520): it would append an
+            # ``answered`` row to THIS log, which the relay's derivation never
+            # reads (the origin is the only record of an answer). The receipt
+            # would then claim an answer the origin does not hold. Moot is the
+            # one local retraction, and it needs no special case below: the
+            # append already targets this session's log, which is exactly the
+            # required scope.
+            return {"ok": False, "error": render.RELAY_WITHDRAW_ANSWERED_IN_CHAT}
         if reason == "moot":
             if answers:
                 # Refused rather than ignored: a model that meant to record the
@@ -1261,8 +1671,19 @@ class AskQueue:
         self._reclaim_closed_drafts(records)
         timeouts: list[tuple[int, CustomMessage]] = []
         responses: list[tuple[int, CustomMessage]] = []
+        relay_notes: list[tuple[int, CustomMessage]] = []
         for record in records:
             status = record["status"]
+            if isinstance(record.get("relay"), Mapping):
+                # A RELAY IS NOT THIS MODEL'S ASK (#2520). No response row and no
+                # deadline row is owed here: the answer belongs to the ORIGIN's
+                # conversation, and the origin's own reconcile has already told
+                # its model. What this session gets is ONE quiet line about how
+                # its pointer ended, whose row id is the delivery marker.
+                note = self._relay_note(record)
+                if note is not None and note.id not in planned:
+                    relay_notes.append((int(record.get("created_at") or 0), note))
+                continue
             # A DISMISSED ask whose notice was never delivered is an owed row like
             # any other (fork A, §14): the dismissal put the ask away, and nothing
             # ever told the model it had no answer. Its row is the same
@@ -1329,10 +1750,19 @@ class AskQueue:
             messages.append(message)
         for _, message in sorted(responses, key=lambda item: item[0]):
             messages.append(message)
+        # The watcher's settle notes last: they are about a pair the earlier rows
+        # belong to, so the batch reads in the order the facts happened.
+        for _, message in sorted(relay_notes, key=lambda item: item[0]):
+            messages.append(message)
         if messages:
             for message in messages:
                 self._handed.add(message.id)
-                await self._emit_delivered(message)
+                # A relay note is NOT an ask row: ``_emit_delivered`` builds a
+                # response/timeout delivery event for ask rows, and a note about
+                # a settlement is neither (the settlement happened on the
+                # origin, whose own rows carry it).
+                if message.custom_type in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE):
+                    await self._emit_delivered(message)
             await self._session.deliver_ask_messages(messages)
         self._refresh(now)
         self.arm()
@@ -1344,6 +1774,38 @@ class AskQueue:
     # SESSION (the four delivery paths call ``Session._append_injected_message``
     # around it). These four methods are that append's queue-side contract, and
     # nothing else in this module touches ``_committing`` or ``_handed``:
+
+    def _relay_note(self, record: Mapping[str, Any]) -> CustomMessage | None:
+        """The WATCHER's one-line note that its relay settled, or ``None`` (#2520).
+
+        Why the watcher and not the origin: the origin's model already gets the
+        answer as a response row (it asked). The watcher's model pointed at an
+        ask and never heard how it ended, so the note names the origin and the
+        settlement in one line and nothing else — it is a fact about a pointer,
+        not a question to act on.
+
+        ``_RELAY_SETTLED_STATUSES`` withholds it while the pair can still move
+        (an open or lapsed relay), and the row id is ``ask-relay-<id>`` so a
+        second reconcile finds it durable and plans nothing: the row IS the
+        marker, exactly like the response and timeout rows.
+        """
+        status = str(record.get("status") or "")
+        if status not in _RELAY_SETTLED_STATUSES:
+            return None
+        ask_id = str(record.get("ask_id") or "")
+        if not ask_id:
+            return None
+        return CustomMessage(
+            custom_type=ASK_RELAY_MESSAGE_TYPE,
+            attribution="system",
+            id=store.relay_row_id(ask_id),
+            details={
+                "ask_id": ask_id,
+                "status": status,
+                "relay": dict(record.get("relay") or {}),
+                "text": render.relay_settled_note(record),
+            },
+        )
 
     def _is_bridge_ask_record(self, record: Mapping[str, Any]) -> bool:
         """Whether a folded ask record is a BRIDGE request at all (structural).
@@ -2256,6 +2718,25 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return {}
 
 
+def parse_relay_ref(value: Any) -> tuple[str, str] | None:
+    """``"<session_id>/<ask_id>"`` → its two halves, or ``None`` (#2520).
+
+    EXACTLY one separator, both halves non-empty. A session id is generated
+    identifier text and never contains a slash, so a second one is a malformed
+    ref rather than an id that happens to carry one — and accepting it would
+    split the string at the wrong place and name a session that does not exist.
+    The shape is checked HERE rather than in the tool schema so the model's
+    refusal and the queue's are the same rule with the same sentence.
+    """
+    text = str(value or "").strip()
+    if text.count("/") != 1:
+        return None
+    session_id, ask_id = (part.strip() for part in text.split("/"))
+    if not session_id or not ask_id:
+        return None
+    return session_id, ask_id
+
+
 def _ask_cap_refusal(rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: bool) -> str:
     """The typed cap refusal for one readiness window, split by custody (TB-13).
 
@@ -2270,6 +2751,12 @@ def _ask_cap_refusal(rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: b
     """
 
     open_rows = [row for row in rows if row["status"] == store.STATUS_OPEN]
+    # RELAYS ARE NOT THE MODEL'S ASKING CAPACITY (#2520). A relay row is a
+    # pointer at a question another session owns: the model here asked nothing,
+    # so it must not consume one of THIS session's slots (nor be squeezed by a
+    # full queue). Filtered here, before the custody split, so the cap cannot
+    # drift between the plain and the bridge arm.
+    open_rows = [row for row in open_rows if not row.get("relay")]
     bridge_rows = [
         row
         for row in open_rows

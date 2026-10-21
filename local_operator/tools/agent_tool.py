@@ -89,6 +89,7 @@ from local_operator.agent_profiles import (
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
+    is_inherit_tier_sentinel,
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
@@ -210,9 +211,28 @@ class AgentParams(BaseModel):
         says "no pin", and it is ACCEPTED in both modes — the operator owning
         the tier choice means the operator owns the value too, and a pin-clearing
         call must not become impossible to make.
+
+        **The INHERIT SENTINEL is refused here, and it is refused by name.**
+        ``default`` is the harness's marker for "the launching session's
+        model"; a role that pins it always runs on the session's model, and
+        that pin is absolute. A model able to set it could pin a REVIEWER to
+        the parent's own model and call the result an independent review, so
+        the state is reachable only from a packaged seed (or the operator's own
+        registry edit) and never from this tool. The generic tier refusal
+        would have covered it too, but it says "not a configured tier", which
+        reads as a misconfiguration to fix — and the fix here is "do not set
+        it", not "configure a tier called default".
         """
         if value == INHERIT_EFFORT:
             return value
+        if is_inherit_tier_sentinel(value):
+            raise ValueError(
+                "'default' is not a tier you can pin: it is the harness's inherit "
+                "marker, and a role that pins it always runs on the launching "
+                "session's model. A pin that collapses an independent review "
+                "into a self-review is not a pin this tool may write. Use "
+                "'inherit' to clear a pin."
+            )
         return _validate_effort_tier(value, info, pin=True)
 
     delegate: bool | None = Field(
@@ -1349,6 +1369,26 @@ def write_profile(
         tools = current.tools if current is not None else None
 
     if params.effort == INHERIT_EFFORT:
+        # The inherit pin is ABSOLUTE, and ``inherit`` is the same value that
+        # clears an ordinary tier — so on a row carrying the sentinel this
+        # call would delete the pin and hand the role back to every layer it
+        # exists to outrank (launch tier, explicit model pick, roster slot).
+        # Startup seed reconciliation restores the packaged pin at the next
+        # launch, which is exactly what makes the hole quiet: after any OTHER
+        # edit the row classifies up-to-date and the pin stays gone for the
+        # rest of the running process, so a role can be un-pinned and used
+        # before anything notices. Refused rather than silently ignored, since
+        # a no-op receipt would read as "pin cleared". The operator keeps a way
+        # out — an explicit tier REPLACES the sentinel — so the refusal names
+        # that path instead of the ``inherit`` spelling it rejects.
+        if current is not None and is_inherit_tier_sentinel(current.effort):
+            raise ValueError(
+                f"role {name!r} pins the launching session's model "
+                "(effort: default), and that pin is absolute: it outranks a launch "
+                "tier, an explicit model pick and a roster slot. 'inherit' cannot "
+                "clear it, because clearing would leave the role on whichever tier "
+                "the next caller asked for. Set an explicit tier to replace the pin."
+            )
         effort = None
     elif params.effort is not None:
         effort = params.effort

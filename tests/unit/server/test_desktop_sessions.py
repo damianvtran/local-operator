@@ -955,10 +955,11 @@ async def test_delegating_is_covered_and_idle_is_not_computed(tmp_path):
     an empty ``live_state`` and be missed by a ``live_state or pending`` test.
     It cannot be: ``delegating`` is a property of counts only a LIVE record
     reports, and a live record always yields a non-empty ``live_state`` (the
-    assertion below pins "idle" for exactly this row). The exact five-code set
+    assertion below pins "idle" for exactly this row). The exact six-code set
     still ships rather than that superset, because the superset also covers
     ``attached``/``idle`` rows — the UI's Today section — and would pay a cold
-    scan per resident session for a value no reader consumes.
+    scan per resident session for a value no reader consumes. ``waiting`` is the
+    sixth: a live record's foreground wait, not an idle/attached resident.
     """
     from local_operator.server.utils.desktop_sessions import RUNNING_STATUS_CODES
     from tests.unit.server.test_desktop_feed import (
@@ -968,7 +969,14 @@ async def test_delegating_is_covered_and_idle_is_not_computed(tmp_path):
         _record_publish,
     )
 
-    assert RUNNING_STATUS_CODES == {"busy", "delegating", "approval", "answer", "wedged"}
+    assert RUNNING_STATUS_CODES == {
+        "busy",
+        "delegating",
+        "approval",
+        "answer",
+        "wedged",
+        "waiting",
+    }
 
     delegating = _listable_session(tmp_path, "deleg0000002")
     _append_transcript(delegating, _typed_user_row("delegate this", 222.0))

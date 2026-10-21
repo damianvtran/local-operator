@@ -793,6 +793,42 @@ def refuse_real_notifier_spawn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def refuse_real_secret_broker_spawn(request, monkeypatch):
+    """Refuse to START the secret broker from a unit test, unless the cell says so.
+
+    WHY A GUARD AT THE SEAM, ON TOP OF THE PER-TEST CONFIG DIR. A store READ calls
+    ``secrets.access.master_key_for`` -> ``secrets.client.ensure_broker``; on Linux
+    and macOS that SPAWNS a detached ``python -m local_operator.secrets.brokerd``
+    rooted at the config dir. In a unit test the config dir is ``tmp_path``, so the
+    daemon outlives the test and keeps creating ``secrets/broker.sock`` and
+    ``secrets/broker.lock`` while pytest's ``TemporaryDirectory`` is walking that
+    directory. Measured 2026-10-20: ``OSError: [Errno 39] Directory not empty:
+    '/tmp/tmp…/secrets'`` in the teardown of
+    ``test_key_prompt.py::test_prompt_reads_from_piped_stdin_without_getpass`` (run
+    39383034418, job 118496365150), and reproduced here as a live
+    ``Local Operator [secret broker]`` pid (50373) after the cell had passed. The
+    daemon also leaked for the rest of the worker's life, holding a store that no
+    longer existed.
+
+    THE FALLBACK IS THE DOCUMENTED ONE: ``ensure_broker`` returning False sends the
+    caller to the key file in keyfile mode, which is exactly what a test with a
+    fresh config root wants. Broker behaviour itself is still covered by the cells
+    that opt in with ``@pytest.mark.allow_secret_broker``; those own their daemon's
+    teardown. Same shape as ``refuse_real_notifier_spawn`` above: the production
+    path stays intact, and a test must say when it means to exercise it.
+    """
+    if request.node.get_closest_marker("allow_secret_broker"):
+        return
+    from local_operator.secrets import client as secrets_client
+
+    monkeypatch.setattr(
+        secrets_client,
+        "ensure_broker",
+        lambda base=None, *, timeout=None: False,
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolate_implicit_local_discovery(monkeypatch):
     """Keyless discovery must not read a developer's default-port runtimes.
 

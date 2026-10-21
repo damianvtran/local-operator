@@ -36,12 +36,19 @@ human resolves the item).
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
+import os
+import re
+import secrets
+import tempfile
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
+from local_operator.config_writer import config_write_lock
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
@@ -74,6 +81,11 @@ TEAM_MANAGER_MAX = 128
 TEAM_ROSTER_MAX = 64
 
 Prefer = Literal["none", "local", "remote"]
+
+#: The one batch/listing order: agents first, then teams, then skills. Sorted by
+#: this rank instead of the kind string so a skill never lands between the two
+#: kinds it was added after (the TUI's ``section_order()`` is the same list).
+KIND_ORDER: dict[str, int] = {"agent": 0, "team": 1, "skill": 2}
 
 
 #: How long an interactive caller waits for another process's update run before
@@ -1235,20 +1247,48 @@ def _apply_skill(
         # a write (the invariant the QA repro tripped over).
         return fail("baseline-unknown", "this skill link has no writer identity yet", "refused")
     alias = record.local_alias
+    # ABSENT CONTENT IS NOT A DIFF. The recorded state (not a missing directory)
+    # is the authority: an explicitly absent link has nothing to compare or
+    # merge, so an apply installs the remote document WHOLESALE -- the same
+    # shape ``install_skill`` writes for a fresh link -- and never reports
+    # ``unchanged`` or computes a three-way merge against bytes that are not
+    # there.
+    #
+    # The CHECK's fact is carried too: if a pull landed between the check and
+    # this apply, the record is present but this row still has no local side.
+    # Installing wholesale is safe there because the storage re-verifies under
+    # its lock (``expected_fingerprint`` is None, so existing bytes refuse with
+    # ``local-concurrent-edit``) -- never a bogus "invalid skill document".
+    absent = c.content_state == "absent" or record.content_state == "absent"
 
     try:
-        local_doc = SkillDocument.from_json(dict(c.local or {}))
         remote_doc = SkillDocument.from_json(dict(c.remote or {}))
-        base_doc = SkillDocument.from_json(dict(c.base)) if c.base else None
+        local_doc = None if absent else SkillDocument.from_json(dict(c.local or {}))
+        base_doc = None if absent else (SkillDocument.from_json(dict(c.base)) if c.base else None)
     except SkillValidationError as exc:
         return fail("merge-refused", f"the skill document is invalid: {exc}", "refused")
 
     results: list[MergeResult] = []
-    if replace == "remote":
+    if absent:
+        if replace == "local":
+            # "Keep my side" has no side to keep: pretending otherwise would
+            # install the hub's bytes under a request that asked for the
+            # opposite. Refuse by name and write nothing.
+            return fail(
+                "merge-refused",
+                "there is no local copy to keep: this link is subscribed without content",
+                "refused",
+            )
         merged: SkillDocument | None = remote_doc
+    elif replace == "remote":
+        merged = remote_doc
     elif replace == "local":
         merged = local_doc
     else:
+        if local_doc is None:
+            # Unreachable: an absent row took the wholesale branch above. The
+            # guard keeps a three-way merge from ever running against nothing.
+            return fail("merge-refused", "the local skill document is missing", "refused")
         merged_json, results = merge_skill_document(
             base_doc.to_json() if base_doc is not None else None,
             local_doc.to_json(),
@@ -1272,7 +1312,9 @@ def _apply_skill(
 
     # Source-name space comparison: nothing to write when the merge reproduced the
     # local document exactly (the remote and local already agree on content).
-    if merged.to_json() == local_doc.to_json() and replace is None:
+    # ``local_doc`` is None exactly for an absent row, which has nothing to
+    # reproduce.
+    if local_doc is not None and merged.to_json() == local_doc.to_json() and replace is None:
         if not dry_run:
             # This site compared the FULL documents (stronger than the check's
             # fingerprints), but the mark still goes through the agreement gate:
@@ -1290,7 +1332,8 @@ def _apply_skill(
         local_write = merged.with_name(alias)
         # The disk copy is alias-rendered; its fingerprint is what the storage
         # re-verifies under its lock (a local edit since this check refuses).
-        before_fingerprint = local_doc.with_name(alias).fingerprint
+        # An absent link has no bytes, so the precondition is exactly None.
+        before_fingerprint = None if local_doc is None else local_doc.with_name(alias).fingerprint
     except SkillValidationError as exc:
         return fail(
             "merge-refused", f"the merged skill cannot be rendered locally: {exc}", "refused"
@@ -1306,6 +1349,9 @@ def _apply_skill(
         identity=record.identity,
         local_alias=alias,
         remote_revision=c.remote_revision or record.remote_revision,
+        # This write makes the copy exist: the state must say so atomically with
+        # the content transaction's baseline finalize.
+        content_state="present",
     )
     storage = ManagedSkillStorage(ctx.config_dir)
     try:
@@ -1366,6 +1412,20 @@ def apply_one(
             "unavailable",
             error_class=c.reason,
             message=c.detail,
+        )
+    if c.kind == "skill" and c.content_state == "absent" and auto:
+        # UNATTENDED NEVER INSTALLS. ``auto`` is the runner tick and the retry
+        # composition; installing a subscribed-only skill is an explicit pull
+        # (or a per-item apply), never a side effect of those paths. Writing a
+        # copy the operator never asked for is the same class of surprise as
+        # clobbering local edits.
+        return ItemMergeReport(
+            c.kind,
+            c.local_id,
+            c.name,
+            c.hub_id,
+            "skipped",
+            skipped_reason="install-requires-pull",
         )
     # An EXPLICIT replace acts on a copy that differs from the hub even when the hub
     # has not moved (classification ``local-only``, which a plain pull reads as
@@ -1571,15 +1631,33 @@ def _apply_items_locked(
 ) -> ApplyReport:
     if all_available:
         prefer, replace = "none", None
-    kinds = (kind,) if kind else ("agent", "team")
+    kinds = (kind,) if kind else ("agent", "team", "skill")
     todo = list(checks) if checks is not None else check_items(ctx, kinds=kinds, names=names)
-    todo.sort(key=lambda c: (0 if c.kind == "agent" else 1, c.name.casefold()))
+    # Agents first, then teams, then skills: the frozen batch order, extended by
+    # one rank rather than replaced, so a client's existing expectations hold.
+    todo.sort(key=lambda c: (KIND_ORDER.get(c.kind, len(KIND_ORDER)), c.name.casefold()))
     reports: list[ItemMergeReport] = []
     stopped: str | None = None
     for c in todo:
         if kind and c.kind != kind:
             continue
         if all_available and c.verdict != "available":
+            continue
+        if all_available and c.kind == "skill" and c.content_state == "absent":
+            # UPDATE-ALL NEVER INSTALLS A SUBSCRIBED-ONLY SKILL. The row is
+            # visible here because it is subscribed and the remote is readable,
+            # but the batch action must not write a copy the operator never
+            # asked for; installing one is an explicit per-item pull.
+            reports.append(
+                ItemMergeReport(
+                    c.kind,
+                    c.local_id,
+                    c.name,
+                    c.hub_id,
+                    "skipped",
+                    skipped_reason="content-absent",
+                )
+            )
             continue
         if stopped is not None and c.verdict == "available":
             reports.append(
@@ -1623,12 +1701,29 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for item in doc.get("items", {}).values():
         kind = item.get("kind", "agent")
-        if kind not in ("agent", "team"):
-            # The legacy typed projection never learned a third kind: skill rows
-            # (and their counts) travel on the capability-gated /hub/links route
-            # only, so an older consumer can never receive an unexpected shape.
+        if kind not in ("agent", "team", "skill"):
+            # Skill failures are part of the updates surface now (the operator's
+            # brief: a skill that cannot update must be visible and retryable
+            # through the SAME channel as agents and teams), so this legacy
+            # projection lists them beside the other two kinds. Unknown kinds
+            # still never reach a typed consumer.
             continue
         state = st.effective_state(item, now)
+        # A ROW THAT CARRIES AN ERROR IS FAILED IN THIS PROJECTION. The store
+        # deliberately keeps a retryable row ``available`` so the timer can still
+        # act on it, and the desktop sidebar compensates by also reading
+        # ``error_class`` -- but every other consumer of this projection sees
+        # only ``state`` and ``counts``. Deriving the failure HERE, for every
+        # kind, means one rule rather than per-kind compensation: a carried
+        # error is counted in ``counts.failed`` and a consumer can act on
+        # ``state`` alone.
+        #
+        # ``no-credential`` is NOT a failure -- it is the sign-in fact an
+        # up-to-date row is listed FOR (UX round 2, U11) -- and a row a writer
+        # still holds in ``updating`` has not failed yet.
+        error_class = item.get("error_class")
+        if error_class and error_class != "no-credential" and state != "updating":
+            state = "failed"
         counts[state] = counts.get(state, 0) + 1
         # An up-to-date item is listed only when it carries the sign-in fact
         # (``no-credential``): the user has no login for an item they have linked, and
@@ -1662,7 +1757,9 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
                 "summary": item.get("summary") or {},
             }
         )
-    items.sort(key=lambda i: (i["kind"], str(i["name"]).casefold()))
+    items.sort(
+        key=lambda i: (KIND_ORDER.get(i["kind"], len(KIND_ORDER)), str(i["name"]).casefold())
+    )
     last = doc.get("last_tick") or {}
     return {
         "generated_at": prov.now_iso(),
@@ -1802,6 +1899,48 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
 # -- links inventory (B5, new capability) ------------------------------------------------
 
 
+def _refresh_config(ctx: HubSyncContext) -> None:
+    """Re-read config.yml into ``ctx.config_manager``: best-effort, lock-ordered.
+
+    WHY IT IS NEEDED. ``ManagedSkillStorage._finalize`` materializes a link's
+    initial policy through a SHORT-LIVED ``ConfigManager`` it builds for itself,
+    so the manager this context carries -- the ONE ``app.state`` hands to every
+    route, including the inventory and the policy CAS -- keeps its pre-write
+    snapshot. Projecting a row from that answered a Download pull
+    (``subscribe: false``) with ``subscribe: true``, and served a policy revision
+    computed over the stale value, which no writer could ever match: the
+    operator's first edit 409'd ``policy-revision-changed`` on a link nothing had
+    touched. The install path and the published-skill path both commit a policy
+    this way, and both refresh through here.
+
+    BEST-EFFORT (review round 1, B1). This runs AFTER a transaction committed.
+    ``reload`` parses config.yml, so an OSError or a decode error can raise, and
+    letting that escape turns an install whose content and baseline are already
+    on disk into a 500 the client cannot read as "done". A failed refresh logs
+    and keeps the previous snapshot: the disk stays the authority, and the next
+    successful refresh (the replay arm calls this too, so a retry converges)
+    repairs the process view. This must never raise.
+
+    LOCK-ORDERED (review round 1, B2). ``set_config_value`` holds
+    ``config_write_lock`` across its read-merge-write AND its ``self.config =
+    candidate``. A refresh that read the file outside that lock and assigned
+    inside it could publish the older snapshot AFTER a concurrent writer
+    published the newer one, leaving memory behind disk for any config key --
+    the same class of bug this helper exists to remove. Taking the same lock
+    around read-and-assign orders them; the lock is re-entrant per thread, so a
+    caller that already holds it cannot deadlock.
+
+    NOT INSIDE ``links_snapshot``: that function is a pure projection of the
+    manager it is given and runs on every inventory read, so a reload there
+    would re-read the file for every caller to cover the two writers above.
+    """
+    try:
+        with config_write_lock(ctx.config_dir):
+            ctx.config_manager.reload()
+    except Exception:  # noqa: BLE001 - a refresh must never fail an answered write
+        logger.warning("could not refresh the process config view", exc_info=True)
+
+
 def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -> dict[str, Any]:
     """The ``GET /v1/desktop/hub/links`` payload: EVERY link, healthy or not.
 
@@ -1809,10 +1948,11 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
     (link_id/kind/local_id/name/hub_id/hub_source/visibility/tenant_id),
     policy{subscribe,auto_push,revision}, service-computed
     eligibility{can_auto_push,reason}, `auto_will_apply`/`auto_will_push`,
-    baseline_state, remote_revision, and INDEPENDENT `pull`/`push`
-    DirectionStatus objects. Distinct from ``status_snapshot`` (attention-only):
-    this lists a healthy idle link too, so the sidebar can show its quiet mark and
-    offer a source-scoped toggle with zero pending changes. Local reads only.
+    baseline_state, remote_revision, `content_state` with `local_path` when the
+    copy exists, and INDEPENDENT `pull`/`push` DirectionStatus objects. Distinct
+    from ``status_snapshot`` (attention-only): this lists a healthy idle link too,
+    so the sidebar can show its quiet mark and offer a source-scoped toggle with
+    zero pending changes. Local reads only.
 
     ``kinds`` filters the enumeration (the route's ``?kind=``); skill rows are
     capability-gated by the route so old typed consumers never see them.
@@ -1861,6 +2001,7 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
         policy = snapshot.policy
         eligibility = _eligibility(ctx, identity, policy, values, record, doc)
         capability = _capability_auto_push(doc, identity)
+        content_present = record.content_state != "absent"
         links.append(
             {
                 "link_id": identity.link_id,
@@ -1874,7 +2015,18 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "tenant_name": _tenant_name(values, identity),
                 "policy": snapshot.to_json(),
                 "eligibility": eligibility,
-                "auto_will_apply": _auto_will_apply(item, policy, ctx, now),
+                # Where the managed copy lives, when it exists. A client needs this
+                # to tell the operator where the bytes are without re-deriving the
+                # managed root; an absent link has no local copy at all.
+                "local_path": (
+                    _managed_skill_path(ctx, name)
+                    if identity.kind == "skill" and content_present
+                    else None
+                ),
+                "content_state": record.content_state,
+                "auto_will_apply": _auto_will_apply(
+                    item, policy, ctx, now, content_present=content_present
+                ),
                 "auto_will_push": _auto_will_push(item, policy, ctx, now, eligibility),
                 "baseline_state": record.recorded_by,
                 "remote_revision": record.remote_revision,
@@ -1882,14 +2034,37 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "push": _direction_status(item, "push", policy, now, capability),
             }
         )
-    links.sort(key=lambda link: (link["kind"], str(link["name"]).casefold()))
-    unresolved.sort(key=lambda row: (row["kind"], str(row["name"]).casefold()))
+    links.sort(
+        key=lambda link: (
+            KIND_ORDER.get(link["kind"], len(KIND_ORDER)),
+            str(link["name"]).casefold(),
+        )
+    )
+    unresolved.sort(
+        key=lambda row: (KIND_ORDER.get(row["kind"], len(KIND_ORDER)), str(row["name"]).casefold())
+    )
     return {
         "generated_at": prov.now_iso(),
         "capability": "hub_links:1",
         "links": links,
         "unresolved": unresolved,
     }
+
+
+def _managed_skill_path(ctx: HubSyncContext, alias: str) -> str | None:
+    """The managed directory for one skill alias, or None when it is not addressable.
+
+    Read-only: ``ManagedSkillStorage.path`` only validates the alias and refuses a
+    symlinked root/alias, so an inventory read can never aim a client at a path the
+    writer would reject.
+    """
+
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    try:
+        return str(ManagedSkillStorage(ctx.config_dir).path(alias))
+    except Exception:  # noqa: BLE001 - an unaddressable alias simply has no path to show
+        return None
 
 
 def _tenant_name(values: Mapping[str, Any], identity: LinkIdentity) -> str | None:
@@ -2013,6 +2188,13 @@ def _eligibility(
     grant bound to THIS link at the current publication-contract version. A
     reason is always present when the answer is no.
     """
+    # AN ABSENT COPY HAS NOTHING TO PUBLISH. A subscribed-without-pull link may be
+    # checked and reported, but an unattended push would have to invent the
+    # local side; the content state is a fact, not a momentary gap. It comes
+    # FIRST because it is the actionable fact: no capability attestation would
+    # make a link with no bytes publishable.
+    if getattr(record, "content_state", "present") == "absent":
+        return {"can_auto_push": False, "reason": "content-absent"}
     if not _capability_auto_push(doc, identity):
         return {"can_auto_push": False, "reason": "unsupported-precondition"}
     # SOURCE-SCOPED CAS ATTESTATION: eligibility is bound to this origin's
@@ -2048,9 +2230,23 @@ def _eligibility(
     return {"can_auto_push": True, "reason": "eligible"}
 
 
-def _auto_will_apply(item: Mapping[str, Any], policy: Any, ctx: HubSyncContext, now: Any) -> bool:
-    """Whether the next run would apply an incoming change: policy+backoff+grace."""
+def _auto_will_apply(
+    item: Mapping[str, Any],
+    policy: Any,
+    ctx: HubSyncContext,
+    now: Any,
+    *,
+    content_present: bool = True,
+) -> bool:
+    """Whether the next run would apply an incoming change: policy+backoff+grace.
 
+    ``content_present`` is False for an explicitly absent skill link: the runner
+    never auto-INSTALLS one, so the row must not promise an automatic update it
+    will not perform.
+    """
+
+    if not content_present:
+        return False
     if not policy.subscribe:
         return False
     if st.effective_state(item, now) not in ("available", "updating"):
@@ -2205,7 +2401,7 @@ def skill_link_local_id(
     return f"skl-{digest[:32]}"
 
 
-def install_skill(
+def _resolve_remote_skill(
     ctx: HubSyncContext,
     *,
     hub_source: str,
@@ -2213,40 +2409,22 @@ def install_skill(
     visibility: Visibility,
     tenant_id: str | None,
     alias: str,
-    subscribe: bool | None = None,
-    auto_push: bool | None = None,
-    confirm_public_egress: bool = False,
-) -> dict[str, Any]:
-    """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
+) -> tuple[str, str, LinkIdentity, dict[str, Any], str]:
+    """The ONE remote-identity path a skill PULL or SUBSCRIBE runs before local state.
 
-    This is the desktop plane's entry into the SAME engine the linked checks and
-    applies use: the fetch goes through the check lane's own seam, the write
-    through ``ManagedSkillStorage``'s journaled transaction, and the row the
-    response carries is the ordinary ``links_snapshot`` inventory row.
+    Source approval, scope pairing, alias validation, the credentialed fetch and
+    the answered-row proof live here so the two writers cannot diverge about
+    which row they are allowed to trust: a subscribe records the same identity a
+    pull does, and a row a pull would refuse is refused identically before any
+    link exists. Returns ``(source, alias, identity, canonical, revision)`` and
+    writes nothing.
 
-    Identities are MINTED DETERMINISTICALLY from the remote identity tuple
-    (kind, normalized source, visibility, tenant, hub id): the local id -- and
-    so the link id -- is stable across retries, which is what makes a crashed
-    install resume as the SAME link instead of minting a second one beside its
-    own journal. The alias stays display-only (the architecture rule); one
-    remote skill is one local link in this milestone, so a second alias for a
-    linked skill is refused rather than silently duplicated.
-
-    The answered row is validated against the REQUESTED identity before its
-    manifest is trusted (R1): a row from another scope or identity refuses
-    with the same nondisclosing 404 as a missing one. The initial policy is
-    committed WITH the content transaction: an explicit ``subscribe`` rides
-    the baseline's materialization hint, and only an ``auto_push: true``
-    request -- eligible exactly like the link-policy PATCH, through the ONE
-    ``policies`` writer with SERVICE-computed attestations -- is staged
-    beforehand and reverted on a failed install while its revision is still
-    ours. Every local-state step runs under the cross-process update lease
-    (Q3), and a crashed attempt is recovered before fresh-vs-completed is
-    decided, so its retry resumes the SAME link (Q4).
+    Every refusal keeps the pull route's vocabulary: ``skill-not-found`` for a
+    missing OR foreign row (one flat 404, never distinguishable), ``no-credential``
+    for a missing sign-in, ``origin-conflict`` for a mismatched source/scope, and
+    ``hub-upstream`` for an unreachable hub.
     """
 
-    from local_operator.config import read_config_values
-    from local_operator.hub_sync import policies as pol
     from local_operator.hub_sync.adapters import SkillAdapter
     from local_operator.hub_sync.check import (
         REQUEST_TIMEOUT_S,
@@ -2257,12 +2435,9 @@ def install_skill(
     )
     from local_operator.hub_sync.identity import approve_source
     from local_operator.hub_sync.skill_document import (
-        SkillDocument,
         SkillValidationError,
         validate_name,
     )
-    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
-    from local_operator.hub_sync.transactions import TransactionError
     from local_operator.providers.radient_credentials import (
         ORG_LOGIN_REMEDY,
         configured_radient_base_url,
@@ -2311,12 +2486,9 @@ def install_skill(
     #    resolves access from the ROW itself, and the signed-in client can read
     #    public and org rows alike -- so the envelope, never the request, is the
     #    only evidence of which row actually answered. Accepting a relabeled row
-    #    would attach clean, trusted ancestry and source-scoped policy to
-    #    another scope's (or another identity's) content. Refusals are the SAME
-    #    flat 404 as a missing or foreign row: a probe must not be able to tell
-    #    the checks apart. Absent/unknown metadata fails closed -- the real
-    #    detail envelope always carries id + visibility, and tenant_id for org
-    #    rows.
+    #    would attach an identity (and, on a pull, clean ancestry) to another
+    #    scope's content. Refusals are the SAME flat 404 as a missing or foreign
+    #    row: a probe must not be able to tell the checks apart.
     if not isinstance(document, dict):
         raise LinkError("skill-not-found", "no such skill")
     remote_id = document.get("id")
@@ -2341,8 +2513,8 @@ def install_skill(
         ) from None
     revision, _contract = _remote_meta(document)
     if not revision:
-        # An install records the ancestry fact; without a revision the link
-        # could never prove what it integrated. Refuse now, write nothing.
+        # A link records the ancestry fact; without a revision it could never
+        # prove what it names. Refuse now, write nothing.
         raise LinkError("unsupported-precondition", "the remote skill carries no revision")
 
     # 6. Deterministic identity: a retry after a crash resumes the SAME link.
@@ -2350,6 +2522,67 @@ def install_skill(
         source=source, visibility=visibility, tenant_id=tenant_id, hub_id=hub_id
     )
     identity = LinkIdentity("skill", local_id, source, visibility, tenant_id, hub_id)
+    return source, alias, identity, canonical, revision
+
+
+def install_skill(
+    ctx: HubSyncContext,
+    *,
+    hub_source: str,
+    hub_id: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    alias: str,
+    subscribe: bool | None = None,
+    auto_push: bool | None = None,
+    confirm_public_egress: bool = False,
+) -> dict[str, Any]:
+    """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
+
+    This is the desktop plane's entry into the SAME engine the linked checks and
+    applies use: the fetch goes through the check lane's own seam, the write
+    through ``ManagedSkillStorage``'s journaled transaction, and the row the
+    response carries is the ordinary ``links_snapshot`` inventory row.
+
+    Identities are MINTED DETERMINISTICALLY from the remote identity tuple
+    (kind, normalized source, visibility, tenant, hub id): the local id -- and
+    so the link id -- is stable across retries, which is what makes a crashed
+    install resume as the SAME link instead of minting a second one beside its
+    own journal. The alias stays display-only (the architecture rule); one
+    remote skill is one local link in this milestone, so a second alias for a
+    linked skill is refused rather than silently duplicated.
+
+    The answered row is validated against the REQUESTED identity before its
+    manifest is trusted (R1): a row from another scope or identity refuses
+    with the same nondisclosing 404 as a missing one. The initial policy is
+    committed WITH the content transaction: an explicit ``subscribe`` rides
+    the baseline's materialization hint, and only an ``auto_push: true``
+    request -- eligible exactly like the link-policy PATCH, through the ONE
+    ``policies`` writer with SERVICE-computed attestations -- is staged
+    beforehand and reverted on a failed install while its revision is still
+    ours. Every local-state step runs under the cross-process update lease
+    (Q3), and a crashed attempt is recovered before fresh-vs-completed is
+    decided, so its retry resumes the SAME link (Q4).
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.hub_sync import policies as pol
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    _source, alias, identity, canonical, revision = _resolve_remote_skill(
+        ctx,
+        hub_source=hub_source,
+        hub_id=hub_id,
+        visibility=visibility,
+        tenant_id=tenant_id,
+        alias=alias,
+    )
+    local_id = identity.local_id
 
     storage = ManagedSkillStorage(ctx.config_dir)
 
@@ -2376,7 +2609,21 @@ def install_skill(
         # 7b. Already-linked / replay arm BEFORE any write: a deterministic id
         #     that already exists is THIS install's own earlier attempt (or a
         #     completed one -- including one just finalized by the recovery
-        #     above), never a second copy.
+        #     above), never a second copy. EXCEPTION: a link whose content is
+        #     explicitly ABSENT (subscribe-without-pull, or an unpulled copy) is
+        #     not a completed install -- an explicit pull IS the install it was
+        #     waiting for, so it falls through to the content transaction below
+        #     and carries the existing identity, scope and policy into it.
+        #
+        #     Refreshed FIRST: 7a's recovery (and any earlier attempt that
+        #     committed content before dying) materializes its policy through the
+        #     storage's own manager, so a replay that projected from the stale
+        #     one would answer the creation default and an unreproducible
+        #     revision -- the reported defect reached through the replay path
+        #     (review round 1, B1/M1). A retry therefore converges to the policy
+        #     the crashed attempt persisted.
+        _refresh_config(ctx)
+        resuming_absent: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
                 continue
@@ -2388,6 +2635,9 @@ def install_skill(
                     f"this skill is already linked as {record.local_alias!r}; one remote skill is "
                     "one local link here -- remove that link first",
                 )
+            if record.content_state == "absent":
+                resuming_absent = record
+                break
             snapshot = links_snapshot(ctx)
             row = next(
                 (link for link in snapshot["links"] if link["link_id"] == identity.link_id), None
@@ -2432,13 +2682,29 @@ def install_skill(
         except SkillValidationError as error:
             raise LinkError("skill-validation", str(error)) from None
         baseline = prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "pull")
+        if resuming_absent is not None:
+            # The prior link's identity/scope/policy/alias must survive an
+            # install that was explicitly requested on top of it; only the
+            # content facts this pull actually establishes move. The migration
+            # hint is left untouched because that link's policy already exists.
+            baseline = replace(
+                resuming_absent,
+                fields=dict(canonical),
+                fingerprint=prov.fingerprint_fields("skill", canonical),
+                recorded_by="pull",
+                content_state="present",
+                remote_revision=revision,
+                lineage="clean",
+            )
+        else:
+            baseline = replace(baseline, legacy_subscribe_hint=subscribe)
         baseline = replace(
             baseline,
             identity=identity,
             local_alias=alias,
             remote_revision=revision,
             lineage="clean",
-            legacy_subscribe_hint=subscribe,
+            content_state="present",
         )
 
         values = read_config_values(ctx.config_dir)
@@ -2476,7 +2742,9 @@ def install_skill(
                 ineligible_reason=str(eligibility["reason"]),
             )
             staged_revision = current.revision
-        elif pol.stored_link_policy(values or {}, identity.link_id) is not None:
+        elif resuming_absent is None and (
+            pol.stored_link_policy(values or {}, identity.link_id) is not None
+        ):
             # No baseline exists (the scan above would have returned), yet an
             # EXPLICIT entry does: a failed or crashed earlier attempt staged
             # it. This request's values are authoritative for the uninstalled
@@ -2596,6 +2864,33 @@ def install_skill(
             if not installed:
                 _settle_staged_after_failure()
 
+        # 7f. REFRESH THE PROCESS'S CONFIG VIEW BEFORE PROJECTING THE ROW (the
+        #     stale-policy defect). The committed transaction materializes the
+        #     initial policy in ``ManagedSkillStorage._finalize`` through a
+        #     SHORT-LIVED ``ConfigManager`` it builds for itself, so the manager
+        #     this request holds -- the ONE ``app.state`` hands to every route,
+        #     and therefore the one ``GET /hub/links`` and the next policy PATCH
+        #     read -- still holds the pre-write snapshot. Without this reload a
+        #     pull that chose Download (``subscribe: false``) answered
+        #     ``subscribe: true`` in its OWN row and in the inventory until the
+        #     process restarted, while config.yml already said false (the
+        #     creation default is also true, so only an OFF pull could expose
+        #     it). A policy revision is a CONTENT digest, so the same staleness
+        #     also served a revision over subscribe=true that no writer could
+        #     ever match: the operator's first edit 409'd
+        #     ``policy-revision-changed`` on a link nothing had touched.
+        #
+        #     Reloaded HERE, at the one install path that commits a policy this
+        #     way, rather than inside ``links_snapshot``: the inventory is a pure
+        #     read of whatever manager it is given and other callers
+        #     (``subscribe_skill``, the policy PATCH) write through that SAME
+        #     manager, so a reload in the reader would re-read the file on every
+        #     inventory call to cover one writer. ``installed`` is only true on a
+        #     committed transaction, so a refused install leaves the manager
+        #     alone (its staged grant was already reverted through it above),
+        #     and a failed refresh can never fail the answered pull.
+        _refresh_config(ctx)
+
         # 8. The response the desktop contract expects: the directional report
         #    the UI reads (applied + link_id + direction) and the ordinary
         #    inventory rows -- the same builders every other surface consumes.
@@ -2617,3 +2912,1125 @@ def install_skill(
             }
         )
         return {"reports": [payload], "link": row, "links": snapshot}
+
+
+def subscribe_skill(
+    ctx: HubSyncContext,
+    *,
+    hub_source: str,
+    hub_id: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    alias: str,
+) -> dict[str, Any]:
+    """Link one remote skill WITHOUT installing a local copy (``hub.skillSubscribe``).
+
+    The link and its content are independent facts. Subscribing records the
+    origin, the alias reservation, the baseline and an explicit
+    ``subscribe: true / auto_push: false`` policy with ``content_state: absent``,
+    so the updates surface can report the remote and a later explicit pull can
+    install it -- while nothing is written into the managed skills root. This is
+    the same identity a pull would mint (the shared ``_resolve_remote_skill``
+    chain, including its nondisclosing refusals), so a repeat request resolves
+    to the SAME link and is replayed rather than duplicated.
+
+    An existing link is left exactly as it is: a subscribe is not a policy edit,
+    and it must never silently turn off an auto_push the operator enabled.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.hub_sync import policies as pol
+
+    _source, alias, identity, canonical, revision = _resolve_remote_skill(
+        ctx,
+        hub_source=hub_source,
+        hub_id=hub_id,
+        visibility=visibility,
+        tenant_id=tenant_id,
+        alias=alias,
+    )
+    local_id = identity.local_id
+
+    # Same lease the install/apply paths take: creating the baseline is local
+    # state a concurrent tick or install must not interleave with.
+    with exclusive(ctx, wait_s=0.0):
+        existing: prov.BaselineRecord | None = None
+        for record in prov.iter_baselines(ctx.config_dir):
+            if record.kind != "skill" or record.local_id != local_id:
+                continue
+            if record.identity is None or record.identity != identity:
+                raise LinkError("origin-conflict", "a local skill already owns this identity")
+            if (record.local_alias or record.local_id) != alias:
+                raise LinkError(
+                    "origin-conflict",
+                    f"this skill is already linked as {record.local_alias!r}; one remote skill is "
+                    "one local link here -- remove that link first",
+                )
+            existing = record
+            break
+
+        if existing is None:
+            record = replace(
+                prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "subscribe"),
+                identity=identity,
+                local_alias=alias,
+                remote_revision=revision,
+                # NOT "clean": nothing from this origin has landed locally. The
+                # baseline names what the hub served at subscribe time; the
+                # lineage becomes clean only when an install integrates it, and
+                # the absent state keeps the link ineligible for pushes until
+                # then (``_eligibility`` refuses on content-absent).
+                lineage="unknown",
+                content_state="absent",
+            )
+            prov.write_baseline(ctx.config_dir, record)
+
+        # The explicit subscription policy. An entry that already exists means
+        # this request's link does too, and a replay never rewrites it; a link
+        # with no entry (a hand-written baseline, or one whose policy was
+        # removed) gets exactly the state this route promises.
+        values = read_config_values(ctx.config_dir)
+        if values is None and (ctx.config_dir / "config.yml").exists():
+            raise LinkError("invalid-link-policy", "configuration is unreadable")
+        if pol.stored_link_policy(values or {}, identity.link_id) is None:
+            current = pol.read_policy(values or {}, identity)
+            pol.update_policy(
+                ctx.config_manager,
+                identity,
+                expected_revision=current.revision,
+                subscribe=True,
+                auto_push=False,
+                can_enable_auto_push=False,
+                ineligible_reason="content-absent",
+            )
+
+        snapshot = links_snapshot(ctx)
+        row = next(
+            (link for link in snapshot["links"] if link["link_id"] == identity.link_id), None
+        )
+        if row is None:
+            raise LinkError("origin-conflict", "the subscription did not materialize a link row")
+        return {"link": row, "links": snapshot}
+
+
+def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
+    """Remove one skill link's managed copy, keeping baseline/policy/alias.
+
+    Membership is the LINK; the bytes are one direction of it. Unpull is an
+    explicit local action, so it is not a policy change and never unlinks: the
+    baseline keeps owning the alias (no other origin can claim it), the policy
+    keeps its subscribe/auto_push values, and the check later reports the remote
+    as ``available`` for an explicit pull to install. Repeating it on an
+    already-absent link is a success, not a "not found": the request's intent is
+    already true.
+
+    The content removal itself (atomic rename, intent marker, state write) lives
+    in ``ManagedSkillStorage.unpull`` so its crash window is recoverable from
+    durable evidence rather than inferred from a missing directory.
+    """
+
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    with exclusive(ctx, wait_s=0.0):
+        record = None
+        for candidate in prov.iter_baselines(ctx.config_dir):
+            if (
+                candidate.kind == "skill"
+                and candidate.identity is not None
+                and candidate.identity.link_id == link_id
+            ):
+                record = candidate
+                break
+        if record is None:
+            raise LinkError("skill-not-found", "no such skill link")
+        try:
+            ManagedSkillStorage(ctx.config_dir).unpull(record.local_id)
+        except TransactionError as error:
+            raise LinkError(
+                getattr(error, "code", "") or "local-concurrent-edit", str(error)
+            ) from None
+        snapshot = links_snapshot(ctx)
+        row = next((link for link in snapshot["links"] if link["link_id"] == link_id), None)
+        if row is None:
+            raise LinkError("origin-conflict", "the unpull left no link row")
+        return {"link": row, "links": snapshot}
+
+
+# -- initial skill publication (the complete adapter's push half) -------------------------
+#
+# `POST /v1/desktop/hub/skills/publish` is the desktop plane's initial-publication
+# arm. It is deliberately NOT a republish path: the hub contract this adapter
+# advertises creates a NEW remote row (`publication: "create"`), and a second
+# publication of an already-linked skill is refused locally with the alias owner
+# rather than answered by an upstream `name_taken`.
+#
+# TWO receipts are involved and they are different facts:
+#   * the PREVIEW receipt is local and review-only. A dry run projects the exact
+#     bytes a confirm would send, binds them to the draft tuple + policy, and
+#     persists that under `hub/publication-previews`. Nothing is published, no
+#     paid call is made, and no link/baseline/policy is written;
+#   * the LOCAL LINK receipt is the answer to "did this machine finish turning
+#     the accepted publication into a real `links_snapshot` row". It is
+#     `complete` only after the managed baseline + policy exist, and
+#     `pending-reconciliation` when the hub accepted the row but local
+#     bookkeeping did not finish. The remote outcome is persisted before any
+#     local write, so a retry resumes the SAME link instead of republishing.
+#
+# RETENTION: a draft receipt is confirmable for PUBLICATION_PREVIEW_TTL_S and
+# expires with the review. Once the hub ACCEPTS, the receipt is the only record
+# of the remote row (no baseline and no link exist yet), so it is retained
+# indefinitely while reconciliation is pending -- through restarts and past the
+# draft TTL. That is why it keeps the reviewed proposal bytes as well as the raw
+# accepted result: re-materializing the link after a restart must not depend on
+# the authored folder, which may have been edited, moved or removed. When the
+# local link completes the receipt is deleted; a failed deletion leaves a
+# `completed` marker that the next expired-receipt sweep prunes.
+#
+# A REFUSED publication leaves every piece of skill state untouched: the hub call
+# happens before the managed transaction, and the only bytes this path writes on
+# a dry run are the preview receipt itself.
+
+#: How long a publication preview stays confirmable. The hub's own preview pins
+#: expire after 15 minutes and this receipt fronts the same reviewed-draft act, so
+#: it uses the same bound: a longer window would let a reviewed payload drift from
+#: the bytes a later confirm sends.
+PUBLICATION_PREVIEW_TTL_S = 900
+
+_PREVIEW_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+
+
+def _publication_preview_dir(config_dir: Path) -> Path:
+    return prov.hub_root(config_dir) / "publication-previews"
+
+
+def _publication_preview_path(config_dir: Path, token: str) -> Path:
+    if not isinstance(token, str) or not _PREVIEW_TOKEN_RE.fullmatch(token):
+        # A token is an opaque local file name; anything path-shaped is refused
+        # before it can name a file outside the preview directory.
+        raise LinkError("preview_mismatch", "the publication preview receipt is not valid")
+    return _publication_preview_dir(config_dir) / f"{token}.json"
+
+
+def _read_publication_preview(config_dir: Path, token: str) -> dict[str, Any] | None:
+    path = _publication_preview_path(config_dir, token)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise LinkError("preview_mismatch", "the publication preview receipt is unsafe")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_publication_preview(config_dir: Path, record: Mapping[str, Any]) -> None:
+    token = str(record.get("preview_receipt") or "")
+    path = _publication_preview_path(config_dir, token)
+    directory = path.parent
+    if directory.is_symlink():
+        raise LinkError("preview_mismatch", "the publication preview store is unsafe")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(dict(record), handle, ensure_ascii=False, indent=1, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _prune_publication_previews(directory, keep=path)
+
+
+def _prune_publication_previews(directory: Path, *, keep: Path) -> None:
+    """Drop expired receipts; a preview is single-review state, not a history.
+
+    A receipt that carries an ACCEPTED remote outcome but has not completed local
+    reconciliation is never pruned: its hub id exists nowhere else (no baseline,
+    no link), so deleting it would orphan the publication. The 15-minute bound is
+    the reviewed DRAFT's lifetime, not the accepted row's. A COMPLETED receipt is
+    prunable like any other: its link is durable, so the record is only a leftover
+    of a failed unlink.
+    """
+
+    cutoff = datetime.now(timezone.utc)
+    try:
+        candidates = list(directory.glob("*.json"))
+    except OSError:
+        return
+    for candidate in candidates:
+        if candidate == keep:
+            continue
+        raw: Any = None
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+            expires = _parse_iso(str(raw.get("expires_at") or ""))
+        except (OSError, ValueError):
+            expires = None
+        if (
+            expires is not None
+            and expires < cutoff
+            and not (isinstance(raw, Mapping) and _receipt_awaits_reconciliation(raw))
+        ):
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+
+
+def _receipt_awaits_reconciliation(record: Mapping[str, Any]) -> bool:
+    """Does this receipt hold a hub row whose local link has not landed yet?"""
+
+    accepted = isinstance(record.get("outcome"), Mapping) or isinstance(
+        record.get("remote_result"), Mapping
+    )
+    return accepted and not record.get("completed")
+
+
+def _delete_publication_preview(config_dir: Path, token: str) -> None:
+    """Remove a reconciled receipt; best-effort, because the link is durable."""
+
+    try:
+        path = _publication_preview_path(config_dir, token)
+    except LinkError:
+        return
+    if path.is_symlink() or path.parent.is_symlink():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _parse_iso(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _resolve_authored_skill(config_dir: Path, name: str) -> Any:
+    """The locally discovered skill a publication names, or a named refusal.
+
+    The UI's source picker reads the SAME sessionless catalogue this resolves
+    against (``GET /v1/desktop/skills`` with no folder: home roots), so a name the
+    picker offered always resolves here and a hand-crafted name cannot reach an
+    arbitrary path. Name collisions follow the catalogue's own rule (the earliest
+    root wins).
+    """
+
+    from local_operator.skills import default_skill_roots, discover_skills
+
+    skills, _warnings = discover_skills(default_skill_roots(Path.home()), config_dir=config_dir)
+    match = next((skill for skill in skills if skill.name == name), None)
+    if match is None:
+        raise LinkError("skill-not-found", "no locally authored skill has that name")
+    # A source that already owns a hub link is NOT authored content any more:
+    # discovering it through the managed root would let a pulled private-org
+    # skill be re-published publicly under a new alias (the baseline is what
+    # proves the origin, and the destination-alias check cannot see a rename).
+    # This is also why re-publishing a linked skill is refused rather than
+    # answered upstream with `name_taken`: the adapter advertises CREATE only.
+    if prov.alias_owner(config_dir, "skill", match.name) is not None:
+        raise LinkError(
+            "origin-conflict",
+            "that skill is already linked to the hub; a new publication needs authored content",
+        )
+    return match
+
+
+def _project_publication(
+    config_dir: Path, *, source_skill: str, local_alias: str
+) -> tuple[Any, Any, Any]:
+    """Read + validate the authored source and render the exact publication draft.
+
+    Returns ``(skill, source_document, draft_document)``. The source is read with
+    :meth:`SkillDocument.from_directory` -- the SAME bounded, all-file validation
+    the pull path applies to a remote manifest -- and the draft is its local-alias
+    rendering (name/description are stored twice, so ``with_name`` rewrites the
+    frontmatter scalar too). Every refusal is the adapter's own named code.
+    """
+
+    from local_operator.hub_sync.adapters import SkillAdapter
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+        validate_name,
+    )
+
+    skill = _resolve_authored_skill(config_dir, source_skill)
+    try:
+        source_document = SkillDocument.from_directory(skill.base_dir)
+        alias = validate_name(local_alias)
+        draft = source_document.with_name(alias)
+        SkillAdapter().validate(draft.to_json())
+    except SkillValidationError as error:
+        raise LinkError(getattr(error, "code", "") or "skill-validation", str(error)) from None
+    return skill, source_document, draft
+
+
+def _proposal_fingerprint(fields: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        {"kind": "skill", "fields": dict(fields)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _publication_blocker(
+    ctx: HubSyncContext, skill: Any, source_document: Any, alias: str
+) -> str | None:
+    """A LOCAL reason this draft can never confirm, or None.
+
+    Checked in the preview so Confirm is disabled with a named reason instead of
+    failing after the hub already created a row. Confirm re-checks the same facts
+    under the update lease; this is not the authority, only the honest preview.
+    """
+
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    try:
+        destination = ManagedSkillStorage(ctx.config_dir).path(alias)
+    except LinkError:
+        return "skill-validation"
+    owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+    if owner is not None:
+        return "origin-conflict"
+    if destination.exists():
+        try:
+            same = destination.resolve() == Path(skill.base_dir).resolve()
+        except OSError:
+            same = False
+        # An authored folder may be adopted only when it IS the published name:
+        # adoption never rewrites bytes, so a differing alias would leave the
+        # managed folder named differently from its link.
+        if not same or alias != source_document.name:
+            return "origin-conflict"
+    return None
+
+
+def _publication_preview_reason(
+    ctx: HubSyncContext,
+    *,
+    hub_source: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    auto_push: bool,
+    confirm_public_egress: bool,
+    blocker: str | None,
+) -> str | None:
+    if blocker is not None:
+        return blocker
+    if ctx.client_for_tenant(tenant_id or "") is None:
+        return "no-credential"
+    if auto_push:
+        # The same capability attestation the policy PATCH and install paths
+        # demand. It is a persisted fact about the DEPLOYED server, never a
+        # boolean this request can supply.
+        probe = LinkIdentity("skill", "preview", hub_source, visibility, tenant_id, "preview")
+        if not _capability_auto_push(ctx.store().load(), probe):
+            return "unsupported-precondition"
+        if visibility == "public" and not confirm_public_egress:
+            # The egress grant is minted by the confirmed policy write; the
+            # preview may not claim confirmability without the explicit consent.
+            return "unsafe-publication"
+    return None
+
+
+def preview_skill_publication(
+    ctx: HubSyncContext,
+    *,
+    source_skill: str,
+    local_alias: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    subscribe: bool,
+    auto_push: bool,
+    confirm_public_egress: bool,
+) -> dict[str, Any]:
+    """Project a local skill into the exact initial-publication preview (no network)."""
+
+    from local_operator.hub_sync.identity import approve_source
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    # Scope pairing first: a half pair must never reach a credential selector.
+    if visibility == "public" and tenant_id is not None:
+        raise LinkError("origin-conflict", "a public skill publication cannot name an organization")
+    if visibility == "org" and not tenant_id:
+        raise LinkError("origin-conflict", "an organization skill publication requires a tenant")
+
+    source = approve_source(
+        configured_radient_base_url(ctx.config_manager),
+        (configured_radient_base_url(ctx.config_manager),),
+    )
+    skill, source_document, draft = _project_publication(
+        ctx.config_dir, source_skill=source_skill, local_alias=local_alias
+    )
+    alias = draft.name
+    fields = draft.to_json()
+    blocker = _publication_blocker(ctx, skill, source_document, alias)
+    reason = _publication_preview_reason(
+        ctx,
+        hub_source=source,
+        visibility=visibility,
+        tenant_id=tenant_id,
+        auto_push=auto_push,
+        confirm_public_egress=confirm_public_egress,
+        blocker=blocker,
+    )
+    warnings: list[str] = []
+    if alias != source_document.name:
+        warnings.append(
+            f"This publication renames the skill from {source_document.name!r} to {alias!r}."
+        )
+    token = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(seconds=PUBLICATION_PREVIEW_TTL_S)
+    preview: dict[str, Any] = {
+        "preview_receipt": token,
+        "kind": "skill",
+        "direction": "push",
+        "publication": "create",
+        "source_skill": source_skill,
+        "local_alias": alias,
+        "hub_source": source,
+        "visibility": visibility,
+        "tenant_id": tenant_id,
+        "local_fingerprint": source_document.fingerprint,
+        "draft_fingerprint": draft.fingerprint,
+        "proposal_fingerprint": _proposal_fingerprint(fields),
+        "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "policy": {
+            "subscribe": bool(subscribe),
+            "auto_push": bool(auto_push),
+            "confirm_public_egress": bool(confirm_public_egress),
+        },
+        "proposal": {"kind": "skill", "fields": fields},
+        "warnings": warnings,
+        "can_confirm": reason is None,
+        "reason": reason,
+    }
+    record = dict(preview)
+    # Private fields: never part of the wire contract, only the local receipt.
+    record["source_dir"] = str(Path(skill.base_dir).resolve())
+    _write_publication_preview(ctx.config_dir, record)
+    return preview
+
+
+def _publication_from_result(
+    result: Mapping[str, Any], proposal: Mapping[str, Any], alias: str
+) -> dict[str, Any]:
+    """The `publication` half of the UI contract, from the hub's accepted answer.
+
+    ``accepted_document`` is normalised through the adapter's tolerant-envelope /
+    strict-manifest reader: the hub echoes metadata beside the manifest, and the
+    managed baseline's own finalizer parses its fields as a bare skill document,
+    so an envelope stored verbatim would be refused at commit time.
+    """
+
+    from local_operator.hub_sync.adapters import SkillAdapter
+    from local_operator.hub_sync.skill_document import SkillValidationError
+
+    accepted = result.get("accepted_document")
+    raw_accepted_id = str(accepted.get("id") or "").strip() if isinstance(accepted, Mapping) else ""
+    if isinstance(accepted, Mapping):
+        try:
+            accepted_fields = dict(SkillAdapter().canonical_fields(accepted))
+        except SkillValidationError as error:
+            raise LinkError(
+                "hub-upstream", f"the hub's accepted skill document is invalid: {error}"
+            ) from None
+    else:
+        accepted_fields = dict(proposal)
+    row = result.get("skill")
+    skill_id = ""
+    skill_name = alias
+    if isinstance(row, Mapping):
+        skill_id = str(row.get("id") or "").strip()
+        skill_name = str(row.get("name") or "").strip() or skill_name
+    if not skill_id:
+        skill_id = raw_accepted_id
+    if not skill_id:
+        raise LinkError("hub-upstream", "the hub accepted the publication but named no skill id")
+    revision = result.get("revision")
+    content_revision = result.get("content_revision")
+    return {
+        "skill": {"id": skill_id, "name": skill_name},
+        "accepted_document": accepted_fields,
+        "revision": str(revision) if isinstance(revision, str) and revision else "",
+        "content_revision": (
+            content_revision
+            if isinstance(content_revision, int) and not isinstance(content_revision, bool)
+            else 0
+        ),
+        "operation_id": str(result.get("operation_id") or ""),
+        "sync_contract": (
+            dict(result.get("sync_contract") or {})
+            if isinstance(result.get("sync_contract"), Mapping)
+            else {}
+        ),
+    }
+
+
+def _published_baseline(
+    identity: LinkIdentity,
+    *,
+    alias: str,
+    accepted: Mapping[str, Any],
+    local_fields: Mapping[str, Any],
+    revision: str,
+    operation_id: str,
+    subscribe: bool,
+) -> Any:
+    """The durable published baseline: the hub's accepted canonical document, not L.
+
+    A publication is the strongest origin proof there is, so the record is
+    `recorded_by="publish"` with clean lineage, and the outbound (A, P) receipt is
+    seeded in the SAME write: auto-push has no other honest starting point, and a
+    first publication is exactly the known-agreed act that proves one.
+    """
+
+    from local_operator.hub_sync.push import receipt_for
+
+    record = prov.make_record(
+        "skill", identity.local_id, identity.hub_id, identity.tenant_id, accepted, "publish"
+    )
+    record = replace(
+        record,
+        identity=identity,
+        local_alias=alias,
+        remote_revision=revision or None,
+        lineage="clean",
+        legacy_subscribe_hint=subscribe,
+        outbound=receipt_for(
+            "skill",
+            accepted,
+            local_fields,
+            revision=revision or None,
+            operation_id=operation_id or None,
+        ),
+    )
+    return record
+
+
+def _materialize_published_skill(
+    ctx: HubSyncContext,
+    *,
+    identity: LinkIdentity,
+    alias: str,
+    draft: Any,
+    baseline: Any,
+    source_dir: str,
+    subscribe: bool,
+    auto_push: bool,
+    confirm_public_egress: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Turn an ACCEPTED publication into a real local link.
+
+    Mirrors :func:`install_skill`'s local half under the same cross-process
+    update lease: the alias-ownership check, the journaled managed transaction
+    (or, when the authored folder already IS the destination, an in-place adopt
+    that writes no bytes), and the policy materialization. The answered row is
+    the ORDINARY ``links_snapshot`` row, never a synthesized projection.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.hub_sync import policies as pol
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    storage = ManagedSkillStorage(ctx.config_dir)
+    destination = storage.path(alias)
+    with exclusive(ctx, wait_s=0.0):
+        values = read_config_values(ctx.config_dir)
+        if values is None and (ctx.config_dir / "config.yml").exists():
+            raise LinkError("invalid-link-policy", "configuration is unreadable")
+        existing = prov.read_baseline(ctx.config_dir, "skill", identity.local_id)
+        if existing is not None:
+            if existing.identity != identity or existing.local_alias != alias:
+                raise LinkError("origin-conflict", "a local skill already owns this identity")
+            # REPLAY ARM: the remote outcome was persisted, but a crash may have
+            # landed the baseline without the policy write (or the caller may be
+            # repeating a completed confirm). Materialize is idempotent; only a
+            # requested auto-push that is not ON yet needs the eligibility gate.
+            current = pol.read_policy(values or {}, identity)
+            if auto_push and not current.policy.auto_push:
+                eligibility = _eligibility(
+                    ctx, identity, current.policy, values or {}, baseline, ctx.store().load()
+                )
+                pol.update_policy(
+                    ctx.config_manager,
+                    identity,
+                    expected_revision=current.revision,
+                    subscribe=subscribe,
+                    auto_push=True,
+                    confirm_public_egress=confirm_public_egress,
+                    can_enable_auto_push=bool(eligibility["can_auto_push"]),
+                    ineligible_reason=str(eligibility["reason"]),
+                )
+            else:
+                pol.materialize_policy(
+                    ctx.config_manager, identity, legacy_subscribe_hint=subscribe
+                )
+            operation_id = f"link-{identity.local_id}"
+        else:
+            owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+            if owner not in (None, identity.local_id):
+                raise LinkError(
+                    "origin-conflict", "managed alias belongs to another local skill origin"
+                )
+            current = pol.read_policy(values or {}, identity)
+            adopt = destination.exists()
+            if adopt:
+                # The authored source and the managed destination are one folder;
+                # adoption writes no bytes, so the alias must already be the name
+                # the draft carries. Confirm re-reads it under the lease: an edit
+                # since the preview is a concurrent-edit refusal, not a silent
+                # baseline over changed content.
+                try:
+                    same = destination.resolve() == Path(source_dir).resolve()
+                except OSError:
+                    same = False
+                if not same:
+                    raise LinkError(
+                        "origin-conflict", "refusing to overwrite an unknown local skill"
+                    )
+                if SkillDocument.from_directory(destination).fingerprint != draft.fingerprint:
+                    raise LinkError(
+                        "local-concurrent-edit", "managed skill changed before publication"
+                    )
+            staged_revision: str | None = None
+            if auto_push:
+                eligibility = _eligibility(
+                    ctx, identity, current.policy, values or {}, baseline, ctx.store().load()
+                )
+                current = pol.update_policy(
+                    ctx.config_manager,
+                    identity,
+                    expected_revision=current.revision,
+                    subscribe=subscribe,
+                    auto_push=True,
+                    confirm_public_egress=confirm_public_egress,
+                    can_enable_auto_push=bool(eligibility["can_auto_push"]),
+                    ineligible_reason=str(eligibility["reason"]),
+                )
+                staged_revision = current.revision
+            try:
+                if adopt:
+                    prov.write_baseline(ctx.config_dir, baseline)
+                    pol.materialize_policy(
+                        ctx.config_manager, identity, legacy_subscribe_hint=subscribe
+                    )
+                    operation_id = f"link-{identity.local_id}"
+                else:
+                    transaction = storage.apply(
+                        identity,
+                        alias,
+                        draft,
+                        baseline,
+                        expected_fingerprint=None,
+                        expected_policy_revision=current.revision,
+                        automatic=False,
+                        basis="initial-publish",
+                    )
+                    operation_id = transaction.operation_id
+            except Exception as error:
+                # A staged auto-push entry must not orphan a link that never
+                # landed -- but a grant whose content/baseline DID land is the
+                # recovered install's policy and must survive (the same split
+                # install_skill's settlement makes). Only revert when neither
+                # durable fact is present.
+                if staged_revision is not None:
+                    landed = (
+                        prov.read_baseline(ctx.config_dir, "skill", identity.local_id) is not None
+                    )
+                    if not landed and not adopt:
+                        try:
+                            landed = (
+                                destination.exists()
+                                and SkillDocument.from_directory(destination).fingerprint
+                                == draft.fingerprint
+                            )
+                        except Exception:  # noqa: BLE001 - cannot prove it did not land
+                            landed = True
+                    if not landed:
+                        try:
+                            pol.revert_policy_if_unchanged(
+                                ctx.config_manager, identity, expected_revision=staged_revision
+                            )
+                        except Exception:  # noqa: BLE001 - never mask the original failure
+                            pass
+                if isinstance(error, LinkError):
+                    raise
+                if isinstance(
+                    error, (TransactionError, SkillValidationError, OSError, prov.BaselineError)
+                ):
+                    raise LinkError(getattr(error, "code", "") or "hub-error", str(error)) from None
+                raise
+
+    # The managed transaction writes policy through its OWN manager instance; the
+    # request's manager still holds the pre-write snapshot, and reading the link
+    # row from it would report a creation default instead of what was stored.
+    # Refresh (best-effort, lock-ordered) before projecting the row so the answer
+    # is the persisted policy.
+    _refresh_config(ctx)
+    snapshot = links_snapshot(ctx)
+    row = next((link for link in snapshot["links"] if link["link_id"] == identity.link_id), None)
+    if row is None:
+        raise LinkError("origin-conflict", "the publication did not materialize a link row")
+    receipt = {
+        "state": "complete",
+        "operation_id": operation_id,
+        "link_id": identity.link_id,
+        "safe_message": None,
+    }
+    return row, receipt
+
+
+def _project_accepted_publication(
+    result: Mapping[str, Any], proposal: Mapping[str, Any], alias: str
+) -> dict[str, Any] | None:
+    """Project an ACCEPTED hub result, or None when its shape cannot be read.
+
+    A projection failure happens AFTER the hub created the row. It must reach the
+    caller as `pending-reconciliation`, never as a 502: the row exists, and
+    "nothing happened" would invite a duplicate publication.
+    """
+
+    try:
+        return _publication_from_result(result, proposal, alias)
+    except LinkError as error:
+        logger.warning("could not project the hub's accepted skill publication: %s", error)
+        return None
+
+
+def _pending_publication(
+    publication: Mapping[str, Any] | None, local_id: str | None, message: str
+) -> dict[str, Any]:
+    """The `pending-reconciliation` answer for an accepted row whose link is not done."""
+
+    return {
+        "preview": None,
+        "link": None,
+        "local_link_receipt": {
+            "state": "pending-reconciliation",
+            "operation_id": f"link-{local_id}" if local_id else "link-pending",
+            "link_id": None,
+            "safe_message": message,
+        },
+        "publication": dict(publication) if publication is not None else None,
+    }
+
+
+def _recorded_draft(record: Mapping[str, Any]) -> Any:
+    """Rebuild the reviewed draft from a receipt, WITHOUT re-reading the source.
+
+    Reconciliation depends on the bytes the hub accepted, not on whatever now
+    sits in the authored folder: the source may have been edited or removed, and
+    refusing the retry for that would orphan the remote row forever.
+    """
+
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+
+    proposal = record.get("proposal")
+    fields = proposal.get("fields") if isinstance(proposal, Mapping) else None
+    if not isinstance(fields, Mapping):
+        raise LinkError("preview_stale", "the publication receipt carries no reviewed draft")
+    try:
+        return SkillDocument.from_json(dict(fields))
+    except SkillValidationError as error:
+        raise LinkError("preview_stale", f"the recorded publication draft is invalid: {error}")
+
+
+def publish_skill(
+    ctx: HubSyncContext,
+    *,
+    source_skill: str,
+    local_alias: str,
+    visibility: Visibility,
+    tenant_id: str | None,
+    subscribe: bool,
+    auto_push: bool,
+    confirm_public_egress: bool,
+    dry_run: bool = False,
+    preview_receipt: str | None = None,
+) -> dict[str, Any]:
+    """Initial skill publication: preview (dry run) or confirm a reviewed draft.
+
+    The confirm path is two-phase and crash-ordered:
+
+    1. the preview receipt is re-read, expiry-checked and compared field-for-field
+       with the request;
+    2. the source is re-read from disk and ALL-file bytes are compared with the
+       fingerprints the reviewed draft pinned (`local_fingerprint`,
+       `draft_fingerprint`, `proposal_fingerprint`) -- an edit since the review is
+       `preview_stale`, never a publication of unreviewed bytes;
+    3. the hub call runs BEFORE any local write, and a refusal leaves every piece
+       of local skill state untouched;
+    4. the remote outcome is persisted into the receipt before the managed link
+       transaction, so a retry with the same receipt resumes the SAME local link
+       (the deterministic id is minted from the published hub id) instead of
+       publishing twice;
+    5. the local link is materialized exactly as ``install_skill`` does and the
+       answer carries that real inventory row.
+
+    A local failure AFTER an accepted publication is reported as
+    ``pending-reconciliation`` -- the remote row exists and saying otherwise
+    would invite a duplicate publication.
+    """
+
+    from local_operator.clients._http import APIError
+    from local_operator.hub_sync.identity import approve_source
+    from local_operator.providers.radient_credentials import (
+        ORG_LOGIN_REMEDY,
+        configured_radient_base_url,
+    )
+
+    if dry_run:
+        return {
+            "preview": preview_skill_publication(
+                ctx,
+                source_skill=source_skill,
+                local_alias=local_alias,
+                visibility=visibility,
+                tenant_id=tenant_id,
+                subscribe=subscribe,
+                auto_push=auto_push,
+                confirm_public_egress=confirm_public_egress,
+            ),
+            "link": None,
+            "local_link_receipt": None,
+            "publication": None,
+        }
+
+    if not preview_receipt:
+        raise LinkError("preview_mismatch", "a publication confirm requires its preview receipt")
+    record = _read_publication_preview(ctx.config_dir, preview_receipt)
+    if record is None:
+        raise LinkError("preview_expired", "the publication preview receipt is unknown or expired")
+    durable = isinstance(record.get("outcome"), Mapping) or isinstance(
+        record.get("remote_result"), Mapping
+    )
+    expires = _parse_iso(str(record.get("expires_at") or ""))
+    if not durable and (expires is None or datetime.now(timezone.utc) > expires):
+        raise LinkError("preview_expired", "the publication preview has expired; preview again")
+
+    expected = {
+        "source_skill": source_skill,
+        "local_alias": local_alias,
+        "visibility": visibility,
+        "tenant_id": tenant_id,
+        "policy": {
+            "subscribe": bool(subscribe),
+            "auto_push": bool(auto_push),
+            "confirm_public_egress": bool(confirm_public_egress),
+        },
+    }
+    for key, value in expected.items():
+        if record.get(key) != value:
+            raise LinkError("preview_mismatch", "the publication draft changed after its preview")
+
+    hub_source = str(record.get("hub_source") or "")
+
+    recorded_outcome = record.get("outcome")
+    publication: dict[str, Any] | None = (
+        dict(recorded_outcome) if isinstance(recorded_outcome, Mapping) else None
+    )
+    if publication is not None:
+        # RECONCILIATION ARM: the hub accepted this row. Local bookkeeping is the
+        # only work left, and it must not depend on the authored source -- the
+        # source may have moved, been edited or been deleted since the review.
+        draft = _recorded_draft(record)
+        fields = draft.to_json()
+        source_dir = str(record.get("source_dir") or "")
+    elif isinstance(record.get("remote_result"), Mapping):
+        # The hub accepted but its response could not be projected (or the
+        # projected outcome could not be persisted). Re-read the RAW accepted
+        # result, which was made durable at acceptance, so the retry never asks
+        # for a fresh review nor republishes.
+        draft = _recorded_draft(record)
+        fields = draft.to_json()
+        source_dir = str(record.get("source_dir") or "")
+        publication = _project_accepted_publication(
+            dict(record["remote_result"]), fields, draft.name
+        )
+        if publication is None:
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but its response could not be read",
+            )
+        record["outcome"] = publication
+        try:
+            _write_publication_preview(ctx.config_dir, record)
+        except Exception:  # noqa: BLE001 - the raw result is already durable
+            logger.warning("could not promote the publication outcome", exc_info=True)
+    else:
+        skill, source_document, draft = _project_publication(
+            ctx.config_dir, source_skill=source_skill, local_alias=local_alias
+        )
+        try:
+            recorded_dir = Path(str(record.get("source_dir") or "")).resolve()
+        except OSError:
+            recorded_dir = None
+        if recorded_dir is None or recorded_dir != Path(skill.base_dir).resolve():
+            # A different folder now answers this name (a new higher-priority root):
+            # the reviewed bytes are not this draft, even if a file happens to agree.
+            raise LinkError("preview_stale", "the authored skill moved since its preview")
+        fields = draft.to_json()
+        if (
+            record.get("local_fingerprint") != source_document.fingerprint
+            or record.get("draft_fingerprint") != draft.fingerprint
+            or record.get("proposal_fingerprint") != _proposal_fingerprint(fields)
+        ):
+            raise LinkError("preview_stale", "the authored skill changed since its preview")
+
+        configured = approve_source(
+            configured_radient_base_url(ctx.config_manager),
+            (configured_radient_base_url(ctx.config_manager),),
+        )
+        if hub_source != configured:
+            # The configured destination moved since the review. Re-targeting a
+            # reviewed publication silently would send the bytes somewhere the user
+            # did not review. (Reconciliation does not re-target: it never calls the
+            # hub, so it keeps the recorded destination.)
+            raise LinkError("preview_stale", "the hub destination changed since the preview")
+
+        # A preview whose Confirm control was disabled must not be confirmable by
+        # replaying its receipt directly: the same local/capability/consent gates
+        # are re-evaluated HERE, before the hub can create a row.
+        preflight = _publication_preview_reason(
+            ctx,
+            hub_source=hub_source,
+            visibility=visibility,
+            tenant_id=tenant_id,
+            auto_push=auto_push,
+            confirm_public_egress=confirm_public_egress,
+            blocker=_publication_blocker(ctx, skill, source_document, draft.name),
+        )
+        if preflight is not None:
+            raise LinkError(preflight, "the publication preview is not confirmable")
+        client = ctx.client_for_tenant(tenant_id or "")
+        if client is None:
+            raise LinkError("no-credential", ORG_LOGIN_REMEDY)
+        if str(getattr(client, "base_url", "")).rstrip("/") != hub_source:
+            raise LinkError(
+                "origin-conflict", "the answering client's base is not the requested source"
+            )
+        try:
+            result = client.publish_skill_document(
+                dict(fields), visibility=visibility, tenant_id=tenant_id
+            )
+        except APIError as error:
+            raise LinkError(getattr(error, "code", None) or "hub-error", str(error)) from None
+
+        # THE HUB HAS ACCEPTED. Persist the RAW result before any projection: a
+        # 2xx whose shape cannot be read still names a row that exists, and a 502
+        # would invite a duplicate publication. This file is the only record of
+        # the hub id until a baseline lands.
+        raw_result = dict(result) if isinstance(result, Mapping) else None
+        if raw_result is None:
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but returned an unreadable result",
+            )
+        record["remote_result"] = raw_result
+        try:
+            _write_publication_preview(ctx.config_dir, record)
+        except Exception:  # noqa: BLE001 - report pending, never 502, after acceptance
+            logger.warning("could not record the accepted publication", exc_info=True)
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but its outcome could not be recorded",
+            )
+        publication = _project_accepted_publication(raw_result, fields, draft.name)
+        if publication is None:
+            return _pending_publication(
+                None,
+                None,
+                "the hub accepted the publication but its response could not be read",
+            )
+        record["outcome"] = publication
+        try:
+            _write_publication_preview(ctx.config_dir, record)
+        except Exception:  # noqa: BLE001 - raw_result is durable; the retry re-projects
+            logger.warning("could not persist the projected publication", exc_info=True)
+        source_dir = str(Path(skill.base_dir).resolve())
+
+    # Every arm above either returned a pending answer or set both facts; the
+    # assertion makes that a runtime invariant as well as a typing one.
+    assert publication is not None
+    hub_id = str(publication["skill"]["id"])
+    local_id = skill_link_local_id(
+        source=hub_source, visibility=visibility, tenant_id=tenant_id, hub_id=hub_id
+    )
+    identity = LinkIdentity("skill", local_id, hub_source, visibility, tenant_id, hub_id)
+    accepted = publication.get("accepted_document")
+    accepted_fields = dict(accepted) if isinstance(accepted, Mapping) else fields
+    baseline = _published_baseline(
+        identity,
+        alias=draft.name,
+        accepted=accepted_fields,
+        local_fields=fields,
+        revision=str(publication.get("revision") or ""),
+        operation_id=str(publication.get("operation_id") or ""),
+        subscribe=subscribe,
+    )
+    try:
+        row, local_receipt = _materialize_published_skill(
+            ctx,
+            identity=identity,
+            alias=draft.name,
+            draft=draft,
+            baseline=baseline,
+            source_dir=source_dir,
+            subscribe=subscribe,
+            auto_push=auto_push,
+            confirm_public_egress=confirm_public_egress,
+        )
+    except Exception as error:
+        # The hub row EXISTS. Reporting the failure as an error would read as
+        # "nothing happened" and invite a duplicate publication; the contract's
+        # pending receipt is the honest state, and the persisted outcome lets a
+        # retry reconcile this same link.
+        logger.warning("could not materialize the published skill link", exc_info=True)
+        return _pending_publication(
+            publication,
+            local_id,
+            (
+                str(error)
+                if isinstance(error, LinkError)
+                else "the local link could not be materialized"
+            ),
+        )
+    record["completed"] = True
+    try:
+        # The marker is only load-bearing if the unlink below fails: a completed
+        # record is prunable, whereas an accepted-unreconciled one is not.
+        _write_publication_preview(ctx.config_dir, record)
+    except Exception:  # noqa: BLE001 - the local link already landed
+        logger.warning("could not mark the publication receipt complete", exc_info=True)
+    _delete_publication_preview(ctx.config_dir, preview_receipt)
+    return {
+        "preview": None,
+        "link": row,
+        "local_link_receipt": local_receipt,
+        "publication": publication,
+    }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -114,10 +115,10 @@ def _err(status: int, code: str, *, details: dict[str, Any] | None = None) -> ht
 
 
 def _make_client(
-    handler, *, store: Any = None, credential_id: int | None = None
+    handler, *, store: Any = None, credential_id: int | None = None, config_dir: Path | None = None
 ) -> TeamBridgeClient:
     return TeamBridgeClient(
-        None,
+        config_dir,
         base_url="https://hub.example/v1",
         store=store or FakeStore(),
         transport=httpx.MockTransport(handler),
@@ -735,6 +736,27 @@ async def test_tenant_state_reads_the_frozen_route_with_the_pinned_bearer():
     assert seen == [("/v1/tenants/tnt_1/messaging/state", "Bearer token-1")]
 
 
+async def test_directory_sends_the_tenant_as_a_query_parameter():
+    """The directory is one org's answer: one GET, tenant in the QUERY, no body."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"members": [{"account_id": "acc_2"}]})
+
+    client = _make_client(handler)
+    result = await client.directory("tnt_1")
+
+    assert result == {"members": [{"account_id": "acc_2"}]}
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/v1/messaging/directory"
+    assert dict(seen[0].url.params) == {"tenant_id": "tnt_1"}
+    assert seen[0].content == b""
+    assert seen[0].headers["authorization"] == "Bearer token-1"
+
+
 # ---------------------------------------------------------------------------
 # the account-scope read surface (desktop multi-org forwarding)
 # ---------------------------------------------------------------------------
@@ -776,3 +798,195 @@ async def test_unread_sends_the_scope_wire_name():
     assert len(seen) == 1
     assert seen[0].path == "/v1/messaging/unread"
     assert dict(seen[0].params) == {"scope": "account"}
+
+
+# ---------------------------------------------------------------------------
+# agent actors, discovery and notification policy (contract §10.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_conversation_sends_the_agent_actor_wire_names():
+    """The actor fields are the server PR's names; a rename would act human."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"id": "conv_1", "kind": "channel", "members": []})
+
+    client = _make_client(handler)
+    await client.create_conversation(
+        {
+            "tenant_id": "tnt_1",
+            "kind": "channel",
+            "name": "build",
+            "visibility": "tenant",
+            "members": [
+                {"account_id": "acc_1", "kind": "agent", "endpoint_id": "bep_1"},
+            ],
+        },
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+    )
+
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/v1/messaging/conversations"
+    assert json.loads(seen[0].content) == {
+        "tenant_id": "tnt_1",
+        "kind": "channel",
+        "name": "build",
+        "visibility": "tenant",
+        "members": [{"account_id": "acc_1", "kind": "agent", "endpoint_id": "bep_1"}],
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+    }
+
+
+async def test_conversation_send_sends_the_agent_actor_and_never_agent_label():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"message": {"id": "cmsg_1", "seq": 4}})
+
+    client = _make_client(handler)
+    await client.conversation_send(
+        "conv_1",
+        client_ref="ref-1",
+        text="hello",
+        tenant_id="tnt_1",
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+    )
+
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/messages"
+    payload = json.loads(seen[0].content)
+    assert payload == {
+        "client_ref": "ref-1",
+        "body": "hello",
+        "tenant_id": "tnt_1",
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+    }
+    assert "agent_label" not in payload
+
+
+async def test_the_human_conversation_calls_are_unchanged_without_an_actor():
+    """No actor means no actor field — the pre-agent wire shape, exactly."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"message": {"id": "cmsg_1"}})
+
+    client = _make_client(handler)
+    await client.conversation_send("conv_1", client_ref="ref-1", text="hello")
+    assert json.loads(seen[0].content) == {"client_ref": "ref-1", "body": "hello"}
+
+    await client.create_conversation({"kind": "dm", "members": []})
+    assert json.loads(seen[1].content) == {"kind": "dm", "members": []}
+
+
+async def test_conversation_notify_posts_the_policy_on_the_read_route():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"muted": False})
+
+    client = _make_client(handler)
+    await client.conversation_notify("conv_1", tenant_id="tnt_1", notify="mention")
+
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/read"
+    assert json.loads(seen[0].content) == {"notify": "mention", "tenant_id": "tnt_1"}
+
+    with pytest.raises(ValueError):
+        await client.conversation_notify("conv_1", notify="loud")  # type: ignore[arg-type]
+
+
+async def test_conversations_passes_discoverable_rows_through_untouched():
+    """Discovery is the server's authorization answer, not the client's to edit."""
+
+    row = {
+        "id": "conv_2",
+        "kind": "channel",
+        "visibility": "tenant",
+        "discoverable": True,
+        "member": False,
+        "member_count": 4,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"conversations": [row], "next_cursor": "bcur_2"})
+
+    client = _make_client(handler)
+    result = await client.conversations(tenant_id="tnt_1", limit=10)
+
+    assert result["conversations"] == [row]
+    assert result["next_cursor"] == "bcur_2"
+
+
+# ---------------------------------------------------------------------------
+# the explicit settings write is the only native-enrollment path (consent hold)
+# ---------------------------------------------------------------------------
+
+
+async def test_an_explicit_enable_commits_the_native_receipt(tmp_path: Path):
+    """A user's own ACTIVE settings PUT commits the owner + consent receipt.
+
+    #2712's status-read enrollment is gone; this is the path that keeps an
+    explicit enable able to receive.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        consent_version="bridge_consent_v1",
+        consented_via="settings",
+        endpoint=None,
+        expected_account_id="acc_1",
+    )
+
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert (owner.account_id, owner.tenant_id, owner.endpoint_id) == ("acc_1", "tnt_1", "bep_1")
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v1",
+        "consent_ref": "bep_1",
+    }
+
+
+async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
+    """Turning off is not consent: a pause leaves the store empty."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "paused"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="paused", endpoint={"state": "active"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_a_resume_without_a_consent_echo_commits_nothing(tmp_path: Path):
+    """Only the CONSENTED active write enrolls; a bare resume is not an opt-in."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="active", endpoint={"state": "paused"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0

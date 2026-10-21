@@ -407,6 +407,51 @@ async def test_legacy_empty_effort_still_clears_existing_pin(context, registry) 
 
 
 @pytest.mark.asyncio
+async def test_the_tool_cannot_clear_a_role_that_pins_the_launching_session_model(
+    context, registry
+) -> None:
+    """R1-1: ``effort='inherit'`` is the CLEAR token, so on a sentinel row it
+    is the un-pin — the one operation this tool must not perform.
+
+    The pin is absolute across every launch layer, and the layers it outranks
+    are precisely the ones a delegating model can reach (``task``'s
+    ``effort=``/``model=``, the ``team`` tool's roster tier). So a clear that
+    went through would hand the role to the next caller's tier, which is the
+    incident this PR exists to close. Startup seed reconciliation does not
+    cover it: it restores the packaged pin only while the rest of the row is
+    untouched, so an edit in the same session leaves the pin gone for the life
+    of the process.
+
+    The refusal is not a silent no-op, because a receipt reading "updated"
+    over an unchanged pin is the same lie in the other direction. And the
+    legitimate clear is untouched: ``test_update_effort_wire_semantics``
+    clears an ordinary ``lo`` pin through this very path.
+    """
+    from local_operator.agent_profiles import install_seed
+    from local_operator.harness.subagent import resolve_member_model
+
+    # The seed is the only door the sentinel comes in through; the validator
+    # above refuses it from this tool.
+    assert install_seed("coder", registry=registry) is not None
+    installed = resolve_profile("coder", registry=registry)
+    assert installed is not None and installed.effort == "default"
+
+    body = await call(context, op="update", name="coder", effort="inherit")
+
+    assert "that pin is absolute" in body
+    kept = resolve_profile("coder", registry=registry)
+    assert kept is not None and kept.effort == "default"
+    resolution = resolve_member_model(
+        "coder",
+        launch_tier="hi",
+        agent_registry=registry,
+        tier_targets={"hi": ("anthropic/claude-opus-5", None)},
+    )
+    assert resolution.selector == "default"
+    assert resolution.role_pins_inherit is True
+
+
+@pytest.mark.asyncio
 async def test_update_keeps_the_effort_tier_and_delegation_flag(context, registry) -> None:
     """C1, the same bug on the other two role fields. Manager ships with
     may_delegate; its tier is set explicitly here because the packaged seeds

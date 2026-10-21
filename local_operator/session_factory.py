@@ -2000,7 +2000,12 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         return []
 
     hints: list[Skill] = []
-    agents_dir = Path(agent_registry.config_dir) / "agents"
+    # The registry, not ``config_dir / "agents"``: a session-scoped registry is
+    # rooted at ``<session>/roles``, and deriving the path here would point the
+    # hint row at the global tree for a row that does not live there. Older
+    # callers and tests pass a duck-typed registry without the seam; keep the
+    # historical global path for those rather than failing hint enrichment.
+    agent_dir_method: Callable[[str], Path] | None = getattr(agent_registry, "agent_dir", None)
     for agent in agents:
         semantic_parts = [
             sanitize_prompt_line(str(agent.description or "")),
@@ -2010,14 +2015,18 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         semantic = " ".join(part for part in semantic_parts if part).strip()
         if not semantic:
             continue
-        agent_dir = agents_dir / str(agent.id)
+        agent_dir: Path
+        if agent_dir_method is not None:
+            agent_dir = agent_dir_method(agent.id)
+        else:
+            agent_dir = Path(agent_registry.config_dir) / "agents" / agent.id
         hints.append(
             Skill(
                 name=f"registered-agent-{agent.id}",
                 description=f"{sanitize_prompt_line(str(agent.name))}: {semantic}"[:512],
                 file_path=agent_dir / "agent.yml",
                 base_dir=agent_dir,
-                source=str(agents_dir),
+                source=str(agent_dir.parent),
                 resource_type="agent_hint",
             )
         )
@@ -4278,6 +4287,8 @@ def _run_delegated_sweeps(
             config_dir,
             live_policy_provider(config_manager, config_dir),
             live_dir=live_dir,
+            actor="startup",
+            trigger="session-startup",
             should_stop=stop_event.is_set,
             wait=stop_event.wait,
         )
@@ -4565,6 +4576,19 @@ async def _prepare(
         cache_lineage_id=fork_parent(transcript_dir) or None,
     )
 
+    # --- session-scoped roles (LOH-9) ---------------------------------------
+    # A role authored FOR this conversation lives in <session>/roles, not in
+    # the global store, so it appears in this session's pickers and nowhere
+    # else. The composite is built ONCE here and inherited by subagents (their
+    # ``create_session`` receives this registry and the helper returns it
+    # unchanged), which is what keeps a child's creations in the parent's
+    # conversation scope. Writes still delegate to the global store in S1.
+    # Teams are scoped beside their creation below, because that registry is
+    # built later and may legitimately be None.
+    from local_operator.profile_scope import scope_agent_registry
+
+    agent_registry = scope_agent_registry(agent_registry, transcript_dir)
+
     # --- tools + lazy knowledge (streams A and C) --------------------------
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
@@ -4641,6 +4665,12 @@ async def _prepare(
             f"\033[1;33mWarning: teams are unavailable this session: {exc}\033[0m",
             file=sys.stderr,
         )
+    else:
+        # LOH-9: teams are conversation-scoped too. A None registry keeps the
+        # existing degrade-one-feature behaviour (the tool is not advertised).
+        from local_operator.profile_scope import scope_team_registry
+
+        team_registry = scope_team_registry(team_registry, transcript_dir)
     # The projects registry gets the same degrade-one-feature handling, for the
     # same reason: a store the user may never have touched must not take down
     # the whole boot. `ProjectRegistry` construction is read-only (it creates
@@ -4689,10 +4719,11 @@ async def _prepare(
         web_search_settings=config_manager.get_config_value("web_search", None),
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
-    tools = create_tools(tool_context)
     # The classification roster's ``tool`` kind is deliberately NOT populated
-    # here: this context carries none of the session-owned ``createIf`` gates,
-    # so a snapshot would miss ``sessions``/``task``/``wait``/``jobs``/``hub``
+    # here: this context carries none of the session-owned ``createIf`` gates
+    # (``bridge_runtime`` is the exception — it is installed above because the
+    # tool table is built from this context), so a snapshot would miss
+    # ``sessions``/``task``/``wait``/``jobs``/``hub``
     # (agent review round 1, PR #1863). ``Session.set_knowledge_hooks``
     # refreshes the roster from the session's FINAL inventory instead.
 
@@ -4713,6 +4744,30 @@ async def _prepare(
         transcript_dir,
         defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
     )
+    # H5d: the bridge runtime must be resolved BEFORE the tool table is built,
+    # because `build_bridge_tool` is createIf — it returns None unless
+    # ``tool_context.bridge_runtime`` is PRESENT — so building the table first
+    # drops the `bridge` tool from every session that has a bridge. Before this
+    # fix the resolution sat ~150 lines below this point: enrollment was
+    # committed, the runtime was attached to the Session, the executor would
+    # have worked, and the model had no tool to call. Nothing outside observed
+    # the gap.
+    #
+    # The resolution needs the transcript (the designation is the session
+    # directory name), which is why it lives here and not beside the
+    # ToolContext it feeds. A session that cannot use the bridge pays no schema:
+    # a gate miss leaves the field None and the createIf behaves as before.
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    # One value, both roles: the table assembled below inspects this context for
+    # PRESENCE, and the Session executes against the same runtime. Two
+    # resolutions here would be two answers waiting to disagree.
+    tool_context.bridge_runtime = bridge_runtime
+    tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
     # placement document plus an identity — deliberately NOT on
@@ -4853,21 +4908,11 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
-    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
-    # account-bound designated session. The decision is the HOST's, taken at
-    # the ONE construction seam, and a gate miss adds NO key at all (the
-    # ordinary kwargs dict cannot drift from what existing callers built).
-    # The helper is import-light and NETWORK-FREE: it reads local
-    # enrollment/settings/availability state and constructs the runtime — no
-    # fetch, no spawn; the client stays cheap until its first request.
-    # Subagent children are built elsewhere and never receive it (see the
-    # parameter's comment on ``Session``).
-    from local_operator.team_bridge.host import bridge_runtime_for_session
-
-    bridge_runtime = bridge_runtime_for_session(
-        config_manager=config_manager,
-        session_id=transcript.directory.name,
-    )
+    # H5 (Team Bridge): the runtime resolved above is the same object the tool
+    # table was built against. It is still attached ONLY to the persisted,
+    # account-bound designated session — and subagent children are built
+    # elsewhere and never receive it (see the parameter's comment on
+    # ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(

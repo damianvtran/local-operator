@@ -1302,14 +1302,15 @@ async def finish(
                 marker_id,
                 "quota" if isinstance(exc, _QuotaExceeded) else "store-error",
                 committed_at,
+                cause=type(exc).__name__,
             )
             return "failed"
         return terminal
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         # The await expired before the scan reported (a wedged thread): no rows were
         # observable, so this stays a failure — but recorded as ``timeout``, which is
         # the attribution the meta record exists for.
-        await _record_failure(store, marker_id, "timeout", committed_at)
+        await _record_failure(store, marker_id, "timeout", committed_at, cause=type(exc).__name__)
         return "failed"
     except Exception as exc:
         await _record_failure(
@@ -1317,19 +1318,37 @@ async def finish(
             marker_id,
             "quota" if isinstance(exc, _QuotaExceeded) else "store-error",
             committed_at,
+            cause=type(exc).__name__,
         )
         return "failed"
 
 
 async def _record_failure(
-    store: MemoryStore, marker_id: str, reason: str, committed_at: float | None
+    store: MemoryStore,
+    marker_id: str,
+    reason: str,
+    committed_at: float | None,
+    *,
+    cause: str | None = None,
 ) -> None:
     """Write the terminal ``failed`` marker; never raise and never log a payload.
+
+    ``cause`` is the exception CLASS NAME and nothing else. The message, ``str(exc)``
+    and the traceback are never logged: capture input is untrusted conversation
+    content, and the value that broke a parser is exactly the content that must not
+    reach a log (the same rule :func:`session_tail` enforces). The class name is the
+    one distinction ``reason`` cannot carry — ``store-error`` is the bucket for every
+    non-quota fault, so without it a ``TypeError`` bug and a locked SQLite store are
+    indistinguishable when an operator asks why a capture failed. It goes to the log
+    rather than the store because ``reason`` is a closed vocabulary and ``captures``
+    keeps its 4-column shape for mixed-version rollout (see :func:`_capture_key`).
 
     Failure is a safe terminal state, never a new turn. Nothing here may escape: a
     store that refused the failure marker (full, locked, corrupt) has already cost the
     pass, and ``finish``'s caller only needs the terminal string.
     """
+    if cause is not None:
+        logger.warning("memory capture failed: %s (compaction %s)", cause, marker_id)
     try:
         await asyncio.to_thread(persist, store, marker_id, [], "failed", committed_at, reason)
     except Exception:

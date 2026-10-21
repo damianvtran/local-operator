@@ -1065,6 +1065,15 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
         dim_money=total_text == UNKNOWN_COST_CELL,
         notes=_SPEND_MARK_RUNGS if mark else (),
     )
+    total_basis = getattr(published, "by_basis", None) or {}
+    split = _payment_split_rungs(
+        {key: total_basis.get(key, 0) for key in (BASIS_BILLED, BASIS_SUBSCRIPTION)}
+    )
+    if split:
+        # The fixed note column cannot fit both amounts at narrow widths. A
+        # wrapping continuation keeps the split visible without moving money
+        # columns or sacrificing the lower-bound warning on the Total row.
+        body.note("Total split: " + split[0])
     if child_micro:
         child_knowledge = str(getattr(children, "knowledge", "") or "")
         child_note = {
@@ -1076,7 +1085,8 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             body,
             "subagents · included in total",
             format_usd(child_micro),
-            notes=child_note,
+            notes=_payment_split_rungs(getattr(children, "by_basis", None), total_micro=child_micro)
+            or child_note,
         )
     for row in rows:
         amount = _as_micro(row.get("amount_micro"))
@@ -1106,7 +1116,7 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             dim_money=dim_money,
             notes=tuple(notes),
         )
-    _draw_spend_basis(body, published)
+    _draw_spend_basis(body, published, excluded=(BASIS_BILLED, BASIS_SUBSCRIPTION) if split else ())
     if pending_calls:
         # D1 (design round 1): a voice charge that is RECORDED but excluded
         # from the total was invisible — the unmarked total read complete, and
@@ -1146,7 +1156,7 @@ def _spend_note_budget(width: int) -> int:
         return 15
     if width >= 62:
         # An 80-column terminal's card lands here (65 content cells measured):
-        # the short basis rungs ("plan-covered", "est.", "billed") fit, which
+        # the short basis rungs ("included", "est.", "billed") fit, which
         # is the disclosure D1 needs beside the money; below this the notes
         # shed entirely rather than crop.
         return 12
@@ -1327,7 +1337,7 @@ def _reason_rungs(reason: str, *, amount_known: bool) -> tuple[str, ...]:
 #: round 1, D1/D6).
 _TAG_RUNGS: dict[str, tuple[str, ...]] = {
     "billed": ("billed",),
-    "plan-covered (API price)": ("plan-covered (API price)", "plan-covered"),
+    "included (API-equivalent)": ("included (API-equivalent)", "included"),
     "estimated": ("estimated", "est."),
     "price not stated": ("price not stated", "not stated"),
     # Shortest rung last and it fits the 80-column card's 12-cell note budget:
@@ -1355,7 +1365,7 @@ def _basis_tag_list(basis: Any, *, amount_known: bool) -> list[str]:
 
     ``quote`` never reaches here (the adapter maps it to ``estimated``), and
     ``subscription_api_equivalent`` is spelled the way a user reads it —
-    "plan-covered (API price)" — rather than as the wire's shorthand (design
+    "included (API-equivalent)" — rather than as the wire's shorthand (design
     round 1, D1c). ``not_tracked`` reads as "basis not recorded" when the row's
     amount IS known (the inference case: the money is stated, its billing basis
     is the part missing) and as "price not stated" when the amount is missing
@@ -1366,7 +1376,7 @@ def _basis_tag_list(basis: Any, *, amount_known: bool) -> list[str]:
     for value in basis if isinstance(basis, list) else []:
         label = {
             BASIS_BILLED: "billed",
-            BASIS_SUBSCRIPTION: "plan-covered (API price)",
+            BASIS_SUBSCRIPTION: "included (API-equivalent)",
             BASIS_ESTIMATED: "estimated",
             BASIS_NOT_TRACKED: not_tracked_label,
         }.get(str(value))
@@ -1391,7 +1401,46 @@ def _units_text(row: dict[str, Any]) -> str:
     return f"{units:g} {noun}"
 
 
-def _draw_spend_basis(body: _Body, published: Any) -> None:
+def _payment_split_rungs(basis: Any, *, total_micro: int | None = None) -> tuple[str, ...]:
+    """Only published buckets may qualify a total, including on narrow cards."""
+    if not isinstance(basis, dict):
+        return ()
+    # A homogeneous child already states its whole amount in the money cell.
+    # Repeating it in the note looks like a second charge. Only mixed children
+    # need amount-bearing notes to explain how that money divides.
+    nonzero = [(key, _as_micro(value)) for key, value in basis.items() if _as_micro(value)]
+    if total_micro is not None and len(nonzero) == 1 and nonzero[0][1] == total_micro:
+        key = nonzero[0][0]
+        return _basis_rungs(
+            [BASIS_NOT_TRACKED if key == NOT_TRACKED_MICRO else key], amount_known=True
+        )
+    parts = []
+    short = []
+    labels = []
+    for key, label, compact in (
+        (BASIS_BILLED, "billed", "billed"),
+        (BASIS_SUBSCRIPTION, "included (API-equivalent)", "included"),
+        (BASIS_ESTIMATED, "estimated", "est."),
+        (NOT_TRACKED_MICRO, "basis not recorded", "unrecorded"),
+    ):
+        micro = _as_micro(basis.get(key))
+        if micro:
+            parts.append(f"{format_usd(micro)} {label}")
+            short.append(f"{format_usd(micro)} {compact}")
+            labels.append(compact)
+    return (
+        (
+            " · ".join(parts),
+            " · ".join(short),
+            " · ".join(labels),
+            "mixed basis" if len(parts) > 1 else labels[0],
+        )
+        if parts
+        else ()
+    )
+
+
+def _draw_spend_basis(body: _Body, published: Any, *, excluded: tuple[str, ...] = ()) -> None:
     """The basis footer: buckets that SUM TO THE TOTAL, labels dim, figures fg.
 
     Round 1 measured the old footer as the least legible line in the section
@@ -1413,10 +1462,12 @@ def _draw_spend_basis(body: _Body, published: Any) -> None:
     units: list[tuple[str, str]] = []  # (label, figure) — figure "" for a clause
     for key, label in (
         (BASIS_BILLED, "billed"),
-        (BASIS_SUBSCRIPTION, "plan-covered (API price)"),
+        (BASIS_SUBSCRIPTION, "included (API-equivalent)"),
         (BASIS_ESTIMATED, "estimated"),
         (NOT_TRACKED_MICRO, "basis not recorded"),
     ):
+        if key in excluded:
+            continue
         value = _as_micro(basis.get(key))
         if not value:
             continue

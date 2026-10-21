@@ -250,6 +250,12 @@ class LibraryView(Vertical):
         #: The last service answer, or ``None`` before the first load. Painting
         #: reads ONLY this and the state below; no handler here touches disk.
         self._payload: dict[str, Any] | None = None
+        #: Which payload is AUTHORITATIVE. ``load()`` (a host preload) and every
+        #: ``_reload()`` bump this; a background worker captures the value it was
+        #: started for and drops its answer if the page has moved on. Without it a
+        #: worker that answered after ``load()`` overwrote the preload with the
+        #: service's own answer — see :meth:`load`.
+        self._payload_generation = 0
         #: The page's controls. Query changes go through the worker.
         self.state = LibraryState()
         #: The cursor inside the RAIL; kept separately from the list cursor so
@@ -418,7 +424,26 @@ class LibraryView(Vertical):
         The production path is :meth:`_load_worker`; this seam exists because
         the SAME painting code must be drivable without a config root, and a
         test that hand-built a frame would not prove the payload contract.
+
+        A PRELOAD IS AUTHORITATIVE, and the generation bump is why. ``on_mount``
+        starts the page's own load; when that worker answers after this call it
+        must not replace the payload the host just supplied. The measured failure
+        was intermittent ``condition did not settle`` at ``space``: the worker
+        returned an empty catalog for a fresh config root, the selected row
+        vanished, and the key did nothing (runs 39375160299 and 39383034418, two
+        heads, both shard 3). The worker drops a stale generation; a later
+        ``_reload`` (a real query change) is still allowed to replace this.
+
+        A PENDING BUILDING RETRY IS CANCELLED, for the same authority: a worker
+        that answered ``state: building`` schedules ``_reload`` a moment later, and
+        that reload would replace the preload the host just supplied. Stopping the
+        timer is what makes the preload outrank the page's own deferred work, not
+        only its in-flight worker (review round 1, F-3).
         """
+        if self._building_timer is not None:
+            self._building_timer.stop()
+            self._building_timer = None
+        self._payload_generation += 1
         self._apply_payload(dict(payload))
 
     def start(self) -> None:
@@ -437,12 +462,17 @@ class LibraryView(Vertical):
         if self._building_timer is not None:
             self._building_timer.stop()
             self._building_timer = None
-        self._load_worker(self.state.query())
+        # THE GENERATION TRAVELS WITH THE WORK, not read when the task starts: the
+        # decorator schedules the worker, so a preload landing between this call
+        # and its first line would otherwise capture the NEWER number and win —
+        # the same race in a smaller window.
+        self._payload_generation += 1
+        self._load_worker(self.state.query(), self._payload_generation)
 
     @work(exclusive=True, group="library-load")
-    async def _load_worker(self, query: library_service.Query) -> None:
+    async def _load_worker(self, query: library_service.Query, generation: int) -> None:
         payload = await asyncio.to_thread(self._fetch_blocking, query)
-        if not self.is_attached:
+        if not self.is_attached or generation != self._payload_generation:
             return
         self._apply_payload(payload)
         if payload.get("state") == "building":

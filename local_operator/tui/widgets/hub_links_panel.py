@@ -233,12 +233,12 @@ class HubLinksPanel(Static):
         """Install a finished inventory; keep the reader's place across a refresh.
 
         D27: rows are sorted into PAINT order ONCE here (section_order, then
-        name casefold) — the SAME order ``core.render_rows`` paints. The SERVICE
-        snapshot is sorted ``(kind, name)`` (agent, skill, team), while the card
-        paints agent, team, skill; leaving ``_rows`` in service order made
-        ``_selected``, the highlight, the window and the policy-write target
-        disagree (the highlighted row was not the row `a`/`s` wrote). One order
-        for every index is the fix.
+        name casefold) — the SAME order ``core.render_rows`` paints. The service
+        inventory uses that same explicit kind order now (agent, team, skill,
+        then name casefold), so this normalisation is the card's own invariant
+        rather than a repair of the service's; it stays because one order for
+        every index is what keeps ``_selected``, the highlight, the window and
+        the policy-write target in agreement.
 
         D38: the reader's place is remembered by the SELECTED LINK, not by the
         integer index. `_selected` points into a list that reorders when a link

@@ -226,10 +226,13 @@ one place in `.github/helpdesk/reconcile.sh`):
   could also edit issue/PR metadata and review state, so treat the agent's
   restraint as prompt-enforced, not token-enforced. Neither token can write
   repository contents or workflows.
-- The sweep job (`reconcile`) is the only place the token gets `actions: write`,
-  and it is safe there **by construction**: it runs no model code, mints no app
-  token, checks out only the default branch, and its one write is
-  `gh workflow run helpdesk.yml` with fixed inputs. Its job-level
+- The sweep job (`reconcile`) holds `actions: write`, and it is safe there
+  **by construction**: it runs no model code, mints no app token, checks out
+  only the default branch, and its one write is `gh workflow run helpdesk.yml`
+  with fixed inputs. (It is no longer the ONLY place that scope exists:
+  `reap-superseded.yml` holds it too, for the single write of cancelling a
+  queued run whose work nothing will read — also no model code, also no
+  contents write.) Its job-level
   `permissions:` block lists exactly what it needs (reads, plus
   `actions: write`), and it replaces the workflow block job-wide — so the
   model's engagement job never holds that scope.

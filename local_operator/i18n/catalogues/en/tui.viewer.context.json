@@ -1,0 +1,97 @@
+{
+  "tui.viewer.title": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.description": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.usage": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.loading": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.legend": {
+    "role": "keyboard hint",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.truncated": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.unreadable": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.unsupported": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.binary": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.changed": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.copied": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.copy_failed": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.open_failed": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.kind_code": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.kind_markdown": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.kind_text": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.header": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.wrap_on": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  },
+  "tui.viewer.wrap_off": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."
+  }
+}

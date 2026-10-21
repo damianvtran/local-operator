@@ -69,6 +69,7 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
@@ -97,6 +98,10 @@ def _entry_owners() -> dict[str, str]:
         ORIGIN_NAME: "resume",
         ORIGIN_CACHE_NAME: "resume",
         CREATED_AT_NAME: "session.creation",
+        # A desktop fork's pending auto-tag intent: per-device tag state that
+        # must not travel (see sync.EXCLUDED_ENTRIES). Listed here so the
+        # round-trip test builds it and proves it does NOT arrive.
+        AUTO_TAG_FILENAME: "session.auto_tag",
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
@@ -279,6 +284,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/network/credentials/mcp_state.py": (
+        2,
+        "``MCP_AUTH_FILENAME``/``MCP_AUTH_LOCK_FILENAME`` ('mcp_auth.json' and its "
+        "sidecar lock): the per-network durable credential EVIDENCE under "
+        "``<config>/network/credentials/<network_id>/``. Machine-local state about "
+        "which sign-in this device must recover, beside the placement document, "
+        "never an entry of a session directory and never copied to a peer",
+    ),
     "local_operator/team_bridge/connector/lock.py": (
         1,
         "``CONNECTOR_LOCK_NAME`` ('connector.lock'): the machine-wide connector "
@@ -453,6 +466,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``MODULE_NAME`` (``local_operator.librarian``): a dotted MODULE name the "
         "control plane imports lazily, not a path or a session entry",
     ),
+    # The tag store is CONFIG-ROOT presentation state: ``<config>/tags/`` holds
+    # the registry and per-session assignments, and ``sidebar-tags.json`` sits
+    # beside ``config.yml`` as the grouping toggle. It is the TUI's own view
+    # data, never an entry a session directory holds, and a session moved to
+    # another device carries none of it.
+    "local_operator/tui/sidebar_tags.py": (
+        1,
+        "``TAG_GROUPS_FILE`` ('sidebar-tags.json'): the grouping toggle at the "
+        "CONFIG root beside config.yml, never an entry of a session directory",
+    ),
     # The Library's derived catalog and authoritative metadata live under the
     # CONFIG root too: the index is a discardable cache under
     # ``<config>/cache/library/`` and the metadata database is
@@ -537,13 +560,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "that gates removal: none of them is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
-        4,
+        5,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
         "sweep lock): the former sits at the sessions root, the latter at the config root; "
         "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
         "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
         "to a tree's name; the result is written beside that tree inside the pad and is never "
-        "a bare session entry. "
+        "a bare session entry. ``CONTENT_MANIFEST_DIRNAME`` is the cleanup-manifest directory "
+        "name at the sessions root: the per-session manifest FILES sit under it, and the name "
+        "itself can never name a session directory. "
         "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
@@ -562,11 +587,27 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``sessions`` itself: the directory the entries live IN",
     ),
+    # The session-tag store's reserved DISPLAY label (``RESERVED_NAME``,
+    # ``"Untagged"``): the pseudo-category the UI shows for conversations no tag
+    # claims, and the one name a user may not assign. It is a candidate only
+    # because it matches the guard's NAME-suffix heuristic (the Aida
+    # ``DEFAULT_NAME`` precedent) — a label in the registry's vocabulary, never
+    # a file or directory inside a session. The store itself is at
+    # ``<config>/tags/``, beside ``sessions/``: its ``"tags"``/``"revision"``/
+    # ``"categories.json"`` segments are spelled inline, so they are not
+    # constants this derivation sees, and a move carries none of the store.
+    "local_operator/session/session_tags.py": (
+        1,
+        "``RESERVED_NAME`` ('Untagged'): the reserved tag DISPLAY NAME for the "
+        "untagged pseudo-category — a label in the registry's vocabulary, never "
+        "a path or an entry of a session directory",
+    ),
     "local_operator/asks/store.py": (
-        4,
+        5,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the two row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``), "
+        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "and ``ask-relay-``, the watcher's settle-note row), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
@@ -588,10 +629,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
     "local_operator/i18n/catalogues.py": (
-        1,
+        2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
         "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
-        "data shipped with the wheel, never an entry of a session directory",
+        "data shipped with the wheel, never an entry of a session directory. "
+        "``WIRE_NAMESPACE_PREFIX`` (``wire.``): a namespace-SELECTOR prefix the "
+        "per-locale bundle route filters catalogue namespace ids with; it is never "
+        "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
         1,
@@ -918,8 +962,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``recommend_`` prefixes a generated question id",
     ),
     "local_operator/compaction/cutpoint.py": (
-        1,
-        "``compaction-elision`` prefixes an elision id inside the transcript payload",
+        2,
+        "``compaction-elision`` prefixes an elision id inside the transcript payload; "
+        "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
+        "the live/replay context, never a filename or session entry",
     ),
     "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),

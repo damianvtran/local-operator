@@ -987,6 +987,14 @@ class EventController:
                 cache_write_tokens=totals["cache_write"],
                 context_tokens=context_tokens or None,
                 cost_components=cost_components,
+                billing_basis=(
+                    cost_components[0].billing_basis
+                    if cost_components
+                    and all(
+                        c.billing_basis == cost_components[0].billing_basis for c in cost_components
+                    )
+                    else None
+                ),
             )
         # The aggregate still prices the calls. A post-turn compaction can stamp
         # a newer occupancy level on the boundary without corrupting that bill.
