@@ -231,24 +231,25 @@ describe("an ended session (U7)", () => {
 		);
 	});
 
-	it("carries the wide-view control on the screen the reading happens on (D2, #1870)", () => {
+	it("reaches wide view through the session menu, with its state visible (D2, #1870)", () => {
 		slot = { projection: projection(), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
+		/* The header no longer carries a permanent `[wide]` toggle; the menu row
+		   names the setting and states it. */
+		expect(screen.queryByRole("button", { name: "wide view" })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "session menu" }));
+
 		const control = screen.getByRole("button", { name: "wide view" });
-		// D3: a WORD, not the glyph alone — `⇔` reads as swap/pan with nothing to
-		// learn it from, and the word fits the same target.
-		expect(control.textContent).toBe("wide");
+		expect(control.textContent).toContain("Wide view");
+		expect(control.textContent).toContain("off");
 		expect(control.getAttribute("aria-pressed")).toBe("false");
 
 		fireEvent.click(control);
 
 		const pressed = screen.getByRole("button", { name: "wide view" });
 		expect(pressed.getAttribute("aria-pressed")).toBe("true");
-		// D4: pressed is FILLED, not a hue change — the palette delta is ~1:1
-		// luminance in most shipped themes, so weight has to carry it.
-		expect(pressed.className).toContain("bg-accent");
-		expect(pressed.className).toContain("text-on-accent");
+		expect(pressed.textContent).toContain("on");
 		expect(document.documentElement.dataset.view).toBe("wide");
 		expect(localStorage.getItem("lo-mobile-wide-view")).toBe("1");
 
@@ -429,9 +430,10 @@ describe("a refused pin (U2)", () => {
 		mocks.setSessionPin.mockImplementation(async () => {
 			throw new Error("no saved messages yet — pin it after you send one");
 		});
-		render(<SessionScreen sessionId="s1" />);
+		const { getByRole } = render(<SessionScreen sessionId="s1" />);
 
-		const star = await screen.findByRole("button", { name: "pin this session" });
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
+		const star = getByRole("button", { name: "pin this session" });
 		fireEvent.click(star);
 
 		await waitFor(() =>
@@ -452,6 +454,7 @@ describe("the refused pin's own exit (U17)", () => {
 		});
 		const { rerender } = render(<SessionScreen sessionId="s1" />);
 
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
 		fireEvent.click(await screen.findByRole("button", { name: "pin this session" }));
 		const refusal = await waitFor(() => screen.getByRole("alert"));
 		expect(refusal.textContent).toContain("pin it after you send one");

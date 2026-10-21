@@ -131,7 +131,7 @@ describe("SessionScreen seen handshake", () => {
 		expect(retainSessionListStream).toHaveBeenCalled();
 	});
 
-	it("clears the header ★ when the 200's read-back disagrees (round 10, MINOR 1)", async () => {
+	it("clears the session menu's pin state when the 200's read-back disagrees (round 10, MINOR 1)", async () => {
 		// The pin route answers with the state it READ BACK, so a body reporting the
 		// old value is the daemon saying the row is not pinned — and the store's
 		// confirmation sweep retires a mark only when a later frame AGREES with it.
@@ -140,8 +140,9 @@ describe("SessionScreen seen handshake", () => {
 		slot = { projection: projection(), connected: true };
 		vi.mocked(setSessionPin).mockResolvedValueOnce({ ok: true, pinned: false });		render(<SessionScreen sessionId="s1" />);
 
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
 		fireEvent.click(screen.getByRole("button", { name: "pin this session" }));
-		// The optimistic half: the ★ is on the control in the commit that handled
+		// The optimistic half: the menu row's state is on in the commit that handled
 		// the press, which is the whole reason the handshake is split.
 		expect(
 			screen.getByRole("button", { name: "unpin this session" }).getAttribute("aria-pressed"),
