@@ -114,6 +114,17 @@ OFFLOAD_CONFIRM_WAIT_S = 30.0
 #: was about to answer (the whole of QA round 1, Q4a).
 MOVE_CONTROL_SLACK_S = 10.0
 
+#: The budget for the ONE ``status`` frame a destination sends after a promote.
+#:
+#: SHORT ON PURPOSE: it is not part of the move — the commit has already landed and
+#: the destination already holds the promoted copy — and it exists only to catch a
+#: CONTRADICTION (the owner still listing the id, which means two live copies). A
+#: peer that does not answer inside this is not evidence against the commit: the
+#: new commit order means the owner's own ``committed`` answer already implies its
+#: directory left ``sessions/``, so silence is treated as the proof it sent, and
+#: only an explicit ``owner: true`` downgrades the move.
+VERIFY_STATUS_TIMEOUT_S = 10.0
+
 #: The margin a CLIENT adds to a published bound before its own deadline. It has to
 #: exceed the round trip that carries the answer back — the link has just been busy
 #: for the whole bound — so a client may not simply EQUAL the bound it is given. 15 s
@@ -461,6 +472,13 @@ class MoveCarryBlock(TypedDict, total=False):
     #: role/team definition(s) stayed on <device> — a mesh move does not carry
     #: them in this version". Present only with ``session_roles``.
     session_roles_notice: str
+    #: The working directory the destination REWROTE, ``{"from": old, "to": new}``
+    #: (``carry.rewrite_host_cwd``). Present only when the recorded path did not
+    #: exist on the destination and was mapped: a cwd is host-specific, and a moved
+    #: conversation whose marker named `/home/ec2-user/project` opened onto a
+    #: directory that does not exist there. Additive inside an already-optional
+    #: block, so a move that carried nothing new parses exactly as before.
+    cwd: dict[str, str]
 
 
 class SessionMoveResult(TypedDict):
@@ -471,11 +489,23 @@ class SessionMoveResult(TypedDict):
     ``keep``. ``phase`` is the last phase reached and is always in
     :data:`MOVE_OPENABLE_PHASES` on this shape; ``phases`` is the history.
 
-    ``engagement`` is the ONE optional member, and it is ``NotRequired`` rather than
-    ``... | None`` on purpose: it is absent — not null — for every caller that did
-    not ask for it, so the document every existing reader parses is unchanged
-    (``test_the_session_move_contract_is_frozen`` pins the set, and this is the one
-    addition made to it since the contract was frozen).
+    ``state`` IS THE OUTCOME, and it exists because a success document could say
+    "queued" (nothing copied yet) and "done" (the destination holds it, the source
+    let go) in the same shape: every surface rendered both as "Moved". It is
+    REQUIRED and has exactly two values — ``completed`` (verified: the destination
+    holds a promoted copy and the source no longer holds a directory for the id) and
+    ``in_progress`` (the intent is durable and a live driver owns it, or a committed
+    handoff has not landed yet). A refusal is the failed state and stays a
+    ``SessionMoveRefusal``; there is deliberately no ``failed`` value here, so a
+    caller cannot mistake a success document for a failure one
+    (``docs/design/mesh-move-outcome.md``, "The contract").
+
+    ``engagement``, ``queue`` and ``carry`` are the OPTIONAL members, all
+    ``NotRequired`` rather than ``... | None`` on purpose: each is absent — not
+    null — for every caller that did not ask for it, so the document a reader parses
+    is unchanged by the ones that did not apply (``test_the_session_move_contract_
+    is_frozen`` pins the set, and ``state`` is the one REQUIRED addition made since
+    the contract was frozen).
     """
 
     ok: Literal[True]
@@ -486,17 +516,20 @@ class SessionMoveResult(TypedDict):
     to_device: MoveDevice
     phase: SessionMovePhase
     phases: list[MovePhaseStamp]
+    #: ``completed`` or ``in_progress`` — see the docstring. Never inferred by a
+    #: surface from ``phase``: the same phase vocabulary serves the queued record's
+    #: phases and the move's own, and only the device that performed the commit can
+    #: say whether the copy is the only one.
+    state: Literal["completed", "in_progress"]
     #: Present ONLY when the move was asked to engage on arrival
     #: (``--engage-on-arrival``); absent otherwise.
     engagement: NotRequired[MoveEngagement]
     #: Present ONLY on a QUEUED receipt (``--queue``): the source's queue record.
-    #: The second addition to this shape since the contract was frozen, made for
-    #: the same reason as ``engagement`` — a queued request is a SUCCESS (the
-    #: intent is durable) whose state a caller renders from this block, and the
-    #: ``phase`` field alone would say "queued" with nothing to show about it.
-    #: Absent — not null — for every caller that did not queue, so existing
-    #: readers parse the identical document (``test_slow_ops`` pins the set and
-    #: was updated in the same commit that added this key).
+    #: ``NotRequired`` for the same reason as ``engagement``: a queued request is a
+    #: SUCCESS whose state a caller renders from this block, and the ``phase`` field
+    #: alone would say "queued" with nothing to show about it. A queued receipt always
+    #: carries ``state: "in_progress"``, which is the field a caller that never looks
+    #: inside this block still branches on.
     queue: NotRequired[MoveQueueBlock]
     #: Present ONLY when the move carried scheduled state worth reporting: the two
     #: scheduled-state halves (see :class:`MoveCarryBlock`). The third addition to
@@ -714,6 +747,97 @@ def _own_block(server: "RelayServer") -> MoveDevice:
 def new_lease_epoch() -> str:
     """A fresh handoff epoch. Its only job is to be unique per handoff attempt."""
     return "e_" + os.urandom(4).hex()
+
+
+def move_receipt_state(result: dict[str, Any]) -> Literal["completed", "in_progress"]:
+    """The outcome a SUCCESS receipt reports, tolerating a document that predates it.
+
+    ``state`` is authoritative when present — that is the contract, and every receipt
+    this build produces carries it. It is absent only on a document built by a build
+    (or a test) from before the field existed, and inferring it there keeps such a
+    document rendering exactly as it always did: completed only when its last phase
+    says the move reached an openable one and it carries no queue block. ONE function
+    for the two surfaces that must agree (``cli._sessions_move_words`` and
+    ``server.utils.desktop_mesh.transfer_receipt``), because two derivations of one
+    fact is how a desktop says "the copy here is gone" about a queued move.
+    """
+    state = str(result.get("state") or "")
+    if state == "completed":
+        return "completed"
+    if state == "in_progress" or isinstance(result.get("queue"), dict):
+        return "in_progress"
+    phase = str(result.get("phase") or "")
+    if not phase:
+        stamps = result.get("phases") or []
+        if stamps and isinstance(stamps[-1], dict):
+            phase = str(stamps[-1].get("phase") or "")
+    return "completed" if phase in MOVE_OPENABLE_PHASES else "in_progress"
+
+
+def _duplicate_refusal(
+    server: "RelayServer", session_id: str, owner_device: str, *, phase_reached: SessionMovePhase
+) -> SessionMoveRefusal:
+    """The refusal for a commit the OWNER contradicts by still listing the id.
+
+    ``changed`` is TRUE and that is the honest answer: this device's copy is promoted
+    and its bytes are the conversation, so a caller must not retry as though nothing
+    had happened. The sentence names the owner, both copies, the source's retrying
+    cleanup and the one rule that keeps the state from becoming two diverging
+    conversations.
+    """
+    name = server._member_name(owner_device) or owner_device  # noqa: SLF001
+    return _move_refusal(
+        session_id,
+        "duplicate",
+        f"{name} still lists {session_id} after the handoff, so both devices now list "
+        f"the same conversation. The copy here is committed; {name}'s cleanup is "
+        "retrying, and until it finishes do not edit both copies.",
+        phase_reached=phase_reached,
+        changed=True,
+    )
+
+
+def _owner_still_lists(transport: LinkTransport, session_id: str, *, to_device: str) -> bool:
+    """Whether the owner still answers ``owner: true`` for a committed id.
+
+    THE CONTRADICTION CHECK (``docs/design/mesh-move-outcome.md``, clause 1). A
+    promoted copy plus a source that still holds its directory is two live copies of
+    one id — the state INV-1 exists to prevent — and no acknowledgement can prove it
+    is not happening: the old commit answered ``committed`` after a delete its own
+    guards refused. So the destination asks the owner ONE short ``status`` frame and
+    lets the owner's own record decide.
+
+    SILENCE IS NOT A CONTRADICTION, and this is the asymmetry the contract rests on:
+    with the new commit order the source RENAMES its directory out of ``sessions/``
+    before it writes the tombstone and answers, so a ``committed`` answer that reached
+    this device already implies the directory left the store. A peer that has since
+    stopped answering (``Moved``), timed out, or answered a shape this build cannot
+    read is therefore the proof it sent — only an explicit ``owner: true`` downgrades
+    the move, because only an explicit answer is evidence AGAINST the commit.
+    """
+    try:
+        status = transport.ask(
+            {
+                "op": "net_session_move",
+                "phase": "status",
+                "session_id": session_id,
+                "to_device": to_device,
+            },
+            timeout=VERIFY_STATUS_TIMEOUT_S,
+        )
+    except Moved:
+        # Unreachable, a timeout, or the owner's own ``not_owner`` refusal: none of
+        # them says the directory is still there, so the commit answer stands.
+        return False
+    except Exception:  # noqa: BLE001 — verification is best-effort, never a second failure
+        logger.warning(
+            "mobility: could not verify the owner retired %s; treating the commit answer "
+            "as the proof",
+            session_id,
+            exc_info=True,
+        )
+        return False
+    return bool(status.get("owner"))
 
 
 def _move_refusal(
@@ -1321,6 +1445,10 @@ def _queued_receipt(
         "phase": phase,
         "phases": stamps,
         "queue": queue,
+        # IN PROGRESS, NOT COMPLETED: the intent is durable and the driver owns it,
+        # but no byte has been copied yet. This is the field a surface renders, and
+        # it is why a queued receipt can never again read as "Moved".
+        "state": "in_progress",
     }
     # THE QUEUED DROP PROMISES ITS STASH UP FRONT (QA round 2). The record knows
     # the flag; the source still holds the definitions, so the receipt can name
@@ -1832,6 +1960,17 @@ def _destination_move(
         transport.ask(done_frame)
     except Moved:
         logger.debug("mobility: %s did not acknowledge the handoff", session_id)
+    if not keep and _owner_still_lists(transport, session_id, to_device=server.identity.device_id):
+        # THE COMMIT IS CONTRADICTED BY THE OWNER'S OWN RECORD. Report the state the
+        # two devices are actually in rather than the success the frames implied: the
+        # copy here is promoted and editable, the source still lists the id, and its
+        # cleanup is what retries. ``changed`` is True — a caller that retried as
+        # though nothing had happened would be editing the wrong one of two copies.
+        return (
+            None,
+            _duplicate_refusal(server, session_id, owner_device, phase_reached="committed"),
+            target_id,
+        )
     note("done")
     _audit(server, AUDIT_DONE, session_id, owner_device, new_session_id=target_id)
     # §6.3 STEP 17's ``--open``, AS AN OPT-IN FLAG, AND LAST ON PURPOSE. The engage
@@ -1852,6 +1991,10 @@ def _destination_move(
         "to_device": _own_block(server),
         "phase": "done",
         "phases": phases,
+        # VERIFIED COMPLETED: the promote landed here and the owner's own commit
+        # answer said its directory left ``sessions/``; the contradiction check just
+        # above is what can still downgrade this to a refusal.
+        "state": "completed",
     }
     if carry_block is not None:
         receipt["carry"] = carry_block
@@ -2015,6 +2158,23 @@ def _finish_from_tombstone(
         )
     carry_block = promote_outcome.carry
     clear_handoff_entry(server.root, session_id)
+    # THE SAME CONTRADICTION CHECK AS THE LIVE PATH, and it is the one this path needs
+    # most: it adopts from the owner's TOMBSTONE, which is the owner's own statement
+    # that it handed the id away — so an owner that still answers ``owner: true`` is
+    # contradicting the record this device is acting on. The status answer here is
+    # expected to be the tombstone; anything else is the commit answer re-read. An
+    # absent link or no answer is not a contradiction (see ``_owner_still_lists``).
+    link = server._ensure_link(owner_device)  # noqa: SLF001 — the one dial seam
+    if link is not None and _owner_still_lists(
+        LinkTransport(server, link, session_id),
+        session_id,
+        to_device=server.identity.device_id,
+    ):
+        return (
+            None,
+            _duplicate_refusal(server, session_id, owner_device, phase_reached="committed"),
+            "",
+        )
     progress.note(session_id, "committed")
     _audit(server, AUDIT_DONE, session_id, owner_device, resumed=True)
     phases: list[MovePhaseStamp] = [
@@ -2031,6 +2191,7 @@ def _finish_from_tombstone(
         "to_device": _own_block(server),
         "phase": "committed",
         "phases": phases,
+        "state": "completed",
     }
     if carry_block is not None:
         # Reported on the receipt this device answers with — and for a RECALL that
@@ -2220,6 +2381,18 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     carry_block: dict[str, Any] | None = None
     from local_operator.network import carry
 
+    # THE HOST-SPECIFIC HALF OF THE CARRY, immediately before the rebuild that reads
+    # it: the marker's cwd belongs to the device the conversation came FROM, and the
+    # indexes rebuilt below take their cwd from that marker (``carry.resolve_cwd``).
+    # Rewriting after the rebuild would leave both indexes naming a directory this
+    # device does not have. The transcript is never edited — the copy was verified
+    # byte-for-byte against it, and a cwd is host state rather than conversation.
+    cwd_report: dict[str, str] = {}
+    try:
+        cwd_report = carry.rewrite_host_cwd(target, target_id, config_dir=server.root)
+    except Exception:  # noqa: BLE001 — a mapping this could not compute must not fail a promote
+        logger.warning("mobility: could not map %s's cwd for this host", target_id, exc_info=True)
+
     try:
         report = carry.rebuild_indexes(server.root, target_id)
         wakes = int(report.get("wakes") or 0)
@@ -2241,6 +2414,13 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         # — so that copy has ONE definition (``network/carry.py``) and this call
         # site cannot end in silence or in a failed promote.
         carry_block = carry.move_carry_block(server.root, wakes, str(_own_block(server)["name"]))
+    if cwd_report:
+        # ADDITIVE INSIDE AN ALREADY-OPTIONAL BLOCK: a move whose cwd was usable here
+        # reports nothing new, and one that was mapped says both paths so the user is
+        # told where their conversation now opens.
+        carried = dict(carry_block or {})
+        carried["cwd"] = cwd_report
+        carry_block = carried
     return _PromoteOutcome(ok=True, carry=carry_block)
 
 
@@ -2601,6 +2781,29 @@ def _source_status(
             entry = handoff_in_flight(server.root, session_id)
         except Exception:  # noqa: BLE001 — the journal's own refusal text is elsewhere
             entry = None
+        queue = _queue_projection(server.root, session_id)
+        if queue is not None and str(queue.get("phase") or "") not in (
+            "resumed",
+            "failed",
+            "cancelled",
+        ):
+            # READING THE RECORD STARTS ITS DRIVER (design clause 5). The record is
+            # durable; the thread that advances it lives in the relay process that
+            # accepted the request, so a restart — or a status read from the device
+            # that can see the record but not its thread — used to leave the move
+            # frozen at ``queued`` while the surface said it was progressing. The
+            # start is idempotent (``move_queue.start_driver`` no-ops for a live
+            # thread), so a status read can never spawn a second driver.
+            try:
+                from local_operator.network import move_queue
+
+                move_queue.start_driver(server, session_id)
+            except Exception:  # noqa: BLE001 — a status answer must not fail on housekeeping
+                logger.warning(
+                    "mobility: could not restart the queued move's driver for %s",
+                    session_id,
+                    exc_info=True,
+                )
         return {
             "result": "state",
             "owner": True,
@@ -2616,7 +2819,7 @@ def _source_status(
             # the requesting surface reads the same record its own device cannot
             # see — this answer is the one path it has to it. ``None`` when
             # there is no queued move, which is every ordinary session.
-            "queue": _queue_projection(server.root, session_id),
+            "queue": queue,
             "session_id": session_id,
         }
     tombstone = _tombstone(server.root, session_id)
@@ -2829,6 +3032,35 @@ def _stash_session_roles(root: str | Path, session_id: str) -> Path | None:
         encoding="utf-8",
     )
     return target
+
+
+def _unstash_session_roles(root: str | Path, session_id: str) -> None:
+    """Put a stashed ``roles/`` tree back after a commit was refused.
+
+    A REFUSAL MUST CHANGE NOTHING, and the stash is a RENAME out of the session: a
+    move that stashed and then could not hand the directory away would leave the
+    conversation without definitions whose departure nothing reported. Best effort
+    and logged — the refusal's own answer does not depend on it, and a stash that
+    cannot be moved back is the same recoverable state ``--drop-session-roles``
+    produces deliberately (``session_roles_stash_path`` still names it).
+    """
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+
+    stash = session_roles_stash_path(root, session_id)
+    if not stash.is_dir():
+        return
+    source = Path(root) / "sessions" / session_id / SESSION_ROLES_DIRNAME
+    if source.exists():
+        return
+    try:
+        source.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(stash), str(source))
+    except OSError:
+        logger.warning(
+            "mobility: could not restore the stashed session roles for %s",
+            session_id,
+            exc_info=True,
+        )
 
 
 def _session_roles_notice(
@@ -3339,6 +3571,14 @@ def _remove_handed_away(root: Path, session_id: str, to_device: str) -> bool:
     )
 
     directory = Path(root) / "sessions" / session_id
+    if not directory.is_dir():
+        # ABSENT IS GONE — THE DESIRED POST-STATE (design clause 1). The commit
+        # renames the directory into ``network/handed-away/`` and only then writes the
+        # tombstone, so a crash in between leaves exactly this: no directory, journal
+        # still open. The earlier answer, ``False`` ("cleanup pending"), made
+        # ``reconcile`` retry forever and left the launch guard latched on an id whose
+        # conversation had already left.
+        return True
     mark_store(directory.parent)
     # NEVER DELETE DEFINITIONS THIS MOVE DOES NOT CARRY. The stash runs for every
     # removing commit, not only the drop-flagged ones: recovery paths (a crashed
@@ -3411,6 +3651,36 @@ def _source_commit(
             "result": "refused",
             "code": "not_authorised",
             "message": "that handoff belongs to another device, so nothing was changed",
+            "session_id": session_id,
+        }
+    directory = Path(server.root) / "sessions" / session_id
+    if str(entry.get("phase") or "") == HANDOFF_PHASE_HANDING_OFF and not directory.exists():
+        # THE CRASH WINDOW AFTER THE COMMIT POINT (clause 1): the journal says
+        # ``handing-off``, the directory already left ``sessions/``, and the
+        # tombstone was never written. Completing the handoff is the only legal
+        # direction — a rollback is forbidden from this phase by rule — and the
+        # digests below are NOT recomputed: there is no directory left to hash, and
+        # the destination has already been told to expect a commit.
+        from local_operator.network.projection import write_tombstone
+
+        write_tombstone(
+            session_id,
+            device_id=to_device,
+            device_name=server._member_name(to_device),  # noqa: SLF001
+            network_id=link.network_id,
+            config_dir=server.root,
+        )
+        clear_handoff_entry(server.root, session_id)
+        # The directory is gone, so the source's derived state goes with it — the
+        # same F5 prune the ordinary commit runs, or the moved session's wakes would
+        # stay armed on a device that no longer holds it.
+        _after_source_commit(Path(server.root), session_id)
+        progress_for(server).note(session_id, "committed")
+        _audit(server, AUDIT_COMMITTED, session_id, to_device)
+        return {
+            "result": "committed",
+            "phase": "committed",
+            "lease_epoch": str(entry.get("lease_epoch") or ""),
             "session_id": session_id,
         }
     # The SAME predicate the plan used, so a commit cannot disagree with the plan it is
@@ -3499,7 +3769,83 @@ def _source_commit(
     _audit(server, AUDIT_HANDING_OFF, session_id, to_device)
 
     from local_operator.network.projection import write_tombstone
+    from local_operator.session import cleanup as cleanup_mod
 
+    # THE DEFINITIONS ARE STASHED BEFORE THE DIRECTORY LEAVES (blocker Q-2), and this
+    # is load-bearing on this path: ``_remove_handed_away`` used to do it as part of
+    # its delete, and the commit no longer calls it — the quarantine below is the
+    # removal. A stash that cannot be written REFUSES the move exactly as a failed
+    # handoff does: a conversation whose role/team definitions were dropped at the
+    # commit point has lost data nothing else holds, and ``--drop-session-roles`` is
+    # the only flag that authorises leaving them behind (and it still stashes them).
+    try:
+        _stash_session_roles(server.root, session_id)
+    except OSError:
+        logger.warning(
+            "mobility: could not stash %s's session roles; refusing the move",
+            session_id,
+            exc_info=True,
+        )
+        # A partial stash (the rename landed, its record write failed) is put back:
+        # the helper is a no-op when there is nothing to restore.
+        _unstash_session_roles(server.root, session_id)
+        clear_handoff_entry(server.root, session_id)
+        progress_for(server).note(session_id, "prepared")
+        _audit(server, AUDIT_ROLLED_BACK, session_id, to_device, cause="cleanup_refused")
+        return {
+            "result": "refused",
+            "code": "cleanup_refused",
+            "message": (
+                f"this device could not hand {session_id} away, so nothing was moved and "
+                "this device still holds the conversation"
+            ),
+            "session_id": session_id,
+        }
+
+    # THE COMMIT POINT, AND IT IS THE RENAME — NOT THE TOMBSTONE. Every validation
+    # above this line has passed, so from here the move is decided; taking the
+    # directory OUT of ``sessions/`` atomically is what makes "exactly one copy"
+    # structural rather than eventual. The old order wrote the tombstone first and
+    # deleted afterwards, and a delete the guards refused still answered
+    # ``committed`` — the destination adopted, and one id was live on two devices
+    # (docs/design/mesh-move-outcome.md clause 1).
+    try:
+        handed_off = cleanup_mod.hand_off_session_dir(
+            directory,
+            config_dir=Path(server.root),
+            reason=(
+                f"mesh-move: {session_id} was verified complete on "
+                f"{server._member_name(to_device) or to_device}; the destination adopts "
+                "only after this rename"
+            ),
+            actor=f"mesh:{to_device}",
+        )
+    except OSError:
+        logger.warning(
+            "mobility: could not quarantine %s for %s; rolling the move back",
+            session_id,
+            to_device,
+            exc_info=True,
+        )
+        handed_off = False
+    if not handed_off and directory.exists():
+        # NOTHING HAS BEEN TOLD TO ANYBODY, so a rollback here is free: the journal
+        # is cleared, the session is ``prepared`` again, and the source still holds
+        # the whole conversation. The refusal NAMES the state instead of reporting a
+        # commit whose local half did not happen.
+        _unstash_session_roles(server.root, session_id)
+        clear_handoff_entry(server.root, session_id)
+        progress_for(server).note(session_id, "prepared")
+        _audit(server, AUDIT_ROLLED_BACK, session_id, to_device, cause="cleanup_refused")
+        return {
+            "result": "refused",
+            "code": "cleanup_refused",
+            "message": (
+                f"this device could not hand {session_id} away, so nothing was moved and "
+                "this device still holds the conversation"
+            ),
+            "session_id": session_id,
+        }
     write_tombstone(
         session_id,
         device_id=to_device,
@@ -3507,31 +3853,13 @@ def _source_commit(
         network_id=link.network_id,
         config_dir=server.root,
     )
-    directory = Path(server.root) / "sessions" / session_id
-    removed = _remove_handed_away(Path(server.root), session_id, to_device)
-    if removed:
-        clear_handoff_entry(server.root, session_id)
-        # THE PRUNE, AND ONLY AFTER A SUCCESSFUL COMMIT (F5, design note §5.3).
-        # The commit is the instant this conversation stops living here, so this
-        # device's DERIVED state for it goes with it — and the queue record folds
-        # to ``resumed`` in the same step (terminal is write-once; the driver's
-        # own tombstone poll is an idempotent second observer). Guarded by
-        # ``removed`` because a commit that could not delete its directory is not
-        # done cleaning: pruning then would strand a session whose only copy is
-        # still here, and its wakes would not come back until somebody opened it.
-        _after_source_commit(Path(server.root), session_id)
-    else:
-        # THE TOMBSTONE IS WHAT GOVERNS THE ID, so the move IS complete and the
-        # destination may promote. What is left is this device's own cleanup, and
-        # the journal entry stays so `reconcile` retries it — never so a runtime
-        # here could start (the launch guard reads the same entry).
-        logger.warning(
-            "mobility: %s was handed to %s but its directory could not be removed; "
-            "reconcile will retry",
-            session_id,
-            to_device,
-        )
-        _audit(server, AUDIT_COMMITTED, session_id, to_device, cleanup="pending")
+    clear_handoff_entry(server.root, session_id)
+    # THE PRUNE, AND ONLY AFTER A SUCCESSFUL COMMIT (F5, design note §5.3). The
+    # commit is the instant this conversation stops living here, so this device's
+    # DERIVED state for it goes with it — and the queue record folds to ``resumed``
+    # in the same step (terminal is write-once; the driver's own tombstone poll is
+    # an idempotent second observer).
+    _after_source_commit(Path(server.root), session_id)
     progress_for(server).note(session_id, "committed")
     _audit(server, AUDIT_COMMITTED, session_id, to_device)
     return {
@@ -3898,7 +4226,8 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
     makes "recall the idle session I left on the build box" a thing this can do at
     all. Raises :class:`Moved` when nobody owns it.
     """
-    rows = server.federated_rows().get("sessions") or []
+    listing = server.federated_rows()
+    rows = listing.get("sessions") or []
     for row in rows:
         if str(row.get("session_id") or "") != session_id:
             continue
@@ -3916,6 +4245,34 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
                 + "; nothing was changed",
             )
         return device_id, str(peer.get("name") or "")
+    # NO ROW HOLDS IT — BUT WHICH SILENCE IS IT? The fan-out emits NO rows for a peer
+    # that did not answer (§8.3: a listing must not show phantom rows), so an id that
+    # lived on an unreachable device looks exactly like an id nobody ever had. The
+    # operator's report was this state reported as a move that had happened; the
+    # honest answer names the device that would know and says nothing was changed
+    # (docs/design/mesh-move-outcome.md clause 2).
+    silent: list[str] = []
+    peers = listing.get("peers") or {}
+    for device_id, block in peers.items():
+        if not isinstance(block, dict) or block.get("reachable", True):
+            continue
+        silent.append(str(block.get("name") or device_id))
+    if silent:
+        # AT MOST TWO NAMES, then a count: a network of ten dark devices must not
+        # turn one refusal into a paragraph.
+        named = ", ".join(silent[:2])
+        if len(silent) > 2:
+            named += f" and {len(silent) - 2} others"
+        tail = (
+            "if that device holds it, retry when it is back"
+            if len(silent) == 1
+            else "if one of them holds it, retry when that device is back"
+        )
+        raise Moved(
+            "unreachable",
+            f"{named} did not answer, so {session_id} could not be handed over and nothing "
+            f"was changed; {tail}.",
+        )
     # Its OWN code, distinct from the per-peer ``unreachable`` above (design
     # review round 1, D1): the two sentences have DIFFERENT remedies — a device
     # that stopped answering may recover on its own, while "no row at all" is
@@ -4148,6 +4505,18 @@ def reconcile(
     """
     from local_operator.session.placement import read_handoff_journal
 
+    # HOUSEKEEPING FIRST, and best effort: quarantined handoffs are trees a completed
+    # commit renamed out of ``sessions/`` and could not delete. They are outside the
+    # store, so leaving them is safe; the sweep is what stops a stuck deletion from
+    # growing without bound. It must never stop a recovery — the entries below are
+    # the ones a user is waiting on.
+    try:
+        from local_operator.session import cleanup as cleanup_mod
+
+        cleanup_mod.sweep_handed_away(Path(root))
+    except Exception:  # noqa: BLE001 — housekeeping is never worth a failed reconcile
+        logger.debug("mobility: could not sweep handed-away handoffs", exc_info=True)
+
     owner_instance = own_instance or (str(server.instance_id) if server is not None else "")
     try:
         entries = read_handoff_journal(root)
@@ -4204,8 +4573,19 @@ def _reconcile_source(
 
 
 def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dict[str, Any]:
-    """Finish a commit the relay died in the middle of (§6.5 row 3)."""
+    """Finish a commit the relay died in the middle of (§6.5 row 3).
+
+    ORDER MATTERS EVEN HERE, which is the point of the clause-1 rewrite: a recovery
+    that wrote the tombstone first and then found it could not take the directory
+    away would have told the destination to adopt a second copy. So the rename is
+    attempted first, and its failure rolls the handoff back while no tombstone
+    exists to make that illegal. A tombstone that IS present was written by a build
+    (or a run) that already passed the commit point; there the only honest answer is
+    ``cleanup_pending`` — the id is the destination's and this device's leftover is
+    swept later.
+    """
     from local_operator.network.projection import write_tombstone
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
         clear_handoff_entry,
@@ -4217,6 +4597,42 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
     from local_operator.session.placement import write_handoff_entry
 
     write_handoff_entry(root, session_id, entry)
+    directory = Path(root) / "sessions" / session_id
+    handed_off = True
+    if directory.exists():
+        # THE DEFINITIONS GO TO THE STASH FIRST, the same guarantee the live commit
+        # gives: a recovery that renamed the tree away without stashing would delete
+        # definitions ``--drop-session-roles`` promised to keep (it stashes them too).
+        try:
+            _stash_session_roles(root, session_id)
+            handed_off = cleanup_mod.hand_off_session_dir(
+                directory,
+                config_dir=Path(root),
+                reason=f"mesh-move: completing a committed handoff of {session_id}",
+                actor=f"mesh:{to_device}",
+            )
+        except OSError:
+            logger.warning(
+                "mobility: could not quarantine %s while completing its handoff",
+                session_id,
+                exc_info=True,
+            )
+            handed_off = False
+        if not handed_off:
+            _unstash_session_roles(root, session_id)
+    if not handed_off and directory.exists():
+        if _tombstone(root, session_id):
+            # THE ID IS ALREADY THE DESTINATION'S, so a rollback would be a lie about
+            # a commit that happened; the leftover directory is this device's cleanup.
+            return {
+                "session_id": session_id,
+                "action": "cleanup_pending",
+                "phase": "committed",
+            }
+        # NOTHING WAS TOLD TO ANYBODY, so the handoff is undone rather than
+        # half-done: the phase returns to ``prepared`` and the session stays here.
+        clear_handoff_entry(root, session_id)
+        return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
     write_tombstone(
         session_id,
         device_id=to_device,
@@ -4224,15 +4640,13 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
         network_id=str(entry.get("network_id") or ""),
         config_dir=root,
     )
-    removed = _remove_handed_away(root, session_id, to_device)
-    if removed:
-        clear_handoff_entry(root, session_id)
-        # The same post-commit cleanup as the ordinary path, and for the same
-        # F5 reason: the directory is gone, so the derived state goes with it.
-        _after_source_commit(root, session_id)
+    clear_handoff_entry(root, session_id)
+    # The same post-commit cleanup as the ordinary path, and for the same
+    # F5 reason: the directory is gone, so the derived state goes with it.
+    _after_source_commit(root, session_id)
     return {
         "session_id": session_id,
-        "action": "completed" if removed else "cleanup_pending",
+        "action": "completed",
         "phase": "committed",
     }
 
@@ -4911,6 +5325,11 @@ def _offload(
             "to_device": _device_block(server, target_device, target_name),
             "phase": str(phases[-1]["phase"]),
             "phases": phases,
+            # The SOURCE's own commit is what this receipt reports (the destination
+            # ran the pull), so reaching the done outcome with a committed phase is
+            # the completed state — an ordinary offload that reached here. A queued
+            # one returned above with ``in_progress``.
+            "state": "completed",
         }
         # THE CARRY, MERGED ON THIS SIDE (§ ``MoveCarryBlock``): the destination's half
         # arrived on the ``done`` frame — wakes carried plus the supervisor's verified
@@ -5111,6 +5530,9 @@ def _recover_from_replica(
                 {"phase": "committed", "at": time.time()},
             ],
             "recovered": True,
+            # A replica promote is a new-id COPY of bytes this device holds; the
+            # source was never asked to retire anything, so nothing is in flight.
+            "state": "completed",
         },
     )
 
@@ -5595,6 +6017,12 @@ def recover_on_start(server: "RelayServer") -> list[dict[str, Any]]:
     that machine. Nothing here is on the critical path of a move — an entry it
     cannot settle stays in the journal and the next attempt picks it up.
     """
+    try:
+        from local_operator.session import cleanup as cleanup_mod
+
+        cleanup_mod.sweep_handed_away(Path(server.root))
+    except Exception:  # noqa: BLE001 — housekeeping, same contract as the sweep above
+        logger.debug("mobility: could not sweep handed-away handoffs", exc_info=True)
     try:
         swept = sweep_staging(server.root)
         report = reconcile(server.root, server=server)

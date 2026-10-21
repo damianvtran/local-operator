@@ -1821,3 +1821,57 @@ def test_an_unreadable_subtree_is_a_lower_bound_not_absent_bytes(tmp_path: Path)
     assert measured["contents_complete"] is False
     assert measured["skipped_entries"] >= 1
     assert measured["transcript_bytes"] == 100
+
+
+def test_hand_off_takes_the_directory_out_of_the_store_then_the_sweep_ages_it(
+    tmp_path: Path,
+) -> None:
+    """The mesh commit's one rename, and the backstop behind its deletion.
+
+    ``hand_off_session_dir`` is the commit point of a move
+    (``docs/design/mesh-move-outcome.md`` clause 1): the directory leaves
+    ``sessions/`` atomically, so no scanner, listing or resume on this device can see
+    a live copy while the tombstone is being written. Its two post-conditions are
+    asserted here — absent counts as GONE (a retry after the crash window), and a
+    deletion that could not finish is aged out by the sweep rather than retried
+    forever.
+    """
+    (target,) = _store(tmp_path, 1)
+    store = tmp_path / "sessions"
+
+    assert (
+        cleanup.hand_off_session_dir(
+            target, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
+        )
+        is True
+    )
+    assert not target.exists()
+    # THE RECEIPT SURVIVES THE MOVE, and says "moved", not "deleted".
+    logged = [
+        json.loads(line)
+        for line in (store / CLEANUP_LOG_NAME).read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert logged[-1]["policy"] == "mesh-move"
+    assert logged[-1]["actor"] == "mesh:test"
+    # ABSENT IS THE DESIRED POST-STATE: the crash window after the rename must not
+    # be read as a failure to hand the directory away.
+    assert (
+        cleanup.hand_off_session_dir(
+            target, config_dir=tmp_path, reason="mesh-move: retry", actor="mesh:test"
+        )
+        is True
+    )
+
+    handoff_root = tmp_path / "network" / cleanup.HANDED_AWAY_DIRNAME
+    handoff_root.mkdir(parents=True, exist_ok=True)
+    aged = handoff_root / "aged.1.token"
+    fresh = handoff_root / "fresh.1.token"
+    aged.mkdir()
+    fresh.mkdir()
+    old = time.time() - cleanup.HANDED_AWAY_MAX_AGE_S - 60
+    os.utime(aged, (old, old))
+
+    assert cleanup.sweep_handed_away(tmp_path) == ["aged.1.token"]
+    assert not aged.exists()
+    assert fresh.is_dir()

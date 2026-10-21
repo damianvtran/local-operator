@@ -910,9 +910,11 @@ def transfer_receipt(
     being moved is about — which device it is moving to or from — and it is why the
     receipt's own ``owner_device`` is the destination rather than a per-phase tally.
 
-    ``source_retired`` is ``mode == "move"``: a ``keep`` copy is minted at the
-    destination and the source is untouched by design, which is the difference the
-    two verbs exist to express.
+    ``source_retired`` is true only for a COMPLETED move: a ``keep`` copy is minted at
+    the destination and the source is untouched by design, and an ``in_progress``
+    receipt (a queued move, or a committed handoff not yet adopted) must never tell a
+    surface "the copy here is gone" — the move that reported exactly that changed
+    nothing (``docs/design/mesh-move-outcome.md``, Surfaces).
     """
     phases = [
         {
@@ -926,12 +928,19 @@ def transfer_receipt(
         if isinstance(stamp, dict)
     ]
     mode = str(result.get("mode") or ("keep" if keep else "move"))
+    # ONE derivation, shared with the CLI: a receipt that predates ``state`` is
+    # completed only when its last phase is openable and it carries no queue block —
+    # never because it was merely ok.
+    from local_operator.network import mobility
+
+    state = mobility.move_receipt_state(result)
     return {
         "phases": phases,
         "locality": "local" if to == "local" else "remote",
         "owner_device": str((result.get("to_device") or {}).get("device_id") or ""),
-        "source_retired": mode == "move",
+        "source_retired": state == "completed" and mode == "move",
         "session_id": session_id,
         "new_session_id": str(result.get("new_session_id") or session_id),
         "mode": "keep" if mode == "keep" else "move",
+        "state": state,
     }
