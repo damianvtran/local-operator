@@ -59,7 +59,7 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
@@ -69,7 +69,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
+from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN, CONVERSATION_ID_PATTERN
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -95,6 +95,17 @@ _MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
 #: because that module rides the httpx boot path this file must not pull at
 #: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
 _ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+#: Image attachment ids (``team_bridge.types.ATTACHMENT_ID_PATTERN``), checked
+#: before interpolation exactly like the conversation id above.
+_ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
+#: Spelled here rather than imported from the client: that module rides the
+#: httpx boot path this file must not pull at module scope. Pinned equal to
+#: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
+_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+_ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
+#: grammar, enforced before the request leaves the machine.
+_ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
 
 
 class _Strict(BaseModel):
@@ -1057,6 +1068,16 @@ _RFC3339 = re.compile(
 )
 
 
+def _validate_attachment_ids(ids: list[str] | None) -> None:
+    # Same grammar the routes use for path ids: an id that could reshape the
+    # hub's URL never leaves, and a duplicate would silently change the bound
+    # set (and its attachments_hash), so it is refused rather than deduped.
+    if not ids:
+        return
+    if len(set(ids)) != len(ids) or any(_ATTACHMENT_ID.fullmatch(i) is None for i in ids):
+        raise ValueError("attachment_ids must be distinct batt_ ids")
+
+
 def _validate_schedule_time(value: str) -> None:
     # Keep the moving 1-minute/120-day window authoritative on the server, whose
     # clock will also fire the message; only reject malformed wire dates here.
@@ -1075,28 +1096,42 @@ class ScheduledCreateIn(_Strict):
     tenant_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(pattern=CONVERSATION_ID_PATTERN)
     client_ref: str = Field(min_length=1, max_length=128)
-    body: str = Field(min_length=1)
+    #: May be empty only when ``attachment_ids`` carries at least one image
+    #: (an image-only message); the hub applies the same rule.
+    body: str = ""
     send_at: str
     mentions: list[ScheduledMentionIn] = Field(default_factory=list)
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
 
     @model_validator(mode="after")
     def _date(self) -> "ScheduledCreateIn":
         _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a scheduled message needs body or attachment_ids")
         return self
 
 
 class ScheduledUpdateIn(_Strict):
-    body: str | None = Field(default=None, min_length=1)
+    #: An empty body is accepted here only as part of an image-only edit; the
+    #: hub's PreflightSend decides against the row's resulting attachment set.
+    body: str | None = None
     send_at: str | None = None
+    #: The schedule's COMPLETE replacement image set; ``[]`` removes every
+    #: image (the hub releases them). Omitted = images unchanged.
+    attachment_ids: list[str] | None = Field(default=None, max_length=4)
 
     @model_validator(mode="after")
     def _edit(self) -> "ScheduledUpdateIn":
         if not self.model_fields_set or any(
             getattr(self, name) is None for name in self.model_fields_set
         ):
-            raise ValueError("a schedule edit requires body or send_at")
+            raise ValueError("a schedule edit requires body, send_at or attachment_ids")
         if self.send_at is not None:
             _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if self.body == "" and "attachment_ids" in self.model_fields_set and not self.attachment_ids:
+            raise ValueError("a schedule edit cannot clear both body and images")
         return self
 
 
@@ -1146,7 +1181,10 @@ async def scheduled_create(
     return reply(
         await _conversation_reply(
             _conversation_client(config_manager).scheduled_create(
-                body.model_dump(exclude_unset=True)
+                # ``body`` always travels (possibly "" for an image-only
+                # schedule); everything else only when the caller set it, so a
+                # text-only schedule stays the pre-attachment wire.
+                {"body": body.body, **body.model_dump(exclude_unset=True)}
             )
         )
     )
@@ -1203,12 +1241,23 @@ class ConversationCreateIn(_Strict):
 class ConversationSendIn(_Strict):
     tenant_id: str | None = Field(default=None, max_length=128)
     client_ref: str = Field(min_length=1, max_length=128)
-    body: str = Field(min_length=1)
+    #: Empty only for an image-only message (``attachment_ids`` non-empty).
+    body: str = ""
     agent_label: str | None = Field(default=None, max_length=64)
+    #: Staged uploads to bind to this message, in display order. Forwarded only
+    #: when present, so a text-only send is the unchanged pre-attachment wire.
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
     #: Reply in this root message's thread (agent-server threads). Held to the
     #: minted message-id grammar here so a malformed id never reaches the hub;
     #: the hub owns the real rule (same conversation, root not a reply).
     thread_root_id: str | None = Field(default=None, pattern=r"^bcmsg_[0-9a-z]{8,64}$")
+
+    @model_validator(mode="after")
+    def _content(self) -> "ConversationSendIn":
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a message needs body or attachment_ids")
+        return self
 
 
 class ConversationJoinIn(_Strict):
@@ -1631,8 +1680,155 @@ async def send_conversation_message(
                 tenant_id=body.tenant_id,
                 agent_label=body.agent_label,
                 thread_root_id=body.thread_root_id,
+                attachment_ids=body.attachment_ids,
             )
         )
+    )
+
+
+def _attachment_tenant(request: Request) -> str | None:
+    """The attachment routes' ONE accepted query name, refused when repeated.
+
+    Closed-table like every route here: ``scope`` (and anything else) is
+    refused rather than dropped, and a duplicated ``tenant_id`` would let the
+    URL parser pick an organization differently from the hub.
+    """
+
+    if set(request.query_params) - {"tenant_id"}:
+        _raise_read("invalid_request")
+    values = request.query_params.getlist("tenant_id")
+    if len(values) > 1 or (values and (not values[0].strip() or len(values[0]) > 128)):
+        _raise_read("invalid_request")
+    return values[0] if values else None
+
+
+def _require_attachment_id(attachment_id: str) -> None:
+    if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        _raise_read("invalid_request")
+
+
+async def _bounded_upload(request: Request) -> bytes:
+    """Read the raw upload body, refusing past the hub's ceiling.
+
+    Streamed and counted rather than ``await request.body()``: a declared
+    ``Content-Length`` is checked first (cheap refusal), and the running count
+    still stops a chunked or lying sender at the bound, so this loopback route
+    never buffers more than one image. Nothing touches disk; the bytes are
+    forwarded once and dropped with the request.
+    """
+
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _ATTACHMENT_MAX_BYTES:
+                raise HTTPException(
+                    413, {"code": "attachment_too_large", "message": "The image is too large."}
+                )
+        except ValueError:
+            _raise_read("invalid_request")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                413, {"code": "attachment_too_large", "message": "The image is too large."}
+            )
+        chunks.append(chunk)
+    if not size:
+        raise HTTPException(422, {"code": "attachment_invalid", "message": "The image is empty."})
+    return b"".join(chunks)
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments",
+    response_model=CRUDResponse[Any],
+    status_code=201,
+)
+async def upload_conversation_attachment(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Stage one image for a later send; the hub sniffs, bounds and stores it.
+
+    The body is the raw image (any declared Content-Type is ignored, exactly
+    as the hub ignores it). The answer is the hub's ``{attachment: {...}}``
+    descriptor, passed through; the bytes are never kept here.
+    """
+
+    _require_conversation_id(conversation_id)
+    tenant_id = _attachment_tenant(request)
+    data = await _bounded_upload(request)
+    client = _conversation_client(config_manager)
+    result = await _conversation_reply(
+        client.upload_attachment(conversation_id, data, tenant_id=tenant_id)
+    )
+    return CRUDResponse(status=201, message="Attachment staged.", result=result)
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments/{attachment_id}",
+    status_code=204,
+)
+async def delete_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Discard one staged upload (a composer chip removed before send)."""
+
+    _require_conversation_id(conversation_id)
+    _require_attachment_id(attachment_id)
+    tenant_id = _attachment_tenant(request)
+    client = _conversation_client(config_manager)
+    await _conversation_reply(
+        client.delete_attachment(conversation_id, attachment_id, tenant_id=tenant_id)
+    )
+    return Response(status_code=204)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def get_conversation_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One bound image's bytes for the HUMAN reader (the renderer's blob cache).
+
+    No ``endpoint_id``/``purpose`` is accepted: those name an AGENT read, and
+    the agent's screen/context fetches happen inside the runtime, never through
+    this renderer-facing route. Response headers follow the attachment route in
+    ``desktop_sessions`` and the hub: a closed type map (the client already
+    refused anything but png/jpeg), ``nosniff`` so the browser never
+    re-decides the type, a sandboxing CSP for a direct navigation, and
+    ``private, no-store`` so no shared or disk cache keeps a teammate's image.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _require_attachment_id(attachment_id)
+    tenant_id = _attachment_tenant(request)
+    client = _conversation_client(config_manager)
+    data, mime = await _conversation_reply(
+        client.fetch_attachment(conversation_id, message_id, attachment_id, tenant_id=tenant_id)
+    )
+    if mime not in _ATTACHMENT_SERVABLE:  # the client refuses first; defence in depth
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
     )
 
 
