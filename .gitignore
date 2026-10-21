@@ -51,6 +51,11 @@ uv.lock
 # SVGs as repo weight. The shipped code is the promoted `org_layout.py`.
 scratch/
 
+# Local evidence frames: the PNGs and geometry JSON the mobile capture scripts
+# write are cited on the PR and never shipped. Ignored so an evidence run cannot
+# be swept into a commit by `git add -A`.
+/.captures/
+
 # The local measurement store for the `scripts/bench_*.py` harnesses: the
 # before/after JSON dumps and the tables built from them. It is regenerable
 # output, not source, so the evidence belongs on the PR that cites it and never
