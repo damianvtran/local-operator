@@ -225,9 +225,10 @@ persist()
 #: evidence, and a cap burned three times over before a real ``failed`` state
 #: arrives. Each state therefore gets exactly the action that can change it:
 #:
-#:   failed/inactive, no listener -> reset-failed + start   (attempt)
-#:   failed/inactive, listener that does not answer
-#:                                -> verified all-process restart (attempt)
+#:   failed/inactive, with or without a listener
+#:                                -> verified all-process restart (attempt);
+#:                                   RESTART_SOURCE owns the reset, the
+#:                                   generation rebase, the kill and the start
 #:   active/activating/... with a listener that does not answer
 #:                                -> verified restart only after TWO consecutive
 #:                                   observations (attempt on the second)
@@ -289,10 +290,11 @@ MAX_INEFFECTIVE = 2
 ABSENT_GRACE_S = 30.0
 EVENT_CAP = 8
 PROBE_TIMEOUT_S = 2.0
-START_VERIFY_S = 9.0
 RESTART_TIMEOUT_S = 15.0
 
 TRIGGERS = ('failed', 'inactive', 'unresponsive')
+#: ``reset-failed+start`` is RETIRED but retained so an event ring written by
+#: an older watchdog still seeds; the cycle only ever issues ``verified-restart``.
 ACTIONS = ('reset-failed+start', 'verified-restart')
 OUTCOMES = ('started', 'start-failed', 'reset-failed-error', 'no-effect',
             'restarted', 'restart-failed', 'throttled', 'capped')
@@ -523,28 +525,51 @@ def verified_verdict(verdict, token):
     # rule exists to prevent.
     return receipt_reconciles(verdict.get('receipt'))
 
-def start_outcome():
-    # ``systemctl start`` exits 0 when the JOB completes, even if the service
-    # exited the moment it started (measured on systemd 255: five `started`
-    # outcomes for a unit with a missing ExecStart target that never served).
-    # So the exit code proves nothing; the outcome is only ``started`` when a
-    # bounded poll sees BOTH an active unit and a listener. ``no-effect`` is
-    # the honest word for a job that completed and changed nothing.
-    try:
-        run('systemctl', 'reset-failed', unit)
-    except Exception:
+def restart_status(verdict, token):
+    # The host's restart_record rule, applied to the script's raw payload, and
+    # returned as the watchdog's fixed outcome word. RESTART_SOURCE writes
+    # observations; ``status`` is a HOST-derived field, so reading one here
+    # would accept a key the producer never emits.
+    if not isinstance(verdict, dict) or verdict.get('schema_version') != 1:
+        return 'restart-failed'
+    if verdict.get('token') != token:
+        # A stale file from an earlier dispatch is not this dispatch's answer,
+        # whatever it says -- including about a refused reset.
+        return 'restart-failed'
+    if verdict.get('start_limit_cleared') is False:
+        # The latch was never cleared, so the start could not have been
+        # accepted: a distinct outcome from a restart that ran and failed.
         return 'reset-failed-error'
-    try:
-        run('systemctl', 'start', unit)
-    except Exception:
-        return 'start-failed'
-    deadline = time.monotonic() + START_VERIFY_S
-    while True:
-        if listening() and active_state() == 'active':
-            return 'started'
-        if time.monotonic() >= deadline:
-            return 'no-effect'
-        time.sleep(0.5)
+    if (verdict.get('pre_scan_complete') is not True
+            or verdict.get('post_scan_complete') is not True):
+        return 'restart-failed'
+    pre = verdict.get('pre_restart_pids')
+    post = verdict.get('post_restart_pids')
+    owners = verdict.get('post_restart_owners')
+    if not isinstance(pre, list) or not isinstance(post, list) or not isinstance(owners, list):
+        return 'restart-failed'
+    if verdict.get('pre_restart_count') != len(pre):
+        return 'restart-failed'
+    if verdict.get('post_restart_count') != len(post):
+        return 'restart-failed'
+    if [owner.get('pid') if isinstance(owner, dict) else None
+            for owner in owners] != post:
+        return 'restart-failed'
+    if not post:
+        # The journal completed and NOTHING listens: the start had no effect.
+        # This is the immediate-exit case; it must never read as a revival.
+        return 'no-effect'
+    new_main = verdict.get('new_main_pid')
+    new_main_start = verdict.get('new_main_start_ticks')
+    kill_ticks = verdict.get('kill_uptime_ticks')
+    if (type(new_main) is not int or type(new_main_start) is not int
+            or type(kill_ticks) is not int):
+        return 'restart-failed'
+    if not postdated(owners, new_main, new_main_start, kill_ticks):
+        return 'restart-failed'
+    if not receipt_reconciles(verdict.get('receipt')):
+        return 'restart-failed'
+    return 'restarted'
 
 def verified_restart():
     token = monotonic_us()
@@ -563,31 +588,23 @@ def verified_restart():
         verdict = json.loads(result_path.read_text())
     except (OSError, ValueError):
         return 'restart-failed'
-    if not isinstance(verdict, dict) or verdict.get('token') != token:
-        # A stale file from an earlier dispatch is not this dispatch's answer,
-        # whatever it says -- including about a refused reset.
-        return 'restart-failed'
-    if verdict.get('start_limit_cleared') is False:
-        # The latch was never cleared, so the start could not have been
-        # accepted: a distinct outcome from a restart that ran and failed.
-        return 'reset-failed-error'
-    return 'restarted' if verified_verdict(verdict, token) else 'restart-failed'
+    return restart_status(verdict, token)
 
-def intervene(now, trigger, action):
+def intervene(now, trigger):
     global last_attempt
     last_attempt = now
     state['attempts'] += 1
     recent.append(now)
-    if action == 'reset-failed+start':
-        outcome = start_outcome()
-    else:
-        outcome = verified_restart()
+    # ONE dispatch for every repair. RESTART_SOURCE owns the whole sequence --
+    # scan, reset-failed, the generation rebase, kill, start, verification --
+    # so the reset accounting cannot drift from the start that needs it.
+    outcome = verified_restart()
     if outcome == 'no-effect':
         ineffective.append(now)
     event = {'us': monotonic_us(), 'trigger': trigger,
-             'action': action, 'outcome': outcome}
+             'action': 'verified-restart', 'outcome': outcome}
     state.update(intervened=True, last_attempt_us=event['us'],
-                 last_trigger=trigger, last_action=action,
+                 last_trigger=trigger, last_action='verified-restart',
                  last_outcome=outcome,
                  events=(state['events'] + [event])[-EVENT_CAP:])
     state['capped'] = (len(recent) >= MAX_ATTEMPTS
@@ -631,14 +648,13 @@ def cycle():
             # One slow response is not death. The second consecutive silence is
             # a wedged server the host cannot reach either.
             return
-        trigger, action = 'unresponsive', 'verified-restart'
+        trigger = 'unresponsive'
     else:
         unresponsive_streak = 0
         observed = active_state()
         if observed in ('failed', 'inactive'):
             observe('no-listener')
             trigger = observed
-            action = 'reset-failed+start'
         elif observed in ('active', 'activating', 'reloading', 'deactivating'):
             # A slow boot is observed, never interrupted: ``start`` would be a
             # no-op or a merge into systemd's own pending job.
@@ -656,7 +672,7 @@ def cycle():
     if last_attempt is not None and now - last_attempt < MIN_INTERVAL_S:
         suppressed('throttled')
         return
-    intervene(now, trigger, action)
+    intervene(now, trigger)
 
 # One record before the first observation: "attempts: 0" is evidence the
 # watchdog is alive, and a missing file is NOT the same answer.
@@ -1274,11 +1290,12 @@ if pre_complete:
         unit_state = props.get('ActiveState', '')
     except Exception:
         unit_state = ''
-    # ``inactive`` matters too: measured on 255, a KillMode=process unit with
-    # survivors goes inactive after two starts+stops and the third start is
-    # refused start-limit-hit; reset-failed while inactive clears it. The
-    # live-unit exclusion stays, because a reset there also zeroes NRestarts.
-    if unit_state in ('failed', 'inactive'):
+    # ONLY ``failed``. QA measured on 255.4 that an inactive unit with
+    # survivors starts fine after this script's all-process kill empties the
+    # cgroup, so widening the gate had no observed justification -- and every
+    # reset zeroes NRestarts, discarding crash accounting the host may still
+    # reconcile. A live unit must never be reset.
+    if unit_state == 'failed':
         try:
             run('systemctl', 'reset-failed', UNIT)
         except Exception:
