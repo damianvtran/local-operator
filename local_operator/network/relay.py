@@ -12665,12 +12665,21 @@ class RelayServer:
                     link, reason, attempts = self._ensure_link_with_probe(
                         member.device_id, probe_timeout_s=remaining, network_id=record.network_id
                     )
-                if link is None and reason != NOT_ATTEMPTED_REASON:
+                # ``getattr``: the tracker is built in ``__init__``, and a relay built
+                # without it (a bare ``object.__new__`` table in a test) has no
+                # redial story to tell — it reports ``connected``-shaped, as before.
+                tracker = getattr(self, "redial", None)
+                if tracker is not None and link is None and reason != NOT_ATTEMPTED_REASON:
                     # A listing's failed probe IS a failed redial of a lost link: it
                     # counts toward the grace window's attempt rule and pushes the
                     # loop's next retry out, so a polled peer is not ALSO redialled
                     # by the loop in between. A no-op for an untracked peer.
-                    self.redial.failed(member.device_id, cause=reason)
+                    tracker.failed(member.device_id, cause=reason)
+                redial_row: dict[str, Any] = (
+                    tracker.snapshot(member.device_id)
+                    if tracker is not None and link is None
+                    else {"state": redial.CONNECTED, "attempts": 0}
+                )
                 state = peer_link_state(link, reason, attempts)
                 peers.append(
                     {
@@ -12703,19 +12712,15 @@ class RelayServer:
                         # frames all session, which is how the sidebar came to say
                         # ``Link down · unknown`` (2026-10-21).
                         "last_seen_at": _newest_seen(
-                            link.last_frame_at if link is not None else None,
+                            getattr(link, "last_frame_at", None),
                             member.last_seen_at,
-                            self.redial.snapshot(member.device_id).get("last_frame_at"),
+                            redial_row.get("last_frame_at"),
                         ),
                         # WHILE A LOST LINK IS BEING REDIALLED: state
                         # (connected/reconnecting/down), attempts, next_retry_at,
                         # last_error, grace_until. The sidebar says "Reconnecting…"
                         # inside the grace window and escalates on ``down`` only.
-                        "redial": (
-                            {"state": redial.CONNECTED, "attempts": 0}
-                            if link is not None
-                            else self.redial.snapshot(member.device_id)
-                        ),
+                        "redial": redial_row,
                         "suspect": member.suspect,
                         # THE UI'S VERSION LINE (mesh-ui; slice 1 of the mesh
                         # remote-offload workstream). Both keys are present with
