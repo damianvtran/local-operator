@@ -544,6 +544,32 @@ def test_a_store_entry_name_after_secret_is_still_released() -> None:
 QUERY_CARRIED_NAME = "glpat" + "-api-server"
 
 
+def test_a_quoted_store_entry_name_after_secret_is_still_released() -> None:
+    """R4-1: the quote a carrier adds must not turn a NAME into a typed VALUE.
+
+    THE ROW IS DISCRIMINATING, and the control above is not: an ordinary kebab name
+    (or an identifier-shaped one) is released at step 3 of
+    :func:`_reject_argument_shape_hit`, before the DNS branch ever asks
+    :func:`_is_typed_credential_assignment`, so that control passes whether the flag
+    reading is right or wrong. A VENDOR-SHAPED name clears those releases — it is
+    precisely the shape the vendor rule keeps — so the DNS branch does ask, and its
+    answer is :func:`_flag_is_typed`. With the carrier's opening quote left on the
+    flag group the answer is "typed" and this argument comes back masked; with it
+    trimmed the argument reaches the executor byte-identical, which is the reading
+    the bare spelling already had.
+
+    Every spelling is the SAME argument, so every spelling has to reach one verdict:
+    the flag rule reads the bare and quoted (space-bound) forms, and the quoted
+    ``credential-assignment`` rule reads the ``=`` forms with ``--secret`` as its
+    name group.
+    """
+    store = _store()
+    for carrier in ("{name}", '"{name}"', "'{name}'", '="{name}"', "='{name}'"):
+        name = carrier.format(name=QUERY_CARRIED_NAME)
+        command = "lop secret run --secret " + name + " -- true"
+        assert store.redact_arguments(command) == command
+
+
 def test_a_query_carried_secret_name_is_masked_at_most() -> None:
     """R3-2: a query parameter's ``=`` is not an assignment operator.
 

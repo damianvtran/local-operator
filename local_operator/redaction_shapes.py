@@ -4955,7 +4955,10 @@ def _carries_assignment_operator(shape: Shape, match: Match[str]) -> bool:
 
     * ``credential-assignment`` — its separator group, captured by the rule, holds
       the operator. ``=`` types a token, a ``:`` labels an object, and ``:=`` is
-      the two-character operator both spellings document.
+      the two-character operator both spellings document. A name that IS the
+      store-entry flag is the exception (:func:`_is_store_entry_flag`): the ``=``
+      spelling of that flag's argument binds a store entry's NAME, not a value, so
+      it carries no assignment.
     * ``cli-credential-flag`` — its guard has already judged the argument
       (:func:`_flag_value_guard` releases a store NAME and usage-string syntax), so
       a hit means a credential was bound to the flag, and only WHITESPACE — not an
@@ -4971,7 +4974,33 @@ def _carries_assignment_operator(shape: Shape, match: Match[str]) -> bool:
         return _flag_is_typed(match)
     if shape.label != _ASSIGNMENT_LABEL:
         return False
+    if _is_store_entry_flag(match.group(_ASSIGNMENT_NAME_GROUP) or ""):
+        return False
     return "=" in (match.group(_ASSIGNMENT_SEPARATOR_GROUP) or "")
+
+
+def _is_store_entry_flag(flag: str) -> bool:
+    """Whether ``flag`` is the store-entry flag, in ANY spelling the table sees.
+
+    The token reaches the judgement with its binder and, for a quoted argument, the
+    carrier's OPENING QUOTE still attached — the flag rule's group 1 is the flag AND
+    its binder, while the quoted ``credential-assignment`` rule's name group is the
+    flag alone:
+
+    * ``--secret `` — the space spelling, as the flag rule captures it;
+    * ``--secret "`` / ``--secret '`` — the same spelling with a quoted argument,
+      which that same rule matches and which the quoted assignment rule reads as a
+      name;
+    * ``--secret=`` / ``--secret="`` — the ``=`` spelling of both readings.
+
+    All of them are ONE flag, and that is what R4-1 measured: trimming only the ``=``
+    left ``--secret "`` in hand, so a QUOTED name was read as a typed VALUE — masked
+    in the retained copy where the bare spelling was released, and promoted as an
+    assignment in the result pass. The binder and the quote are TRIMMED rather than
+    compared literally because they are punctuation the carrier added, not part of
+    the flag.
+    """
+    return flag.split(maxsplit=1)[0].rstrip("=\"'").lower() == _STORE_ENTRY_FLAG
 
 
 def _flag_is_typed(match: Match[str]) -> bool:
@@ -4990,12 +5019,17 @@ def _flag_is_typed(match: Match[str]) -> bool:
       ``--api-key`` and the rest — binds a VALUE, so a name-shaped or hyphen-phrase
       argument after it is a passphrase TYPED into the command.
 
-    The flag is matched case-insensitively by its pattern, so it is lowered here; the
-    binder (a space or an ``=``) is trimmed off because both spellings reach this
-    hook with it attached (`_flag_value_guard` for the space, the re-scan of the inner
-    assignment for the ``=``).
+    The flag is matched case-insensitively by its pattern, so it is lowered by
+    :func:`_is_store_entry_flag`; the binder (a space or an ``=``) and the carrier's
+    opening quote are trimmed there, because every spelling reaches this hook with
+    them attached (`_flag_value_guard` for the space, the re-scan of the inner
+    assignment for the ``=``). Leaving the opening quote on was the R4-1 defect: a
+    QUOTED name read as a typed VALUE — masked in the retained copy where the bare
+    spelling was released, and promoted as an assignment in the result pass — one
+    verdict per spelling of one argument. Both quote characters and both binders go
+    through the same trim.
     """
-    return match.group(_FLAG_GROUP).strip().rstrip("=").lower() != _STORE_ENTRY_FLAG
+    return not _is_store_entry_flag(match.group(_FLAG_GROUP))
 
 
 def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
@@ -6170,6 +6204,13 @@ def _is_typed_credential_assignment(label: str, match: Match[str]) -> bool:
         return False
     name = match.group(_ASSIGNMENT_NAME_GROUP) or ""
     separator = match.group(_ASSIGNMENT_SEPARATOR_GROUP) or ""
+    if _is_store_entry_flag(name):
+        # The QUOTED spelling of this rule is what matches the ``=`` form, and
+        # ``--secret`` on its own is a strong credential name — so without this the
+        # operator spelling of the argument :func:`_flag_is_typed` releases was
+        # masked and promoted here, one verdict per binder rather than per argument
+        # (agent review R4-1).
+        return False
     return "=" in separator and is_strong_credential_name(name)
 
 
