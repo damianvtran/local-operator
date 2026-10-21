@@ -8,9 +8,11 @@ arrangements are explicitly left unchanged.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shlex
+import zlib
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Sequence
 
@@ -1670,6 +1672,75 @@ print(json.dumps(history))
 """
 
 
+#: The ONE install script that still rides in argv as literal text.
+#:
+#: ``/execute`` takes an argv list and no stdin, so the install's scripts can
+#: only reach the guest as argv strings -- and Linux caps ONE argv string at
+#: ``MAX_ARG_STRLEN`` (131072 bytes), failing the exec with ``E2BIG`` past it.
+#: The literal transport measured 135,579 bytes for a non-empty client password
+#: (the escalation ladder repeats the fragment once per sudo tier, and shell
+#: quoting inflates ~46 KB of source to ~68 KB per tier), so every episode
+#: built after #2739 recorded only ``HTTPError`` and never installed
+#: supervision: the provider persists the exception TYPE, never the guest's
+#: ``Argument list too long``.
+#:
+#: This driver decompresses the single payload element back into the positional
+#: contract ``INSTALL_SOURCE`` has always read -- argv[1] capture source, [2]
+#: port, [3] watchdog source, [4] restart source -- so nothing downstream of the
+#: transport changes.
+#:
+#: EVERY transport failure is the same fixed-vocabulary refusal, never a
+#: traceback: decode, inflate, parse and the payload's shape all happen inside
+#: one handler that prints ``install payload invalid``. A truncated base64
+#: element, a flipped character, a non-zlib stream, non-JSON text or the wrong
+#: arity otherwise exits rc=1 with empty stdout, and the host records THAT as
+#: "privilege escalation or installation command failed" -- a false diagnosis of
+#: a sudo problem, which this suite has already paid for once. The inflate is
+#: capped because the element itself is capped: deflate reaches ~1030:1, so a
+#: guest-accepted 131,072-byte argv could otherwise expand to ~135 MB before any
+#: check. The ceiling is a decision (20x the ~49 KB it actually carries), not an
+#: emergent property of the kernel limit.
+TRANSPORT_SOURCE = """\
+import base64, json, sys, zlib
+LIMIT = 1000000
+try:
+    raw = base64.b64decode(sys.argv[1])
+    payload = json.loads(zlib.decompressobj().decompress(raw, LIMIT).decode())
+    shaped = type(payload) is list and len(payload) == 4
+    if not shaped or not all(type(part) is str for part in payload):
+        raise ValueError('install payload shape')
+except Exception:
+    print(json.dumps({'installed': False, 'reason': 'install payload invalid'}))
+else:
+    sys.argv = [sys.argv[0], payload[1], sys.argv[2], payload[2], payload[3]]
+    try:
+        exec(payload[0])
+    except RuntimeError as error:
+        print(json.dumps({'installed': False, 'reason': str(error)}))
+    except Exception as error:
+        print(json.dumps({'installed': False, 'reason': type(error).__name__}))
+"""
+
+
+def _install_payload() -> str:
+    """The four install scripts as ONE zlib+base64 argv element.
+
+    zlib is stdlib in every python3 the guest can have; bz2 and lzma compress
+    this input a little better (18,148 bytes of argv against bz2's 16,164 and
+    lzma's 16,680) but are optional build features, and a missing codec here is
+    an ImportError in the guest, which the provider can only record as an install
+    refusal. The safe codec wins ~2 KB.
+
+    Built per call rather than cached at import: it is one zlib pass over ~49 KB,
+    measured 2.8 ms best-of-7 on this host (bz2 3.3 ms, lzma 6.0 ms; the same
+    ordering held at 10.2/17.7/23.2 ms under review load), invisible beside the
+    15 s install deadline. A cached constant would silently pin a stale copy of a
+    script a test monkeypatched.
+    """
+    batch = [INSTALL_SOURCE, CAPTURE_SOURCE, WATCHDOG_SOURCE, RESTART_SOURCE]
+    return base64.b64encode(zlib.compress(json.dumps(batch).encode(), 9)).decode("ascii")
+
+
 def _privileged_fragment(fragment: str, password: str) -> Sequence[str]:
     # Reuse preparation's non-interactive escalation ladder. Nothing logs its
     # argv or error output, which may contain the supplied password.
@@ -1685,22 +1756,12 @@ def install_command(password: str) -> Sequence[str]:
     # ladder does not mistake an unsupported service for failed authentication.
     # RuntimeError messages above are fixed vocabulary, never guest-authored.
     #
-    # ``sys.argv`` in the wrapper: [1] is the capture helper's source, [2] the
-    # action port, [3] the watchdog's, [4] the restart script the watchdog
-    # dispatches. Every script is data, never interpolated into a shell
+    # The scripts travel COMPRESSED (see ``TRANSPORT_SOURCE`` and
+    # ``_install_payload``): ~18 KB of argv instead of ~68 KB per escalation tier,
+    # which is what keeps the largest single argv element far below
+    # ``MAX_ARG_STRLEN``. They are still data, never interpolated into a shell
     # fragment, so no guest-authored text can join the command.
-    wrapper = (
-        "import json\ntry:\n    exec(" + repr(INSTALL_SOURCE) + ")\n"
-        "except RuntimeError as error:\n"
-        "    print(json.dumps({'installed': False, 'reason': str(error)}))\n"
-        "except Exception as error:\n"
-        "    print(json.dumps({'installed': False, 'reason': type(error).__name__}))\n"
-    )
-    return _privileged(
-        wrapper,
-        [CAPTURE_SOURCE, str(ACTION_SERVER_PORT), WATCHDOG_SOURCE, RESTART_SOURCE],
-        password,
-    )
+    return _privileged(TRANSPORT_SOURCE, [_install_payload(), str(ACTION_SERVER_PORT)], password)
 
 
 def report_command(unit: str, password: str) -> Sequence[str]:
