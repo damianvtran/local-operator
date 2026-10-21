@@ -17,8 +17,8 @@ resident, how it is signalled, or what a stop does. Lifetime and residency stay
 exactly where they are (``process._should_exit`` and ``docs/design-idle-reap.md``);
 what changes is that a death can now be NAMED instead of inferred.
 
-THREE ARTIFACTS, ONE STORY
---------------------------
+FOUR ARTIFACTS, ONE STORY
+-------------------------
 * **The turn journal** (``registry.turn_journal_path``, in the conversation
   directory) — the runtime's own statement that turn N was in flight, written
   at turn start and closed at turn end. An OPEN row is the positive evidence the
@@ -39,6 +39,11 @@ THREE ARTIFACTS, ONE STORY
   already composed, with the run key that keeps an older departure from
   explaining a newer death. Read by ``info.collect`` for a STORED row's STOPPED
   age/reason and by ``rescue`` so a policy departure is never re-engaged.
+* **The run record** (``sessions/<id>/runtime-run.json``) — the exit record's
+  counterpart, written at boot and removed by that run's own clean exit. It is
+  what lets a listing tell "the record on disk is the last thing that happened"
+  from "an earlier run exited, and the one after it was killed"; without it a
+  row borrowed its predecessor's departure (review round 1, MAJOR-1).
 
 Why a row and not a log line: the questions asked afterwards are asked from a
 DIFFERENT process, on a machine whose log may have rotated, and the answer has
