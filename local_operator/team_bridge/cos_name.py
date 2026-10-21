@@ -17,10 +17,16 @@ WHERE THE NAME COMES FROM, and why only there.
   the bridge" — badge-only arrivals — so there is no agent name to publish and
   the resolver answers ``None`` (the client then omits the field entirely).
 * When that session IS Aida's (``aida/state.json``'s ``session_id``), the name
-  is ``aida.name`` via :func:`local_operator.aida.naming.display_name` — the
-  config-canonical reader every other surface (TUI receipts, the desktop
-  payload, the greeting) already uses, which follows every rename gesture
-  because ``Session.set_conversation_name`` syncs her title into that key.
+  is ``aida.name`` — the config-canonical key every other surface reads, which
+  follows every rename gesture because ``Session.set_conversation_name`` syncs
+  her title into it — with the SAME rules as
+  :func:`local_operator.aida.naming.display_name` (absent or unusable →
+  :data:`~local_operator.aida.naming.DEFAULT_NAME`). It is read from the
+  config WATCHER's last-good snapshot, not through ``display_name``: that
+  reader constructs a ``ConfigManager``, which moves a malformed
+  ``config.yml`` aside, and this resolver runs on read paths (every active
+  desktop settings write, a fresh bridge status read) that must never do that
+  to a half-written hand edit (review R1-4).
 * When the designated session is ANY OTHER session, the answer is ``None``.
   Deliberately: an ordinary session's only "name" is its conversation title,
   which is usually generated from the conversation's content ("Q3 layoffs
@@ -47,6 +53,7 @@ from __future__ import annotations
 import logging
 import unicodedata
 from pathlib import Path
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +106,9 @@ def bridge_agent_name(raw: object) -> str | None:
     kept: list[str] = []
     for char in raw:
         category = unicodedata.category(char)
-        if category in {"Cc", "Cf", "Co", "Cn", "Zl", "Zp"} or _invisible(char):
+        # Cs: a lone surrogate is invalid UTF-8 (the server's DefaultLabel
+        # drops it via ToValidUTF8) and would make httpx's encoder raise.
+        if category in {"Cc", "Cf", "Co", "Cn", "Cs", "Zl", "Zp"} or _invisible(char):
             continue
         kept.append(" " if char.isspace() or category == "Zs" else char)
     tidy = " ".join("".join(kept).split())[:AGENT_NAME_MAX_CHARS].strip()
@@ -108,20 +117,34 @@ def bridge_agent_name(raw: object) -> str | None:
     return tidy
 
 
-def _designated_session(config_dir: Path) -> str:
-    """``team_bridge.session`` from the watcher's last-good snapshot ("" when unset).
+def _config_values(config_dir: Path) -> Mapping[str, Any]:
+    """The directory-scoped watcher's last-good config values.
 
-    The directory-scoped watcher, not a ``ConfigManager``: constructing one on
-    a malformed hand edit would move the user's file aside from a read path
-    (the reason ``client._local_settings_snapshot`` reads it the same way).
+    The watcher, not a ``ConfigManager``: constructing one on a malformed hand
+    edit would move the user's file aside from a read path (the reason
+    ``client._local_settings_snapshot`` reads it the same way).
     """
 
     from local_operator.config_watch import process_watcher
-    from local_operator.team_bridge.settings import TeamBridgeSettings
 
     watcher = process_watcher(config_dir)
     watcher.poll_now()
-    return TeamBridgeSettings.from_values(watcher.values).session
+    return watcher.values
+
+
+def _aida_name(values: Mapping[str, Any]) -> str:
+    """``aida.name`` from a config snapshot, defaulted exactly like ``display_name``."""
+
+    from local_operator.aida import naming as aida_naming
+
+    section = values.get("aida")
+    raw = section.get("name", aida_naming.DEFAULT_NAME) if isinstance(section, Mapping) else None
+    if not isinstance(raw, str):
+        return aida_naming.DEFAULT_NAME
+    try:
+        return aida_naming.validate_name(raw)
+    except (ValueError, TypeError):
+        return aida_naming.DEFAULT_NAME
 
 
 def cos_display_name(config_dir: Path | str | None) -> str | None:
@@ -137,15 +160,17 @@ def cos_display_name(config_dir: Path | str | None) -> str | None:
         return None
     root = Path(config_dir)
     try:
-        designated = _designated_session(root)
+        from local_operator.team_bridge.settings import TeamBridgeSettings
+
+        values = _config_values(root)
+        designated = TeamBridgeSettings.from_values(values).session
         if not designated:
             return None
-        from local_operator.aida import naming as aida_naming
         from local_operator.aida import state as aida_state
 
         if not aida_state.is_aida_session(root, designated):
             return None
-        return bridge_agent_name(aida_naming.display_name(root))
+        return bridge_agent_name(_aida_name(values))
     except Exception:  # noqa: BLE001 — a display name must never break the write it rides on
         logger.debug("team_bridge: could not resolve the CoS display name", exc_info=True)
         return None
