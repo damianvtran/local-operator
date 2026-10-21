@@ -430,3 +430,57 @@ def test_the_receipt_prints_the_peers_model_sentence_for_a_pure_model_create(
     assert reason in with_reason
     assert reason not in empty_detail
     assert empty_detail == no_block, "an empty detail prints no line, exactly as before"
+
+
+@pytest.mark.parametrize(
+    ("choice", "sent"),
+    [
+        pytest.param(
+            {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning_effort": "max"},
+            "max",
+            id="desktop-spelling",
+        ),
+        pytest.param(
+            {"provider": "deepseek", "model_id": "deepseek-flash", "effort": "low"},
+            "low",
+            id="legacy-spelling",
+        ),
+        pytest.param(
+            {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning_effort": None},
+            None,
+            id="no-level",
+        ),
+    ],
+)
+def test_the_set_model_hop_carries_the_desktops_reasoning_effort(
+    root: Path, choice: dict[str, Any], sent: str | None
+) -> None:
+    """The level a desktop create names reaches the runtime's ``set_model``.
+
+    Operator report, 2026-10-21 (effort shown ``High`` after picking ``Max`` on a
+    remote session). The desktop create route forwards its choice as
+    ``model.reasoning_effort`` (``routes/desktop_sessions.py``), but this hop read
+    only ``model["effort"]``, so the level was silently dropped and the owner ran
+    the model's seed — ``high`` on DeepSeek's none/low/high/max ladder. The frame
+    the owner receives is asserted directly, through the real ``_set_model_on``
+    with only the dial stubbed.
+    """
+    identity.mint(root, name="cloud-node-1")
+    server = _warmed_server(root)
+    frames: list[dict[str, Any]] = []
+
+    class _Dial:
+        def exchange(self, frame: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:
+            frames.append(frame)
+            return {"op": "ack"}
+
+        def close(self) -> None:
+            pass
+
+    server._dial_owned = lambda *args, **kwargs: _Dial()  # noqa: SLF001
+
+    result = server._set_model_on(SESSION, choice)  # noqa: SLF001
+
+    assert result == {"applied": True, "detail": ""}
+    assert frames[0]["provider"] == "deepseek" and frames[0]["model_id"] == "deepseek-flash"
+    assert frames[0].get("effort") == sent, frames[0]

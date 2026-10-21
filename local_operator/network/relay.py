@@ -9230,6 +9230,16 @@ class RelayServer:
         different model than the caller asked for is the kind of quiet wrongness
         that costs a session.
         """
+        # THE LEVEL HAS TWO SPELLINGS ON THIS FRAME, and reading only one lost it
+        # (operator report, 2026-10-21: a remote session created at ``max`` ran its
+        # first turns at the model's seed). The desktop's create route forwards the
+        # pane's choice as ``reasoning_effort`` — the ``DraftModel``/``ModelSpec``
+        # field name — while this hop only ever read ``effort``, so every desktop
+        # birth level was dropped here and the runtime's ``set_model`` fell back to
+        # the model's own default (``high`` on a none/low/high/max ladder).
+        # ``reasoning_effort`` is preferred because it is what the producer of
+        # record sends; ``effort`` stays for any caller already spelling it so.
+        level = str(model.get("reasoning_effort") or model.get("effort") or "")
         try:
             dial = self._dial_owned(session_id, capabilities=())
         except session_dial.OwnerUnreachable as exc:
@@ -9241,7 +9251,7 @@ class RelayServer:
                     "req": 1,
                     "provider": str(model.get("provider")),
                     "model_id": str(model.get("model_id")),
-                    **({"effort": str(model["effort"])} if model.get("effort") else {}),
+                    **({"effort": level} if level else {}),
                 },
                 timeout_s=self.settings.op_wait_s,
             )
