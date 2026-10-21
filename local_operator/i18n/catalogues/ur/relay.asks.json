@@ -27,10 +27,10 @@
   "relay.asks.card.send_answer": "جواب بھیجیں",
   "relay.asks.card.decline": "انکار کریں",
   "relay.asks.card.timed_out_badge": "وقت ختم",
-  "relay.asks.sheet.title_waiting": "سوالات · {count, plural, one {# سوال} other {# سوالات}}",
-  "relay.asks.sheet.title_lapsed": "سوالات · {count, number} کا وقت ختم",
-  "relay.asks.sheet.title_plain": "سوالات",
-  "relay.asks.sheet.loading": "سوالات پڑھے جا رہے ہیں…",
+  "relay.asks.sheet.title_waiting": "درخواستیں · {count, plural, one {# سوال} other {# سوالات}}",
+  "relay.asks.sheet.title_lapsed": "درخواستیں · {count, number} کا وقت ختم",
+  "relay.asks.sheet.title_plain": "درخواستیں",
+  "relay.asks.sheet.loading": "درخواستیں پڑھی جا رہی ہیں…",
   "relay.asks.sheet.empty": "کچھ انتظار میں نہیں — ایجنٹ کے پوچھے گئے سوالات یہاں دکھائی دیں گے۔",
   "relay.asks.sheet.retry": "دوبارہ کوشش کریں",
   "relay.asks.sheet.ended_wait": "یہ گفتگو ختم ہو چکی ہے — جواب دینے سے یہ دوبارہ کھل جائے گی (اس میں ~30 سیکنڈ تک لگ سکتے ہیں)",
@@ -74,6 +74,6 @@
   "relay.asks.disclosure.answer_first": "· پہلے جواب دیں",
   "relay.asks.duration.less_than_minute": "<1 منٹ",
   "relay.asks.duration.minutes": "{count, number} منٹ",
-  "relay.asks.duration.hours": "{count, number} گھنٹہ",
+  "relay.asks.duration.hours": "{count, plural, one {# گھنٹہ} other {# گھنٹے}}",
   "relay.asks.duration.days": "{count, number} دن"
 }

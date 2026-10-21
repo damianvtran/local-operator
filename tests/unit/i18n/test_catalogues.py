@@ -153,7 +153,7 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
     # Pin only the original ten Hindi groups plus each later reviewed slice.
     # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
     # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
@@ -216,8 +216,9 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         translated = catalogues.load_catalogue(locale, namespace)
         assert translated.keys() == source.keys(), (locale, namespace)
         for key in source:
-            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
-                source[key]
+            assert i18n_check.arguments_match(
+                runtime.message_arguments(source[key]),
+                runtime.message_arguments(translated[key]),
             ), (locale, namespace, key)
 
 

@@ -646,6 +646,12 @@ def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
     the manifest) and the growth ratchet (which rejects added rows when
     English grows) are mutually unsatisfiable for any change that adds
     English copy: a deadlock rather than a ratchet.
+
+    ``zh-CN`` is the manifest locale with no catalogue directory at all (it is
+    SECURITY HELD in ``scripts/i18n/generate.py``), so it stands in for the
+    untranslatable case. ``ur`` cannot: it gained its own catalogue, and the
+    carve-out deliberately stops applying the moment a locale becomes
+    translatable.
     """
     base = {"pairs": []}
     # A synthetic locale with no catalogue in the tree: the carve-out is about
