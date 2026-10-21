@@ -588,6 +588,107 @@ def test_a_source_whose_tombstone_write_fails_still_commits_and_keeps_one_holder
     assert _holders(server_a.root, server_b.root, SESSION) == [server_b.root / "sessions" / SESSION]
 
 
+def test_a_queued_move_whose_tombstone_fails_folds_its_record_resumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3-1: the queue fold belongs to the COMMIT, not to the tombstone.
+
+    ``_settle_source_commit`` returned on a failed tombstone BEFORE its derived-state
+    step, and that step is the only caller of ``move_queue.note_committed`` — the fold
+    from ``copying`` to ``resumed``. A queued move whose tombstone write kept failing
+    (a full disk is the realistic spelling) therefore stayed live, and the driver's
+    tombstone-only watch folded it terminally ``failed`` after ``COPY_WATCH_S`` with
+    "this device still holds the conversation" — while this device's directory was
+    gone and the destination held and ran the only copy. Terminal is write-once, so
+    the reconcile that later wrote the tombstone could not repair the record.
+
+    Driven on a source root in exactly the post-rename state the commit leaves: the
+    directory is out of ``sessions/``, the journal says ``handing-off``, the queue
+    record is live at ``copying``. The queue fold and the F5 prune must happen
+    whatever the tombstone does; the journal is what stays held back.
+    """
+    from local_operator.network import move_queue, projection
+    from local_operator.session.placement import write_handoff_entry
+    from local_operator.wakes import store as wake_store
+
+    # THE QUEUED MOVE'S RECORD, in the phase the driver leaves while it copies.
+    record, created = move_queue.enqueue(
+        tmp_path,
+        SESSION,
+        to_device="device-b",
+        to_name="pixel-8",
+        request_id="req-r3-1",
+        requested_by="device-b",
+    )
+    assert created, record
+    move_queue.transition(tmp_path, SESSION, move_queue.QUEUE_PHASE_COPYING, writer="relay")
+    # Derived state the commit must prune: a wake index entry for the moved session.
+    wake_store.write_entry(tmp_path, SESSION, cwd="/tmp/here", schedules=[dict(_WAKE_ROW)])
+    assert wake_store.read_entry(tmp_path, SESSION) is not None
+
+    # THE POST-RENAME STATE: the directory has left ``sessions/`` and the journal
+    # says ``handing-off``, so only the commit's durable tail remains to run.
+    write_handoff_entry(
+        tmp_path,
+        SESSION,
+        {
+            "role": "source",
+            "phase": "handing-off",
+            "to_device": "device-b",
+            "to_name": "pixel-8",
+            "network_id": "net-1",
+            "lease_epoch": "1",
+            "instance_id": "dead-relay",
+        },
+    )
+
+    def refusing_write(session_id: str, **kwargs: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(projection, "write_tombstone", refusing_write)
+
+    settled = mobility._settle_source_commit(
+        tmp_path,
+        SESSION,
+        device_id="device-b",
+        device_name="pixel-8",
+        network_id="net-1",
+    )
+
+    assert settled is False, "the tombstone did not land, and the answer must say so"
+    # THE FOLD THE DRIVER'S WATCH READS: terminal ``resumed``, never a live record
+    # the watch would fail after COPY_WATCH_S.
+    folded = move_queue.read_record(tmp_path, SESSION) or {}
+    assert folded.get("phase") == move_queue.QUEUE_PHASE_RESUMED, folded
+    assert move_queue.is_terminal(folded), folded
+    assert not folded.get("code"), folded
+    assert [stamp.get("phase") for stamp in folded.get("phases") or []] == [
+        "queued",
+        "copying",
+        "resumed",
+    ], folded
+    # THE F5 PRUNE RAN ON THE SAME STEP, so this device fires none of the moved
+    # session's wakes any more.
+    assert wake_store.read_entry(tmp_path, SESSION) is None
+    # THE JOURNAL IS HELD BACK, because it is how the repair finds the tombstone
+    # write that did not happen.
+    assert read_handoff_journal(tmp_path)[SESSION]["phase"] == "handing-off"
+    assert SESSION not in read_tombstones(tmp_path)
+
+    # THE REPAIR: a restarted relay writes the tombstone and finishes the handoff...
+    monkeypatch.undo()
+    report = mobility.reconcile(tmp_path, own_instance="restarted-a")
+    assert [row["action"] for row in report] == ["completed"], report
+    assert read_tombstones(tmp_path)[SESSION]["device_id"] == "device-b"
+    assert read_handoff_journal(tmp_path) == {}
+    # ... and the terminal record is STILL the commit's own word: write-once means
+    # the failed-tombstone window cannot be turned into the driver's failed report
+    # by anything that runs later.
+    final = move_queue.read_record(tmp_path, SESSION) or {}
+    assert final.get("phase") == move_queue.QUEUE_PHASE_RESUMED, final
+    assert move_queue.is_terminal(final), final
+
+
 def test_an_error_frame_after_the_commit_keeps_the_verified_copy_too(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -854,3 +955,68 @@ def test_an_explicit_refusal_after_the_copy_still_rolls_the_staging_back(
     assert not staging.exists()
     assert read_handoff_journal(server_b.root) == {}
     assert _holders(server_a.root, server_b.root, SESSION) == [source]
+
+
+def test_an_error_frame_before_the_commit_keeps_the_staging_and_loses_the_claim(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3-2: ``Moved('refused')`` raised BEFORE the rename still means
+    "this device cannot tell", and the owner's own answer is what settles it.
+
+    ``refused`` is the transport's word for a peer that threw inside its handler, and
+    the R2-1(b) arm keeps the verified staging for it whether the throw came after
+    the commit (the cell above drives the real commit, then loses the answer) or
+    before it. This cell pins the BEFORE flavour: the owner never receives ``ready``,
+    so its directory and transcript stay, there is no tombstone, and the receipt is
+    ``unconfirmed`` with ``changed: true`` — a caller must not retry blind. The
+    destination still cannot adopt anything, so its reconcile asks the owner, hears
+    "mine", drops the claim and KEEPS the verified bytes: a retry resumes them, and
+    exactly one device still holds the conversation.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    staging = sync.staging_dir(server_b.root, SESSION)
+    real_ask = mobility.LinkTransport.ask
+    seen = {"ready": 0}
+
+    def refusing_ask(self: Any, frame: dict[str, Any], *, timeout: float | None = None):
+        if str(frame.get("phase") or "") == "ready":
+            # NOT DELEGATED: the owner throws before it commits, so it still owns.
+            seen["ready"] += 1
+            raise mobility.Moved("refused", "the owner raised before it committed")
+        return real_ask(self, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", refusing_ask)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert seen["ready"] == 1, seen
+    assert result["ok"] is False, result
+    assert result["code"] == "unconfirmed", result
+    assert result["changed"] is True, result
+    assert result["phase_reached"] == "handing_off", result
+    # THE SOURCE STILL OWNS IT: the commit never ran, so the directory, the
+    # transcript and the id are all where they were.
+    assert source.is_dir()
+    assert _transcript(server_a.root, SESSION) == before
+    assert SESSION not in read_tombstones(server_a.root)
+    assert _holders(server_a.root, server_b.root, SESSION) == [source]
+    # ... AND THE DESTINATION KEPT WHAT IT VERIFIED, plus the entry that describes
+    # it — sweeping either here is how a lost reply used to lose the only copy.
+    assert (staging / "ready.json").is_file()
+    entry = read_handoff_journal(server_b.root)[SESSION]
+    assert entry["role"] == "destination", entry
+    assert entry["phase"] == "handing-off", entry
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+    # THE RECOVERY: the owner answers "still mine", so this device releases the id
+    # and keeps the bytes — nothing is promoted, and no second holder appears.
+    report = mobility.reconcile(server_b.root, server=server_b, own_instance="restarted-b")
+    assert [row["action"] for row in report] == ["rolled_back"], report
+    assert read_handoff_journal(server_b.root) == {}
+    assert (staging / "ready.json").is_file(), "the verified bytes are a retry's head start"
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    assert _holders(server_a.root, server_b.root, SESSION) == [source]
+    assert SESSION not in read_tombstones(server_a.root)
