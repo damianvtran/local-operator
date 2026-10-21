@@ -3984,6 +3984,27 @@ def _stamp_attempted_selector(event: StreamEvent, spec: ModelSpec) -> StreamEven
     return event.model_copy(update={"attempted_selector": spec})
 
 
+def _stamp_failing_selector(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+    """Carry the serving selector on an end that REPORTS a failure.
+
+    FAULT-ONLY: an unmarked end is returned unchanged, so an ordinary turn's
+    events stay byte-for-byte what they were.
+
+    WHY the end event and not ``StreamModelEvent``: that frame is published only
+    when the context budget changed or the credential is OAuth (see the yield
+    above the attempt loop), so on the ordinary API-key path NOTHING tells the
+    loop which target served. An in-band refusal — a content filter, which
+    ``clients.py`` reports as ``refusal``/``error`` prose rather than an
+    exception — therefore had no provenance at all and was attributed to the
+    session's SELECTED model. This is the one frame that holds the truth here:
+    it is the attempt's own ``spec``, and the same place the sibling stampers
+    read it from.
+    """
+    if not isinstance(event, StreamEndEvent) or not event.error:
+        return event
+    return event.model_copy(update={"failing_selector": spec})
+
+
 async def stream_with_failover(
     request: ChatRequest,
     auth: FailoverAuthStore,
@@ -4581,6 +4602,7 @@ async def stream_with_failover(
                     stamped = _stamp_serving_spec(event, spec, access=access, key=key)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
                     stamped = _stamp_attempted_selector(stamped, spec)
+                    stamped = _stamp_failing_selector(stamped, spec)
                     if buffered is not None:
                         buffered.append(stamped)
                         continue
