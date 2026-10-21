@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -152,3 +153,41 @@ def test_unhold_with_no_recorded_hold_says_so(
 ) -> None:
     assert sessions_unhold_command(_args(session="bbbb", reason="nothing")) == 1
     assert "no hold was recorded" in capsys.readouterr().err
+
+
+def _help_text(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
+    """The rendered help for ``argv`` (argparse exits 0 after printing)."""
+    from local_operator.cli import build_cli_parser
+
+    with pytest.raises(SystemExit) as exit_info:
+        build_cli_parser().parse_args(list(argv))
+    assert exit_info.value.code == 0
+    return capsys.readouterr().out
+
+
+def test_the_commands_are_hidden_but_their_arguments_are_documented(
+    store: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 1, U2: hide the deferred verbs, not the syntax of the commands.
+
+    The parent listing must not advertise `hold`/`holds`/`unhold` while their
+    help prose awaits the translation wave, but each command's own `--help`
+    must still name its positional and flags — hiding the ARGUMENT is the
+    mistake this pins (``help=argparse.SUPPRESS`` hides an argument entirely).
+    """
+    sessions = _help_text(capsys, "sessions", "--help")
+    for name in ("hold", "holds", "unhold"):
+        assert not re.search(rf"\b{name}\b", sessions), name
+    for visible in ("cleanup", "reclaim", "resume", "move", "sync"):
+        assert visible in sessions
+
+    hold = _help_text(capsys, "sessions", "hold", "--help")
+    assert "--reason" in hold and "--kind" in hold
+    assert re.search(r"\bsession\b", hold), "the positional must be listed"
+
+    holds = _help_text(capsys, "sessions", "holds", "--help")
+    assert "--json" in holds
+
+    unhold = _help_text(capsys, "sessions", "unhold", "--help")
+    assert "--reason" in unhold
+    assert re.search(r"\bsession\b", unhold)

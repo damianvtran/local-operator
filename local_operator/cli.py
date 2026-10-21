@@ -1147,7 +1147,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # file when the switch is turned off, so that was the incident's shape
     # (QA Q1, UX U2, review R1-5). Every hard guard (live claim/lease, armed
     # wake, unread mail, the 10 most recent) applies whatever the flags.
-    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
+    # THE METAVAR OMITS THE THREE DEFERRED VERBS (round 1, U2). Registering a
+    # subparser puts its name in argparse's choices metavar, so omitting its
+    # `help=` hides the description but still advertises the verb. This list is
+    # the VISIBLE set; `hold`/`holds`/`unhold` remain callable and are documented
+    # in `guides/configuration/GUIDE.md`. They are added below, after the other
+    # visible commands, and a new visible command must be added here too.
+    sessions_subparsers = sessions_parser.add_subparsers(
+        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync}"
+    )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
         help=_sh.cleanup().envelope(locale=help_locale)["text"],
@@ -1462,31 +1470,31 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # translation wave into every active locale plus an independent audit; the
     # i18n gate refuses brand-new English in an active locale by design
     # (`check.py`'s allowance-growth rule), and a coder must not translate and
-    # audit their own contribution. Until that wave lands, the three commands
-    # are hidden from the DESCRIPTION list in `lop sessions --help` the way
-    # `resume-click` is: for a SUBPARSER, `help=argparse.SUPPRESS` is not the
-    # hide idiom (argparse renders the sentinel verbatim), so the kwarg is
-    # OMITTED. Their names still appear in the usage choices line because
-    # argparse registers them — the omission hides descriptions, not the verbs.
-    # Command-local syntax is therefore documented where it can be read without
-    # a catalogue: the "Value holds and the store audit" section of
-    # `guides/configuration/GUIDE.md` names every argument and its meaning. The
-    # handlers and `session/cleanup.py`'s holds block carry the semantics for a
-    # code reader. Follow-up: one help-tranche key per command.
+    # audit their own contribution. Until that wave lands the three commands
+    # are hidden from `lop sessions --help` the way `resume-click` is: their
+    # SUBPARSERS omit `help=`. On a subparser `help=argparse.SUPPRESS` is not
+    # the hide idiom (argparse renders the sentinel verbatim); on an ARGUMENT
+    # it would hide the argument itself — from the usage line and the options
+    # list alike — which is NOT wanted here: the argument NAMES must stay
+    # visible so `lop sessions hold --help` still shows `session`, `--reason`
+    # and `--kind` (round 1, U2). Their descriptions are what the translation
+    # wave will add. Command-local syntax is also documented in the "Value
+    # holds and the store audit" section of `guides/configuration/GUIDE.md`;
+    # the handlers and `session/cleanup.py`'s holds block carry the semantics
+    # for a code reader. Follow-up: one help-tranche key per argument/command.
     hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
-    hold_parser.add_argument("session", help=argparse.SUPPRESS)
-    hold_parser.add_argument("--reason", required=True, help=argparse.SUPPRESS)
+    hold_parser.add_argument("session")
+    hold_parser.add_argument("--reason", required=True)
     hold_parser.add_argument(
         "--kind",
         choices=("evidence", "source-of-truth", "operator"),
         default="operator",
-        help=argparse.SUPPRESS,
     )
     holds_parser = sessions_subparsers.add_parser("holds", parents=[parent_parser])
-    holds_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    holds_parser.add_argument("--json", action="store_true")
     unhold_parser = sessions_subparsers.add_parser("unhold", parents=[parent_parser])
-    unhold_parser.add_argument("session", help=argparse.SUPPRESS)
-    unhold_parser.add_argument("--reason", required=True, help=argparse.SUPPRESS)
+    unhold_parser.add_argument("session")
+    unhold_parser.add_argument("--reason", required=True)
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
