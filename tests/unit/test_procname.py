@@ -1638,6 +1638,15 @@ class TestCrossTreeSpawnSites:
             recorded["executable"] = kwargs.get("executable")
             return _Popen()
 
+        # ``_spawn_runtime`` goes through ``macos_disclaim.spawn_disclaimed``, which
+        # on macOS uses ``posix_spawn`` and never reaches ``Popen``: the patched
+        # seam would record the helper's own ``ps`` probe instead. Force the
+        # ``Popen`` fallback (the only path on Linux/CI) so every host pins the
+        # same ``executable=`` contract — the shape of ``popen_fallback`` in
+        # ``test_spawn_naming_fallback.py``.
+        from local_operator import macos_disclaim
+
+        monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: "forced for the test")
         monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
         process = launch_module._spawn_runtime("sess-xtree", str(tmp_path), defer_materialise=True)
         capture = getattr(process, "lop_capture_path", None)
@@ -1703,6 +1712,15 @@ class TestCrossTreeSpawnSites:
             recorded["executable"] = kwargs.get("executable")
             return _Popen()
 
+        # ``_spawn_runtime`` goes through ``macos_disclaim.spawn_disclaimed``, which
+        # on macOS uses ``posix_spawn`` and never reaches ``Popen``: the patched
+        # seam would record the helper's own ``ps`` probe instead. Force the
+        # ``Popen`` fallback (the only path on Linux/CI) so every host pins the
+        # same ``executable=`` contract — the shape of ``popen_fallback`` in
+        # ``test_spawn_naming_fallback.py``.
+        from local_operator import macos_disclaim
+
+        monkeypatch.setattr(macos_disclaim, "_fallback_reason", lambda: "forced for the test")
         monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
         process = launch_module._spawn_runtime("sess-own", str(tmp_path), defer_materialise=True)
         capture = getattr(process, "lop_capture_path", None)
