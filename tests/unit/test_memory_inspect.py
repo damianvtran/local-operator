@@ -59,9 +59,16 @@ def _strict_ms() -> int:
 
     ``max(clock, last + 1)`` is the idiom the store itself uses for its persisted
     ``clock`` (``memory.py``, ``put``/``forget``), and the counter half is what an
-    HLC does when the wall clock does not advance: the value stays time-shaped (a
-    legacy row's seq really is a clock reading on the device that wrote it) while
-    never repeating.
+    HLC does when the wall clock does not advance: the value stays time-shaped
+    while never repeating.
+
+    Be precise about what that shape is: production does NOT read ``seq`` from a
+    clock. ``MemoryStore.put`` mints it as a per-origin counter
+    (``coalesce(max(seq), 0) + 1``) and puts the wall clock in ``hlc`` only, so a
+    real legacy row's ``seq`` is a counter, not a timestamp. Time-shaped values
+    here are a fixture-only stand-in for rows that bypass ``apply_ops``'s
+    contiguity check; the property this helper must preserve is that two rows
+    never share ``(origin, seq)``, which is production's invariant.
     """
     global _last_stamp_ms
     with _STAMP_LOCK:
