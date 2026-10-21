@@ -336,7 +336,9 @@ def test_backoff_remains_finite_after_massive_attempt_counts(
     assert len(ticks) == 3
 
 
-def test_reader_close_during_admission_keeps_its_newer_loss_schedule() -> None:
+def test_reader_close_during_admission_keeps_its_newer_loss_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Actual admission/close methods, with a reader released by start().
 
     Pause admission's persistence after its ownership section so the reader can
@@ -367,7 +369,7 @@ def test_reader_close_during_admission_keeps_its_newer_loss_schedule() -> None:
             assert closed.wait(5), "reader did not reach the unlocked admission gap"
         connected(device)
 
-    server.redial.connected = connected_after_close_when_unlocked
+    monkeypatch.setattr(server.redial, "connected", connected_after_close_when_unlocked)
 
     def persist(link: Any, *, force: bool = False) -> None:
         if threading.current_thread().name != "synthetic-reader":
