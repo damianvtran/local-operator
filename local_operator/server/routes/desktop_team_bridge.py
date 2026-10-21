@@ -685,7 +685,17 @@ async def get_directory(
     from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
     if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
-        _raise_read("invalid_request")
+        # Name the field, not the version. A local grammar refusal used to carry
+        # the generic read sentence, which the renderer classified as an outdated
+        # server and told the user to update a current client.
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_request",
+                "message": "tenant_id was not in a shape this client accepts",
+                "field": "tenant_id",
+            },
+        )
     client = TeamBridgeClient(config_manager.config_dir)
     try:
         payload = await client.directory(tenant_id)

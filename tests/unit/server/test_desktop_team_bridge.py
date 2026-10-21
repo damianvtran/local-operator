@@ -717,6 +717,19 @@ async def test_directory_accepts_a_uuid_tenant_id(api):
     assert FakeClient.behavior["last_directory_tenant"] == tenant_id
 
 
+async def test_directory_names_a_malformed_tenant_as_a_local_validation_error(api):
+    client, _root, _discipline = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/directory", params={"tenant_id": "../not-a-tenant"}
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_request"
+    assert detail["field"] == "tenant_id"
+    assert "tenant_id" in detail["message"]
+    assert "newer version" not in detail["message"]
+
+
 async def test_status_composes_state_local_config_consent_and_the_screening_receipt(api):
     client, _root, discipline = api
     response = await client.get("/v1/desktop/team-bridge/status?boundary=app_start")
