@@ -40,7 +40,12 @@ import { HttpError, isAuthorityRefusalCode, sendCommandWithProof } from "../api"
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
 import { NotPairedError, storedCertificate } from "../lib/operator-device";
-import { globalDefaultReceipt, setApprovalsPolicy, approvalPolicyLine } from "../lib/approval-policy";
+import {
+	approvalPolicyLine,
+	globalDefaultReceipt,
+	setApprovalsPolicy,
+} from "../lib/approval-policy";
+import { messageRuntime } from "../store";
 import { PairPromptSheet } from "../screens/pair";
 import type { ApprovalMode, ApprovalProvenance } from "../types";
 
@@ -94,11 +99,14 @@ export function GateSheet({
 	   revoked still passes this check, which is why it HEADS THE DECISION rather
 	   than replaces the refusal. */
 	const paired = storedCertificate() !== null;
-	const policyLine = approvalPolicyLine({
-		approval_mode: approvalMode,
-		approval_provenance: approvalProvenance,
-		approval_global_mode: approvalGlobalMode,
-	});
+	const policyLine = approvalPolicyLine(
+		{
+			approval_mode: approvalMode,
+			approval_provenance: approvalProvenance,
+			approval_global_mode: approvalGlobalMode,
+		},
+		messageRuntime.t,
+	);
 
 	async function choose(mode: Mode) {
 		if (busy) return;
@@ -116,7 +124,7 @@ export function GateSheet({
 					args: "ask",
 					images: [],
 				});
-				setNotice("keeping approvals at ask in this session");
+				setNotice(messageRuntime.t("relay.asks.gate.notice_ask"));
 				/* AND THE LOOSENING RECEIPT GOES (UX round 8, U8-3). It lives on the
 				   header, above this sheet, and it reports a STATE ("the gate is now
 				   auto — gated tools run without asking"); a tighten from this very
@@ -145,7 +153,7 @@ export function GateSheet({
 				   change the runtime says did not happen, so the refusal stays in
 				   THIS sheet, in the runtime's own words, with the choices still
 				   there for the reader to take another way. */
-				setError(receipt.detail.trim() || "that was refused — nothing changed");
+				setError(receipt.detail.trim() || messageRuntime.t("relay.approvals.gate.refused_nothing_changed"));
 				return;
 			}
 			// OUT FIRST, THEN CLOSE: the receipt has to exist somewhere that is not
@@ -154,8 +162,8 @@ export function GateSheet({
 			// which is why that one never had this bug.
 			onReceipt(
 				mode === "auto"
-					? "this session's gate is now auto — gated tools run without asking"
-					: globalDefaultReceipt(receipt),
+					? messageRuntime.t("relay.asks.gate.notice_auto")
+					: globalDefaultReceipt(receipt, messageRuntime.t),
 			);
 			onClose();
 		} catch (failure) {
@@ -163,9 +171,7 @@ export function GateSheet({
 				/* The remedy the refusal copy names, one tap away rather than a
 				   sentence telling the reader to go and find a terminal. */
 				setPairPrompt(true);
-				setError(
-					"This phone is not paired with that machine yet — pair it once and it can give this consent itself.",
-				);
+				setError(messageRuntime.t("relay.asks.gate.not_paired_error"));
 				return;
 			}
 			setError(humanizeGateError(failure));
@@ -174,7 +180,7 @@ export function GateSheet({
 
 	return (
 		<>
-			<Sheet open={open} onClose={onClose} title="Approvals in this session">
+			<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.asks.gate.title")}>
 				<div className="flex flex-col gap-3 p-3">
 					{policyLine ? (
 						/* THE STATE, BEFORE THE ACTIONS. Every other line here says what a
@@ -185,15 +191,14 @@ export function GateSheet({
 						<p className="text-meta text-ink-muted">{policyLine}</p>
 					) : null}
 					<p className="text-body-sm text-ink-muted">
-						Ask parks every gated tool call until you answer its card. Auto lets them run
-						without asking. The first two choices change <strong>this session</strong> only; the
-						last changes the <strong>default for all sessions</strong> that follow it.
+						{messageRuntime.t("relay.asks.gate.body")}{" "}
+						{messageRuntime.t("relay.approvals.gate.body_scope")}
 					</p>
 					<Button disabled={busy !== null} onClick={() => void choose("ask")}>
-						{busy === "ask" ? "…" : "keep asking (ask)"}
+						{busy === "ask" ? "…" : messageRuntime.t("relay.asks.gate.keep_asking")}
 					</Button>
 					<Button disabled={busy !== null} onClick={() => void choose("auto")}>
-						{busy === "auto" ? "…" : "run without asking (auto)"}
+						{busy === "auto" ? "…" : messageRuntime.t("relay.asks.gate.run_without")}
 					</Button>
 					{/* THE SCOPE-CHANGING CHOICE, and the reason it is `quiet`: the two
 					    buttons above act on the session in front of the reader, this one
@@ -207,7 +212,7 @@ export function GateSheet({
 						disabled={busy !== null}
 						onClick={() => void choose("default auto")}
 					>
-						{busy === "default auto" ? "…" : "run without asking in all sessions (default auto)"}
+						{busy === "default auto" ? "…" : messageRuntime.t("relay.approvals.gate.default_auto")}
 					</Button>
 					{!paired ? (
 						/* SAID BEFORE THE TAP, not after (design round 6, D4). Both buttons
@@ -218,9 +223,12 @@ export function GateSheet({
 						   honest thing to state; `storedCertificate()` is a synchronous read
 						   this component already has. */
 						<p className="text-meta text-ink-muted">
-							This phone is not paired with that machine, so <strong>run without asking</strong> and{" "}
-							<strong>run without asking in all sessions</strong> will ask you to pair it first.
-							Keeping approvals at <strong>ask</strong> never needs a pairing.
+							{messageRuntime.t("relay.asks.gate.unpaired_before")}{" "}
+							<strong>{messageRuntime.t("relay.asks.gate.unpaired_run_label")}</strong>{" "}
+							{messageRuntime.t("relay.asks.gate.unpaired_middle")}{" "}
+							<strong>{messageRuntime.t("relay.asks.gate.unpaired_ask_label")}</strong>{" "}
+							{messageRuntime.t("relay.asks.gate.unpaired_after")}{" "}
+							{messageRuntime.t("relay.approvals.gate.unpaired_default_auto")}
 						</p>
 					) : null}
 					{notice ? <p className="text-body-sm text-ink-muted">{notice}</p> : null}
@@ -254,15 +262,15 @@ export function humanizeGateError(error: unknown): string {
 			   must not reword a refusal it does not own), but the one step that is
 			   actually left is knowable here and nowhere else: the machine refused a
 			   signature from a device that believed it was paired. */
-			return `${error.message} (This phone's signature was refused — on that machine, \`lop operator devices\` shows whether this device is revoked or expired.)`;
+			return messageRuntime.t("relay.asks.gate.operator_refused", { message: error.message });
 		}
 	}
 	const message = String((error as Error)?.message ?? error);
 	if (message.includes("504") || message.toLowerCase().includes("did not answer")) {
-		return "The session didn’t respond in time — try again.";
+		return messageRuntime.t("relay.asks.error.session_timeout");
 	}
 	if (message.includes("409") || message.toLowerCase().includes("not connected")) {
-		return "The session went away — reopen it from the session list.";
+		return messageRuntime.t("relay.asks.error.session_gone_list");
 	}
 	return message;
 }

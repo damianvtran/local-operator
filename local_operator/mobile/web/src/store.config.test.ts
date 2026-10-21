@@ -52,10 +52,17 @@ describe("retainConfigStream", () => {
 		// relay.session.tags is the LOH-11 tag slice's own namespace.
 		// relay.ask is the R5 ask card's own: the dismiss reasons and the
 		// stale-ask context line, bundled like every other owned surface.
+		// relay.asks is the asks/cards slice's owned copy (ask card, sheet, dock,
+		// pending card, approval gate and disclosure). Both are OWNED slices on
+		// either side of the rebase; the namespace names differ on purpose.
+		// relay.approvals is the approvals-policy slice's own en-only copy (the
+		// policy state line, the global scope and the mode-change links).
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
 			"relay.ask",
+			"relay.approvals",
+			"relay.asks",
 			"relay.library",
 			"relay.session",
 			"relay.session.tags",

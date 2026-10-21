@@ -1,0 +1,19 @@
+{
+  "relay.approvals.card.notice_session_auto": "this session is now auto",
+  "relay.approvals.card.request_needs_answer": "This request still needs your answer.",
+  "relay.approvals.card.set_auto_all": "Set auto for all sessions",
+  "relay.approvals.card.set_auto_session": "Set auto for this session",
+  "relay.approvals.card.still_needs_answer": "This call still needs your answer.",
+  "relay.approvals.gate.body_scope": "The first two choices change this session only; the last changes the default for all sessions that follow it.",
+  "relay.approvals.gate.default_auto": "run without asking in all sessions (default auto)",
+  "relay.approvals.gate.refused_nothing_changed": "that was refused — nothing changed",
+  "relay.approvals.gate.unpaired_default_auto": "Run without asking in all sessions also needs a paired phone.",
+  "relay.approvals.policy.default_auto_receipt": "the default for sessions that follow it is now auto",
+  "relay.approvals.policy.global_default": "Approvals: {mode} — global default.",
+  "relay.approvals.policy.mode_ask": "Ask",
+  "relay.approvals.policy.mode_auto": "Auto",
+  "relay.approvals.policy.mode_only": "Approvals: {mode}.",
+  "relay.approvals.policy.session_override": "Approvals: {mode} — session override.",
+  "relay.approvals.policy.session_override_global": "Approvals: {mode} — session override; global {global}.",
+  "relay.approvals.policy.this_run": "Approvals: {mode} — this run."
+}

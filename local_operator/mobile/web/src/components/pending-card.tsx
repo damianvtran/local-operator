@@ -76,6 +76,7 @@ import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
 import { setApprovalsPolicy, approvalPolicyLine, globalDefaultReceipt } from "../lib/approval-policy";
 import { PairPromptSheet } from "../screens/pair";
+import { messageRuntime } from "../store";
 import type { PendingRequest } from "../types";
 
 /** Turn a raw command error into copy a phone user can act on. The daemon and
@@ -87,20 +88,20 @@ function humanizeError(message: string): string {
 		/* The picker advanced (usually a terminal answer to this question)
 		   while the tap was in flight; the card is about to repaint to the
 		   current question (U8/U9) — distinct from "already answered". */
-		return "That question moved on — showing the current one.";
+		return messageRuntime.t("relay.asks.error.moved_on");
 	}
 	if (m.includes("already answered")) {
 		/* Stale tap: the question settled on another surface first (U4). */
-		return "Already answered — this question was settled on the terminal.";
+		return messageRuntime.t("relay.asks.error.already_answered_terminal");
 	}
 	if (m.includes("no longer waiting")) {
-		return "Already answered — this question is no longer waiting.";
+		return messageRuntime.t("relay.asks.error.already_answered_waiting");
 	}
 	if (m.includes("not connected") || m.includes("409")) {
-		return "The terminal session went away — reopen it to answer.";
+		return messageRuntime.t("relay.asks.error.session_gone_reopen");
 	}
 	if (m.includes("did not answer") || m.includes("504")) {
-		return "The session didn’t respond in time — try again.";
+		return messageRuntime.t("relay.asks.error.session_timeout");
 	}
 	return message;
 }
@@ -336,7 +337,10 @@ export function PendingCard({
 				   HTTP failure; it changed nothing, so it must not be confirmed. The
 				   runtime's own sentence goes inline — this line is NOT the card's
 				   `error`, which would grey out the answer controls. */
-				setPolicyError(receipt.detail.trim() || "that was refused — nothing changed");
+				setPolicyError(
+					receipt.detail.trim() ||
+						messageRuntime.t("relay.approvals.gate.refused_nothing_changed"),
+				);
 				return;
 			}
 			/* THE RUNTIME'S SENTENCE IS THE RECEIPT (U1). This used to print a fixed
@@ -347,8 +351,8 @@ export function PendingCard({
 			   `globalDefaultReceipt` covers the global write's own accounting. */
 			const said = asSentence(
 				mode === "auto"
-					? receipt.detail.trim() || "this session is now auto"
-					: globalDefaultReceipt(receipt),
+					? receipt.detail.trim() || messageRuntime.t("relay.approvals.card.notice_session_auto")
+					: globalDefaultReceipt(receipt, messageRuntime.t),
 			);
 			/* THE CARD'S OWN FACT, AND IT MUST NOT BE LOST IN THE RECEIPT. The
 			   runtime's sentence is about the GATE; this card is about a request
@@ -356,13 +360,11 @@ export function PendingCard({
 			   tap reads as "handled", and the reader walks away from a session
 			   that is still blocked (`approval_answer` was never sent — see the
 			   block above `setPolicy`). */
-			setPolicyNotice(`${said} This call still needs your answer.`);
+			setPolicyNotice(`${said} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`);
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
 				setPairPrompt(true);
-				setPolicyError(
-					"This phone is not paired with that machine yet — pair it once and it can give this consent itself.",
-				);
+				setPolicyError(messageRuntime.t("relay.asks.gate.not_paired_error"));
 				return;
 			}
 			setPolicyError(humanizeError(String((failure as Error).message ?? failure)));
@@ -391,10 +393,11 @@ export function PendingCard({
 	   "runs without asking" as "this card is stale". The GATE SHEET paints the
 	   same `approvalPolicyLine` without that clause — it has no request in hand,
 	   so the sentence would name something that does not exist. */
-	const policyState = pending.kind === "approval" ? approvalPolicyLine(pending) : "";
+	const policyState =
+		pending.kind === "approval" ? approvalPolicyLine(pending, messageRuntime.t) : "";
 	const policyLine =
 		policyState && pending.approval_mode === "auto"
-			? `${policyState} This request still needs your answer.`
+			? `${policyState} ${messageRuntime.t("relay.approvals.card.request_needs_answer")}`
 			: policyState;
 
 	return (
@@ -438,22 +441,27 @@ export function PendingCard({
 			<span className="flex shrink-0 items-center justify-between text-meta text-accent">
 				<span>
 					{pending.kind === "approval"
-						? "approval needed"
+						? messageRuntime.t("relay.asks.pending.kind_approval")
 						: pending.secret
-							? "secret requested"
-							: "question"}
+							? messageRuntime.t("relay.asks.pending.kind_secret")
+							: messageRuntime.t("relay.asks.pending.kind_question")}
 					{optionCount > 0 ? (
-						<span className="text-ink-dim"> · {optionCount} options</span>
+						<span className="text-ink-dim">
+							{" "}
+							{messageRuntime.t("relay.asks.pending.options", { count: optionCount })}
+						</span>
 					) : null}
 				</span>
 				{multiQuestion ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
-						Question {pending.question_index + 1} of{" "}
-						{pending.question_total}
+						{messageRuntime.t("relay.asks.pending.question_of", {
+							index: pending.question_index + 1,
+							total: pending.question_total,
+						})}
 					</span>
 				) : count > 1 ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
-						1 of {count}
+						{messageRuntime.t("relay.asks.pending.one_of", { count })}
 					</span>
 				) : null}
 			</span>
@@ -558,7 +566,7 @@ export function PendingCard({
 							onChange={(e) => setRemember(e.target.checked)}
 							className="size-4 accent-accent"
 						/>
-						remember this choice
+						{messageRuntime.t("relay.asks.pending.remember")}
 					</label>
 					<div className="flex gap-2">
 						<button
@@ -567,7 +575,7 @@ export function PendingCard({
 							onClick={() => approve(true)}
 							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
 						>
-							{busy ? "…" : "approve"}
+							{busy ? "…" : messageRuntime.t("relay.asks.pending.approve")}
 						</button>
 						<button
 							type="button"
@@ -575,7 +583,7 @@ export function PendingCard({
 							onClick={() => approve(false)}
 							className="flex min-h-11 flex-1 items-center justify-center rounded-sm border border-danger-border bg-danger-wash text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
 						>
-							{busy ? "…" : "deny"}
+							{busy ? "…" : messageRuntime.t("relay.asks.pending.deny")}
 						</button>
 					</div>
 					{/* THE ESCAPE HATCH: a mode change, not an answer.
@@ -608,7 +616,7 @@ export function PendingCard({
 								onClick={() => void setPolicy("auto")}
 								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
 							>
-								Set auto for this session
+								{messageRuntime.t("relay.approvals.card.set_auto_session")}
 							</button>
 							<button
 								type="button"
@@ -616,7 +624,7 @@ export function PendingCard({
 								onClick={() => void setPolicy("default auto")}
 								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
 							>
-								Set auto for all sessions
+								{messageRuntime.t("relay.approvals.card.set_auto_all")}
 							</button>
 						</div>
 						{policyNotice ? (
@@ -651,7 +659,7 @@ export function PendingCard({
 				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
 					{pending.secret ? (
 						<p className="text-meta text-ink-dim">
-							secret — sent directly, not shown in the transcript
+							{messageRuntime.t("relay.asks.card.secret_notice")}
 						</p>
 					) : null}
 					<div className="flex gap-2">
@@ -670,7 +678,11 @@ export function PendingCard({
 							autoCapitalize={pending.secret ? "none" : undefined}
 							autoCorrect={pending.secret ? "off" : undefined}
 							spellCheck={pending.secret ? false : undefined}
-							placeholder={pending.secret ? "paste secret" : "your answer"}
+							placeholder={
+								pending.secret
+									? messageRuntime.t("relay.asks.card.placeholder_secret")
+									: messageRuntime.t("relay.asks.card.placeholder_answer")
+							}
 							className="min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 						/>
 						<button
@@ -679,7 +691,7 @@ export function PendingCard({
 							onClick={() => answerAsk(freeText.trim())}
 							className="flex min-h-11 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
 						>
-							{busy ? "…" : "send"}
+							{busy ? "…" : messageRuntime.t("relay.asks.pending.send")}
 						</button>
 					</div>
 				</div>

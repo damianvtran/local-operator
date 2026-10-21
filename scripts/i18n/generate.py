@@ -88,6 +88,18 @@ SECURITY_HELD_LOCALES: frozenset[str] = frozenset()
 #: ``relay.session.tags`` is the tag slice (LOH-11 C1): the tag line, the
 #: assignment sheet and the list's long-press copy, split out of ``relay.session``
 #: because the catalogues are one small owned namespace per surface.
+#: ``relay.asks`` is the asks/cards slice (the relay's last planned namespace,
+#: RFC §5): the ask card, asks sheet, dock, settled row, pending decision card,
+#: approval-gate sheet and the disclosure that holds panels shut while a
+#: question waits. The tuple is one reviewed line per slice, never a glob.
+#: ``relay.approvals`` is the approvals-policy slice that landed on main while
+#: ``relay.asks`` was in flight (`feat(mobile): offer both approval scopes on
+#: the phone`): the policy state line, the third (global) scope and the mode
+#: change links the pending card carries. It is a namespace of its own rather
+#: than more ``relay.asks`` keys because the asks catalogues are already
+#: carried by every translated locale, and a new key there would be untranslated
+#: in all of them; this one starts en-only and rides §2.5 fallback until its own
+#: translation wave.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
@@ -100,6 +112,8 @@ OWNED_SPA_NAMESPACES = (
     # new key in a namespace a locale has not carried yet GROWS the shrink-only
     # coverage allowance (docs/I18N.md).
     "relay.ask",
+    "relay.approvals",
+    "relay.asks",
 )
 
 GENERATED_HEADER = (
