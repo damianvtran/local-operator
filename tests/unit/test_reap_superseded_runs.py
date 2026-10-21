@@ -112,7 +112,8 @@ def test_a_deleted_branch_is_kept_rather_than_guessed(api):
     assert "gone" in reason
 
 
-def test_a_pr_run_is_cancelled_only_when_both_readings_agree(api):
+def test_a_pr_run_is_cancelled_when_the_head_and_the_tip_both_moved(api):
+    """Both readings moved: this is the ordinary superseded PR case."""
     api["pr"][7] = "b" * 40
     api["tip"]["feat/x"] = "b" * 40
     should, reason = reaper.decide(
@@ -122,13 +123,13 @@ def test_a_pr_run_is_cancelled_only_when_both_readings_agree(api):
     assert "moved past" in reason
 
 
-def test_a_pr_run_is_kept_when_the_two_readings_disagree(api):
-    """The guard that matters: one reading saying 'current' is enough to KEEP.
+def test_a_pr_run_is_kept_when_the_branch_tip_still_points_at_it(api):
+    """The tip disagreeing with the PR head KEEPS the run.
 
-    A cancellation requires both the PR head and the branch tip to have moved
-    past this run. If either still points at the run's commit, the run may be
-    the one that is about to be current, and cancelling it would delete live
-    CI on a guess.
+    The PR head is authoritative (see the fork-PR test below), but when the
+    head says "moved" and the branch tip still points at the run's commit, the
+    run may be the one about to be current and cancelling it would delete live
+    CI on one signal. Corroboration only ever protects.
     """
     api["pr"][7] = "b" * 40  # PR says moved
     api["tip"]["feat/x"] = "a" * 40  # but the branch tip still IS this commit
@@ -345,3 +346,51 @@ def test_a_transient_failure_on_the_corroborating_tip_read_keeps_a_pr_run(api, m
     )
     assert not should
     assert "transient" in reason
+
+
+def test_a_transient_failure_on_the_pr_head_read_keeps_even_past_the_bound(api, monkeypatch):
+    """The exact Q2 regression: a 502 on the PR read must not become a bound.
+
+    Round 2 reproduced the opposite behaviour, and the surviving mutant from
+    round 3 showed this path had no test of its own.
+    """
+    ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    def boom(repo, number):
+        raise reaper.ApiError("HTTP 502", 502)
+
+    monkeypatch.setattr(reaper, "pr_head_sha", boom)
+    should, reason = reaper.decide(
+        "o/r",
+        _run(
+            event="pull_request",
+            created_at=ancient,
+            updated_at=ancient,
+            pull_requests=[{"number": 7}],
+        ),
+        5.0,
+        24.0,
+    )
+    assert not should
+    assert "transient" in reason
+
+
+def test_branch_tip_returns_none_only_for_a_confirmed_404(monkeypatch):
+    """The classification itself, which the surviving mutant disabled.
+
+    `branch_tip` maps 404 to None ("gone") and re-raises everything else, so
+    the distinction the abandonment bound depends on cannot be silently lost.
+    """
+    for code, expected_none in ((404, True), (500, False), (403, False)):
+
+        def fake(path, *, method="GET", _code=code):
+            raise reaper.ApiError(f"HTTP {_code}", _code)
+
+        monkeypatch.setattr(reaper, "gh_api", fake)
+        if expected_none:
+            assert reaper.branch_tip("o/r", "feat/x") is None
+        else:
+            with pytest.raises(reaper.ApiError):
+                reaper.branch_tip("o/r", "feat/x")

@@ -40,10 +40,14 @@ one prevents:
    because a head move and the run it triggers arrive seconds apart and a
    sweep racing that gap would cancel the run that is about to be current.
 6. ABANDONMENT, bounded hard, and ONLY for a run no reading can resolve. A
-   run queued longer than --max-queue-hours (default 24) whose branch, PR head
-   and pull_requests entry are all unavailable is cancelled, because nothing
-   queues for a day and then runs. Age NEVER overrules a resolved run: a
-   current head wins at 37 days. This rule exists because a live dry run found exactly that:
+   run queued longer than --max-queue-hours (default 24) is cancelled when the
+   reading that would supersede it is CONFIRMED absent: a 404 on the branch or
+   on the PR head, or no `pull_requests` entry to ask about. Note the scope --
+   a PR run whose PR head 404s is bounded without the branch ever being read,
+   so "all three unavailable" is the common shape, not a requirement. Any
+   UNKNOWN failure keeps the run instead. Age NEVER overrules a resolved run:
+   a current head wins at 37 days. This rule exists because a live dry run
+   found exactly that:
    two `pull_request` runs from 2026-09-13, still `queued` 37 days later, on
    branches that no longer exist (404) and with no `pull_requests` entry in
    either the list or the single-run view -- so the supersession rules could
