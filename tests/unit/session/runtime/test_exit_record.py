@@ -403,6 +403,36 @@ def test_a_departure_stamp_a_reader_cannot_use_is_refused(tmp_path: Path) -> Non
         assert journal.read_exit_record(directory) is None, bad
 
 
+def test_a_non_finite_pressure_reading_refuses_the_record(tmp_path: Path) -> None:
+    """Hostile JSON must not take the listing down (review round 2, MINOR-1).
+
+    ``json.loads`` accepts the bare ``Infinity``/``NaN``/``-Infinity`` literals,
+    so ``free_disk_bytes: Infinity`` reached ``int()`` and raised
+    ``OverflowError`` OUT of the reader — one corrupt field and
+    ``lop sessions --all`` died. A pressure value nobody can trust is corruption
+    of the record, and the record reads as "no record": the same rule the
+    non-finite stamps above already follow.
+    """
+    directory = _session_dir(tmp_path)
+    path = journal.exit_record_path(directory)
+    base = {"v": 1, "session_id": "abc123", "pid": 1, "started_at": 1.0, "at": 1.0, "reason": "x"}
+
+    for bad in (
+        {**base, "pressure": {"free_disk_bytes": float("inf"), "load_1m": None}},
+        {**base, "pressure": {"free_disk_bytes": None, "load_1m": float("nan")}},
+        {**base, "pressure": {"free_disk_bytes": float("-inf"), "load_1m": None}},
+        {**base, "pressure": {"free_disk_bytes": None, "load_1m": float("inf")}},
+        # The literals themselves, as the writer would see them on disk.
+        {**base, "pressure": {"free_disk_bytes": 1, "load_1m": "-Infinity"}},
+    ):
+        path.write_text(json.dumps(bad))
+        assert journal.read_exit_record(directory) is None, bad
+
+    # A NULL pressure pair is the ordinary "nothing measured" answer and stays.
+    path.write_text(json.dumps({**base, "pressure": {"free_disk_bytes": None, "load_1m": None}}))
+    assert journal.read_exit_record(directory) is not None
+
+
 def test_a_record_from_another_conversation_is_refused(tmp_path: Path) -> None:
     """The directory is the authority: a mismatched ``session_id`` is no evidence."""
     directory = _session_dir(tmp_path)
@@ -437,6 +467,30 @@ def test_the_run_record_round_trips_and_only_its_own_key_clears_it(tmp_path: Pat
 
     journal.clear_run_record(directory, pid=4242, started_at=900.0)
     assert journal.read_run_record(directory) is None
+
+
+def test_a_failed_exit_record_write_keeps_the_run_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed write must not clear the marker (review round 2, MINOR-2).
+
+    The listing reads "run marker absent" as the clean-exit pair and shows
+    whatever exit record it finds. Clearing the marker after a FAILED write would
+    therefore let the PREVIOUS run's record explain this departure — the
+    borrowed-history verdict the marker exists to stop. Keeping the marker makes
+    the same situation read as unknown.
+    """
+    directory = _session_dir(tmp_path)
+    journal.write_run_record("abc123", conversation_dir=directory, pid=os.getpid(), started_at=42.0)
+    monkeypatch.setattr(journal, "write_exit_record", lambda *args, **kwargs: None)
+    handle = _Handle("abc123", directory)
+    runtime = _Runtime("abc123", 42.0)
+
+    asyncio.run(process._clean_exit(handle, runtime, reason="idle-exit"))
+
+    assert handle.disposed is True, "the exit still proceeds"
+    assert journal.read_exit_record(directory) is None
+    assert journal.read_run_record(directory) is not None, "the marker must survive a failed write"
 
 
 def test_a_clean_exit_removes_its_run_record(tmp_path: Path) -> None:
