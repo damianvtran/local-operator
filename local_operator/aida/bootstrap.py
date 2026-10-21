@@ -79,7 +79,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -176,12 +175,25 @@ def _discard_failed_create(config_dir: Path, session_id: str) -> None:
     durable can be inside it), so it can never delete a real conversation.
     """
     from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session.cleanup import remove_fresh_session_dir
 
     directory = _sessions_root(config_dir) / session_id
     try:
         if not directory.is_dir() or (directory / TRANSCRIPT_NAME).exists():
             return
-        shutil.rmtree(directory)
+        # The audited fresh-removal primitive writes the ``failed-create``
+        # receipt before it removes, and refuses when the receipt cannot be
+        # written; a stray empty directory is the safe failure, an unlogged
+        # loss is not.
+        if not remove_fresh_session_dir(
+            directory,
+            config_dir=Path(config_dir),
+            policy="failed-create",
+            reason="the session build failed after its directory was created",
+            actor="aida",
+            title=naming.display_name(config_dir),
+        ):
+            logger.warning("aida: kept the failed session directory %s (no receipt)", session_id)
     except OSError:
         logger.debug("aida: could not clean up a failed session create", exc_info=True)
 

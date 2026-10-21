@@ -894,6 +894,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "tmp FILE -> last-cleanup.json FILE beside the session dirs (R3-4)",
     ),
     (
+        "local_operator/session/cleanup.py::_write_holds",
+        "os.replace",
+        "tmp FILE -> .session-holds.json FILE beside the session dirs; never a session",
+    ),
+    (
+        "local_operator/session/cleanup.py::_write_holds",
+        "<path>.unlink",
+        "the tmp FILE of a failed holds write",
+    ),
+    (
+        "local_operator/session/census.py::_write_census",
+        "os.replace",
+        "tmp FILE -> .session-census.json FILE beside the session dirs; never a session",
+    ),
+    (
+        "local_operator/session/census.py::_write_census",
+        "<path>.unlink",
+        "the tmp FILE of a failed census write",
+    ),
+    (
         "local_operator/session/cleanup.py::_write_record",
         "<path>.unlink",
         "the tmp FILE of a failed record write",
@@ -1112,26 +1132,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
         "os.replace",
         "the .desktop.json.<uuid>.tmp staging FILE -> desktop.json FILE",
-    ),
-    # The create+arm rollback in the wakes surface. This call CAN reach a
-    # session directory, and the row says so rather than claiming otherwise:
-    # it removes the draft `wakes.create` made in the same request, when and
-    # only when the arm that followed failed. What makes it safe is an
-    # IDENTITY proof checked at the call site (`_rollback_created`): the
-    # target is this config dir's own `sessions/<id>`, it carries the desktop
-    # draft marker THIS request wrote, and it holds no transcript, no runtime
-    # record and no wake index entry — any of which means something else has
-    # adopted the directory, and it is left alone. It deliberately does NOT go
-    # through `cleanup.remove_session_dir`, and that is the interesting half:
-    # that remover refuses an UNMARKED store, `mark_store`'s contract says
-    # cleanup must never mark its own target, and a store where no session has
-    # ever been built carries no marker — which is exactly the store a
-    # freshly created desktop draft lives in, so routing this through it would
-    # turn the rollback into a silent no-op in the one case it exists for.
-    (
-        "local_operator/server/routes/desktop_wakes.py::_rollback_created",
-        "shutil.rmtree",
-        "the desktop draft THIS request just created, after proving it is untouched",
     ),
     # The local publication's in-memory store swap. `<path>.replace` is this
     # guard's heuristic reading of `store.replace(state)` — the receiver is a
@@ -2768,19 +2768,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "removes the <config_dir>/aida/escalate.json tray FILE after reading it",
     ),
-    # The ONE call of hers that removes a DIRECTORY: the create-failure
-    # cleanup. It is guarded twice in the same function — the directory must
-    # exist AND hold no transcript — so the window it can act in is between
-    # the fresh ``mkdir`` and the first transcript append, and a real
-    # conversation can never be inside it. The id it names was minted by the
-    # very call that created the directory (``uuid4().hex[:12]``), never read
-    # from her state file, so a retry after a partial failure cannot reach an
-    # established id either.
-    (
-        "local_operator/aida/bootstrap.py::_discard_failed_create",
-        "shutil.rmtree",
-        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
-    ),
     # The Librarian's small stores and her create-failure cleanup: the same
     # shapes, the same arguments as Aida's block above.
     (
@@ -2797,11 +2784,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/librarian/state.py::clear_extras",
         "<path>.unlink",
         "removes the <config_dir>/librarian/extras.json tray FILE after processing it",
-    ),
-    (
-        "local_operator/librarian/bootstrap.py::_discard_failed_create",
-        "shutil.rmtree",
-        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
     ),
     (
         "local_operator/librarian/proactive.py::reconcile",
@@ -3492,6 +3474,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> .session-holds.json (the holds map, beside the log)
+        "local_operator/session/cleanup.py::_write_holds",
+        # tmp -> .session-census.json (the census baseline, beside the log)
+        "local_operator/session/census.py::_write_census",
         # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
         # never a session directory (the target is a regular file).
         "local_operator/session/delegated_retention.py::_write_cleanup_manifest",

@@ -1450,6 +1450,39 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
 
+    # `lop sessions hold|holds|unhold`: the operator's VALUE HOLDS. A hold is
+    # the one removal refusal that is not a policy question — an argument that
+    # this conversation is evidence, or is itself the source of truth, so no
+    # age/count/byte limit and no content pass may take it. Recorded in
+    # <config>/sessions/.session-holds.json and read fail-closed by every
+    # remover; releasing one writes a `hold-release` row to the cleanup log,
+    # which is the explicit decision an auditor needs.
+    #
+    # HELP IS DEFERRED, NOT DROPPED (2026-10-20). New visible help copy needs a
+    # translation wave into every active locale plus an independent audit; the
+    # i18n gate refuses brand-new English in an active locale by design
+    # (`check.py`'s allowance-growth rule), and a coder must not translate and
+    # audit their own contribution. Until that wave lands, the three commands
+    # are hidden from `lop sessions --help` the way `resume-click` is: for a
+    # SUBPARSER, `help=argparse.SUPPRESS` is not the hide idiom (argparse
+    # renders the sentinel verbatim), so the kwarg is OMITTED. The semantics are
+    # documented on the handlers and in `session/cleanup.py`'s holds block, and
+    # the commands work in full. Follow-up: one help-tranche key per command.
+    hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
+    hold_parser.add_argument("session", help=argparse.SUPPRESS)
+    hold_parser.add_argument("--reason", required=True, help=argparse.SUPPRESS)
+    hold_parser.add_argument(
+        "--kind",
+        choices=("evidence", "source-of-truth", "operator"),
+        default="operator",
+        help=argparse.SUPPRESS,
+    )
+    holds_parser = sessions_subparsers.add_parser("holds", parents=[parent_parser])
+    holds_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    unhold_parser = sessions_subparsers.add_parser("unhold", parents=[parent_parser])
+    unhold_parser.add_argument("session", help=argparse.SUPPRESS)
+    unhold_parser.add_argument("--reason", required=True, help=argparse.SUPPRESS)
+
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
     # running / talk to it / end it" — and deliberately NOT the
@@ -6663,6 +6696,128 @@ def sessions_sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sessions_hold_command(args: argparse.Namespace) -> int:
+    """``lop sessions hold`` — record an operator value hold on one conversation.
+
+    A hold outranks every removal policy and the content pass, so the reference
+    is resolved to one id before anything is written: an ambiguous prefix is
+    refused with its candidates rather than holding the wrong conversation.
+    """
+    from local_operator.session.cleanup import resolve_session_reference, set_hold
+
+    sessions_dir = config_dir() / "sessions"
+    requested = str(args.session)
+    session_id, candidates = resolve_session_reference(sessions_dir, requested)
+    if session_id is None:
+        if candidates:
+            print(
+                f"{requested!r} is ambiguous: {len(candidates)} stored sessions match "
+                "(pass the full id):",
+                file=sys.stderr,
+            )
+            for name in candidates[:20]:
+                print(f"  {name}", file=sys.stderr)
+        else:
+            print(f"no session {requested!r} in this store", file=sys.stderr)
+        return 1
+    if not set_hold(
+        sessions_dir, session_id, reason=str(args.reason), by="operator", kind=str(args.kind)
+    ):
+        print(f"could not record the hold on {session_id}", file=sys.stderr)
+        return 1
+    print(f"Held {session_id} ({args.kind}): {str(args.reason).strip()}")
+    return 0
+
+
+def sessions_holds_command(args: argparse.Namespace) -> int:
+    """``lop sessions holds`` — list the store's value holds.
+
+    Exit 1 on an unreadable holds file, because that is the same state in which
+    every remover refuses: the listing must not render an empty table as "no
+    holds" when the truth is "cannot tell".
+    """
+    import json as _json
+
+    from local_operator.session.cleanup import HoldsUnreadable, read_holds
+
+    sessions_dir = config_dir() / "sessions"
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        print(f"cannot read the value holds: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(_json.dumps({"holds": holds}, indent=2, sort_keys=True))
+        return 0
+    if not holds:
+        print("no value holds recorded for this store.")
+        return 0
+    for session_id in sorted(holds):
+        entry = holds[session_id]
+        print(
+            f"  {session_id}  {entry.get('kind', '?')}  {entry.get('reason', '')}"
+            f"  ({entry.get('by', '?')}, {entry.get('at', '?')})"
+        )
+    print(f"{len(holds)} value hold(s).")
+    return 0
+
+
+def sessions_unhold_command(args: argparse.Namespace) -> int:
+    """``lop sessions unhold`` — clear a hold, logging the decision.
+
+    A session directory that is already gone can still have its hold released:
+    the holds file is the record that must be clearable, and refusing because
+    the directory vanished would leave a tombstone no command can remove. The
+    output says the session is gone so the caller is not misled about what
+    remains.
+    """
+    from local_operator.session.cleanup import (
+        HoldsUnreadable,
+        read_holds,
+        release_hold,
+        resolve_session_reference,
+    )
+
+    sessions_dir = config_dir() / "sessions"
+    requested = str(args.session)
+    session_id, candidates = resolve_session_reference(sessions_dir, requested)
+    if candidates:
+        print(
+            f"{requested!r} is ambiguous: {len(candidates)} stored sessions match "
+            "(pass the full id):",
+            file=sys.stderr,
+        )
+        for name in candidates[:20]:
+            print(f"  {name}", file=sys.stderr)
+        return 1
+    if session_id is None:
+        # No directory: only a literal id-shaped reference can name a hold on a
+        # session that is gone. Anything path-shaped is refused by the same
+        # rule the resolver applies.
+        if not requested or requested in (".", "..") or Path(requested).name != requested:
+            print(f"not a session id: {requested!r}", file=sys.stderr)
+            return 1
+        target = requested
+    else:
+        target = session_id
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        print(f"cannot read the value holds: {exc}", file=sys.stderr)
+        return 1
+    if target not in holds:
+        print(f"no hold was recorded for {target}", file=sys.stderr)
+        return 1
+    if not release_hold(sessions_dir, target, reason=str(args.reason), actor="cli"):
+        print(f"could not release the hold on {target}", file=sys.stderr)
+        return 1
+    if session_id is None:
+        print(f"Released the hold on {target}; the session directory is gone.")
+    else:
+        print(f"Released the hold on {target}.")
+    return 0
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -6674,6 +6829,15 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "hold":
+        return sessions_hold_command(args)
+
+    if getattr(args, "sessions_command", None) == "holds":
+        return sessions_holds_command(args)
+
+    if getattr(args, "sessions_command", None) == "unhold":
+        return sessions_unhold_command(args)
 
     if getattr(args, "sessions_command", None) == "reclaim":
         return sessions_reclaim_command(args)
