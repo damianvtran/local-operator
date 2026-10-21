@@ -67,7 +67,7 @@ def test_package_globs_include_exactly_six_active_locales_and_no_held_bytes() ->
         for path in PACKAGE.glob(glob)
         if path.is_file() and path.is_relative_to(PACKAGE / "i18n" / "catalogues")
     }
-    assert {path.parent.name for path in included} == {"en", "es", "fr", "hi", "ru", "vi"}
+    assert {path.parent.name for path in included} == {"en", "es", "fr", "hi", "ru", "ur", "vi"}
     assert not (PACKAGE / "i18n" / "catalogues" / "zh-CN").exists()
     assert not any("zh-CN" in path.relative_to(PACKAGE).parts for path in included)
     assert all(path.stat().st_size > 0 for path in included)
