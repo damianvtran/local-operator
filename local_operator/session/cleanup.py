@@ -1539,10 +1539,14 @@ _GUARD_REFUSALS: dict[str, str] = {
         "with `lop sessions unhold {session_id} --reason ...` before deleting it."
     ),
     # The index itself is the thing to repair; deleting it would silently drop
-    # every hold, and nothing removes a session while it cannot be read.
+    # every hold, and nothing removes a session while it cannot be read. The
+    # sentence names the CONVERSATION first, like every other refusal in this
+    # table (the table is read by a user looking at one conversation), and
+    # names the file store-relative — never a host path.
     "operator holds unreadable": (
-        "The value-hold index could not be read, so nothing was deleted. Repair "
-        "or restore the store's .session-holds.json file, then try again."
+        "That conversation's value-hold index could not be read, so nothing was "
+        "deleted. Repair or restore the store's .session-holds.json file, then "
+        "try again."
     ),
 }
 
