@@ -712,6 +712,7 @@ def test_a_role_pin_is_honoured_under_the_operator_default(tmp_path, monkeypatch
             effort="hi",
         ),
         creating=True,
+        scope="global",
     )
     session = make_session(tmp_path)
     session.agent_registry = registry
@@ -1041,6 +1042,7 @@ def test_a_role_pin_written_after_the_session_starts_reaches_the_next_spawn(tmp_
             effort="hi",
         ),
         creating=True,
+        scope="global",
     )
 
     spec = session._resolve_subagent_model("designer", None, strict=True)
@@ -1232,6 +1234,7 @@ async def test_a_role_pinned_to_an_effort_tier_sends_that_effort(tmp_path, monke
             effort="hi",
         ),
         creating=True,
+        scope="global",
     )
     session = make_session(tmp_path)
     session.agent_registry = registry
@@ -1262,7 +1265,7 @@ def install_coder_seed(registry) -> None:
     """
     from local_operator.agent_profiles import install_seed
 
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
 
 
 def test_a_role_pinning_the_session_model_runs_on_it_even_when_the_launch_passes_a_tier(

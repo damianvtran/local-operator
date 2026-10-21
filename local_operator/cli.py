@@ -1399,6 +1399,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(_sh.move_queue().envelope(locale=help_locale)["text"]),
     )
+    # THE ROLE-DEFINITION GATE'S OPT-OUT (LOH-9 S2). A conversation with session
+    # roles refuses a move by default because v1 does not carry them; this flag is
+    # the explicit "move it anyway, stash the definitions on this device" — never
+    # silent, because the move's receipt and its refusal name the count and path.
+    #
+    # NO `help=` STRING, DELIBERATELY. Every key in ``cli.sessions_help`` is
+    # already recorded as missing for four ACTIVE locales (es/hi/ru/vi); a new
+    # English key would GROW that coverage allowance, which the shrink-only gate
+    # forbids, and translating the 48-key namespace for four locales is a review
+    # wave of its own. The flag is still listed by argparse and its consequences
+    # are stated by the refusal and the receipt, so the gap is the one-line
+    # description only (disclosed in the LOH-9 S2 PR).
+    move_parser.add_argument("--drop-session-roles", action="store_true")
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
@@ -6029,6 +6042,12 @@ _REMOTE_ROW_FILL: dict[str, Any] = {
     "subagents_running": None,
     "subagents_queued": None,
     "last_activity_s": None,
+    # THE EXIT RECORD'S THREE READINGS. A remote catalogue row does not carry
+    # them, so the fill keeps the merged list ONE shape: absent is null, exactly
+    # as this table treats every other fact a peer cannot report.
+    "stopped_at_s": None,
+    "stop_reason": "",
+    "stop_requested": None,
     "completion_kind": "",
     "completion_reason": "",
     "leaving": "",
@@ -6462,7 +6481,7 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    for key in ("running_notice", "notice", "monitors_notice"):
+    for key in ("running_notice", "notice", "monitors_notice", "session_roles_notice"):
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
@@ -6509,6 +6528,9 @@ def _sessions_move_words(
         # pre-safe-point reading).
         queue = result["queue"]
         phase = str(result.get("phase") or queue.get("phase") or "queued")
+        # A queued DROP still owes the user its stash promise (QA round 2): the
+        # same carry line the finished move prints, from the record-backed carry.
+        stay_lines = _carry_lines(result)
         to_block_q = result.get("to_device") or {}
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
@@ -6527,11 +6549,12 @@ def _sessions_move_words(
         head = f"Queued a move of {session_id} to {target}"
         head += f" — {note}." if note else "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device."]
+            return [head, "It is no longer running on this device.", *stay_lines]
         if shape == "running":
             return [
                 head,
                 f"It can no longer be cancelled; the conversation continues on {target}.",
+                *stay_lines,
             ]
         return [
             head,
@@ -6539,6 +6562,7 @@ def _sessions_move_words(
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
             f"`lop sessions move --cancel-queued {session_id}`.",
+            *stay_lines,
         ]
 
     to_block = result.get("to_device") or {}
@@ -6667,6 +6691,9 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
         # off, the same contract the parser's default gives it.
         queue=bool(getattr(args, "queue", False)),
+        # ``bool(...)`` so a hand-rolled Namespace without the attribute gets the
+        # protective default (the source refuses; nothing is dropped silently).
+        drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
     )
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
@@ -7206,6 +7233,13 @@ def sessions_command(args: argparse.Namespace) -> int:
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
+        # STOPPED rides beside LAST_ACTIVE on the same gate: a stored session has
+        # no uptime, so when it LAST MOVED and when it LAST STOPPED are the two
+        # clocks a reader can actually use. The reason cell follows, because the
+        # age alone cannot separate "it idled out" from "I stopped it" — the
+        # question the 2026-09-30 sweep left unanswered (see ``stop_requested``).
+        header += f" {'STOPPED':>11}"
+        header += f" {'STOP_REASON':<{STOP_REASON_COLUMN_WIDTH}}"
     if show_why:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
@@ -7274,6 +7308,24 @@ def sessions_command(args: argparse.Namespace) -> int:
             stamp = row["last_activity_s"]
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
+            # A REAL AGE FROM THE EXIT RECORD, and "—" where there is none. The
+            # two are different sentences and the column must not blur them: a
+            # SIGKILLed runtime writes no record, and printing the transcript's
+            # mtime here would invent a departure nobody observed.
+            stopped = row.get("stopped_at_s")
+            stopped_age = (
+                "—" if stopped is None else _format_duration(max(0.0, now - float(stopped)))
+            )
+            line += f" {stopped_age:>11}"
+            # THE REASON, fitted and marked by the same helpers WHY uses — not
+            # character slicing, which is what runs a wide-glyph row into its
+            # neighbour. Only a stored row can carry one; a live row's cell is
+            # blank because nothing has stopped to report.
+            if stored:
+                said = _clamp_reason_cell(row.get("stop_reason") or "—", STOP_REASON_COLUMN_WIDTH)
+            else:
+                said = ""
+            line += f" {_pad_cell(said, STOP_REASON_COLUMN_WIDTH)}"
         if show_why:
             cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
             # `:<{WHY_COLUMN_WIDTH}` would pad this by CHARACTERS and hand a
@@ -9320,6 +9372,21 @@ def _live_state_supersedes_outcome(row: dict[str, Any]) -> bool:
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
 WHY_COLUMN_WIDTH = 48
+
+
+#: Width of `lop sessions`' trailing STOP_REASON column, in display CELLS.
+#:
+#: THE SECOND HALF of the STOPPED pair. The age column says WHEN the runtime's own
+#: exit path ran; this one says WHY, in the runtime's words (``idle-exit``,
+#: ``retiring for 0.85.0``, ``SIGTERM``). Both are gated on stored rows exactly
+#: like LAST_ACTIVE, because both are facts only a stopped runtime can report.
+#:
+#: Wide enough that every policy reason a runtime produces fits uncut —
+#: ``retiring for 0.85.0@abc1234`` is the long shape at 27 cells — and a longer
+#: one (the probe-unreadable idle exit appends its evidence) is MARKED by
+#: ``_clamp_reason_cell`` rather than silently sliced, because the cell's purpose
+#: is to answer a question and a plausible-looking cut answers it wrongly.
+STOP_REASON_COLUMN_WIDTH = 28
 
 
 #: Width of `lop sessions`' trailing LEAVING column, in display CELLS.

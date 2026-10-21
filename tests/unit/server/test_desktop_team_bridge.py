@@ -548,6 +548,7 @@ class FakeClient:
         text: str,
         tenant_id=None,
         agent_label=None,
+        thread_root_id=None,
         access=None,
     ):
         FakeClient.behavior["last_send"] = {
@@ -557,7 +558,29 @@ class FakeClient:
             "tenant_id": tenant_id,
             "agent_label": agent_label,
         }
+        FakeClient.behavior["last_send_thread_root_id"] = thread_root_id
         return self._answer("conversation_send")
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id=None,
+        limit=None,
+        after_seq=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_replies_kwargs"] = {
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "after_seq": after_seq,
+            "endpoint_id": endpoint_id,
+        }
+        return self._answer("conversation_replies")
 
     async def conversation_body(
         self,
@@ -691,6 +714,39 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
     ) as client:
         yield client, root, discipline
+
+
+async def test_directory_accepts_a_uuid_tenant_id(api):
+    """The live tenant id is a UUID, not the legacy ``tnt_`` form.
+
+    The route's pre-I/O grammar used to accept only ``tnt_...``; a real tenant
+    was therefore refused with 422 ``invalid_request`` and the renderer showed
+    its "needs a newer version" cause even though the deployed server had the
+    directory. The UUID must reach the client unchanged.
+    """
+
+    client, _root, _discipline = api
+    tenant_id = "5b72d9f4-8ce7-4821-ac8a-f92c365ed5b3"
+    FakeClient.behavior["directory"] = {"members": []}
+    response = await client.get(
+        "/v1/desktop/team-bridge/directory", params={"tenant_id": tenant_id}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"members": []}
+    assert FakeClient.behavior["last_directory_tenant"] == tenant_id
+
+
+async def test_directory_names_a_malformed_tenant_as_a_local_validation_error(api):
+    client, _root, _discipline = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/directory", params={"tenant_id": "../not-a-tenant"}
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_request"
+    assert detail["field"] == "tenant_id"
+    assert "tenant_id" in detail["message"]
+    assert "newer version" not in detail["message"]
 
 
 async def test_status_composes_state_local_config_consent_and_the_screening_receipt(api):
@@ -2821,3 +2877,78 @@ async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
         json={"decision": "accept", "consent_version": "bridge_consent_v1"},
     )
     assert response.status_code == 422, response.text
+
+
+# -- threads (agent-server feat/bridge-threads) --------------------------------
+
+
+async def test_conversation_send_forwards_a_thread_root(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_2", "seq": 2}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-2", "body": "on it", "thread_root_id": "bcmsg_root0001"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_thread_root_id"] == "bcmsg_root0001"
+
+
+async def test_conversation_send_without_a_thread_root_forwards_none(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_3", "seq": 3}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-3", "body": "hello"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_thread_root_id"] is None
+
+
+async def test_conversation_send_refuses_a_malformed_thread_root_before_io(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-4", "body": "x", "thread_root_id": "../../status"},
+    )
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_replies_forwards_parsed_hints(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_replies"] = {
+        "root": {"id": "bcmsg_root0001", "seq": 1, "reply_count": 2},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 2}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
+        "?tenant_id=tnt_1&limit=20&after_seq=2"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["root"]["reply_count"] == 2
+    assert FakeClient.behavior["last_replies_kwargs"] == {
+        "conversation_id": "bcv_abc12345",
+        "message_id": "bcmsg_root0001",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "after_seq": 2,
+        "endpoint_id": None,
+    }
+
+
+async def test_conversation_replies_refuses_bad_input_before_io(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    base = "/v1/desktop/team-bridge/conversations"
+    for path in (
+        f"{base}/nope/messages/bcmsg_root0001/replies",
+        f"{base}/bcv_abc12345/messages/nope/replies",
+        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?after_seq=x",
+        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?after_seq=-1",
+        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?before_seq=3",
+    ):
+        response = await client.get(path)
+        assert response.status_code == 422, (path, response.text)
+    assert FakeClient.calls == calls_before

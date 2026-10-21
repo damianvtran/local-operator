@@ -583,6 +583,13 @@ def test_the_session_move_contract_is_frozen() -> None:
         "running_notice",
         "notice",
         "monitors_notice",
+        # LOH-9 S2: the source's statement about the role/team definitions a
+        # --drop-session-roles move stashed instead of carrying — the COUNT
+        # (always present on a drop move, so a client can branch without
+        # parsing prose) and the receipt line every surface prints. Absent
+        # exactly when the move carried no session roles.
+        "session_roles",
+        "session_roles_notice",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

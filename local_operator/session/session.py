@@ -358,6 +358,9 @@ from local_operator.video.records import VIDEO_JOB_CUSTOM_TYPE
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
     # It only holds the manager the composition root hands it.
+    # Type-only: the consent intent is a harness value, held without being
+    # constructed here.
+    from local_operator.harness.types import DurableWriteIntent
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -2980,6 +2983,20 @@ class Session:
         cwd: str | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
         request_approval: "ApprovalGate | None" = None,
+        #: THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may write a
+        #: CONVERSATION-scoped role or team unaided; changing the ACCOUNT store
+        #: is the user's decision. No host installs a seam yet — the TUI's
+        #: approval card is satisfied by its session-scoped "approve all" latch
+        #: without showing the specific intent, so wiring this to that card
+        #: would let a blanket shortcut authorize account-wide writes. ``None``
+        #: refuses every tool-issued account write, and the refusal names the
+        #: user surfaces (desktop editor / TUI form / CLI) plus the
+        #: conversation-only retry. Declared here so a host that CAN show an
+        #: intent-specific, non-rememberable confirmation has one place to
+        #: install it.
+        authorize_durable_write: (
+            Callable[["DurableWriteIntent"], Awaitable[str | None]] | None
+        ) = None,
         goal_state: GoalState | None = None,
         #: The variables surface behind list_variables/read_variable. Held by
         #: the SESSION because ``_build_tool_context`` is rebuilt every turn:
@@ -3803,6 +3820,7 @@ class Session:
             skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
         )
         self._request_approval = request_approval
+        self._authorize_durable_write = authorize_durable_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
         # terminal can draw a picker, so the hook arrives from
@@ -18017,6 +18035,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The host's consent seam for tool-issued ACCOUNT writes. Held on
+            # the session because this context is rebuilt every turn; ``None``
+            # is a refusal, never a permission (see the constructor field).
+            authorize_durable_write=self._authorize_durable_write,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
             # (the flag is off, or no host installed an ask surface), which is

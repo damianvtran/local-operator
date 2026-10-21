@@ -36,6 +36,7 @@ def setup(tmp_path, monkeypatch, *, choice="model"):
         registry,
         AgentParams(op="create", name="designer", instructions="Design it", effort="hi"),
         creating=True,
+        scope="global",
     )
     session = make_session(tmp_path)
     session.agent_registry = registry
@@ -402,7 +403,7 @@ def setup_inherit_pinned(tmp_path, monkeypatch, *, choice="model"):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     write_model_choice_config(tmp_path / "config", {"hi": "deepseek/deepseek-chat"}, choice=choice)
     registry = AgentRegistry(tmp_path / "agents")
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
     session = make_session(tmp_path)
     session.agent_registry = registry
     return session
