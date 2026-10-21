@@ -453,7 +453,7 @@ def test_the_receipt_prints_the_peers_model_sentence_for_a_pure_model_create(
     ],
 )
 def test_the_set_model_hop_carries_the_desktops_reasoning_effort(
-    root: Path, choice: dict[str, Any], sent: str | None
+    root: Path, choice: dict[str, Any], sent: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The level a desktop create names reaches the runtime's ``set_model``.
 
@@ -477,7 +477,7 @@ def test_the_set_model_hop_carries_the_desktops_reasoning_effort(
         def close(self) -> None:
             pass
 
-    server._dial_owned = lambda *args, **kwargs: _Dial()  # noqa: SLF001
+    monkeypatch.setattr(server, "_dial_owned", lambda *args, **kwargs: _Dial())
 
     result = server._set_model_on(SESSION, choice)  # noqa: SLF001
 
