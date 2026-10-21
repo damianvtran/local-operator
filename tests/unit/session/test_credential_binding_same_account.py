@@ -128,16 +128,19 @@ async def test_the_upgrade_edge_records_identity_without_a_notice(tmp_path: Path
 
 
 def test_is_same_account_is_the_notice_gate() -> None:
-    base = dict(provider=PROVIDER, owner_device=SELF, credential_id=1)
     account = f"mesh:{OWNER}:{PROVIDER}"
-    same = CredentialBinding(**base, account=account)
-    assert is_same_account(same, CredentialBinding(**{**base, "credential_id": 2}, account=account))
-    assert is_same_account(CredentialBinding(**base), same)
-    assert not is_same_account(same, CredentialBinding(**base, account="mesh:x:y"))
-    assert not is_same_account(CredentialBinding(**base), CredentialBinding(**base))
-    assert not is_same_account(
-        same, CredentialBinding(**{**base, "owner_device": OWNER}, account=account)
-    )
+
+    def _b(*, credential_id: int = 1, owner: str = SELF, acct: str = "") -> CredentialBinding:
+        return CredentialBinding(
+            provider=PROVIDER, owner_device=owner, credential_id=credential_id, account=acct
+        )
+
+    same = _b(acct=account)
+    assert is_same_account(same, _b(credential_id=2, acct=account))
+    assert is_same_account(_b(), same)
+    assert not is_same_account(same, _b(acct="mesh:x:y"))
+    assert not is_same_account(_b(), _b())
+    assert not is_same_account(same, _b(owner=OWNER, acct=account))
 
 
 @pytest.mark.asyncio
