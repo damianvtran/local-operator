@@ -719,24 +719,21 @@ class ExitRecord:
         same reason: a session can exit cleanly and be resumed, and the record of
         that PREVIOUS departure must not explain a later, unexplained death.
 
-        THE PID-ONLY BRANCH IS DELIBERATE AND ITS BOUND IS STATED (review round
-        1, nit). When either side has no start stamp — a writer whose record
-        could not be read (``0.0``), or a reader classifying a boot record with
-        no start — the pid match is all the evidence there is. It is accepted
-        rather than refused because the only caller that can produce that shape
-        is a reduced host, and refusing would delete an explanation on no
-        evidence (the wrong-verdict direction this module forbids elsewhere).
-        The pid is recyclable, so the bound is: on such a host a same-pid
-        stranger could in principle satisfy this check; every path that HAS a
-        start stamp — every real runtime — is compared within
-        ``EXIT_RUN_KEY_TOLERANCE_S``.
+        BOTH STAMPS ARE REQUIRED, WHICH IS THE MARKER RUNG'S RULE (review round
+        1, NIT-2). ``attention._stop_marker_covers_run`` refuses when the dead
+        record carries no start stamp — ``abs(marker_start - 0.0)`` is never
+        inside the tolerance — and this accepts nothing weaker. An earlier
+        revision returned True on the pid alone in that case; the two run-key
+        rules then disagreed, and the disagreement's direction was the bad one:
+        ``rescue._exit_record_explains`` is the rung whose false positive HIDES a
+        crash, so a record it cannot fully key must fall through to the ladder
+        (which fires) rather than explain the death. A caller comparing two
+        stamps it wrote itself with a real start (every runtime) is unaffected;
+        so is the ``0.0``-vs-``0.0`` case (a reduced host comparing its own
+        writings), because the difference is zero.
         """
         if int(pid) != self.pid:
             return False
-        if not started_at:
-            return True
-        if not self.started_at:
-            return True
         return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
 
 
@@ -937,15 +934,13 @@ class RunRecord:
     def covers_run(self, pid: int, started_at: float) -> bool:
         """Whether this row names the run ``(pid, started_at)``.
 
-        The pid-only branch is the same documented bound ``ExitRecord.covers_run``
-        carries: a missing start stamp on either side leaves the pid as the only
-        evidence, and refusing there would delete an explanation rather than
-        protect one.
+        Both stamps are required, the same rule ``ExitRecord.covers_run`` applies
+        (and through it the marker rung's): a comparison that cannot be keyed is
+        no evidence, and this one feeds a listing that must not borrow a
+        departure.
         """
         if int(pid) != self.pid:
             return False
-        if not started_at or not self.started_at:
-            return True
         return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
 
 
