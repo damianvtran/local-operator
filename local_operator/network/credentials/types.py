@@ -58,6 +58,11 @@ LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     # broker (and its in-memory mint registry) lives in the relay process, and
     # the CLI that ran ``credential revoke`` is a different process.
     "credential_revoke",
+    # The member-side repair pull (mesh-mcp-credentials.md §4): the CLI asks
+    # THIS device's relay to pull one copy from its owner NOW, and answers
+    # ``{ok, state, code}``. Local for the same reason as the rest of the
+    # family — the pull needs a link, and the link lives in the relay.
+    "credential_sync_pull",
 )
 
 #: Leg 2 (relay → owner relay). ONE peer op with a ``kind`` discriminator, as the
