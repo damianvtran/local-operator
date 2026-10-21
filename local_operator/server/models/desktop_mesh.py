@@ -35,6 +35,20 @@ class _Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PeerRedial(BaseModel):
+    """The relay's redial bookkeeping for one peer (see ``PeerRow.redial``)."""
+
+    state: str
+    attempts: int = 0
+    lost_at: float | None = None
+    #: The lost link's last frame, epoch seconds — the "last seen" a tooltip shows.
+    last_frame_at: float | None = None
+    next_retry_at: float | None = None
+    #: The last redial failure, in words (``peer_reason_words``).
+    last_error: str = ""
+    grace_until: float | None = None
+
+
 class PeerRow(BaseModel):
     """One OTHER device, collapsed across every network this device shares with it.
 
@@ -72,6 +86,12 @@ class PeerRow(BaseModel):
     #: ``peer-readiness-v1``), so a missing one reads as "that device cannot do
     #: it" with no translation table to drift.
     capabilities: list[str] = Field(default_factory=list)
+    #: The relay's redial state for a lost link (``network.redial``), or ``None``
+    #: when the relay does not report one (an older build) — never a default.
+    #: ``state`` is ``connected`` | ``reconnecting`` | ``down``; ``reconnecting``
+    #: holds for a grace window (``grace_until``) and until enough redials failed,
+    #: so a blip reads as "Reconnecting…" rather than "Link down".
+    redial: PeerRedial | None = None
 
 
 class PeerList(BaseModel):

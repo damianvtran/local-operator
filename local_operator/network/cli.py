@@ -7713,6 +7713,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 "remedies": ["run `lop network start` on this device"],
             }
         )
+    # SUPERVISION CONFLICTS (2026-10-21): a second relay unit, a foreign port holder,
+    # or a unit pinned to one build — each made the node "running" and unreachable
+    # or stale at once, and nothing here named it. Supervision-class rows: they
+    # degrade the verdict without claiming the link itself failed.
+    for conflict in relay_mod.foreign_supervision():
+        checks.append(
+            {
+                "check": "supervision",
+                "code": conflict["code"],
+                "ok": False,
+                "detail": conflict["detail"],
+                "remedies": list(conflict["remedies"]),
+            }
+        )
     for check in checks:
         check["class"] = (
             "payload"
@@ -7813,9 +7827,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 "— run the named login on this device"
             )
         elif supervision_failures:
-            lines.append(
-                "note: relay restart-on-boot needs repair — run `lop network start` on this device"
-            )
+            conflict_remedies = [
+                str(remedy)
+                for check in checks
+                if check.get("check") == "supervision" and check.get("code") and not check["ok"]
+                for remedy in check.get("remedies") or []
+            ]
+            if conflict_remedies:
+                # A conflict's remedy is not `lop network start` (that is what the
+                # node ran while its system unit crash-looped); say the real one.
+                lines.append("note: relay supervision conflict — " + "; ".join(conflict_remedies))
+            else:
+                lines.append(
+                    "note: relay restart-on-boot needs repair — run `lop network start` on "
+                    "this device"
+                )
     return _emit(args, answer, lines)
 
 

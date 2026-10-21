@@ -1231,3 +1231,124 @@ def fragments_ranked(
         )
     ranked.sort(key=lambda fragment: (-fragment.mb, fragment.pid))
     return ranked
+
+
+# ---------------------------------------------------------------------------
+# Admission: refuse NEW resident work on a device that is already short of RAM
+# ---------------------------------------------------------------------------
+#
+# WHY (2026-10-21, cloud-node-1). A 2 GB node with no swap ran session runtimes
+# (~130-200 MB each), their subagents and a pnpm/Next build until the kernel OOM
+# killer fired six times — and one victim was the mesh relay. Every guard above
+# is per COMMAND: nothing stopped the fleet itself from growing one runtime or one
+# delegated child at a time past what the box could hold. Admission is that
+# missing gate, at the two places resident work is added: a session runtime spawn
+# (``session.runtime.launch``) and a subagent launch (``Session`` launcher).
+#
+# THE RULE IS AN ABSOLUTE FLOOR, not a fraction: what kills a small node is
+# running out of headroom in MB, and a fraction of a 2 GB box is not enough room
+# for the ~200 MB a runtime costs. Unknown memory (no ``/proc/meminfo``, a probe
+# failure) ADMITS — the rest of this module's fail-open-on-unknown rule for
+# availability, because refusing every spawn on a host that cannot answer would be
+# an outage this gate caused.
+
+#: Free memory (MemAvailable, plus free swap) below which new resident work is
+#: refused. 384 MB is ~two runtimes' worth of headroom: enough that the runtime
+#: being admitted plus its first tool command still fit before the kernel acts.
+ADMISSION_FLOOR_MB = 384
+
+#: Environment override for the floor, read at each check so an operator on a
+#: tiny node can tune it without a config migration. ``0`` disables the gate.
+ADMISSION_FLOOR_ENV = "LOCAL_OPERATOR_ADMISSION_FLOOR_MB"
+
+
+@dataclass(frozen=True)
+class Admission:
+    """One admission decision: ``admitted``, the numbers behind it, and why."""
+
+    admitted: bool
+    available_mb: int | None
+    swap_free_mb: int | None
+    floor_mb: int
+    reason: str
+
+
+def _admission_floor_mb() -> int:
+    raw = os.environ.get(ADMISSION_FLOOR_ENV, "").strip()
+    if not raw:
+        return ADMISSION_FLOOR_MB
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return ADMISSION_FLOOR_MB
+
+
+def admission_check(
+    what: str,
+    *,
+    runner: Runner | None = None,
+    floor_mb: int | None = None,
+) -> Admission:
+    """Whether ``what`` (a short noun: "a session runtime") may start NOW.
+
+    ``available + free swap`` is the headroom compared, because swap is exactly
+    what turns an allocation burst into a slowdown instead of an OOM kill; a host
+    with healthy swap is not refused for a dip in MemAvailable alone. The reason
+    sentence names both numbers and the remedy, because the caller surfaces it
+    verbatim to the model or the person who asked.
+    """
+    floor = _admission_floor_mb() if floor_mb is None else max(0, int(floor_mb))
+    probe = runner or _default_runner
+    if floor <= 0:
+        return Admission(True, None, None, floor, "admission floor disabled")
+    available = _available_memory_mb(probe)
+    if available is None:
+        return Admission(True, None, None, floor, "available memory could not be measured")
+    swap = _free_swap_mb(probe)
+    headroom = available + (swap or 0)
+    if headroom >= floor:
+        return Admission(True, available, swap, floor, "")
+    swap_words = f"{swap} MB of free swap" if swap is not None else "no measurable swap"
+    reason = (
+        f"not starting {what}: this device has {available} MB of memory available"
+        f" and {swap_words}, below the {floor} MB admission floor. Starting it now risks the kernel OOM killer"
+        " ending other sessions or the mesh relay. Finish or stop other sessions or"
+        " commands and try again, or add RAM/swap to this device"
+        f" ({ADMISSION_FLOOR_ENV}=0 disables this check)."
+    )
+    return Admission(False, available, swap, floor, reason)
+
+
+#: The ``oom_score_adj`` a session runtime gives ITSELF on Linux. Raising one's own
+#: score needs no privilege, so this works under every supervisor and in every
+#: container. It pairs with the relay unit's ``OOMScoreAdjust``
+#: (``network.relay.RELAY_OOM_SCORE_ADJUST``): whatever the relay could obtain, the
+#: runtimes and every command and subagent they spawn (children inherit the value)
+#: sit above it, so the kernel ends a session's work before the one process every
+#: remote surface depends on. 300 rather than 1000: a runtime should still lose to
+#: a runaway build it spawned (which inherits 300 and is bigger), and be preferred
+#: over the desktop and system daemons, not marked as disposable.
+RUNTIME_OOM_SCORE_ADJ = 300
+
+
+def raise_own_oom_score(value: int = RUNTIME_OOM_SCORE_ADJ, *, path: str | None = None) -> bool:
+    """Raise this process's ``oom_score_adj`` to at least ``value``; Linux only.
+
+    Never LOWERS it: a process already marked more expendable (a manager default
+    above ``value``) keeps that, and lowering needs ``CAP_SYS_RESOURCE`` anyway.
+    Returns whether the file now holds at least ``value``. Never raises — a
+    hardening step must not be the reason a runtime fails to boot.
+    """
+    if not _platform().startswith("linux"):
+        return False
+    target = path or "/proc/self/oom_score_adj"
+    try:
+        with open(target, encoding="ascii") as handle:
+            current = int(handle.read().strip() or 0)
+        if current >= value:
+            return True
+        with open(target, "w", encoding="ascii") as handle:
+            handle.write(str(int(value)))
+        return True
+    except (OSError, ValueError):
+        return False

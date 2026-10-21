@@ -241,12 +241,18 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
                 "rtt_ms": RTT_MS,
                 "build": dict(build) if isinstance(build, dict) else {},
                 "capabilities": list(capabilities) if isinstance(capabilities, list) else [],
+                # FORWARDED VERBATIM (``network.redial``): the relay's own verdict on
+                # a lost link, so the sidebar says "Reconnecting…" inside the grace
+                # window and "Link down" only once the relay escalated. Absent from an
+                # older relay; ``_redial_block`` turns that into ``None``.
+                "redial": _redial_block(entry.get("redial")),
             }
             continue
         if reachable and not current["reachable"]:
             current["reachable"] = True
             current["unreachable_reason"] = ""
             current["session_count"] = counts.get(device_id, 0)
+            current["redial"] = _redial_block(entry.get("redial"))
         elif not reachable and not current["reachable"] and not current["unreachable_reason"]:
             # The FIRST non-empty reason wins: every entry for one device describes
             # the same condition, and a device unreachable in one network and never
@@ -274,6 +280,36 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
         "self_device_id": self_device_id or None,
         "degraded": [],
     }
+
+
+#: The redial keys the renderer may read; anything else a relay adds stays in
+#: ``lop network peers --json`` rather than widening this route's contract.
+_REDIAL_KEYS = (
+    "state",
+    "attempts",
+    "lost_at",
+    "last_frame_at",
+    "next_retry_at",
+    "last_error",
+    "grace_until",
+)
+
+
+def _redial_block(raw: Any) -> dict[str, Any] | None:
+    """The relay's ``redial`` block, filtered to the published keys, or ``None``.
+
+    ``None`` means "this relay does not report redial state" (an older build), which
+    the renderer must read as "no claim" and keep its previous behaviour — never as
+    ``connected``.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("state"), str):
+        return None
+    block = {key: raw[key] for key in _REDIAL_KEYS if key in raw}
+    if isinstance(block.get("last_error"), str):
+        # The relay's cause token (``timeout``, ``peer_closed_silently``,
+        # ``connect_failed:TimeoutError``) in words, like ``unreachable_reason``.
+        block["last_error"] = peer_reason_words(block["last_error"]) if block["last_error"] else ""
+    return block
 
 
 def _networks(root: Path | None) -> list[Any]:

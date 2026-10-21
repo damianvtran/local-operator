@@ -429,6 +429,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "declared_device",
             "expected_device",
             "unidentified",
+            # How many identical refusals the relay folded into this row since the
+            # last one it wrote (``network.redial.RefusalCoalescer``). Absent = 0.
+            "repeats",
         }
     ),
     "authorisation_refused": frozenset({"op", "capability", "phase", "link_epoch"}),

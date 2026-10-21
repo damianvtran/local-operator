@@ -18266,6 +18266,17 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
+        # MEMORY ADMISSION (memory_guard.admission_check): a child session is
+        # resident work in THIS process — its transcript, its tool commands, its
+        # browser — and a small node OOM-killed its own mesh relay by adding such
+        # work one launch at a time. Refused with the sentence rather than queued:
+        # the delegating model can wait, finish other work, or do the slice itself,
+        # and a queue would hide the pressure from the one reader who can act on it.
+        from local_operator import memory_guard
+
+        admission = memory_guard.admission_check("a subagent")
+        if not admission.admitted:
+            raise RuntimeError(admission.reason)
         if model is not None and model != "inherit":
             from local_operator.harness.subagent import model_may_choose_tier
 
