@@ -452,7 +452,11 @@ def test_recovery_record_contains_cause_and_stderr(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         record = {
             "restart": 123,
             "exit_code": "exited",
@@ -495,14 +499,19 @@ async def test_crash_loop_exhausts_wait_and_ends_cleanly(
             provider._credentials, provider._region
         ).http_post_json
         provider._clients.ec2 = _NoConsoleEc2()
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: False)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (False, {"answered": False}),
+        )
         with pytest.raises(
             aws_mod.GuestExecutionError, match="supervisor recovery budget exhausted"
         ):
             await provider.execute(["not_applied()"])
-        # The whole pre-action wait, then a clean end without sending input: a
-        # refused/False probe is not a connect-class verdict, so the receipt is
-        # genuinely unavailable and the action is never attempted.
+        # The whole pre-action wall-clock wait (probes at t=0, 0.5, 1, 2, 3, 5,
+        # 7, 9, 11, 13, 15), then a clean end without sending input: a patched
+        # probe reports no verdict, so the receipt is treated as genuinely
+        # unavailable and the action is never attempted.
         assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["recovered"] is False
@@ -513,15 +522,38 @@ async def test_crash_loop_exhausts_wait_and_ends_cleanly(
         assert not any("not_applied()" in str(body) for body in stubs.guest_posts)
 
 
+@pytest.mark.asyncio
+async def test_an_observation_wait_is_short_even_when_the_server_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    """An observation read is not worth the pre-action wait.
+
+    It consumes a restart generation and then reads a frame; when the server
+    cannot be reached the frame read fails and is reported anyway, and the
+    harness re-observes once the guest is back. Paying 15 s here would delay
+    every retry for nothing.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        provider._supervisor_unit = "action-server.service"
+        provider._clients.http_get = lambda url, timeout: 503
+        observed = await provider.observe()
+
+    assert observed["screenshot"] == b"png"
+    assert aws_mod._OBSERVATION_RECOVERY_BUDGET_S < aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    assert sum(stubs.slept) == aws_mod._OBSERVATION_RECOVERY_BUDGET_S
+
+
 def test_exhaustion_evidence_names_which_path_element_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Six silent probes used to collapse to ``read_failed: true``.
 
-    The decision is unchanged -- still ``read_failed``, still six waits, still no
-    input sent -- but the evidence now names the element that failed. A refused
-    port, a name that does not resolve and a connect timeout are three different
-    faults, and only one of them is the action server.
+    The decision is unchanged -- still ``read_failed``, still the full wall-clock
+    wait, still no input sent -- but the evidence now names the element that
+    failed. A refused port, a name that does not resolve and a connect timeout
+    are three different faults, and only one of them is the action server.
     """
 
     monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
@@ -1165,7 +1197,11 @@ async def test_receipt_read_failure_retries_once_and_never_posts_stale_input(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -1220,7 +1256,11 @@ async def test_a_receipt_behind_a_guest_warning_is_read_and_its_restart_is_not_i
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -1262,7 +1302,11 @@ async def test_a_shadow_envelope_before_the_receipt_cannot_report_no_restart(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
         shadow = json.dumps(_envelope([]))
 
@@ -1300,7 +1344,11 @@ async def test_unreadable_receipt_returns_a_fresh_adapter_binding_without_input(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         calls = []
 
         def invalid(*args: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -1324,7 +1372,11 @@ def test_transient_receipt_failure_retries_before_accepting_a_result(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         replies = iter(
             [
                 guest_disk.CommandResult(1, "", ""),
@@ -1346,7 +1398,11 @@ def test_withheld_records_are_explicitly_marked(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             if _is_restart_command(argv):
@@ -1400,7 +1456,11 @@ async def test_statement_three_restart_interrupts_batch_and_rebinds_before_next_
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         reads = 0
         input_posts = []
 
@@ -1481,7 +1541,11 @@ async def test_failed_first_capture_write_cannot_hide_generation_change(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
             nonlocal generation
@@ -3245,7 +3309,11 @@ def _recovering_provider(
     stubs = _Stubs()
     provider = _provider_over(stubs, tmp_path)
     provider._supervisor_unit = "action-server.service"
-    monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+    monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
     monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
     monkeypatch.setattr(aws_mod.time, "monotonic", stubs.monotonic)
     events: list[str] = []
@@ -3427,7 +3495,11 @@ async def test_restart_dispatch_failure_fails_closed_without_polling(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
         events: list[str] = []
         posts: list[str] = []
@@ -4626,7 +4698,11 @@ async def test_a_restart_that_needed_the_watchdog_is_visible_in_the_evidence(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         envelope = _envelope([_restart_record()])
         envelope["watchdog"] = _watchdog_payload(attempts=2, capped=True)
@@ -4658,7 +4734,11 @@ async def test_a_changed_watchdog_summary_is_written_without_a_recovery(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         writes: list[str] = []
         real_write = provider._write_supervisor_evidence
 
@@ -4722,7 +4802,11 @@ async def test_a_latched_recovery_leaves_a_receipt_the_host_can_post_through(
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         posted: list[str] = []
 
         def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
@@ -4760,7 +4844,11 @@ async def test_a_watchdog_only_change_never_overwrites_a_verified_recovery(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
         envelope = _envelope([_restart_record()])
         envelope["watchdog"] = _watchdog_payload(attempts=1)
 
@@ -4795,7 +4883,11 @@ async def test_a_corrupt_watchdog_record_never_changes_a_recovery_outcome(
         provider = _provider_over(stubs, tmp_path)
         assert provider._cache_root is not None
         provider._supervisor_unit = "action-server.service"
-        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
 
         envelope = _envelope([_restart_record()])
         envelope["watchdog"] = "not a record"

@@ -1162,6 +1162,48 @@ async def test_a_pre_action_path_failure_attempts_the_action_instead_of_dying(
 
 
 @pytest.mark.asyncio
+async def test_the_refusal_message_claims_no_cause_it_cannot_know(
+    tmp_path: Path,
+) -> None:
+    """Pinned: "was not attempted", no delivery verdict, and no false cause.
+
+    This branch is reached by a server that ANSWERED (503 here) as well as by an
+    ambiguous probe or a failed restart verification, so naming an unreachable
+    control server would be false in every case that gets here -- and a false
+    cause in a terminal message is exactly what sent an earlier investigation to
+    the wrong layer. A genuinely unreachable path takes the ATTEMPT branch
+    instead (``test_a_pre_action_path_failure_attempts_the_action_instead_of_dying``),
+    so neither branch may claim more than was observed.
+    """
+
+    posted: list[str] = []
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        posted.append(url)
+        return {"returncode": 0, "output": "", "error": ""}
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path, post=post)
+        provider._supervisor_unit = "action-server.service"
+        provider._clients.http_get = lambda url, timeout: 503
+        provider._clients.ec2 = _NoConsoleEc2()
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()"])
+
+    message = str(raised.value)
+    assert "guest action 1 was not attempted" in message
+    assert "delivery=" not in message, "no delivery happened, so there is no verdict"
+    assert raised.value.delivery is None
+    assert "unreachable" not in message, "the server answered"
+    assert "connection could not be established" not in message
+    assert "connection refused" not in message
+    assert "supervisor recovery budget exhausted" in message
+    assert "guest down" in message
+    assert posted == [], "a reachable-but-unhealthy server must not receive the action"
+    assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+
+
+@pytest.mark.asyncio
 async def test_an_attempt_that_spends_the_window_stops_the_retrying(tmp_path: Path) -> None:
     """An attempt-count bound alone allowed ~4 x 90 s per statement.
 

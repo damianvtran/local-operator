@@ -143,6 +143,11 @@ _EXECUTE_READINESS_TIMEOUT_S = 2.0
 # does and does not allow.
 _PRE_ACTION_RECOVERY_BUDGET_S = 15.0
 _IN_LOOP_RECOVERY_BUDGET_S = 3.0
+# An OBSERVATION read is not worth the pre-action wait. It consumes a restart
+# generation and then reads a frame; if the server cannot be reached the frame
+# read fails and is reported anyway, and the harness re-observes once the guest
+# is back, so blocking that call for 15 s buys nothing and delays every retry.
+_OBSERVATION_RECOVERY_BUDGET_S = 3.0
 # Backoff between probes: 0.5, 0.5, 1, 1, then 2 s, capped by the budget. A
 # fixed 0.5 s cadence probes more often early and never reaches the later part
 # of a longer blip; this schedule spreads the same probes over a wider window.
@@ -808,19 +813,6 @@ class AwsProvider:
         # not only of the log.
         self._transport_retries: list[dict[str, Any]] = []
         self._transport_retry_recovered = 0
-        # The reason behind the most recent boolean probe, for the recovery
-        # evidence. ``_probe_control_server`` is boolean by contract (its async
-        # RPC caller acts on the boolean alone) and is patched directly by
-        # tests, so the record is a side channel that survives that contract.
-        # CONSTRAINT: it is not thread-local. ``execute`` runs on a worker thread
-        # and the async ``probe_control_server`` RPC can land on another, so two
-        # probes can interleave and the recovery loop could read the OTHER one's
-        # reason. That can only misattribute a probe entry in best-effort
-        # evidence -- both call sites clear the field before probing and never
-        # read it to make a decision -- so it is not worth a lock on a dying
-        # path; a decision-bearing reader must go through
-        # ``_probe_control_server_outcome`` and use its return value instead.
-        self._last_probe_record: dict[str, Any] | None = None
         # Reset-retry tracking for ``_seal_upstream``. Upstream's ``reset``
         # loop writes ``is_environment_used = True`` before task-specific
         # setup and does not clear it when an attempt fails, so its OWN retry
@@ -1055,14 +1047,11 @@ class AwsProvider:
         deadline = self._monotonic() + budget_s
         served = False
         while True:
-            # Clear BEFORE the call and read after: the record must belong to
-            # THIS probe. ``_probe_control_server`` is boolean by contract and
-            # is patched by callers (tests patch it), so a stale record left by
-            # an earlier probe elsewhere (``execute``'s readiness check) would
-            # otherwise be reported as this probe's reason.
-            self._last_probe_record = None
-            served = self._probe_control_server(_RECOVERY_PROBE_TIMEOUT_S)
-            record = self._last_probe_record
+            # The RETURNED record, never a shared field: two threads can probe
+            # this provider at once (``execute`` on a worker thread, the async
+            # RPC), and the verdict must belong to this probe. The record is
+            # evidence here; ``served`` is still the decision.
+            served, record = self._probe_control_server_outcome(_RECOVERY_PROBE_TIMEOUT_S)
             probes.append({"probe": len(probes) + 1, **(record or {"answered": served})})
             if served:
                 break
@@ -1883,7 +1872,11 @@ class AwsProvider:
         if self._supervisor_unit is not None:
             # Consume the generation BEFORE reading the frame. Consuming it
             # afterwards could bless a screenshot taken before that restart.
-            await asyncio.to_thread(self._recover_guest_supervisor, "observation")
+            await asyncio.to_thread(
+                self._recover_guest_supervisor,
+                "observation",
+                budget_s=_OBSERVATION_RECOVERY_BUDGET_S,
+            )
         # Attached only for the duration of upstream's own retry loop, exactly as
         # ``evaluate`` captures judge errors. The records are the ONLY trace of
         # why a capture failed (``get_screenshot`` logs and returns None), and
@@ -2265,8 +2258,7 @@ class AwsProvider:
     def _probe_control_server(self, timeout: float) -> bool:
         """Shared read-only probe for the worker thread and async RPC path."""
 
-        answered, record = self._probe_control_server_outcome(timeout)
-        self._last_probe_record = record
+        answered, _record = self._probe_control_server_outcome(timeout)
         return answered
 
     def _probe_control_server_outcome(self, timeout: float) -> tuple[bool, dict[str, Any]]:

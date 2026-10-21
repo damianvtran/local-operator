@@ -318,16 +318,17 @@ def describe_unattempted_action(index: int) -> str:
     nothing had tried to connect to, which sent an investigation to the wrong
     layer for days -- the guest was reachable again seconds later.
 
-    The caller appends the supervisor cause (and, where it applies, the transport
-    classification of the probes); this function owns only the distinction
-    between "was not sent" and "was not attempted".
+    The message names NO cause. The branch that calls it is reached for a
+    non-200 answer, an ambiguous probe failure and a failed restart verification
+    alike -- cases where the server WAS reachable -- so a parenthetical
+    "unreachable control server" would be false in every one of them, which is
+    the exact class of defect this function exists to remove. The caller appends
+    the supervisor cause and the guest-health cause; this function owns only the
+    distinction between "was not sent" and "was not attempted", and it carries
+    no ``delivery=`` token because no delivery happened.
     """
 
-    return (
-        f"guest action {index + 1} was not attempted "
-        "(action-server receipt unavailable over an unreachable control server); "
-        "no input was sent"
-    )
+    return f"guest action {index + 1} was not attempted; no input was sent"
 
 
 def failure_record(error: BaseException, *, origin: str | None) -> dict[str, Any]:
