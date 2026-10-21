@@ -3617,12 +3617,22 @@ def _materialize_published_skill(
                     same = False
                 if not same:
                     # Publish's OWN pre-check, reached before the storage
-                    # chokepoint. Same fact there (an unowned copy holds the
-                    # alias), but here the user can also pick another name.
+                    # chokepoint: an unowned occupant holds the alias and it is
+                    # not the authored source. The CODE is the same one the
+                    # preview and the storage collisions use (``alias-occupied``)
+                    # so a client keys on the category, never on the words; the
+                    # sentence follows the occupant's actual kind, because a
+                    # plain file is not a skill (code review F1).
+                    if destination.is_dir():
+                        raise LinkError(
+                            "alias-occupied",
+                            f"a skill named {alias!r} already exists on this machine outside "
+                            "the hub; publish under a different name, or move the existing one",
+                        )
                     raise LinkError(
-                        "origin-conflict",
-                        f"a skill named {alias!r} already exists on this machine outside "
-                        "the hub; publish under a different name, or move the local copy",
+                        "alias-occupied",
+                        f"a file named {alias!r} is already in the skills folder; "
+                        "move it somewhere else, then try again",
                     )
                 if SkillDocument.from_directory(destination).fingerprint != draft.fingerprint:
                     raise LinkError(

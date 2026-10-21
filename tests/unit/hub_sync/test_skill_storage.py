@@ -236,11 +236,14 @@ def test_differing_origin_cannot_claim_a_temporarily_absent_alias(tmp_path: Path
         identity=org_identity,
         local_alias=public_doc.name,
     )
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(LinkError) as refused:
         storage.apply(
             org_identity, public_doc.name, public_doc, org_baseline, expected_fingerprint=None
         )
-    assert "alias belongs to another" in str(excinfo.value)
+    # A link owning the alias is a genuine origin conflict, never a name
+    # collision: the alias-occupied category is for UNOWNED occupants (D1).
+    assert refused.value.code == "origin-conflict"
+    assert "alias belongs to another" in str(refused.value)
 
 
 def test_a_file_occupying_the_alias_is_refused_in_its_own_words(tmp_path: Path) -> None:
@@ -265,12 +268,13 @@ def test_a_file_occupying_the_alias_is_refused_in_its_own_words(tmp_path: Path) 
     ):
         with pytest.raises(LinkError) as refused:
             entry()
-        assert refused.value.code == "origin-conflict"
+        assert refused.value.code == "alias-occupied"
         message = str(refused.value)
-        assert f"{document.name!r}" in message
-        assert "something that is not a skill is already using the name" in message
-        assert "move it out of the skills folder, then try again" in message
-        # Distinguishable from the unowned-skill refusal (a different fact).
+        assert f"a file named {document.name!r} is already in the skills folder" in message
+        assert "move it somewhere else, then try again" in message
+        # Distinguishable from the unowned-skill refusal (a different fact and
+        # a different sentence, though the same category).
+        assert "a skill named" not in message
         assert "outside the hub" not in message
 
 
