@@ -335,17 +335,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from local_operator.session import cleanup as cleanup_module
 from local_operator.session.cleanup import (
     CLEANUP_LOG_NAME,
     DEFAULT_DELEGATED_MAX_AGE_HOURS,
     MAX_DELEGATED_MAX_AGE_HOURS,
     MIN_DELEGATED_MAX_AGE_HOURS,
-    HoldsUnreadable,
     Candidate,
     CleanupPolicy,
     CleanupResult,
+    HoldsUnreadable,
     _append_cleanup_log,
-    _bounded_dir_stats as _cleanup_bounded_dir_stats,
     _claimed,
     _forget_monitor_entry,
     _forget_wake_entry,
@@ -358,7 +358,6 @@ from local_operator.session.cleanup import (
     _is_deletable_dir,
     _lease_runtime_alive,
     _write_record,
-    bounded_dir_bytes as _cleanup_bounded_dir_bytes,
     hold_for,
     policy_from_config,
     remove_scratchpad_entry,
@@ -941,9 +940,7 @@ is_delegated_dir = _is_delegated_dir
 is_deletable_dir = _is_deletable_dir
 
 
-def _bounded_dir_stats(
-    directory: Path, max_entries: int = SIZE_MAX_ENTRIES
-) -> tuple[int, int]:
+def _bounded_dir_stats(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> tuple[int, int]:
     """``(bytes, entries)`` under ``directory``; the pass's 2,000-entry default.
 
     The walk body lives in ``cleanup`` now (the removal receipt needs the same
@@ -952,12 +949,12 @@ def _bounded_dir_stats(
     bound. A wrapper rather than a bare re-export so moving the walk cannot
     silently raise the per-pad cost tenfold.
     """
-    return _cleanup_bounded_dir_stats(directory, max_entries)
+    return cleanup_module._bounded_dir_stats(directory, max_entries)
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
     """Bytes under ``directory``; the pass's 2,000-entry default (see above)."""
-    return _cleanup_bounded_dir_bytes(directory, max_entries)
+    return cleanup_module.bounded_dir_bytes(directory, max_entries)
 
 
 # ---------------------------------------------------------------------------

@@ -306,6 +306,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
+    # The census document lives BESIDE the session directories (a store-level
+    # file), never inside one: it is the audit baseline, not conversation
+    # content, so a session travelling between devices carries none of it.
+    "local_operator/session/census.py": (
+        1,
+        "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
+        "beside the session directories, never an entry of a session",
+    ),
     "local_operator/server/utils/local_tokens.py": (
         1,
         "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
@@ -555,9 +563,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        3,
-        "the cleanup log and last-cleanup record (sessions root) and the store marker "
-        "that gates removal: none of them is a file a session directory holds",
+        4,
+        "the cleanup log, the value-hold index and the last-cleanup record (all at the "
+        "sessions root) and the store marker that gates removal: none of them is a file "
+        "a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,

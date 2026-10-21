@@ -97,7 +97,9 @@ def test_unhold_releases_the_hold_and_writes_the_decision(
     capsys.readouterr()
 
     assert sessions_unhold_command(_args(session="bbbb", reason="case closed")) == 0
-    assert "Released the hold on bbbb55556666" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Released the hold on bbbb55556666" in out
+    assert "Cleanup and retention may now apply" in out
     assert read_holds(store / "sessions") == {}
     rows = [
         json.loads(line)
@@ -105,6 +107,32 @@ def test_unhold_releases_the_hold_and_writes_the_decision(
     ]
     assert rows[-1]["policy"] == "hold-release"
     assert rows[-1]["reason"] == "case closed"
+
+
+def test_a_blank_release_reason_is_refused_and_keeps_the_hold(
+    store: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UX round 1, U1: an empty reason used to release an evidence hold."""
+    assert sessions_hold_command(_args(session="bbbb", reason="Evidence must remain")) == 0
+    capsys.readouterr()
+
+    assert sessions_unhold_command(_args(session="bbbb", reason="")) == 2
+    assert "must be non-empty" in capsys.readouterr().err
+    assert sessions_unhold_command(_args(session="bbbb", reason="   ")) == 2
+    capsys.readouterr()
+
+    assert "bbbb55556666" in read_holds(store / "sessions")
+    assert not (store / "sessions" / CLEANUP_LOG_NAME).exists()
+    assert sessions_holds_command(_args()) == 0
+    assert "bbbb55556666" in capsys.readouterr().out
+
+
+def test_a_blank_hold_reason_is_refused_before_resolution(
+    store: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert sessions_hold_command(_args(session="bbbb", reason="  ")) == 2
+    assert "must be non-empty" in capsys.readouterr().err
+    assert read_holds(store / "sessions") == {}
 
 
 def test_unhold_can_clear_a_hold_whose_session_is_gone(

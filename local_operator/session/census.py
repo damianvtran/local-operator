@@ -45,6 +45,18 @@ DESIGN CONSTRAINTS, all deliberate:
 * **Runs regardless of the cleanup switch.** The census is not a retention
   feature — it is the record that retention (and anything else) left, so the
   maintenance pass runs it whether or not ``session.cleanup.enabled`` is true.
+
+WHAT A CONTENT REPORT CAN AND CANNOT ATTRIBUTE (review round 1, M5). The pad is
+the agent's own working directory: a session's tools may delete their own build
+output between two passes, and this module cannot tell that apart from an
+external deleter. Two things narrow and disclose the gap rather than hide it:
+the report is suppressed while a runtime record answers (a session doing work
+is not evidence of a loss), and every row carries the last-known
+``origin``/``last_activity_at`` plus the ``before``/``after`` blocks, so the
+operator can see whether the session was a delegated one past its window or a
+live workspace. A content row is an invitation to investigate with the session
+named, not a verdict about who removed the bytes; the removal *record* rows
+from the audited pass remain the only claims of provenance.
 """
 
 from __future__ import annotations
@@ -215,11 +227,15 @@ def _accounts_for_content(row: dict[str, Any], session_id: str) -> bool:
     if row.get("session") != session_id:
         return False
     policy = _row_policy(row)
-    if policy == UNACCOUNTED_CONTENT_POLICY:
-        return True
     # A planned content row names intent, not a removal: only a completed row
     # (or an old pre-phase row, which was written after the removals) proves
     # the pad's bytes left through the audited content pass.
+    #
+    # ``unaccounted-content-removal`` is deliberately NOT accepted (review
+    # round 1, M2). It used to be, only to absorb the re-read that the old
+    # post-append ``log_bytes`` re-stat caused; with the offset now taken from
+    # the pass's own diff snapshot, each session is visited once per pass and
+    # a census row can never be the explanation a later diff consumes.
     return policy == "delegated_scratchpad" and row.get("phase") != "planned"
 
 
@@ -283,9 +299,10 @@ def _material_pad_shrink(before: dict[str, Any], after: dict[str, Any]) -> bool:
 
 def _transcript_vanished(before: dict[str, Any], after: dict[str, Any]) -> bool:
     try:
-        return int(before.get("transcript_bytes") or 0) > 0 and int(
-            after.get("transcript_bytes") or 0
-        ) == 0
+        return (
+            int(before.get("transcript_bytes") or 0) > 0
+            and int(after.get("transcript_bytes") or 0) == 0
+        )
     except (TypeError, ValueError):
         return False
 
@@ -356,12 +373,10 @@ def run_store_census(
     config_root = Path(config_dir)
     sessions_dir = config_root / SESSIONS_DIRNAME
     if not sessions_dir.is_dir():
-        return {"count": 0, "reported": 0, "complete": True}
+        return {"count": 0, "reported": 0, "complete": True, "enumerated": True}
 
     previous = _usable_baseline(read_census(sessions_dir))
-    sessions, complete, enumerated = _walk_store(
-        config_root, sessions_dir, should_stop=should_stop
-    )
+    sessions, complete, enumerated = _walk_store(config_root, sessions_dir, should_stop=should_stop)
 
     log_path = sessions_dir / CLEANUP_LOG_NAME
     current_size = _log_size(log_path)
@@ -439,13 +454,37 @@ def run_store_census(
             if _append_cleanup_log(sessions_dir, record):
                 reported += 1
 
+    if not enumerated:
+        # NEVER REPLACE A USABLE BASELINE WITH A PARTIAL ONE (review round 1,
+        # M3). ``enumerated`` false means the pass stopped before visiting
+        # every directory, so its ``sessions`` map is not a complete picture:
+        # writing it would evict the last good baseline and a later deletion
+        # of an unvisited id would go unreported forever. The next complete
+        # pass diffs from the surviving baseline, exactly as the module
+        # docstring promises. M4: say so at WARNING — a silent audit is the
+        # failure an auditor cannot see.
+        logger.warning(
+            "session census: not fully enumerated (%d session(s) seen); "
+            "keeping the previous baseline and reporting nothing",
+            len(sessions),
+        )
+        return {
+            "count": len(sessions),
+            "reported": 0,
+            "complete": complete,
+            "enumerated": False,
+        }
+
     payload = {
         "schema": CENSUS_SCHEMA,
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        # The size AFTER any rows this pass appended: the next pass starts
-        # reading where this one finished, so its own report cannot be read
-        # back as someone else's explanation.
-        "log_bytes": _log_size(log_path),
+        # THE OFFSET THE DIFF USED, NOT A POST-APPEND RE-STAT (review round 1,
+        # M2). A row landing between the snapshot and a later stat would sit
+        # below the recorded offset and no future pass would ever read it, so
+        # a *recorded* removal could be reported as unaccounted on the next
+        # run. Rows this pass appended sit AT or AFTER this offset and are
+        # read (and ignored, for ``unaccounted-*``) by the next pass.
+        "log_bytes": current_size,
         "count": len(sessions),
         "sessions": sessions,
         "complete": complete,

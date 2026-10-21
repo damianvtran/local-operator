@@ -759,9 +759,10 @@ async def test_a_refused_schedule_on_the_create_shape_is_a_typed_refusal(
     # conversation in the sidebar. The rollback now writes its receipt into
     # ``sessions/.cleanup-log.jsonl``, so only DIRECTORIES are absent — the
     # log file is the evidence the rollback happened.
-    assert not (root / "sessions").exists() or [
-        entry for entry in (root / "sessions").iterdir() if entry.is_dir()
-    ] == []
+    assert (
+        not (root / "sessions").exists()
+        or [entry for entry in (root / "sessions").iterdir() if entry.is_dir()] == []
+    )
 
 
 @pytest.mark.asyncio
