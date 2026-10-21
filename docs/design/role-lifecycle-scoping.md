@@ -432,6 +432,46 @@ release cut**.
   refusal would let a deleting move leave roles behind silently. The S2 PR carries this gate.
 - Gate: design/UX review of badge wording; i18n `--check`; tool-doc drift tests updated.
 
+**S2 status (landed 2026-10-20; PR pending).** Shipped: explicit `scope` on both write
+entry points and the composite creates; the name-shadow refusal; one create lock; scope
+receipts and `details`; `agent op='delete'` (session-only, write-tier) and a session-first
+`team_delete`; additive `scope` on catalogue/detail/command-entity rows;
+`features.profile_scope: 1`; the TUI facts badge and the `agent_listing_rows` dedupe; the
+mesh refusal and `--drop-session-roles`. Two corrections to this document, then the one
+deferral its §3.4 needed.
+
+**Correction 1 — `write_profile`'s home.** The function lives in
+`local_operator/tools/agent_tool.py`, not `agent_profiles.py`; §3.2's pointer was right,
+but the S2 bullet's phrasing read as though the shared writer belonged to the profile
+module. Nothing moved: the required `scope` keyword was added to the function where it
+already was, and `install_seed` (which IS in `agent_profiles.py`) takes scope as a
+required keyword too, routing its create through `scope_store`.
+
+**Correction 2 — `agent_listing_rows` dedupe.** §3.3 says the listing "dedupes by name".
+It did not: `seen` was populated for role/specialist rows but only CONSULTED for packaged
+seeds, so the tolerated reverse race (an account row created after a session row of the
+same name) painted the key twice. S2 makes the code true — the composite lists session
+rows first, the loop skips a later duplicate, and the surviving row's scope fact says
+which store is in force.
+
+**Deferral — the durable-write grant, and why it is not a string.** §3.4 proposed
+`ToolContext.durable_write_grant: str | None` carrying an `ask`-recorded origin. S2 ships
+a host seam instead: `ToolContext.authorize_durable_write(DurableWriteIntent) ->
+Awaitable[str | None]`, with the origin recorded in the receipt's `details` only. Three
+reasons: (a) a string on the tool context is a value a model's turn can be given, and a
+model-influenced provenance string is not consent; (b) the existing TUI approval card is
+satisfied by the session-scoped "approve all" latch without showing this specific intent,
+so wiring the seam to it would let a blanket shortcut authorize account-wide writes, and a
+non-rememberable intent-specific confirmation is new UI that S2 deliberately does not
+build; (c) an answered `ask` is not by itself human authority — `asks/queue.respond`
+writes the caller-supplied `by` (`asks/queue.py:559-565`), and `Session.bridge_decide`
+treats the in-memory admitted grant, never the ask-log fold, as the evidence
+(`session.py:11585-11589`). No host installs the callback in S2, so every tool-issued
+`scope='global'` write is refused with the user-surface remedy and the conversation-only
+retry. AC6's tool branch therefore moves to S4 with promotion, the first flow that needs
+an explicit "make this durable" answer; that slice should build the non-rememberable
+confirmation and only then install the seam.
+
 ### S3 — Lifecycle integration
 - Fork copies `roles/` (independent; no global writes); mesh move detects roles and refuses
   by default, `--drop-session-roles` leaves them with a target-side notice; delete/retention/
