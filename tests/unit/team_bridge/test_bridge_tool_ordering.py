@@ -117,9 +117,7 @@ def test_the_same_runtime_is_installed_on_the_tool_context() -> None:
     """One resolution, so the createIf inspection and the executor agree."""
 
     body = _prepare_body()
-    assignments = [
-        node for node in body if _installs_runtime_on_context(node)
-    ]
+    assignments = [node for node in body if _installs_runtime_on_context(node)]
     assert assignments, (
         "tool_context must carry bridge_runtime before create_tools runs: that "
         "context is what decides whether the `bridge` tool exists"
