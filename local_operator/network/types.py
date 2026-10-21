@@ -1713,6 +1713,17 @@ class InviteRecord:
     def is_fresh(self, now: float) -> bool:
         return now < self.expires_at
 
+    def listed_state(self, now: float) -> str:
+        """``state`` as a listing should print it: a dead ``minted`` row says ``expired``.
+
+        ``state`` is the single-use ledger and never moves on expiry (nothing
+        redeemed or consumed the token), so a listing that printed it verbatim
+        called a token that redemption already refuses (``not is_fresh``)
+        ``minted`` — 24 of them on one record, 2026-10-21. Display-only: the
+        stored state, and every decision made on it, is unchanged.
+        """
+        return "expired" if self.state == "minted" and not self.is_fresh(now) else self.state
+
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
 
