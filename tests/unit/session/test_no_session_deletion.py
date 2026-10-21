@@ -621,6 +621,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<config>/network/networks/ (design §12 — local record removal, audit kept)",
     ),
     (
+        "local_operator/network/store.py::forget_invite_tokens",
+        "<path>.unlink",
+        "Residue sweep of dead invites: the token FILE <config>/network/outbox/<id>.invite, "
+        "composed by invite_path from safe_component(invite_id) (no separators, so no "
+        "traversal) -- a regular file two levels below network/, never under sessions/",
+    ),
+    (
         "local_operator/network/store.py::clear_pending_pairing",
         "<path>.unlink",
         "The parked pairing FILE <config>/network/pending/<invite>.pending.json, once "
