@@ -1687,18 +1687,38 @@ print(json.dumps(history))
 #: This driver decompresses the single payload element back into the positional
 #: contract ``INSTALL_SOURCE`` has always read -- argv[1] capture source, [2]
 #: port, [3] watchdog source, [4] restart source -- so nothing downstream of the
-#: transport changes, and the refusal vocabulary (a JSON document on stdout) is
-#: produced by the same two handlers the literal wrapper used.
+#: transport changes.
+#:
+#: EVERY transport failure is the same fixed-vocabulary refusal, never a
+#: traceback: decode, inflate, parse and the payload's shape all happen inside
+#: one handler that prints ``install payload invalid``. A truncated base64
+#: element, a flipped character, a non-zlib stream, non-JSON text or the wrong
+#: arity otherwise exits rc=1 with empty stdout, and the host records THAT as
+#: "privilege escalation or installation command failed" -- a false diagnosis of
+#: a sudo problem, which this suite has already paid for once. The inflate is
+#: capped because the element itself is capped: deflate reaches ~1030:1, so a
+#: guest-accepted 131,072-byte argv could otherwise expand to ~135 MB before any
+#: check. The ceiling is a decision (20x the ~49 KB it actually carries), not an
+#: emergent property of the kernel limit.
 TRANSPORT_SOURCE = """\
 import base64, json, sys, zlib
-payload = json.loads(zlib.decompress(base64.b64decode(sys.argv[1])).decode())
-sys.argv = [sys.argv[0], payload[1], sys.argv[2], payload[2], payload[3]]
+LIMIT = 1000000
 try:
-    exec(payload[0])
-except RuntimeError as error:
-    print(json.dumps({'installed': False, 'reason': str(error)}))
-except Exception as error:
-    print(json.dumps({'installed': False, 'reason': type(error).__name__}))
+    raw = base64.b64decode(sys.argv[1])
+    payload = json.loads(zlib.decompressobj().decompress(raw, LIMIT).decode())
+    shaped = type(payload) is list and len(payload) == 4
+    if not shaped or not all(type(part) is str for part in payload):
+        raise ValueError('install payload shape')
+except Exception:
+    print(json.dumps({'installed': False, 'reason': 'install payload invalid'}))
+else:
+    sys.argv = [sys.argv[0], payload[1], sys.argv[2], payload[2], payload[3]]
+    try:
+        exec(payload[0])
+    except RuntimeError as error:
+        print(json.dumps({'installed': False, 'reason': str(error)}))
+    except Exception as error:
+        print(json.dumps({'installed': False, 'reason': type(error).__name__}))
 """
 
 
@@ -1706,14 +1726,16 @@ def _install_payload() -> str:
     """The four install scripts as ONE zlib+base64 argv element.
 
     zlib is stdlib in every python3 the guest can have; bz2 and lzma compress
-    this input a little better (~16 KB against ~18 KB) but are optional build
-    features, and a missing codec here is an ImportError in the guest, which
-    the provider can only record as an install refusal. The safe codec wins a
-    2 KB difference.
+    this input a little better (18,148 bytes of argv against bz2's 16,164 and
+    lzma's 16,680) but are optional build features, and a missing codec here is
+    an ImportError in the guest, which the provider can only record as an install
+    refusal. The safe codec wins ~2 KB.
 
-    Built per call rather than cached at import: it is one zlib pass over ~49 KB
-    (sub-millisecond) on the one install an episode performs, and a cached
-    constant would silently pin a stale copy of a script a test monkeypatched.
+    Built per call rather than cached at import: it is one zlib pass over ~49 KB,
+    measured 2.8 ms best-of-7 on this host (bz2 3.3 ms, lzma 6.0 ms; the same
+    ordering held at 10.2/17.7/23.2 ms under review load), invisible beside the
+    15 s install deadline. A cached constant would silently pin a stale copy of a
+    script a test monkeypatched.
     """
     batch = [INSTALL_SOURCE, CAPTURE_SOURCE, WATCHDOG_SOURCE, RESTART_SOURCE]
     return base64.b64encode(zlib.compress(json.dumps(batch).encode(), 9)).decode("ascii")

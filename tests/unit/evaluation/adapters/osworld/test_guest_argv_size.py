@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import pytest
-from lop_osworld_v2_adapter import guest_supervisor
+from lop_osworld_v2_adapter import guest_disk, guest_supervisor
 
 from tests.unit.evaluation.adapters.osworld.test_aws_provider import (  # noqa: F401
     _hermetic_aws,
@@ -50,10 +50,22 @@ LINUX_MAX_ARG_STRLEN = 131_072
 #: The bound the adapter ships against: real margin below the kernel's ceiling.
 MAX_SAFE_ARGV_BYTES = 100_000
 
-#: A password is what doubles the escalation ladder (agentless + supplied), so
-#: every builder is measured both ways. The value is deliberately not one of
-#: upstream's defaults: that rung adds a third copy of the fragment.
-PASSWORDS = ["", "Passw0rd!"]
+#: A password is what multiplies the escalation ladder (agentless, supplied, and
+#: -- when the supplied value is one of upstream's own defaults -- the
+#: ``upstream-default`` rung), and the ladder repeats the whole fragment once per
+#: rung. Every builder is therefore measured on the runbook's documented value as
+#: well: that is the WORST configuration the real guest sees, and measuring only
+#: the two-tier shape left a blind window between the two-tier and three-tier
+#: sizes in which this guard stayed green while the command had already crossed
+#: the kernel limit. The value is read from ``guest_disk`` rather than repeated
+#: here, so the ladder cannot gain a rung without this file measuring it.
+PASSWORD_CASES = [
+    ("no-password", ""),
+    ("with-password", "two-tier-value"),
+    ("documented-default-three-rungs", guest_disk._UPSTREAM_DEFAULT_PASSWORDS[0]),
+]
+
+PASSWORDS = [pytest.param(value, id=name) for name, value in PASSWORD_CASES]
 
 UNIT = "action-server.service"
 
@@ -90,28 +102,43 @@ def _measure(password: str) -> list[tuple[str, int]]:
     return [(name, _largest_element(build(password))) for name, build in BUILDERS]
 
 
-@pytest.mark.parametrize("password", PASSWORDS, ids=["no-password", "with-password"])
+@pytest.mark.parametrize("password", PASSWORDS)
 def test_no_builder_puts_one_argv_element_near_the_kernel_limit(password: str) -> None:
     measured = _measure(password)
     over = [(name, size) for name, size in measured if size >= MAX_SAFE_ARGV_BYTES]
     report = ", ".join(f"{name}={size}" for name, size in measured)
+    rungs = guest_supervisor.install_command(password)[-1].count("| sudo -S") + 1
     assert not over, (
         f"largest argv element over {MAX_SAFE_ARGV_BYTES} bytes "
         f"(Linux MAX_ARG_STRLEN={LINUX_MAX_ARG_STRLEN}) for password "
-        f"{'set' if password else 'empty'}: {over}. Measured: {report}. "
+        f"{'set' if password else 'empty'}, {rungs} escalation rung(s): {over}. "
+        f"Measured: {report}. "
         "The guest's /execute takes argv only, so an oversized element fails the "
         "exec with E2BIG and the provider can only record the exception type -- "
         "compress the payload or transport it outside argv (see TRANSPORT_SOURCE)."
     )
     # Print the inventory on success too: the failure message is only useful if
     # the sizes are cheap to read back when something grows unexpectedly.
-    print(f"argv sizes (password {'set' if password else 'empty'}): {report}")
+    print(f"argv sizes (password {'set' if password else 'empty'}, " f"{rungs} rung(s)): {report}")
+
+
+def test_the_documented_default_password_really_takes_the_third_rung() -> None:
+    """The worst measured case must be the three-tier one, not a mislabelled copy.
+
+    If the ladder stopped opening its ``upstream-default`` rung, the guard would
+    silently fall back to measuring the two-tier shape under a three-tier name --
+    the exact blind window it exists to close.
+    """
+
+    script = guest_supervisor.install_command(guest_disk._UPSTREAM_DEFAULT_PASSWORDS[0])[-1]
+    assert "upstream-default" in script
+    assert guest_supervisor.install_command("two-tier-value")[-1].count("| sudo -S") == 1
 
 
 def test_the_install_transport_is_what_actually_rides_in_argv() -> None:
     """The compressed element is the shipped one, not a parallel copy."""
 
-    for password in PASSWORDS:
+    for _, password in PASSWORD_CASES:
         command = guest_supervisor.install_command(password)
         assert any(
             guest_supervisor._install_payload() in part for part in command
@@ -193,3 +220,91 @@ def test_the_install_the_fake_guest_receives_fits_and_arrives_once(tmp_path: Pat
             f"(bound {MAX_SAFE_ARGV_BYTES}, Linux limit {LINUX_MAX_ARG_STRLEN})"
         )
         assert stubs.guest_posts[0]["shell"] is False
+
+
+#: Every way the transport stage can fail, as the element the guest would receive.
+#: These are the shapes that used to escape as an rc=1 traceback with EMPTY
+#: stdout -- which the host cannot tell from a sudo rejection.
+CORRUPT_PAYLOADS = [
+    pytest.param(lambda good: good[: len(good) // 2], id="truncated-base64"),
+    pytest.param(
+        lambda good: good[:10] + ("A" if good[10] != "A" else "B") + good[11:],
+        id="flipped-character",
+    ),
+    pytest.param(
+        lambda good: base64.b64encode(b"not a zlib stream").decode("ascii"),
+        id="not-zlib",
+    ),
+    pytest.param(
+        lambda good: base64.b64encode(zlib.compress(b"not json")).decode("ascii"),
+        id="not-json",
+    ),
+    pytest.param(
+        lambda good: base64.b64encode(zlib.compress(json.dumps(["print(1)"]).encode())).decode(
+            "ascii"
+        ),
+        id="wrong-arity",
+    ),
+    pytest.param(
+        lambda good: base64.b64encode(
+            zlib.compress(json.dumps({"a": "1", "b": "2", "c": "3", "d": "4"}).encode())
+        ).decode("ascii"),
+        id="object-not-list",
+    ),
+    pytest.param(
+        lambda good: base64.b64encode(zlib.compress(json.dumps("scalar").encode())).decode("ascii"),
+        id="scalar-not-list",
+    ),
+    pytest.param(
+        lambda good: base64.b64encode(
+            zlib.compress(json.dumps(["print(1)", 1, "2", "3"]).encode())
+        ).decode("ascii"),
+        id="non-string-member",
+    ),
+]
+
+
+def _good_payload() -> str:
+    return base64.b64encode(
+        zlib.compress(json.dumps(["print(1)", "c", "w", "r"]).encode(), 9)
+    ).decode("ascii")
+
+
+@pytest.mark.parametrize("corrupt", CORRUPT_PAYLOADS)
+def test_every_transport_corruption_is_one_fixed_vocabulary_refusal(
+    corrupt: Callable[[str], str],
+) -> None:
+    """A broken payload must never read as a sudo failure.
+
+    ``aws.py`` records only the cause word, so a transport crash is persisted as
+    "privilege escalation or installation command failed" -- a false diagnosis
+    this suite has already paid for. One literal keeps the stages distinct.
+    """
+
+    result = _run_driver(corrupt(_good_payload()))
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "installed": False,
+        "reason": "install payload invalid",
+    }
+
+
+def test_the_driver_bounds_the_inflate_before_parsing() -> None:
+    """The element is kernel-capped; the expansion it can produce must be too.
+
+    Deflate reaches ~1030:1, so a guest-accepted 131,072-byte element could
+    otherwise inflate to ~135 MB before anything looks at it. ``LIMIT`` in the
+    driver makes that ceiling a decision -- and a payload over it is refused like
+    any other transport corruption, not parsed.
+    """
+
+    oversized = ["print(1)", "A" * 1_500_000, "w", "r"]
+    payload = base64.b64encode(zlib.compress(json.dumps(oversized).encode(), 9)).decode("ascii")
+    assert len(payload) < MAX_SAFE_ARGV_BYTES
+    result = _run_driver(payload)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "installed": False,
+        "reason": "install payload invalid",
+    }
