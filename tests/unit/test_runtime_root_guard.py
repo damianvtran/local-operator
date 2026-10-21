@@ -147,24 +147,27 @@ def test_a_swallowed_real_root_plant_writes_nothing_and_is_still_recorded(
 ) -> None:
     """The silent path the guard exists for: production swallows the raise.
 
-    ``ensure_branded_interpreter`` catches every exception (a brand is
+    ``_plant_branded_image`` — the core ``ensure_branded_interpreter`` and both
+    cross-tree spawn sites share — catches every exception (a brand is
     decoration), so a test that reached the real root used to pass with the
     plant done. Under the guard nothing is written there, and the escape is on
-    record — which is what fails the test in ``isolate_environment``.
+    record, which is what fails the test in ``isolate_environment``. Called
+    directly rather than through ``ensure_branded_interpreter``, whose
+    ``branded_link_path`` answers ``None`` off macOS before any root is asked
+    for: this cell must hold on Linux CI too.
     """
     from tests import conftest as suite
 
     fake_real = tmp_path / "operator" / "runtime"
     _aim_guard_at(monkeypatch, fake_real)
     monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(fake_real))
-    prefix = tmp_path / "venv"
-    (prefix / "bin").mkdir(parents=True)
-    (prefix / "pyvenv.cfg").write_text(f"home = {Path(sys.executable).parent}\n")
-    monkeypatch.setattr(sys, "prefix", str(prefix))
-    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+    link = tmp_path / "venv" / "bin" / procname.BRAND
+    link.parent.mkdir(parents=True)
+    real = Path(os.path.realpath(sys.executable))
 
-    assert procname.ensure_branded_interpreter() is None
+    assert procname._plant_branded_image(link, real, None) is None
     assert not fake_real.exists(), "nothing may be planted in the guarded root"
+    assert not link.exists(), "nothing may be linked into the guarded root"
     escapes = suite.drain_runtime_root_escapes()
     assert escapes and all("REAL" in line for line in escapes)
 
