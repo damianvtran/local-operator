@@ -64,6 +64,23 @@ is superseded. Cancelling an already-terminal run is a no-op, and the script
 re-derives every decision from live state, so running it twice changes
 nothing the second time.
 
+Outcomes
+--------
+Each queued run ends in exactly one of:
+
+  KEEP    a rule protected it (protected branch, current head, grace period)
+  CANCEL  cancelled, confirmed by a successful POST
+  WOULD   selected in --dry-run
+  REFUSE  the write failed in a way the NEXT sweep might fix (403, 5xx,
+          rate limit) -- retrying is meaningful
+  GHOST   the write failed with 409. Terminal: GitHub reports the run as
+          `queued` but refuses ever to cancel it. Measured on runs
+          34749070299 and 34747986252 -- 37 days old, branches 404, and both
+          with `jobs: []`, i.e. never scheduled, so they hold no runner slot.
+          Retrying every 20 minutes forever would be noise, not progress.
+
+`cancelled + kept + refused + ghosts == the number of queued runs examined`.
+
 Usage:
     python scripts/reap_superseded_runs.py --repo OWNER/NAME [--dry-run]
 """
@@ -73,6 +90,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 import subprocess
 import sys
 from typing import Any
@@ -113,11 +131,14 @@ def gh_api(path: str, *, method: str = "GET") -> Any:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         detail = proc.stderr.strip()[:200]
-        status = None
-        for code in (404, 403, 422, 500, 502, 503, 504):
-            if f"HTTP {code}" in detail or f"({code})" in detail:
-                status = code
-                break
+        # Parse whatever status `gh` reports rather than matching a fixed list.
+        # A hardcoded tuple silently dropped 409, which made the GHOST branch
+        # in main() unreachable in production while its unit tests passed --
+        # they injected ApiError(status=409) directly and so never exercised
+        # this line. `gh` prints "... (HTTP 409)" and some subcommands "...
+        # (409)", so both shapes are accepted.
+        match = re.search(r"HTTP (\d{3})", detail) or re.search(r"\((\d{3})\)", detail)
+        status = int(match.group(1)) if match else None
         raise ApiError(f"{method} {path} failed rc={proc.returncode}: {detail}", status)
     body = (proc.stdout or "").strip()
     if not body:
@@ -329,7 +350,7 @@ def main() -> int:
     if not runs:
         return 0
 
-    cancelled = kept = refused = 0
+    cancelled = kept = refused = ghosts = 0
     for run in runs:
         run_id = run.get("id")
         should, reason = decide(args.repo, run, args.min_age_minutes, args.max_queue_hours)
@@ -358,6 +379,24 @@ def main() -> int:
         try:
             gh_api(f"repos/{args.repo}/actions/runs/{run_id}/cancel", method="POST")
         except ApiError as exc:
+            if exc.status == 409 and "has not been queued" in str(exc):
+                # THIS 409 is TERMINAL, not retryable. The message matters:
+                # cancel also returns 409 "Cannot cancel a workflow run that
+                # is completed", which is a different situation, so the ghost
+                # label is gated on the never-queued wording rather than on
+                # the bare status. Measured on runs 34749070299 and 34747986252 --
+                # 37 days old, branches 404, reported `queued` by the API, and
+                # both with `jobs: []`. They were never scheduled, so they hold
+                # no runner slot; retrying every 20 minutes forever would be
+                # noise with no possible success. Counted separately from a
+                # refusal (403/5xx), which may well succeed next sweep.
+                ghosts += 1
+                print(
+                    f"  GHOST  {label}: {reason} -> uncancellable ({exc}); "
+                    f"holds no runner slot",
+                    flush=True,
+                )
+                continue
             refused += 1
             print(f"  REFUSE {label}: {reason} -> {exc}", flush=True)
             continue
@@ -365,7 +404,10 @@ def main() -> int:
         print(f"  CANCEL {label}: {reason} -> ok", flush=True)
 
     verb = "would cancel" if args.dry_run else "cancelled"
-    print(f"{verb} {cancelled}, kept {kept}, refused {refused}", flush=True)
+    print(
+        f"{verb} {cancelled}, kept {kept}, refused {refused}, ghosts {ghosts}",
+        flush=True,
+    )
     return 0
 
 
