@@ -48,7 +48,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
@@ -93,11 +93,19 @@ SIDEBAR_LAYOUT_VERSION = 1
 class SidebarLayout(BaseModel):
     """A whole stored preference: both regions, in draw order.
 
-    Both fields are REQUIRED. A body that omits ``more`` must not silently
+    Both REGIONS are required. A body that omits ``more`` must not silently
     mean "restore the default fold", because that is a destructive answer to
     what is far more likely a malformed request; the client always sends the
     whole preference (design §4), and a partial file on disk degrades to the
     defaults in :func:`read_layout` instead of being completed here.
+
+    ``version`` is OPTIONAL and never stored from the body: the store always
+    writes its own. It exists so the document ``GET`` answers can be sent
+    straight back by a read-modify-write client (a ``curl | jq`` loop, a future
+    phone surface): the read answer carries the version, and refusing that
+    exact object on the write would make the route's own answer invalid input.
+    A present version must be ``1``; a newer one is refused rather than
+    silently reinterpreted (agent review round 1, R1-3).
     """
 
     # ``extra="forbid"`` at every layer: an unknown key is a client sending a
@@ -106,6 +114,7 @@ class SidebarLayout(BaseModel):
     # was asked for.
     model_config = ConfigDict(extra="forbid")
 
+    version: Literal[1] | None = None
     visible: list[str]
     more: list[str]
 
@@ -201,10 +210,12 @@ def read_layout(config_dir: Path) -> dict[str, Any]:
 def write_layout(config_dir: Path, layout: dict[str, Any]) -> dict[str, Any]:
     """Validate, then atomically store one layout. Raises on failure.
 
-    The caller supplies only the two regions; the VERSION is this module's to
-    write, so a client can never pin a schema. Validation happens here as well
-    as at the route so no other caller can persist a layout the reader would
-    reject (a ``ValidationError`` escapes, rather than being stored).
+    The caller supplies the two regions and may echo the ``GET`` answer's
+    ``version``; the VERSION that is STORED is this module's, so a client can
+    never pin a schema, and an echoed version other than ``1`` is refused
+    rather than ignored. Validation happens here as well as at the route so no
+    other caller can persist a layout the reader would reject (a
+    ``ValidationError`` escapes, rather than being stored).
 
     ``OSError`` is deliberately not caught: the route answers 500 on it, and a
     caller that does not expect one gets the real failure instead of a bool
@@ -213,7 +224,11 @@ def write_layout(config_dir: Path, layout: dict[str, Any]) -> dict[str, Any]:
     ``0600``, matching the config directory's own permissions.
     """
     validated = SidebarLayout.model_validate(
-        {"visible": layout.get("visible"), "more": layout.get("more")}
+        {
+            "version": layout.get("version"),
+            "visible": layout.get("visible"),
+            "more": layout.get("more"),
+        }
     )
     stored: dict[str, Any] = {
         "version": SIDEBAR_LAYOUT_VERSION,
@@ -221,7 +236,12 @@ def write_layout(config_dir: Path, layout: dict[str, Any]) -> dict[str, Any]:
         "more": list(validated.more),
     }
     directory = Path(config_dir)
-    directory.mkdir(parents=True, exist_ok=True)
+    # 0700 like `ConfigManager` creates it (config.py: "the default 0755
+    # exposed the directory to every other account on a shared host"). The
+    # dependency hands over an initialised manager today, so this is a guard,
+    # not a path we expect to take - but the store must never be the one
+    # component able to restore the wider mode.
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / SIDEBAR_LAYOUT_FILE
     descriptor, temporary = tempfile.mkstemp(
         dir=directory, prefix=f".{SIDEBAR_LAYOUT_FILE}.", suffix=".tmp"
