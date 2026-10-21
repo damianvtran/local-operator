@@ -56011,6 +56011,12 @@ class OperatorApp(App[None]):
             manager = getattr(self._session, "mcp_manager", None)
             startup = getattr(self._session, "mcp_startup", None)
             failures = dict(startup.failures) if startup is not None else {}
+            # The tool-count accessor and the credential-reason reader are both
+            # optional: a minimal manager stand-in (and a session whose manager
+            # could not start) must render the block without them rather than
+            # collapse it.
+            tools_for = getattr(manager, "get_server_tools", None)
+            reason_for = getattr(manager, "credential_reason", None)
             rows: list[tuple[str, str, str]] = []
             for name, cfg in configs.items():
                 target = getattr(cfg, "command", None) or getattr(cfg, "url", None) or ""
@@ -56019,7 +56025,35 @@ class OperatorApp(App[None]):
                 # server that has since reconnected must not keep reporting the
                 # failure it recovered from, or /mcp becomes a permanent accusation.
                 error = failures.get(name, "") if status != "connected" else ""
-                rows.append((name, status, error or target))
+                reason = ""
+                if status != "connected" and callable(reason_for):
+                    try:
+                        reason = str(reason_for(name) or "")
+                    except Exception:  # noqa: BLE001 — a detail must not break /mcp
+                        reason = ""
+                if status == "connected":
+                    # WHICH SERVER AND HOW MUCH IT OFFERS, on one line. The target
+                    # alone stopped answering the question once a peer's tools could
+                    # be borrowed: the operator wants to know the connection carries
+                    # tools, and the count is the cheapest proof it does.
+                    detail = target
+                    if callable(tools_for):
+                        try:
+                            from collections.abc import Sized
+
+                            listing = tools_for(name)
+                            if isinstance(listing, Sized):
+                                detail = f"{target} · {len(listing)} tools"
+                        except Exception:  # noqa: BLE001 — keep the target
+                            detail = target
+                else:
+                    # THE REASON REPLACES THE TARGET, because the target is not the
+                    # answer to "why is this server down" (design §5). Order: the
+                    # boot error is the most specific fact while it is current; the
+                    # credential state is the durable one; the target is the last
+                    # resort for a manager that knows neither.
+                    detail = error or reason or target
+                rows.append((name, status, detail))
             name_column = max(len(name) for name, _, _ in rows)
             status_column = max(len(status) for _, status, _ in rows)
             items = [

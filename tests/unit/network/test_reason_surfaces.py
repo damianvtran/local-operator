@@ -258,8 +258,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # them as machine tokens and the human line only counts them. No peer prose
     # can reach this read.
     ("local_operator/network/cli.py", "_cmd_mcp_credentials", "reason"): (
+        2,
+        "this device's own grant-skip code (a --json machine token) plus the "
+        "credential-status pass's locally composed, value-free sentence",
+    ),
+    # The three readers of that credential-status sentence. It is authored HERE,
+    # by ``mcp.credential_status`` — "sign in again on <owner>", "not yet synced —
+    # run ..." — bounded at composition and carrying names only. None of these is
+    # a peer's prose and no value can reach them.
+    ("local_operator/mcp/manager.py", "McpManager.credential_reason", "reason"): (
         1,
-        "this device's own grant-skip code, carried in --json as a machine token",
+        "the local credential-status sentence, composed on this device",
+    ),
+    ("local_operator/mcp/manager.py", "McpManager._credential_hint", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
+    ),
+    ("local_operator/network/cli.py", "_render_mcp_credential_row", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
     ),
     # ``_dedupe_skip_rows`` reads the same local code only to form the dedupe
     # identity: compared, never rendered.
