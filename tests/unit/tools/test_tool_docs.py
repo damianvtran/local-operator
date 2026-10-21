@@ -270,7 +270,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # 376 -> 240 chars, both model docstrings to one line each). 729 is the
     # structural floor for a capability the model must be able to call. The
     # paired start-context raise is stated in scripts/bench_context_budget.py.
-    "bridge": 729,
+    # RE-MEASURED (#2757 R1): 729 -> 755 via this test's canonical isolated
+    # renderer (count_text_tokens(render_tool_doc(...))). Threads add the
+    # channel_thread op and thread_root_id parameter plus their wire guidance;
+    # no other tool's measured entry moved. This is the deliberate 26-token
+    # cost of letting agents read and answer IN a thread instead of the channel.
+    "bridge": 755,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
