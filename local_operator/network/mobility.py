@@ -1336,21 +1336,29 @@ def _queued_receipt(
     if explicit is not None:
         result["carry"] = dict(explicit)
     elif bool(queue.get("drop_session_roles") or False):
-        notice = str(queue.get("session_roles_notice") or "").strip()
-        count = int(queue.get("session_roles") or 0)
-        if not notice and root is not None:
+        # THE STAMP IS A QUEUE-TIME FACT (round 4): it is written at enqueue and
+        # re-read on a re-delivery after the safe point, when the live tree may
+        # have gained definitions. Trust it ONLY while the record is still
+        # `queued`; afterwards the live tree (still here until the commit) is the
+        # count the stash will hold.
+        phase = str(queue.get("phase") or "")
+        queued_now = phase in ("", "queued")
+        notice = str(queue.get("session_roles_notice") or "").strip() if queued_now else ""
+        count = int(queue.get("session_roles") or 0) if queued_now else 0
+        if root is not None:
             try:
                 names = _session_role_definitions(root, session_id)
             except _SessionRolesUnreadable:
                 names = []
-            count = count or len(names)
             if names:
+                count = len(names)
                 notice = _session_roles_notice(
                     len(names),
-                    device_name=str(from_block.get("name") or "this device"),
-                    stash=session_roles_stash_path(root, session_id),
-                    kept=False,
-                    future=True,
+                    str(from_block.get("name") or "this device"),
+                    session_roles_stash_path(root, session_id),
+                    # Still prospective until the record reaches a terminal
+                    # phase: a paused/copying re-delivery has not stashed yet.
+                    future=phase not in ("resumed", "failed", "cancelled"),
                 )
         if notice:
             result["carry"] = {
@@ -2692,7 +2700,20 @@ def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
             for child in store_dir.iterdir()
             if child.is_dir() and not child.name.startswith(".") and (child / suffix).is_file()
         )
-        return markers[0] if len(markers) > parsed else None
+        if len(markers) <= parsed:
+            return None
+        # NAME THE FILE THE WALK FAILED ON (round 4), not just the first marker:
+        # parse each one and return the first that is not valid YAML. When every
+        # file parses but a row still failed validation, the count is the only
+        # honest statement, so the first marker is reported as the candidate.
+        import yaml
+
+        for marker in markers:
+            try:
+                yaml.safe_load(marker.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 — this is the offending file
+                return marker
+        return markers[0]
 
     try:
         store = AgentRegistry(base, initialize=False, migrate=False)
@@ -2824,9 +2845,10 @@ def _session_roles_notice(
     noun = "definition" if count == 1 else "definitions"
     if kept:
         return (
-            f"{count} session role/team {noun} remain in the source conversation on "
+            f"{count} session role/team {noun} "
+            f"{'remains' if count == 1 else 'remain'} in the source conversation on "
             f"{device_name} (--keep leaves it running) — a mesh move does not carry "
-            "them in this version"
+            "them in this version."
         )
     where = f"at {stash}" if stash is not None else "under the dropped-session-roles root"
     # ONE CONCEPT WORD (round 3, U9): "stash" across the flag's prose, the
@@ -2868,7 +2890,8 @@ def _session_roles_refusal(
         "result": "refused",
         "code": "session_roles",
         "message": (
-            f"this conversation owns {len(names)} session definition(s) ({listed}), and a "
+            f"this conversation owns {len(names)} session "
+            f"{'definition' if len(names) == 1 else 'definitions'} ({listed}), and a "
             "mesh move does not carry them in this version. Either stay on this device, "
             "or re-run with --drop-session-roles: the definitions will then be stashed "
             f"at {stash} on this device, and the receipt names that path."
@@ -3189,11 +3212,11 @@ def _source_prepare(
                 # durable on the record.
                 queued_receipt["carry"] = {
                     "session_roles": len(session_roles),
-                    "session_roles_notice": (
-                        f"{len(session_roles)} session role/team definition(s) will stay on "
-                        f"{server._own_label()} at "  # noqa: SLF001
-                        f"{session_roles_stash_path(server.root, session_id)} when this "
-                        "queued move runs — a mesh move does not carry them"
+                    "session_roles_notice": _session_roles_notice(
+                        len(session_roles),
+                        str(server._own_label()),  # noqa: SLF001
+                        session_roles_stash_path(server.root, session_id),
+                        future=True,
                     ),
                 }
             return queued_receipt

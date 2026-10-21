@@ -1320,8 +1320,17 @@ def test_a_corrupt_role_file_refuses_the_move_instead_of_being_skipped(
     """
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin")
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
     directory = _owned_session(server_a)
-    broken = directory / "roles" / "agents" / "broken" / "agent.yml"
+    # A VALID row first, so ``markers[0]`` is NOT the broken one: the round-4
+    # finding was that the message named the first marker rather than the file
+    # the walk failed on, which here would have been this row's directory.
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+    broken = directory / "roles" / "agents" / "zzz-broken" / "agent.yml"
     broken.parent.mkdir(parents=True)
     broken.write_text("name: [unclosed\n", encoding="utf-8")
 
@@ -1329,7 +1338,7 @@ def test_a_corrupt_role_file_refuses_the_move_instead_of_being_skipped(
 
     assert result.get("ok") is not True, result
     assert result.get("code") == "session_roles_unreadable", result
-    assert "broken" in str(result.get("message") or ""), result
+    assert "zzz-broken/agent.yml" in str(result.get("message") or ""), result
     assert directory.is_dir(), "the refusal changed nothing on the source"
 
 
@@ -1419,3 +1428,59 @@ def test_a_dot_staging_dir_and_a_renamed_row_are_not_corrupt(tmp_path: Path) -> 
     os.rename(staged, base / "teams" / ".staging-tmp")
 
     assert mobility._session_role_definitions(tmp_path, SESSION) == ["Alpha"]
+
+
+def test_a_relayed_receipt_states_the_live_count_not_the_enqueue_stamp(
+    tmp_path: Path,
+) -> None:
+    """Round 4: the stamp is a queue-time fact.
+
+    A definition added between enqueue and the safe point must show up in the
+    receipt the re-delivery prints: the stamp said 1, the stash will hold 2.
+    """
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.network import move_queue
+    from local_operator.profile_scope import scope_agent_registry
+
+    scoped = scope_agent_registry(AgentRegistry(tmp_path), tmp_path / "sessions" / SESSION)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+    record, _ = move_queue.enqueue(
+        tmp_path,
+        SESSION,
+        to_device="d_b",
+        to_name="dev-b",
+        request_id="rq1",
+        requested_by="d_a",
+        drop_session_roles=True,
+        session_roles=1,
+        session_roles_notice=(
+            "1 session role/team definition will be stashed on dev-a at /x "
+            "when this queued move runs"
+        ),
+    )
+    blocks = {
+        "keep": False,
+        "from_block": {"device_id": "d_a", "name": "dev-a"},
+        "to_block": {"device_id": "d_b", "name": "dev-b"},
+    }
+
+    while_queued = mobility._queued_receipt(
+        SESSION, move_queue.payload(record) or {}, root=tmp_path, **blocks
+    )
+    assert (while_queued.get("carry") or {}).get("session_roles") == 1, while_queued
+
+    assert install_seed("coder", registry=scoped, scope="session") is not None
+    move_queue.transition(tmp_path, SESSION, "paused")
+    relayed = mobility._queued_receipt(
+        SESSION,
+        move_queue.payload(move_queue.read_record(tmp_path, SESSION)) or {},
+        root=tmp_path,
+        **blocks,
+    )
+
+    carry = relayed.get("carry") or {}
+    assert carry.get("session_roles") == 2, relayed
+    assert "2 session role/team definitions will be stashed" in str(
+        carry.get("session_roles_notice")
+    ), carry

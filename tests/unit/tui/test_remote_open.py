@@ -691,10 +691,12 @@ class _QueuedFake:
                 "drop_session_roles": drop_session_roles,
             }
         )
+        # The QUEUED tense (round 4): the product's notice is future here, and the
+        # fake must be the same sentence or the test cannot catch a tense slip.
         notice = (
-            "1 session role/team definition were stashed on laptop at "
-            "/tmp/config/dropped-session-roles/other1 — a mesh move does not "
-            "carry them in this version"
+            "1 session role/team definition will be stashed on laptop at "
+            "/tmp/config/dropped-session-roles/other1 when this queued move "
+            "runs — a mesh move does not carry them"
         )
         carry = {"session_roles": 1, "session_roles_notice": notice} if drop_session_roles else {}
         return {
@@ -826,7 +828,8 @@ async def test_a_queued_drop_move_reports_the_stash(monkeypatch: pytest.MonkeyPa
         assert fake.calls[0]["drop_session_roles"] is True, fake.calls
         shown = " ".join(_notices(app))
         assert "dropped-session-roles/other1" in shown, shown
-        assert "were stashed on laptop" in shown, shown
+        assert "will be stashed on laptop" in shown, shown
+        assert ".." not in shown, shown
 
 
 @pytest.mark.asyncio
