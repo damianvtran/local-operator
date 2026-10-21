@@ -414,10 +414,6 @@ class FakeClient:
             during()
         return self._answer("message")
 
-    async def directory(self, tenant_id: str, *, access: Any = None) -> dict[str, Any]:
-        FakeClient.behavior["last_directory_tenant"] = tenant_id
-        return self._answer("directory")
-
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("settings")
 
