@@ -4913,3 +4913,90 @@ def test_listing_rows_carry_the_sessions_own_team_binding(root: Path) -> None:
     assert rows[cold]["state"] == "stored", "the cell needs a stored row to mean anything"
     assert rows[cold]["binding"] == {"agent": "coder", "team": None}
     assert rows[bare]["binding"] == {"agent": None, "team": None}, "no sidecar is no claim"
+
+
+def test_a_promptless_team_create_carries_its_team_and_level_across_the_link(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The desktop's remote ``/new`` over a REAL two-relay mesh: team and effort both land.
+
+    Operator report, 2026-10-21, two halves of one create: a session started from
+    the desktop on a peer under team ``lopdev`` at effort ``max`` showed no team
+    badge and showed ``High``. The desktop create sends NO first prompt and spells
+    the level ``model.reasoning_effort``; this cell sends exactly that frame from
+    A to B over the live link and requires:
+
+    * the create REPLY names the team (the promptless branch omitted it, so the
+      origin recorded ``binding.team = null``);
+    * B's runtime is asked for the chosen level (the hop read only ``effort``);
+    * B's listing row, and A's sidebar producer reading it across the link,
+      carry the team binding (the listing never did).
+    """
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session.peer_rows import clear_cache
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    levels: list[tuple[str, str, str]] = []
+
+    async def set_model_effort(self: Any, provider: str, model_id: str, effort: str) -> str:
+        levels.append((provider, model_id, effort))
+        return f"model: {provider}/{model_id}"
+
+    monkeypatch.setattr(_Handle, "set_model_effort", set_model_effort, raising=False)
+    server_a, server_b, _host_a, _port_a = peer_pair
+    for device_root in (server_a.root, server_b.root):
+        TeamRegistry(device_root).create_team(
+            TeamEditFields(
+                name="lopdev",
+                description="Development team.",
+                manager="manager",
+                members=[TeamMember(role="coder")],
+                instructions="Ship reviewed work.",
+                project="local-operator",
+            )
+        )
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 11,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "prompt": "",
+                "team": "lopdev",
+                "model": {
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "reasoning_effort": "max",
+                },
+            },
+            timeout=60.0,
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        detail = reply["detail"]
+        session_id = detail["session_id"]
+        assert detail["warming"] is True, "the cell needs the desktop's promptless branch"
+        assert (detail.get("team") or {}).get("name") == "lopdev", detail
+
+        assert net_fixtures.wait_for(lambda: bool(levels), 60.0), "set_model never reached B"
+        assert levels[0] == ("deepseek", "deepseek-flash", "max"), levels
+
+        own = next(row for row in server_b.local_session_rows() if row["session_id"] == session_id)
+        assert own["binding"] == {"agent": None, "team": "lopdev"}, own
+
+        payload = _call(server_a.root, "peer_session_rows")["detail"]
+        crossed = next(row for row in payload["sessions"] if row["session_id"] == session_id)
+        assert crossed["binding"] == {"agent": None, "team": "lopdev"}, crossed
+
+        clear_cache()
+        desktop = [
+            row for row in remote_session_rows(server_a.root, pins=set()) if row["id"] == session_id
+        ]
+        assert desktop and desktop[0]["binding"] == {"agent": None, "team": "lopdev"}, desktop
+        link.close("test")
+    finally:
+        _stop_all(served)
