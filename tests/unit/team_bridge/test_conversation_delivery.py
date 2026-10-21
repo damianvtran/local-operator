@@ -93,14 +93,28 @@ def _receipt(verdict: str) -> Any:
 
 @dataclass
 class FakeServer:
-    """One channel message and the documented per-member delivery rules."""
+    """One channel message and the documented per-member delivery rules.
+
+    ``page`` models the server's NEWEST-FIRST list: it filters by the cursors,
+    sorts descending and takes ``limit``. That is what makes the target-window
+    assertion meaningful (an ``after_seq`` window can hide the target behind
+    newer rows; ``before_seq=seq+1, limit=1`` cannot).
+    """
 
     notify: dict[str, str] = field(default_factory=dict)
     active: dict[str, bool] = field(default_factory=dict)
     mentioned: set[str] = field(default_factory=set)
-    last_read: dict[str, int] = field(default_factory=dict)
     body: str = BODY
     body_override: str | None = None
+    human_member: bool = True
+    metadata: bool = True
+    conversation_name: str = "#qa-coordination"
+    sender: dict[str, Any] = field(default_factory=lambda: dict(SENDER))
+    newer_messages: int = 0
+    hide_target: bool = False
+    include_history_body: bool = False
+    body_route_available: bool = True
+    view_calls: list[str] = field(default_factory=list)
     history_calls: list[dict[str, Any]] = field(default_factory=list)
     admits: list[dict[str, Any]] = field(default_factory=list)
 
@@ -110,48 +124,89 @@ class FakeServer:
         mention = endpoint in self.mentioned
         if not mention and self.notify.get(endpoint) != "all":
             return None
-        return {
-            "type": "message_available",
-            "ids": {
-                "message_id": MESSAGE_ID,
-                "conversation_id": CONVERSATION_ID,
-                "conversation_seq": 1,
-                "mention": mention,
-            },
-            "at": HISTORY_AT,
+        ids: dict[str, Any] = {
+            "message_id": MESSAGE_ID,
+            "conversation_id": CONVERSATION_ID,
+            "conversation_seq": 1,
         }
+        if mention:  # the server's bool is ``omitempty``: false is ABSENT
+            ids["mention"] = True
+        if self.metadata:
+            ids.update(
+                {
+                    "conversation_name": self.conversation_name,
+                    "sender_label": self.sender["display_label"],
+                    "sender_kind": self.sender["kind"],
+                }
+            )
+        return {"type": "message_available", "ids": ids, "at": HISTORY_AT}
 
     def events_answer(self, endpoint: str) -> dict[str, Any]:
         event = self.event_for(endpoint)
         return {"events": [event] if event else [], "cursor": "1"}
 
     def view(self, endpoint: str) -> dict[str, Any]:
+        self.view_calls.append(endpoint)
+        if not self.human_member:
+            raise conversation_mod.BridgeRefusal(
+                "not_a_member", "person-gated view refused", http_status=403
+            )
         return {
             "id": CONVERSATION_ID,
             "kind": "channel",
-            "name": "qa-coordination",
-            "last_read_seq": self.last_read.get(endpoint, 0),
+            "name": self.conversation_name,
             "members": [],
         }
 
-    def page(self, after_seq: int | None, limit: int | None) -> dict[str, Any]:
-        self.history_calls.append({"after_seq": after_seq, "limit": limit})
-        if after_seq is not None and after_seq >= 1:
-            return {"messages": [], "has_more": False}
-        return {
-            "messages": [
+    def _messages(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if not self.hide_target:
+            body = self.body if self.include_history_body else None
+            rows.append(
                 {
                     "id": MESSAGE_ID,
                     "conversation_id": CONVERSATION_ID,
                     "seq": 1,
-                    "sender": dict(SENDER),
-                    "body": None,
+                    "sender": dict(self.sender),
+                    "body": body,
+                    "body_hash": hashlib.sha256(self.body.encode("utf-8")).hexdigest(),
                     "origin": "human",
                     "created_at": HISTORY_AT,
                 }
-            ],
-            "has_more": False,
-        }
+            )
+        for index in range(self.newer_messages):
+            rows.append(
+                {
+                    "id": f"bcmsg_newer{index:02d}",
+                    "conversation_id": CONVERSATION_ID,
+                    "seq": index + 2,
+                    "sender": dict(self.sender),
+                    "body": None,
+                    "body_hash": "",
+                    "origin": "human",
+                    "created_at": HISTORY_AT,
+                }
+            )
+        return rows
+
+    def page(
+        self,
+        *,
+        before_seq: int | None,
+        after_seq: int | None,
+        limit: int | None,
+    ) -> dict[str, Any]:
+        self.history_calls.append(
+            {"before_seq": before_seq, "after_seq": after_seq, "limit": limit}
+        )
+        rows = [
+            row
+            for row in self._messages()
+            if (before_seq is None or row["seq"] < before_seq)
+            and (after_seq is None or row["seq"] >= after_seq)
+        ]
+        rows.sort(key=lambda row: row["seq"], reverse=True)
+        return {"messages": rows[: limit or 50], "has_more": False}
 
     def body_response(self) -> dict[str, Any]:
         return {
@@ -172,10 +227,18 @@ class FakeWire:
 
     async def conversation_messages(self, conversation_id: str, **kwargs: Any) -> dict[str, Any]:
         assert conversation_id == CONVERSATION_ID
-        return self.server.page(kwargs.get("after_seq"), kwargs.get("limit"))
+        return self.server.page(
+            before_seq=kwargs.get("before_seq"),
+            after_seq=kwargs.get("after_seq"),
+            limit=kwargs.get("limit"),
+        )
 
     async def conversation_body(self, conversation_id: str, message_id: str, **kwargs: Any):
         assert (conversation_id, message_id) == (CONVERSATION_ID, MESSAGE_ID)
+        if not self.server.body_route_available:
+            raise conversation_mod.BridgeRefusal(
+                "not_found", "classification route unavailable", http_status=404
+            )
         return self.server.body_response()
 
     async def conversation_admit(
@@ -324,6 +387,32 @@ def test_card_sender_kind_is_dynamic() -> None:
     assert "(human, same tenant)" not in card
 
 
+def _ref(server: FakeServer, endpoint: str = "bep_a") -> Any:
+    """The conversation ref the connector would drain for this endpoint."""
+
+    _cursor, refs, _resync = project_events_batch(server.events_answer(endpoint))
+    return plan_feed_refs(refs).conversation_deliveries[0]
+
+
+def test_card_header_collapses_crlf_in_labels() -> None:
+    """Server-resolved labels are not newline-free; the header must be one line."""
+
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_label="#qa\ncoordination\r",
+            sender_label="Ada\r\nEve",
+            sender_kind="human",
+            mention=True,
+            message_id=MESSAGE_ID,
+            conversation_seq=1,
+        )
+    )
+    assert card.splitlines()[0] == (
+        "Channel message · #qa coordination · from Ada Eve (human, same tenant)"
+    )
+    assert "\r" not in card
+
+
 def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkeypatch) -> None:
     a = _owner("a", 1)
     b = _owner("b", 2)
@@ -336,7 +425,6 @@ def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkey
         notify={"bep_a": "mute", "bep_b": "all"},  # A is muted; the mention overrides it
         active={"bep_a": True, "bep_b": True},
         mentioned={"bep_a"},
-        last_read={"bep_a": 0, "bep_b": 0},
     )
     runtimes = {"a": (a, dirs["a"]), "b": (b, dirs["b"])}
     notifications: list[str] = []
@@ -372,11 +460,10 @@ def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkey
     assert "hello from the channel" not in card_b
     assert modes["sess_b"] == ["mailbox"]
 
-    # The gap page is history, after_seq, never the pair inbox.
-    assert server.history_calls == [
-        {"after_seq": 0, "limit": 50},
-        {"after_seq": 0, "limit": 50},
-    ]
+    # The body route is addressed by message id: neither the person-gated view
+    # nor a history window is consulted for the normal path.
+    assert server.view_calls == []
+    assert server.history_calls == []
     # Admission is per endpoint and identical bytes.
     assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [
         ("bep_a", "allow"),
@@ -406,9 +493,7 @@ def test_mute_member_gets_no_row_and_disabled_endpoint_gets_no_row(tmp_path, mon
     _enroll(config_dir, b, "sess_b")
 
     # (c) mute (and not mentioned): the server writes no feed row.
-    server = FakeServer(
-        notify={"bep_b": "mute"}, active={"bep_b": True}, mentioned=set(), last_read={"bep_b": 0}
-    )
+    server = FakeServer(notify={"bep_b": "mute"}, active={"bep_b": True}, mentioned=set())
     transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
     out = _run(b, config_dir)
     assert out["handled"] == [] and transcripts["sess_b"] == []
@@ -439,14 +524,135 @@ def test_no_designation_is_badge_only_and_wakes_nothing(tmp_path, monkeypatch) -
         json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
     )
 
-    server = FakeServer(
-        notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"}, last_read={}
-    )
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
     transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
     out = _run(a, config_dir)
 
     assert out["handled"][0]["action"] == "badge_only"
     assert transcripts == {"sess_a": []}
+
+
+def test_agent_only_membership_never_calls_the_person_view(tmp_path, monkeypatch) -> None:
+    """BLOCKER proof: the feed labels suffice; the human-gated view is not read."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(
+        notify={"bep_a": "mute"},
+        active={"bep_a": True},
+        mentioned={"bep_a"},
+        human_member=False,  # an account with only an agent membership
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    out = _run(a, config_dir)
+
+    assert out["handled"][0]["action"] == "delivered"
+    assert server.view_calls == []
+    assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+
+
+def test_body_route_does_not_depend_on_a_newest_window(tmp_path, monkeypatch) -> None:
+    """MAJOR proof: 100 newer messages cannot hide the target body."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(
+        notify={"bep_a": "mute"},
+        active={"bep_a": True},
+        mentioned={"bep_a"},
+        newer_messages=100,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    out = _run(a, config_dir)
+
+    assert out["handled"][0]["action"] == "delivered"
+    assert server.history_calls == []
+    assert [row["verdict"] for row in server.admits] == ["allow"]
+    assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+
+
+def test_body_route_unavailable_falls_back_to_the_target_window(tmp_path, monkeypatch) -> None:
+    """A legacy server without the body route still gets the target, not a 404."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(
+        notify={"bep_a": "mute"},
+        active={"bep_a": True},
+        mentioned={"bep_a"},
+        newer_messages=100,
+        body_route_available=False,
+        include_history_body=True,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    out = _run(a, config_dir)
+
+    assert out["handled"][0]["action"] == "delivered"
+    assert server.history_calls == [{"before_seq": 2, "after_seq": None, "limit": 1}]
+    assert [row["verdict"] for row in server.admits] == ["allow"]
+    assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+
+
+def test_absent_target_keeps_the_hold(tmp_path, monkeypatch) -> None:
+    """A missing target is retryable, not terminal: the hold row survives."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    store = _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(
+        notify={"bep_a": "mute"},
+        active={"bep_a": True},
+        mentioned={"bep_a"},
+        body_route_available=False,
+        hide_target=True,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    out = _run(a, config_dir)
+
+    assert out["handled"][0]["action"] == "hold"
+    assert out["handled"][0]["code"] == "body_unavailable"
+    assert transcripts["sess_a"] == []
+    assert store.screening_hold(a, _ref(server).encode()) is not None
+
+
+def test_hold_retry_survives_restart(tmp_path, monkeypatch) -> None:
+    """A persisted conversation hold is re-driven by its encoded ref."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    store = _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    ref = _ref(server)
+    store.persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    loop_mod._RETRY_ATTEMPTS.clear()  # a fresh process has no in-memory counter
+
+    out = asyncio.run(
+        loop_mod.retry_due_holds(
+            a,
+            config_dir=config_dir,
+            access=SimpleNamespace(credential_id=a.credential_id),
+            auth_store=None,
+        )
+    )
+
+    assert out["outcomes"][0]["action"] == "delivered"
+    assert transcripts["sess_a"][0]["payload"] == EXPECTED_CARD_A
+    assert store.screening_hold(a, ref.encode()) is None
+    assert [row["verdict"] for row in server.admits] == ["allow"]
 
 
 def test_denied_body_stays_metadata_only(tmp_path, monkeypatch) -> None:
@@ -455,9 +661,7 @@ def test_denied_body_stays_metadata_only(tmp_path, monkeypatch) -> None:
     config_dir.mkdir()
     _enroll(config_dir, a, "sess_a")
 
-    server = FakeServer(
-        notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"}, last_read={}
-    )
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
     transcripts, _modes = _wire_rig(
         monkeypatch, server, {"a": (a, config_dir)}, disposition="bounce"
     )
@@ -481,7 +685,6 @@ def test_mutated_body_is_not_screened_admitted_or_rendered(tmp_path, monkeypatch
         notify={"bep_a": "mute"},
         active={"bep_a": True},
         mentioned={"bep_a"},
-        last_read={},
         body_override="tampered bytes",
     )
     screen_calls: list[str] = []
