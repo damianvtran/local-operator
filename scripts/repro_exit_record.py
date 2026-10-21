@@ -115,16 +115,19 @@ def main() -> int:
     config.mkdir()
     print(f"scratch root: {scratch}")
 
-    # THE CHILD'S ENVIRONMENT: the operator's families stripped, then the two
-    # roots and the session this spawn serves set explicitly.
-    child_env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
-    # THE SUITE'S OWN KILL SWITCHES, imported rather than spelled: a child spawned
-    # from this script must not post a desktop notification or try to focus the
-    # operator's app (its env is a scratch HOME, and a launch there would be a
-    # second product instance, not a test).
-    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+    # THE CHILD'S ENVIRONMENT goes through the product's own harness carrier:
+    # ``harness_child_env`` is the ONE place a script under ``scripts/`` says "I am
+    # a harness driving the real CLI", and it carries the notification gate with
+    # it — a scratch-home child whose mock session finishes a turn must never put
+    # that turn's last line on the operator's lock screen. The families below are
+    # stripped first because an inherited ``LOP_RUNTIME_*``/``CMUX_*`` would point
+    # the child at the operator's own session instead of this scratch root.
+    from local_operator.agent_shell import harness_child_env
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_REFUSED_ENV
 
+    child_env = harness_child_env(
+        {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
+    )
     child_env.update(
         {
             "HOME": str(home),
@@ -132,7 +135,8 @@ def main() -> int:
             "LOP_MOBILE_CHILD_CWD": str(config),
             "LOP_MOBILE_CHILD_RESUME": SESSION_ID,
             "LOP_SESSION_GRACE_S": GRACE_S,
-            ENV_DISABLE: ENV_DISABLE_VALUE,
+            # Not a notification switch: this refuses a DESKTOP LAUNCH, so the
+            # child cannot spawn a second product instance against the scratch home.
             DESKTOP_LAUNCH_REFUSED_ENV: "1",
         }
     )
