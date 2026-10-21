@@ -263,10 +263,8 @@ class AgentParams(BaseModel):
     scope: Literal["global", "session"] | None = Field(
         default=None,
         description=(
-            "create/update/delete/reset/install: where the role lives. Omit for "
-            "'session' — this conversation only, gone with it. 'global' changes "
-            "the user's account and needs their confirmation; this host may be "
-            "unable to ask, in which case the call is refused with the way forward."
+            "'session' (default) is this conversation only; 'global' is the "
+            "user's account and needs their confirmation."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not

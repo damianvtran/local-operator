@@ -20390,7 +20390,11 @@ class OperatorApp(App[None]):
         """
         from local_operator.profile_scope import row_scope
 
-        counter = getattr(team, "member_count", None)
+        # Defensive access kept from the original: a doubled registry method is
+        # typed ``object`` through ``getattr``, and the annotation states the one
+        # contract this line needs (a count), so a reduced double still degrades
+        # to a row instead of breaking the picker mid-keystroke.
+        counter: Callable[[], int] | None = getattr(team, "member_count", None)
         slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
         parts: list[str] = []
         if led_by:

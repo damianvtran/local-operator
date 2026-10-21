@@ -1155,7 +1155,7 @@ async def test_both_result_bodies_spell_the_launch_line_the_same_way(context) ->
     assert "launch with task(" in await call(context, op="show", name="reviewer")
 
 
-def _legacy_role_row(registry: AgentRegistry, name: str, **overrides: Any):
+def _legacy_role_row(registry: Any, name: str, **overrides: Any):
     """A role row as a PRE-PROVENANCE release wrote it: role tags, no `seed:`.
 
     The population U7 was found on. Built by hand because no code path writes

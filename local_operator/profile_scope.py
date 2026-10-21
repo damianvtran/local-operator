@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -76,7 +77,7 @@ def row_scope(registry: Any, row: Any) -> Scope:
     inspect. Only the composite, which can answer ``scope_of``, may say
     ``session``.
     """
-    scope_of = getattr(registry, "scope_of", None)
+    scope_of: Callable[[Any], Scope] | None = getattr(registry, "scope_of", None)
     return scope_of(row) if callable(scope_of) else "global"
 
 

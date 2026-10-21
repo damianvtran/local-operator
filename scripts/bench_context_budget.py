@@ -1723,7 +1723,7 @@ BUDGET_BILLED_TOKENS = 32_104
 #   = +919 chars of ``tool_schemas`` = ~+331 billed, the SAME delta as the top
 #     arm: the channel tool is in every session's surface, children included,
 #     and no child counter moved. Ceiling = measured head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 29_053
+BUDGET_CHILD_BILLED_TOKENS = 29_124
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

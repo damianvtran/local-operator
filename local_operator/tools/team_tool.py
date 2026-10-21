@@ -152,10 +152,8 @@ class TeamParams(BaseModel):
     scope: Literal["global", "session"] | None = Field(
         default=None,
         description=(
-            "create/update: where the team lives. Omit for 'session' — this "
-            "conversation only, gone with it. 'global' saves it for every "
-            "conversation and needs the user's confirmation; this host may be "
-            "unable to ask, in which case the call is refused with the way forward."
+            "'session' (default) is this conversation only; 'global' is the "
+            "user's account and needs their confirmation."
         ),
     )
     overrides: list[TeamOverride] | None = Field(
