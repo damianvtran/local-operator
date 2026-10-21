@@ -243,7 +243,10 @@ def test_owner_reads_a_legacy_members_ack_as_its_held_digest(rig: _Rig) -> None:
     """A member build without ``held_digest`` (0.84.5) stops the bump too.
 
     The owner's own ack ledger for exactly the generation the member says it
-    holds is the evidence. A frame that DOES carry the field, even empty, is
+    holds is the evidence. An old member cannot read ``in_sync`` (its apply
+    calls anything but ``copy`` a refusal), so it is served at the CURRENT
+    generation — never ``held + 1`` — and its own monotonicity rule drops that
+    reply before applying. A frame that DOES carry the field, even empty, is
     taken at its word — that is how a current member whose copy was deleted
     gets it re-served — and an ack for a DIFFERENT generation proves nothing.
     """
@@ -251,7 +254,13 @@ def test_owner_reads_a_legacy_members_ack_as_its_held_digest(rig: _Rig) -> None:
     gen = rig.owner_gen()
     link = SimpleNamespace(device_id=MEMBER)
     legacy = {"kind": "copy", "key": KEY, "gen": 0, "held": gen}
-    assert sync.owner_copy(rig.broker, link, dict(legacy))["kind"] == "in_sync"
+    for _ in range(TICKS):
+        detail = sync.owner_copy(rig.broker, link, dict(legacy))
+        assert detail["kind"] == "copy" and detail["gen"] == gen, detail
+        # The old member's own rule, exercised: at-or-below held is dropped.
+        assert (
+            rig.engine.apply_copy_reply(KEY, detail, owner=OWNER, held_gen=gen) == "in_sync"
+        )
     assert rig.owner_gen() == gen, "a legacy steady-state request must not bump"
 
     # An empty field is a claim of "nothing held": served, as before the fix.

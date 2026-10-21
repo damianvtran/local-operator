@@ -2510,23 +2510,27 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
                     f"this device has no copyable value for {key!r} right now; nothing was copied",
                 )
             digest = str(meta.get("digest") or "")
+            legacy_equal = False
             if "held_digest" not in frame and held > 0:
                 # A MEMBER BUILD THAT PREDATES THE FIELD (the live cloud-node-1
                 # ran 0.84.5): its own ACK for exactly the generation it says it
-                # holds is the held-digest evidence instead. Without this the
-                # fleet's owner would keep bumping and re-serving every tick
-                # until every member upgraded. A frame that CARRIES the field —
-                # even empty, which a current member sends when its copy is gone
-                # from its store — is taken at its word, so a lost copy is
-                # always re-served.
+                # holds is the held-digest evidence instead. Such a member
+                # cannot read an ``in_sync`` answer (its apply calls anything
+                # but ``copy`` a refusal, and its ``--repair`` would record the
+                # key unavailable), so it is still SERVED — but at the current
+                # generation, never ``held + 1``: its own monotonicity rule then
+                # drops the reply before applying (``served <= held``), so no row
+                # is rewritten and no generation moves. A frame that CARRIES the
+                # field — even empty, which a current member sends when its copy
+                # is gone from its store — is taken at its word.
                 with mutate(str(broker.network_id), broker.root) as state:
                     acked = state.ack_for(by, key)
-                if (
+                legacy_equal = (
                     isinstance(acked, Mapping)
                     and acked.get("wiped") is not True
                     and int(acked.get("gen") or 0) == held
-                ):
-                    held_digest = _bounded_digest(acked.get("digest"))
+                    and _bounded_digest(acked.get("digest")) == digest
+                )
             if held_digest and held_digest == digest:
                 # ADOPT, DON'T RE-SERVE. The member already holds these exact
                 # bytes, so nothing is copied, nothing is audited as a copy, and
@@ -2539,9 +2543,13 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
                 with mutate(str(broker.network_id), broker.root) as state:
                     current = _ensure_generation(state, key, meta)
                 return {"kind": "in_sync", "key": key, "gen": current, "digest": digest}
-            served = _served_generation(
-                broker.root, broker.network_id, key, meta, requested=requested, held=held
-            )
+            if legacy_equal:
+                with mutate(str(broker.network_id), broker.root) as state:
+                    served = _ensure_generation(state, key, meta)
+            else:
+                served = _served_generation(
+                    broker.root, broker.network_id, key, meta, requested=requested, held=held
+                )
             broker._audit(
                 "credential.copy",
                 actor=broker.self_device,
