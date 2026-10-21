@@ -583,6 +583,10 @@ def test_exhaustion_evidence_names_which_path_element_failed(
     assert {outcome["kind"] for outcome in outcomes} == {"refused"}
     assert {outcome["errno"] for outcome in outcomes} == {errno.ECONNREFUSED}
     assert all(outcome["answered"] is False for outcome in outcomes)
+    # The other side of the distinction: this branch MAY say unreachable, and it
+    # names the element. An answered 503 must never reach this wording.
+    assert "unreachable" in evidence["cause"]
+    assert "refused" in evidence["cause"]
 
 
 _LOOPBACK_SERVER = r"""

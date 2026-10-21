@@ -1202,6 +1202,51 @@ async def test_the_refusal_message_claims_no_cause_it_cannot_know(
 
 
 @pytest.mark.asyncio
+async def test_the_persisted_cause_names_the_answer_not_an_unreachable_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A real 503-answering server: "server unreachable" is a false cause.
+
+    The persisted cause is the line a post-mortem reads before choosing which
+    layer to investigate. It used to say "server unreachable" for EVERY
+    exhaustion -- including this one, where a real listener answered every probe
+    -- and that wording is what sent an earlier investigation at the guest.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(503)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path)
+            provider._supervisor_unit = "action-server.service"
+            provider._clients.http_get = aws_mod.build_clients(CREDS, REGION).http_get
+            result = provider._recover_guest_supervisor()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.state == "read_failed"
+    assert result.path_unreachable is False, "the server answered"
+    assert provider._cache_root is not None
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    cause = evidence["cause"]
+    assert "unreachable" not in cause.lower(), cause
+    assert "status=503" in cause, cause
+    assert cause.startswith("supervisor recovery budget exhausted"), cause
+
+
+@pytest.mark.asyncio
 async def test_an_attempt_that_spends_the_window_stops_the_retrying(tmp_path: Path) -> None:
     """An attempt-count bound alone allowed ~4 x 90 s per statement.
 

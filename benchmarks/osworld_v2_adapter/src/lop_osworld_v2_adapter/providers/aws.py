@@ -1072,6 +1072,32 @@ class AwsProvider:
             path_unreachable = all(
                 entry.get("delivery") == guest_loss.DELIVERY_NOT_SENT for entry in probes
             )
+            # The cause is the line a post-mortem reads first, so it may say only
+            # what the probes recorded. It used to say "server unreachable" for
+            # EVERY exhaustion -- including one where the server answered 503 --
+            # and that is the string an investigation read before spending three
+            # days on the guest. So "unreachable" is reserved for the branch
+            # where NO probe established a connection; an answered status is
+            # named as itself; a failure that was neither is named as neither.
+            statuses = sorted(
+                {str(entry["status"]) for entry in probes if isinstance(entry.get("status"), int)}
+            )
+            if path_unreachable:
+                kinds = sorted({str(entry.get("kind") or "connect_failed") for entry in probes})
+                cause = (
+                    "supervisor recovery budget exhausted; action server unreachable "
+                    f"(no probe established a connection: {'+'.join(kinds)})"
+                )
+            elif statuses:
+                cause = (
+                    "supervisor recovery budget exhausted; action server answered, "
+                    f"not ready (status={'+'.join(statuses)})"
+                )
+            else:
+                cause = (
+                    "supervisor recovery budget exhausted; receipt unavailable "
+                    "without a connect-class verdict"
+                )
             self._write_supervisor_evidence(
                 "guest-supervisor-recovery.json",
                 {
@@ -1079,7 +1105,7 @@ class AwsProvider:
                     "read_failed": True,
                     "receipt_unavailable": True,
                     "records_withheld": False,
-                    "cause": "supervisor recovery budget exhausted; server unreachable",
+                    "cause": cause,
                     "probe_outcomes": probes,
                     "path_unreachable": path_unreachable,
                     "records": self._supervisor_records,
