@@ -1356,6 +1356,93 @@ def _spend_unknown_projection() -> SessionProjection:
     )
 
 
+def _operator_spend_projection() -> SessionProjection:
+    """The operator's reported screen, as closely as the wire can reproduce it.
+
+    The phone showed `image $–  image $0.080  image $0.080  search $0.0000
+    channels not tracked · +9 more` on a second, wrapping line: one session on a
+    33.3%/1M context, a floor total of $447.70, three image rows (two different
+    provider/model pairs, one amount unstated), a zero search row and the
+    untracked notice. `+N more` comes from the SAME cap the phone applies: the
+    four NAMED rows win the budget, so the large inference row and a read row
+    are the remainder. The rows sum exactly to ``total_micro`` so a reviewer
+    cannot mistake this for an arithmetic fixture.
+    """
+    projection = _spend_projection(
+        "operator-spend",
+        900021,
+        tracked=False,
+        knowledge="partial",
+        total_micro=447_700_000,
+        by_basis={
+            "billed": 447_539_880,
+            "estimated": 160_120,
+        },
+        rows=[
+            # The bulk of the money is inference and loses the chip budget to the
+            # named channels — deliberately, so `· +N more` hides a real row.
+            {
+                "channel": "inference",
+                "provider": "anthropic",
+                "model": "claude-opus-4-1",
+                "label": "anthropic/claude-opus-4-1",
+                "amount_micro": 447_539_880,
+                "knowledge": "exact",
+                "basis": ["billed"],
+                "price_versions": [],
+            },
+            # Three `image` rows: two provider/model pairs, one unpriceable call.
+            {
+                "channel": "image",
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "amount_micro": 80_000,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+            {
+                "channel": "image",
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "amount_micro": None,
+                "knowledge": "unknown",
+                "basis": [],
+                "price_versions": [],
+            },
+            {
+                "channel": "image",
+                "provider": "radient",
+                "model": "gpt-image-2",
+                "amount_micro": 80_000,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+            {
+                "channel": "search",
+                "provider": "brave",
+                "amount_micro": 0,
+                "knowledge": "exact",
+                "basis": [],
+                "price_versions": [],
+            },
+            {
+                "channel": "read",
+                "provider": "browser",
+                "amount_micro": 120,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+        ],
+    )
+    projection.context_tokens = 333_000
+    projection.context_window = 1_000_000
+    projection.context_is_estimate = False
+    return projection
+
+
 def _asks_stacked_projection() -> SessionProjection:
     """Queued asks in the BUSIEST column: todos, a running subagent roster, a
     pending approval card AND the minimized ask chip in one stack.
@@ -1545,6 +1632,11 @@ async def main() -> None:
         _spend_capped_projection(),
         _spend_untracked_exact_projection(),
         _spend_recovered_projection(),
+        # THE OPERATOR'S OWN SCREEN (the status-row defect): three duplicate
+        # `image` rows, a zero search row, the untracked notice and a real
+        # `· +N more` — so the collapse is photographed against the shape that
+        # caused it rather than a tidy invented one.
+        _operator_spend_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial
