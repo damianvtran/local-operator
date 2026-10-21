@@ -4250,6 +4250,22 @@ class AgentLoop:
                     attempted_selector = (
                         event.attempted_selector if retryable_interruption else None
                     )
+                    if error:
+                        # IN-BAND FAILURES. A provider can END the stream with a
+                        # refusal or an ``error`` finish instead of raising, and
+                        # those are how real clients report a content filter
+                        # (``clients.py`` composes the refusal text on exactly
+                        # this frame). No exception exists to carry provenance,
+                        # so without this the session fell back to the SELECTED
+                        # model — the same misattribution, on the path that
+                        # produces most content refusals at all.
+                        #
+                        # ``model`` is the serving spec: the walk republishes it
+                        # through ``StreamModelEvent`` on every dispatch
+                        # (including a fallback hop), and it is READ HERE rather
+                        # than ``request_model``, which still names the model the
+                        # request was BUILT from.
+                        failure_selector = f"{model.provider}/{model.model_id}"
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):

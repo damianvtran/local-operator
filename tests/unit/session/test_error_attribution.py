@@ -19,7 +19,13 @@ import json
 
 import pytest
 
-from local_operator.harness.types import AgentEndEvent
+from local_operator.harness.types import (
+    AgentEndEvent,
+    ModelSpec,
+    StreamEndEvent,
+    StreamModelEvent,
+)
+from local_operator.providers.failover import stream_with_failover
 
 from .test_session import MODEL, ScriptedStream, make_session
 
@@ -108,20 +114,51 @@ def test_the_end_event_carries_the_failing_model():
     assert AgentEndEvent(failing_model="openai/gpt-5").failing_model == "openai/gpt-5"
 
 
-class _RefusingStream:
-    """A model client whose first call raises a provider failure.
+class _Auth:
+    """The two methods the failover walk asks a credential store for."""
 
-    The failover has already stamped WHICH target produced it, exactly as
-    ``stream_with_failover`` does when a hop it made returns the error.
+    async def get_api_key(self, provider: str, session_id=None, **kwargs) -> str | None:
+        return "k"
+
+    def rotate_sibling(self, *args, **kwargs) -> bool:
+        return False
+
+
+class _RoutedAwayWalk:
+    """The operator's path, driven through the REAL failover walk.
+
+    The session is on ``test/m``, but the request that reaches the provider is
+    already ``openai/gpt-5`` — which is what the quota preflight does when the
+    selected account is blocked, and why ``stream_with_failover`` then names
+    the fallback as its OWN entry selector. Nothing here is hand-stamped: the
+    provenance under test is the one the walk produces.
     """
 
     def __init__(self, error: BaseException) -> None:
         self.error = error
 
     def __call__(self, request, signal):
+        routed = request.model_copy(
+            update={"model": ModelSpec(provider="openai", model_id="gpt-5")}
+        )
+        error = self.error
+
+        async def client_for(spec):
+            class _Client:
+                async def stream(self, request, api_key, oauth_access=None):
+                    yield StreamModelEvent(model=spec)
+                    raise error
+
+            return _Client()
+
         async def gen():
-            raise self.error
-            yield  # pragma: no cover — unreachable, keeps this a generator
+            async for event in stream_with_failover(
+                routed,
+                _Auth(),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 0, "fallbackChains": {"default": []}}},
+                client_for,
+            ):
+                yield event
 
         return gen()
 
@@ -134,16 +171,17 @@ async def test_a_failed_turn_journals_the_refusing_model_end_to_end(tmp_path):
     OpenAI, and must still say which model the turn was on before it failed
     over.
     """
-    from local_operator.providers.failover import ProviderError
+    from local_operator.providers.failover import (  # noqa: F401
+        ProviderError,
+        stream_with_failover,
+    )
 
     error = ProviderError(
         None,
         "cyber_policy: This content was flagged for possible cybersecurity risk.",
         retryable=True,
-        provider="openai",
-        model="gpt-5",
     )
-    session = make_session(tmp_path, _RefusingStream(error), model=MODEL)
+    session = make_session(tmp_path, _RoutedAwayWalk(error), model=MODEL)
     # The loop converts a provider failure into a terminal END EVENT rather
     # than raising, so ``prompt`` returns normally and the row is the record.
     await session.prompt("summarise this")
@@ -154,3 +192,39 @@ async def test_a_failed_turn_journals_the_refusing_model_end_to_end(tmp_path):
     assert (
         f"failed on openai/gpt-5 after failing over from {MODEL.provider}/{MODEL.model_id}" in text
     )
+
+
+class _InBandRefusalStream:
+    """A client that dispatches on a fallback and ENDS the stream with a refusal.
+
+    This is how a real content filter arrives: ``clients.py`` composes the
+    refusal text on the END event rather than raising, so there is no exception
+    to carry provenance. The serving spec is only visible on
+    ``StreamModelEvent`` — which the failover republishes on every dispatch —
+    and reading the request's model instead is what reported the refusal
+    against the selection.
+    """
+
+    def __call__(self, request, signal):
+        async def gen():
+            yield StreamModelEvent(model=ModelSpec(provider="openai", model_id="gpt-5"))
+            yield StreamEndEvent(stop_reason="refusal", error=REFUSAL)
+
+        return gen()
+
+
+@pytest.mark.asyncio
+async def test_an_in_band_refusal_names_the_serving_model(tmp_path):
+    """No exception, no raise — and the refusal still names OpenAI.
+
+    Covered separately from the raising path because the two are different
+    carriers: one is an exception the walk stamps, the other is an end event
+    the loop has to attribute from the serving spec.
+    """
+    session = make_session(tmp_path, _InBandRefusalStream(), model=MODEL)
+    await session.prompt("summarise this content")
+
+    text = _incident_text(tmp_path)
+    head = text.splitlines()[0]
+    assert head.startswith("[session incident (openai/gpt-5)] content-filter:"), head
+    assert f"after failing over from {MODEL.provider}/{MODEL.model_id}" in text
