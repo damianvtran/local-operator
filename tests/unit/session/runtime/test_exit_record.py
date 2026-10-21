@@ -94,6 +94,7 @@ def test_write_and_read_round_trip(tmp_path: Path) -> None:
 
     path = journal.write_exit_record(**payload)
 
+    assert path is not None
     assert path == directory / "runtime-exit.json"
     assert oct(path.stat().st_mode & 0o777) == "0o600"
     stored = json.loads(path.read_text())
