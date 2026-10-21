@@ -18251,6 +18251,18 @@ class Session:
         shipped default that silently downgraded review quality could not be
         traced to anything the operator decided.
 
+        ONE exception to that order, and it is the only absolute one: a role
+        whose own pin IS the inherit sentinel (``effort: default``) states
+        "always run on the launching session's model", and nothing a delegating
+        model can pass moves it — not a launch tier, not a roster slot's tier
+        (the ``team`` tool lets a model author one), not an explicit
+        ``model=`` pick. The role's own pin being a TIER is still the role's
+        DEFAULT and keeps being overridable; only the sentinel is absolute,
+        because only the sentinel claims the session's model rather than naming
+        a tier. The launch receipt names the deciding layer (``role_inherit``)
+        so a caller whose tier was not applied is told, rather than left to
+        assume its pick took effect.
+
         A tier whose VALUE is the inherit sentinel (``default``, matched by
         :func:`~local_operator.harness.subagent.is_inherit_tier_sentinel`)
         resolves to the session's own model (``self.model``) instead of being
@@ -18331,7 +18343,11 @@ class Session:
         Sources: ``explicit_inherit`` and ``explicit_model`` for a per-run
         ``model``, ``team`` when a ``TeamMember`` ``tier``/``effort`` decided
         either field, ``effort`` for the caller's own tier argument, ``role`` for
-        the row's ``effort:`` tag, ``parent`` for no pin at all.
+        the row's ``effort:`` tag, ``parent`` for no pin at all, and
+        ``role_inherit`` when the row's pin IS the inherit sentinel and that
+        absolute pin decided the model (which is why it outranks ``effort`` and
+        ``team`` here, and why a caller whose tier was passed but not applied
+        must be told so rather than left to assume it took effect).
 
         The resolution itself is
         :func:`~local_operator.harness.subagent.resolve_member_model` -- the SAME
@@ -18355,19 +18371,72 @@ class Session:
                 agent_registry=registry,
             )
 
+        def _role_resolution() -> Any:
+            """The launch resolution WITH the registry, or the lenient fallback.
+
+            The registry is the OPERATOR's layer: a pin written into it is a
+            decision the operator made, so a registry that cannot be read is
+            precisely the silent substitution the strict tier path refuses one
+            layer up. Surface it instead.
+
+            The fallback re-resolves with no registry at all: the ROW pin is
+            what could not be read, and a roster override does not need it, so a
+            member tier still wins on the lenient path.
+            """
+            try:
+                return _resolved(self.agent_registry)
+            except Exception as exc:  # noqa: BLE001
+                if strict:
+                    raise SubagentModelUnavailable(
+                        agent,
+                        f"the agent registry could not be read ({exc}); refusing to "
+                        "inherit the session model for a role whose pin cannot be "
+                        "resolved",
+                    ) from exc
+                logger.warning(
+                    "agent registry could not be read while resolving role %r (%s); "
+                    "using the session model",
+                    agent,
+                    exc,
+                )
+                return _resolved(None)
+
         if model is not None:
             # Explicit run choices override the role, but never rewrite it.
             # Retain the inherit sentinel separately from omission so restart
             # can follow the lineage without accidentally re-applying a pin.
             if effort is not None:
                 raise ValueError("pass either model or effort, not both")
+            provider, separator, model_id = model.partition("/")
+            if model != "inherit" and (
+                not separator or not provider or not model_id or any(c.isspace() for c in model)
+            ):
+                # The SHAPE of a pick is checked before the role is consulted,
+                # and stays checked for every role: a malformed selector is
+                # malformed whether or not the role's pin was going to use it,
+                # and refusing it here is what keeps "an unusable selector
+                # registers no job" true of every role rather than only of the
+                # ones whose pin the selector could have moved.
+                raise ValueError("model must be 'inherit' or <provider>/<model-id>")
+            # THE ROLE IS CONSULTED NEXT, because a role whose own pin is the
+            # inherit sentinel states an ABSOLUTE decision -- "always run on
+            # the launching session's model" -- and a delegating model's pick
+            # cannot move it. Every layer this outranks is model-reachable (the
+            # ``task`` tool's ``effort``/``model`` arguments, and the ``team``
+            # tool's roster-slot tier), so a pin any of them could move would
+            # not be a pin. The role's own row is the only place the decision
+            # can be stated or withdrawn.
+            role_resolution = _role_resolution()
+            if role_resolution.role_pins_inherit:
+                requested = role_resolution.effort if apply_tier_effort else None
+                return (
+                    _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                    "role_inherit",
+                )
             if model == "inherit":
                 return None, "explicit_inherit"
             from local_operator.mobile.peer_model import validate_subagent_selection
 
-            provider, separator, model_id = model.partition("/")
-            if not separator or not provider or not model_id or any(c.isspace() for c in model):
-                raise ValueError("model must be 'inherit' or <provider>/<model-id>")
             chosen = validate_subagent_selection(provider, model_id)
             # The MODEL and the DEPTH are independent fields, so a member's own
             # ``effort`` still applies to an explicitly chosen model. Only that
@@ -18375,40 +18444,23 @@ class Session:
             # so a member TIER loses to it (including the effort a ``{model,
             # effort}`` tier mapping carries -- that effort belongs to the tier's
             # model, which is not the one being run).
-            member = _resolved(None)
+            member = role_resolution
             if apply_tier_effort and member.effort_source == "team":
                 chosen = _with_tier_effort(chosen, _member_reasoning_effort(chosen, member.effort))
             return chosen, "explicit_model"
-        try:
-            resolution = _resolved(self.agent_registry)
-        except Exception as exc:  # noqa: BLE001
-            # An unreadable registry is NOT "no role of that name": the old
-            # swallow sent this down the seed path (a packaged seed carries no
-            # operator pin) and then inherited the session model with no trace --
-            # precisely the silent substitution the strict tier path refuses one
-            # layer up. Surface it instead.
-            if strict:
-                raise SubagentModelUnavailable(
-                    agent,
-                    f"the agent registry could not be read ({exc}); refusing to "
-                    "inherit the session model for a role whose pin cannot be "
-                    "resolved",
-                ) from exc
-            logger.warning(
-                "agent registry could not be read while resolving role %r (%s); "
-                "using the session model",
-                agent,
-                exc,
-            )
-            # Re-resolve with no registry at all: the ROW pin is what could not
-            # be read, and a roster override does not need it, so a member tier
-            # still wins on the lenient path.
-            resolution = _resolved(None)
+        resolution = _role_resolution()
         wanted = resolution.tier
         source = (
-            "team"
-            if resolution.decided_by_team
-            else "effort" if effort else "role" if resolution.selector is not None else "parent"
+            # The role's ABSOLUTE pin decides first: it outranks both the
+            # launch tier and the roster's tier, so a source that named either
+            # of them here would report a layer that did not decide.
+            "role_inherit"
+            if resolution.role_pins_inherit
+            else (
+                "team"
+                if resolution.decided_by_team
+                else "effort" if effort else "role" if resolution.selector is not None else "parent"
+            )
         )
 
         def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:
