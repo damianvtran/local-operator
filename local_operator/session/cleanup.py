@@ -241,6 +241,35 @@ STORE_MARKER_NAME = ".local-operator-store"
 #: question after "why": who did it.
 CLEANUP_LOG_NAME = ".cleanup-log.jsonl"
 
+#: The operator's VALUE HOLDS, beside the log: ``{"schema": 1, "holds": {id:
+#: {"reason", "by", "at", "kind"}}}``. A hold is the one statement a removal
+#: cannot argue with — not an age, not a size, not a policy switch — so it is
+#: read by every remover (``remove_session_dir``, ``_guard`` and the content
+#: pass's ``_content_guard``) and cleared only by :func:`release_hold`, which
+#: writes its own ``hold-release`` row. Deliberately a separate FILE from the
+#: cleanup log: the log is append-only history, this is current intent, and a
+#: reader that has to fold history to answer "is this held?" can be wrong at
+#: exactly the wrong moment. Read FAIL CLOSED: an unreadable or corrupt file
+#: keeps every candidate (see :class:`HoldsUnreadable`).
+HOLDS_NAME = ".session-holds.json"
+HOLDS_SCHEMA = 1
+HOLD_KINDS = ("evidence", "source-of-truth", "operator")
+
+#: The directory inside a session that the content pass may reclaim from.
+#: Spelled once: ``_scratchpad_refusal`` and the contents measurement must
+#: agree on which subtree is "the pad", or a receipt describes one tree and
+#: the removal targets another.
+PAD_DIRNAME = "scratchpad"
+
+#: How many directory entries :func:`measure_session_dir` will stat before it
+#: stops and marks the measurement incomplete. The bound is the point: this
+#: runs on the removal path (one session) and on the census's store walk
+#: (thousands), so an unbounded rglob over a clone tree is not an option. A
+#: capped measurement is still a LOWER BOUND and still an honest receipt —
+#: ``contents_complete`` says so rather than letting a reader assume the walk
+#: finished.
+CONTENTS_MAX_ENTRIES = 20_000
+
 #: The LAST startup removal, as one JSON object beside the log: ``{"at",
 #: "actor", "pid", "removed": N, "scanned": N, "policies": {name: count},
 #: "record": path, "acknowledged": bool}``. Written only by a pass that
@@ -618,6 +647,202 @@ def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) ->
 # ---------------------------------------------------------------------------
 
 
+class HoldsUnreadable(Exception):
+    """The holds file exists but cannot be trusted; every caller FAILS CLOSED.
+
+    Raised for an unreadable file, invalid JSON, an unknown schema or a
+    malformed entry. Absence is NOT an error — the common store has no holds
+    file — but a file that is there and cannot be read must keep every
+    candidate rather than let a removal proceed as if nothing were held.
+    """
+
+
+def holds_path(sessions_dir: Path) -> Path:
+    return sessions_dir / HOLDS_NAME
+
+
+def read_holds(sessions_dir: Path) -> dict[str, dict[str, Any]]:
+    """The store's holds by session id; ``{}`` when no file exists.
+
+    Raises :class:`HoldsUnreadable` for anything that is not a clean schema-1
+    document. Deliberately strict on entries too: a holds file a newer build
+    wrote with a shape this one does not understand must refuse removals, not
+    be silently filtered down to the entries this one happens to parse.
+    """
+    path = holds_path(sessions_dir)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise HoldsUnreadable(f"cannot read {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HoldsUnreadable(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != HOLDS_SCHEMA:
+        raise HoldsUnreadable(f"{path} has no schema-{HOLDS_SCHEMA} document")
+    holds = payload.get("holds")
+    if not isinstance(holds, dict):
+        raise HoldsUnreadable(f"{path} carries no holds object")
+    clean: dict[str, dict[str, Any]] = {}
+    for session_id, entry in holds.items():
+        if not isinstance(session_id, str) or not isinstance(entry, dict):
+            raise HoldsUnreadable(f"{path} carries a malformed hold entry")
+        clean[session_id] = entry
+    return clean
+
+
+def _write_holds(sessions_dir: Path, holds: dict[str, dict[str, Any]]) -> bool:
+    """Publish the holds map atomically; False (and ERROR) on any failure."""
+    path = holds_path(sessions_dir)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump({"schema": HOLDS_SCHEMA, "holds": holds}, handle, indent=1, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.error("session cleanup: cannot write %s: %s", path, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def hold_for(sessions_dir: Path, session_id: str) -> dict[str, Any] | None:
+    """This session's hold, or ``None``; raises :class:`HoldsUnreadable`."""
+    return read_holds(sessions_dir).get(session_id)
+
+
+def set_hold(
+    sessions_dir: Path,
+    session_id: str,
+    *,
+    reason: str,
+    by: str,
+    kind: str = "operator",
+) -> bool:
+    """Record a hold on ``session_id``: True only when it is durably written.
+
+    A hold without a reason is refused: the file is read by a person deciding
+    whether a preserved session still matters, and "held" with no why is a
+    tombstone nobody can release responsibly. ``kind`` is one of
+    :data:`HOLD_KINDS`; it exists so a reader can tell evidence a case depends
+    on from a session that is itself the source of truth.
+    """
+    if kind not in HOLD_KINDS:
+        logger.error("session cleanup: unknown hold kind %r", kind)
+        return False
+    if not reason.strip():
+        logger.error("session cleanup: refusing a hold with no reason (%s)", session_id)
+        return False
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        logger.error("session cleanup: cannot hold %s: %s", session_id, exc)
+        return False
+    holds[session_id] = {
+        "reason": reason.strip(),
+        "by": by,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "kind": kind,
+    }
+    return _write_holds(sessions_dir, holds)
+
+
+def release_hold(sessions_dir: Path, session_id: str, *, reason: str, actor: str) -> bool:
+    """Clear a hold, recording the decision as a ``hold-release`` log row.
+
+    True only when a recorded hold was cleared. THE RECEIPT IS WRITTEN FIRST:
+    if the log append fails nothing is cleared, so the failure mode is a hold
+    that stays in force (removals keep refusing) rather than a hold that
+    vanished without the operator's stated decision in the log. If the log
+    append succeeds and the holds rewrite then fails, the session remains held
+    and the row records the intent — retry the release; removals stay closed
+    until the file says otherwise, which is the safe side either way.
+
+    Releasing an id that is not held is a no-op returning False: the CLI says
+    "no hold was recorded" rather than pretending to have cleared one.
+    """
+    # THE DECISION NEEDS A WHY, SYMMETRIC WITH set_hold (UX round 1, U1). A
+    # blank release reason is not a decision a later reader can evaluate, and a
+    # hold is the operator's safety statement: releasing one is itself a
+    # consequential act (retention may now reap the conversation), so an empty
+    # string is refused here as well as at the CLI. The API check matters most
+    # for non-CLI callers, which have no argparse layer to lean on.
+    if not reason.strip():
+        logger.error("session cleanup: refusing to release a hold with no reason (%s)", session_id)
+        return False
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        logger.error("session cleanup: cannot release %s: %s", session_id, exc)
+        return False
+    previous = holds.get(session_id)
+    if previous is None:
+        return False
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": session_id,
+        "policy": "hold-release",
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+        "previous": previous,
+    }
+    if not _append_cleanup_log(sessions_dir, record):
+        return False
+    del holds[session_id]
+    return _write_holds(sessions_dir, holds)
+
+
+def resolve_session_reference(sessions_dir: Path, requested: str) -> tuple[str | None, list[str]]:
+    """Map a typed session reference to one store id; ``(id, candidates)``.
+
+    Same contract as the CLI's other session references: the EXACT id wins,
+    and a prefix resolves only when exactly one stored directory starts with
+    it. Ambiguity returns NO id and the matching ids (sorted), never a guess —
+    a hold is a safety statement about one conversation, so picking one of two
+    matches silently is the failure mode that matters here.
+
+    The reference must be one path component (no separators, no ``..``), or it
+    could name a directory outside this store. That check is local rather than
+    imported from ``resume.is_session_id_shape``: ``resume`` is heavy (it pulls
+    the transcript reader and the picker machinery), and this function is
+    called on the CLI path only, but the policy module is imported by the
+    daemon at boot and must stay light.
+    """
+    if not requested or requested in (".", "..") or Path(requested).name != requested:
+        return None, []
+    try:
+        if (sessions_dir / requested).is_dir():
+            return requested, []
+    except OSError:
+        return None, []
+    matches: list[str] = []
+    try:
+        with os.scandir(sessions_dir) as scanned:
+            for entry in scanned:
+                if entry.name.startswith(".") or not entry.name.startswith(requested):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        matches.append(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        return None, []
+    matches.sort()
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
 def store_marker_path(sessions_dir: Path) -> Path:
     return sessions_dir / STORE_MARKER_NAME
 
@@ -726,6 +951,29 @@ def remove_session_dir(
             reason,
         )
         return False
+    try:
+        held = hold_for(target.resolve().parent, target.name)
+    except HoldsUnreadable as exc:
+        # Fail closed: a holds file that cannot be read is not proof that
+        # nothing is held. Refusing here is the whole point of the file.
+        logger.error(
+            "session cleanup: REFUSED to remove %s (operator holds unreadable: %s); "
+            "policy=%s reason=%s",
+            target,
+            exc,
+            policy,
+            reason,
+        )
+        return False
+    if held is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove %s (held by the operator: %s); policy=%s reason=%s",
+            target,
+            held.get("reason") or "no reason recorded",
+            policy,
+            reason,
+        )
+        return False
     if dry_run:
         logger.debug(
             "session cleanup (dry run): would remove %s; policy=%s reason=%s",
@@ -734,6 +982,15 @@ def remove_session_dir(
             reason,
         )
         return True
+    # MEASURE BEFORE THE RECORD AND BEFORE THE REMOVAL: the receipt has to say
+    # what was lost, and once `_bounded_rmtree` returns there is nothing left to
+    # measure. A measurement failure is recorded rather than raised — an
+    # unreadable corner must not turn a policy removal into a crash — but it is
+    # named in the row so a reader knows the figures are missing, not zero.
+    try:
+        contents: dict[str, Any] = measure_session_dir(target)
+    except Exception as exc:  # noqa: BLE001 — the removal decision is the guards'
+        contents = {"contents_error": f"{type(exc).__name__}: {exc}"}
     record = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "session": target.name,
@@ -742,15 +999,33 @@ def remove_session_dir(
         "reason": reason,
         "actor": actor,
         "pid": os.getpid(),
+        "path": os.fspath(target.absolute()),
+        **contents,
     }
-    _append_cleanup_log(target.parent, record)
+    if not _append_cleanup_log(target.parent, record):
+        # A directory whose receipt cannot be written SURVIVES. The WARNING
+        # below is a process log line, not a durable record, and a removal
+        # nobody can describe afterwards is the incident shape this module
+        # exists to prevent.
+        logger.error(
+            "session cleanup: REFUSED to remove %s: its receipt could not be written to %s",
+            target,
+            target.parent / CLEANUP_LOG_NAME,
+        )
+        return False
     logger.warning(
-        "session cleanup: removing %s%s; policy=%s reason=%s actor=%s (record: %s)",
+        "session cleanup: removing %s%s; policy=%s reason=%s actor=%s "
+        "bytes=%s entries=%s transcript_bytes=%s pad_bytes=%s pad_entries=%s (record: %s)",
         target.name,
         f" ({title})" if title else "",
         policy,
         reason,
         actor,
+        contents.get("bytes", "?"),
+        contents.get("entries", "?"),
+        contents.get("transcript_bytes", "?"),
+        contents.get("pad_bytes", "?"),
+        contents.get("pad_entries", "?"),
         target.parent / CLEANUP_LOG_NAME,
     )
     # The bounded widen-and-retry removal — the ``onexc`` hook, the pre-widen
@@ -771,6 +1046,124 @@ def remove_session_dir(
             ask_store.remove_entry(config_dir, target.name)
         except Exception:  # noqa: BLE001 — the sweep is the backstop
             logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
+    return True
+
+
+def remove_fresh_session_dir(
+    target: Path,
+    *,
+    config_dir: Path,
+    policy: str,
+    reason: str,
+    actor: str,
+    title: str = "",
+) -> bool:
+    """Remove a session directory THIS PROCESS just minted, receipt included.
+
+    The two create paths that can fail after ``mkdir`` (a desktop wake whose arm
+    fails, Aida's and the Librarian's failed first build) used a literal
+    ``shutil.rmtree`` and left no trace at all. This is their audited shape.
+
+    WHY NOT :func:`remove_session_dir`: that remover refuses a store without
+    :data:`STORE_MARKER_NAME`, and ``mark_store``'s contract forbids cleanup
+    from marking its own target — so the store a fresh draft lives in (one that
+    has never had a session built in it) carries no marker, exactly where this
+    call is needed. This function keeps every other refusal and adds the one
+    identity proof the call sites relied on, checked HERE so a future caller
+    cannot skip it: there is NO TRANSCRIPT. That window is between ``mkdir``
+    and the first transcript append; a real conversation can never be inside it.
+
+    The receipt is the same content receipt :func:`remove_session_dir` writes,
+    with the caller's policy (``wake-rollback`` / ``failed-create``), and it is
+    written BEFORE the removal: a directory whose receipt cannot be written is
+    left alone, so the failure mode is a stray empty directory, never an
+    unlogged loss.
+    """
+    try:
+        if target.is_symlink():
+            logger.warning("session cleanup: REFUSED to remove fresh %s (symlink)", target)
+            return False
+        resolved = target.resolve(strict=True)
+    except OSError:
+        return False
+    sessions_dir = resolved.parent
+    try:
+        expected = (Path(config_dir) / SESSIONS_DIRNAME).resolve(strict=True)
+    except OSError:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (config store cannot be resolved)",
+            target,
+        )
+        return False
+    if sessions_dir != expected:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (not this config dir's store)", target
+        )
+        return False
+    if not resolved.is_dir():
+        return False
+    # THE IDENTITY PROOF: nothing durable has been written yet. A transcript,
+    # even a zero-byte one another writer created, means the directory is no
+    # longer the one this request left empty.
+    try:
+        if (resolved / TRANSCRIPT_FILENAME).exists():
+            logger.warning(
+                "session cleanup: REFUSED to remove fresh %s (a transcript exists)",
+                resolved.name,
+            )
+            return False
+    except OSError:
+        return False
+    try:
+        held = hold_for(sessions_dir, resolved.name)
+    except HoldsUnreadable as exc:
+        logger.error(
+            "session cleanup: REFUSED to remove fresh %s (operator holds unreadable: %s)",
+            resolved.name,
+            exc,
+        )
+        return False
+    if held is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (held by the operator: %s)",
+            resolved.name,
+            held.get("reason") or "no reason recorded",
+        )
+        return False
+    try:
+        contents: dict[str, Any] = measure_session_dir(resolved)
+    except Exception as exc:  # noqa: BLE001 — see remove_session_dir
+        contents = {"contents_error": f"{type(exc).__name__}: {exc}"}
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": resolved.name,
+        "title": title,
+        "policy": policy,
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+        "path": os.fspath(resolved),
+        **contents,
+    }
+    if not _append_cleanup_log(sessions_dir, record):
+        logger.error(
+            "session cleanup: REFUSED to remove fresh %s: its receipt could not be written to %s",
+            resolved.name,
+            sessions_dir / CLEANUP_LOG_NAME,
+        )
+        return False
+    logger.warning(
+        "session cleanup: removing fresh %s; policy=%s reason=%s actor=%s bytes=%s entries=%s "
+        "(record: %s)",
+        resolved.name,
+        policy,
+        reason,
+        actor,
+        contents.get("bytes", "?"),
+        contents.get("entries", "?"),
+        sessions_dir / CLEANUP_LOG_NAME,
+    )
+    _bounded_rmtree(resolved)
     return True
 
 
@@ -997,7 +1390,7 @@ def _scratchpad_refusal(target: Path, *, config_dir: Path | None, sessions_dir: 
     except ValueError:
         return f"target {resolved} is not inside the store {store}"
     parts = relative.parts
-    if len(parts) < 3 or parts[1] != "scratchpad":
+    if len(parts) < 3 or parts[1] != PAD_DIRNAME:
         return "not a path inside a session's scratchpad/ directory"
     if not store_marker_path(store).is_file():
         return f"store carries no {STORE_MARKER_NAME} marker"
@@ -1136,6 +1529,24 @@ _GUARD_REFUSALS: dict[str, str] = {
         "That conversation has a monitor armed for it. Reopen it and ask it to "
         "cancel the monitor, or delete its {monitor_file} entry, before "
         "deleting it."
+    ),
+    # A HOLD IS NOT AN UNKNOWN (review round 1, M6): the fallback says "could
+    # not be checked", which is false — it was checked and the operator's own
+    # record is the answer. The remedy is the one command that clears it,
+    # resolved to this session id so the door is addressable.
+    "held by the operator": (
+        "That conversation is held as a value you asked to keep. Release the hold "
+        "with `lop sessions unhold {session_id} --reason ...` before deleting it."
+    ),
+    # The index itself is the thing to repair; deleting it would silently drop
+    # every hold, and nothing removes a session while it cannot be read. The
+    # sentence names the CONVERSATION first, like every other refusal in this
+    # table (the table is read by a user looking at one conversation), and
+    # names the file store-relative — never a host path.
+    "operator holds unreadable": (
+        "That conversation's value-hold index could not be read, so nothing was "
+        "deleted. Repair or restore the store's .session-holds.json file, then "
+        "try again."
     ),
 }
 
@@ -1429,15 +1840,33 @@ def delete_session(
     )
 
 
-def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> None:
+def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> bool:
+    """Append one row to the store's cleanup log; True only if it is DURABLE.
+
+    Returns False on any write failure and says so at ERROR. THE RETURN VALUE
+    IS THE REMOVAL GATE (2026-10-20): every content removal and every session
+    removal writes its receipt BEFORE it removes anything, and a caller that
+    gets False must not remove. A directory whose receipt cannot be written
+    survives — the log is the durable record the operator is told to read, and
+    the per-removal WARNING is not a substitute for it (it lives in a rotating
+    process log, not the store).
+
+    ``fsync`` before returning, deliberately: an append that reached the page
+    cache and died with the host is the same lost receipt as an append that
+    never happened, and this is the one write whose whole job is to outlive
+    the process. The cost is one fsync per removed item, which is bounded by
+    the same removals-per-pass bounds as the removals themselves.
+    """
+    path = sessions_dir / CLEANUP_LOG_NAME
     try:
-        with (sessions_dir / CLEANUP_LOG_NAME).open("a", encoding="utf-8") as handle:
+        with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     except OSError as exc:
-        # The removal still proceeds — the WARNING log line above carries the
-        # same facts — but say so, because the jsonl is the record the user
-        # is told to look at.
-        logger.warning("session cleanup: cannot append to %s: %s", CLEANUP_LOG_NAME, exc)
+        logger.error("session cleanup: cannot append to %s: %s", path, exc)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1793,6 +2222,22 @@ def _guard(
     gone, and the guards are read as they stand.
     """
     try:
+        try:
+            held = hold_for(Path(config_dir) / SESSIONS_DIRNAME, directory.name)
+        except HoldsUnreadable as exc:
+            # Fail closed with a diagnosable reason: an unreadable file is not
+            # evidence that nothing is held, it is absence of evidence.
+            logger.error(
+                "session cleanup: holds unreadable for %s (%s); keeping it",
+                directory.name,
+                exc,
+            )
+            return "operator holds unreadable"
+        if held is not None:
+            # The operator's explicit statement outranks every policy question
+            # below; nothing removes a held session but `release_hold`, which is
+            # itself a logged decision.
+            return "held by the operator"
         if not live_owner_gone:
             if _claimed(directory, now):
                 return "claimed by a live process"
@@ -1832,8 +2277,10 @@ def _guard_refusal(reason: str, session_id: str) -> str:
     template = _GUARD_REFUSALS.get(reason)
     if template is None:
         return _GUARD_REFUSAL_FALLBACK
-    return template.replace("{wake_file}", f"wakes/{session_id}.json").replace(
-        "{monitor_file}", f"monitors/{session_id}.json"
+    return (
+        template.replace("{wake_file}", f"wakes/{session_id}.json")
+        .replace("{monitor_file}", f"monitors/{session_id}.json")
+        .replace("{session_id}", session_id)
     )
 
 
@@ -1874,6 +2321,147 @@ def _has_transcript(directory: Path) -> bool:
         return (directory / TRANSCRIPT_FILENAME).stat().st_size > 0
     except OSError:
         return False
+
+
+def measure_session_dir(
+    directory: Path, *, max_entries: int = CONTENTS_MAX_ENTRIES
+) -> dict[str, Any]:
+    """What a session directory HOLDS, bounded, for a removal receipt.
+
+    ``transcript_bytes`` (the conversation itself), ``pad_bytes``/
+    ``pad_entries`` (the scratchpad subtree, measured during the SAME walk that
+    produces the total — a second walk of the pad would double the cost of the
+    largest part of a session for no extra fact), ``bytes``/``entries`` (the
+    whole directory), ``origin`` (origin.json's value), ``last_activity_at``
+    (retention's ONE clock, rendered UTC ISO 8601), ``contents_complete`` (False
+    when the walk was CAPPED at ``max_entries`` **or** any entry could not be
+    read — both make every size a lower bound) and ``skipped_entries``.
+
+    NEVER RAISES for a filesystem problem, and an unreadable subtree is NOT
+    zero bytes: an ``OSError`` on a directory or an entry is counted in
+    ``skipped_entries`` and clears ``contents_complete``. The census relies on
+    that flag to refuse a size comparison — a 0000 pad read as "0 bytes" made
+    it report a 2 MB content loss that was still on disk (review round 1, M1) —
+    and a removal receipt that cannot see a subtree says so rather than
+    understating the loss.
+    """
+    pad_root = os.path.join(os.fspath(directory), PAD_DIRNAME)
+    contents: dict[str, Any] = {
+        "transcript_bytes": 0,
+        "pad_bytes": 0,
+        "pad_entries": 0,
+        "bytes": 0,
+        "entries": 0,
+        "origin": "",
+        "last_activity_at": None,
+        "contents_complete": True,
+        "skipped_entries": 0,
+    }
+    try:
+        contents["transcript_bytes"] = (directory / TRANSCRIPT_FILENAME).stat().st_size
+    except OSError:
+        pass
+    total = 0
+    entries = 0
+    pad_bytes = 0
+    pad_entries = 0
+    seen = 0
+    complete = True
+    skipped = 0
+    stack: list[tuple[str, bool]] = [(os.fspath(directory), False)]
+    while stack:
+        current, in_pad = stack.pop()
+        try:
+            with os.scandir(current) as scanned:
+                for entry in scanned:
+                    seen += 1
+                    if seen > max_entries:
+                        complete = False
+                        stack.clear()
+                        break
+                    entries += 1
+                    if in_pad:
+                        pad_entries += 1
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            child_in_pad = in_pad or entry.path == pad_root
+                            stack.append((entry.path, child_in_pad))
+                        elif entry.is_file(follow_symlinks=False):
+                            size = entry.stat(follow_symlinks=False).st_size
+                            total += size
+                            if in_pad:
+                                pad_bytes += size
+                    except OSError:
+                        # The entry exists (scandir listed it) but cannot be
+                        # read: its bytes are unknown, not absent.
+                        skipped += 1
+                        continue
+        except OSError:
+            # The DIRECTORY itself could not be scanned. Count it so the
+            # measurement cannot pass a partial walk off as complete.
+            skipped += 1
+            continue
+    contents["bytes"] = total
+    contents["entries"] = entries
+    contents["pad_bytes"] = pad_bytes
+    contents["pad_entries"] = pad_entries
+    contents["skipped_entries"] = skipped
+    contents["contents_complete"] = complete and skipped == 0
+    try:
+        from local_operator.resume import session_origin
+
+        contents["origin"] = session_origin(directory) or ""
+    except Exception:  # noqa: BLE001 — a label, never a reason to fail a receipt
+        contents["origin"] = ""
+    activity = session_activity(directory)
+    if activity is not None:
+        contents["last_activity_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(activity))
+    return contents
+
+
+def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
+    """``(bytes, entries)`` under ``directory``, counting at most ``max_entries``.
+
+    Both figures are LOWER BOUNDS once capped. One walk serves both the size
+    estimate a notice records and the entry count a cleanup-log row carries, so
+    the two can never disagree about what was measured. Deliberately not
+    :func:`_dir_bytes` (an unbounded ``rglob`` that also follows into
+    ``node_modules``): this runs per removed item, so its cost is bounded.
+    Shared with ``delegated_retention`` — it lives HERE because the receipt
+    writer needs it and the content pass imports this module, not the other
+    way round.
+    """
+    total = 0
+    seen = 0
+    stack = [os.fspath(directory)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > max_entries:
+                        return total, max_entries
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total, seen
+
+
+def bounded_dir_bytes(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> int:
+    """Bytes under ``directory`` counting at most ``max_entries`` entries.
+
+    A lower bound once capped. Deliberately not :func:`_dir_bytes` (an
+    unbounded ``rglob`` that also follows into ``node_modules``): this runs only
+    for the items about to be removed, so its cost is bounded per removal.
+    """
+    return _bounded_dir_stats(directory, max_entries)[0]
 
 
 def _dir_bytes(directory: Path) -> int:

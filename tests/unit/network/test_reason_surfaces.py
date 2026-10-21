@@ -78,6 +78,23 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the content layer's own class prose (merged-clean clone / stale output past the window)",
     ),
+    # The operator's own hold/release reasons, typed on THIS device and stored
+    # in ``sessions/.session-holds.json`` (the release also lands in the
+    # cleanup log). Nothing here arrives over a relay, and nothing is rendered
+    # for a peer: these are the human's words about their own store, declared
+    # by field name for the same reason as the prune vocabulary above.
+    ("local_operator/cli.py", "sessions_hold_command", "reason"): (
+        3,
+        "the operator's own hold reason: blank check, hold record, and echo",
+    ),
+    ("local_operator/cli.py", "sessions_unhold_command", "reason"): (
+        2,
+        "the operator's own release reason: blank check and the logged hold-release row",
+    ),
+    ("local_operator/cli.py", "sessions_holds_command", "reason"): (
+        1,
+        "the operator's own stored hold reason, printed in this device's listing",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # The hub-links CLI is a HUB surface, not a mesh one, and these tokens come
