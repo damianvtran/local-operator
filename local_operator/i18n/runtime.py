@@ -368,9 +368,12 @@ def plural_arguments(source: str) -> tuple[PluralArgument, ...]:
             if isinstance(node, _Hash) and not nested_plural:
                 return True
             if isinstance(node, _Arg):
-                # `{count}` formats a numeric argument per locale too, so it
-                # renders the value just as `{count, number}` does.
-                if node.name == argument and node.kind in ("number", "simple"):
+                # The catalogue rule names exactly two renderings of the value:
+                # `#` (handled above) and `{count, number}`. A bare `{count}`
+                # also happens to format the number, but accepting extra
+                # shapes would be an untested loosening of a gate whose whole
+                # job is to be narrow.
+                if node.name == argument and node.kind == "number":
                     return True
                 for _, child in node.parts:
                     if renders_value(child, argument, nested_plural or node.kind == "plural"):
