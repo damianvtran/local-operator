@@ -36,9 +36,12 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # the host-facing consent type; importing it here would be heavy
+    from local_operator.harness.types import DurableWriteIntent
 
 #: Directory under a session that holds its scoped definitions.
 SESSION_ROLES_DIRNAME = "roles"
@@ -122,6 +125,52 @@ def _shadow_refusal(kind: str, name: str) -> str:
         f"a {kind} named {name!r} already exists in your account, so this conversation "
         f"already has it: launch it as it is ({launch}). Choose a different name for "
         "the conversation-only version; copying one into your account is a separate step."
+    )
+
+
+async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> str | None:
+    """Ask the HOST to approve a write into the account's shared store.
+
+    THE ONE CONSENT SEAM (LOH-9 S2). The decision is the host's: a model must not
+    be able to stamp its own provenance, so there is no grant field on any tool
+    parameter and no value in this module authorizes anything. ``None`` means
+    "no seam here" or "the user said no" and is a REFUSAL; a non-empty string is
+    the host's audit origin for a write it approved, and is recorded, never
+    re-read as authority.
+
+    A seam that raises is also a refusal: an ask that could not be delivered is
+    not a yes, and failing open here would let a broken host silently grant
+    account-wide writes.
+    """
+    callback = getattr(context, "authorize_durable_write", None) if context is not None else None
+    if callback is None:
+        return None
+    try:
+        origin = await callback(intent)
+    except Exception:  # noqa: BLE001 — an unavailable consent seam is a refusal
+        logger.warning("durable-write consent seam failed; refusing", exc_info=True)
+        return None
+    return str(origin) if origin else None
+
+
+def durable_write_refusal(intent: "DurableWriteIntent") -> str:
+    """Why a tool-issued account write was refused, and the two ways forward.
+
+    Names the user surfaces that ARE the user's own act (desktop editor, TUI form,
+    CLI) and the retry path that needs no consent at all (the conversation-only
+    default), because a refusal that does not say what to do next is how a model
+    starts guessing at scope values.
+    """
+    kind = intent.kind
+    if kind == "team":
+        surface = "the desktop Teams editor, the TUI /team form, or `lop teams`"
+    else:
+        surface = "the desktop Profiles editor, the TUI /agent form, or `lop agents`"
+    return (
+        f"saving a {kind} for every conversation needs the user's confirmation, and "
+        "this run cannot ask for it. To keep it for THIS conversation only, retry "
+        "without scope (or with scope='session'). To add it to the user's account "
+        f"yourself, use {surface}."
     )
 
 

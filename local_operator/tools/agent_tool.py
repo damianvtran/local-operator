@@ -96,6 +96,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    DurableWriteIntent,
     ToolContext,
     ToolResult,
 )
@@ -1045,20 +1046,21 @@ async def _op_reset(
         )
 
     # RESET WRITES WHERE THE ROW ALREADY LIVES. A conversation row is reset in
-    # place; a row in the ACCOUNT store is a model-initiated mutation of shared
-    # state, so it is refused while no host can ask for that specific write —
-    # reset is a WRITE, not a read, exactly like update/delete.
-    from local_operator.profile_scope import row_scope
+    # place (no consent: the model may reshape its own conversation's rows). A
+    # row in the ACCOUNT store is a model-initiated mutation of shared state, so
+    # it needs the same host consent as any other account write — reset is a
+    # WRITE, not a read, exactly like update/delete.
+    from local_operator.profile_scope import (
+        durable_write_origin,
+        durable_write_refusal,
+        row_scope,
+    )
 
     target: Scope = row_scope(registry, existing) if existing is not None else scope
     if context is not None and target == "global":
-        return _error(
-            tool_call_id,
-            "agent",
-            "resetting a role saved in the user's account needs their confirmation, and "
-            "this run cannot ask for it. Ask the user first, then use the desktop "
-            "Profiles editor, the TUI /agent form, or `lop agents sync --replace`.",
-        )
+        intent = DurableWriteIntent(kind="agent", operation="reset", name=seed.name)
+        if await durable_write_origin(context, intent) is None:
+            return _error(tool_call_id, "agent", durable_write_refusal(intent))
 
     previous = profile_from_agent(registry, existing) if existing is not None else None
     diverged = seed_divergence(previous, seed) if previous is not None else ()
@@ -1270,6 +1272,7 @@ def write_profile(
     *,
     creating: bool,
     scope: "Scope",
+    authorized_by: str | None = None,
     expected_definition_revision: str | None = None,
     context: ToolContext | None = None,
 ) -> tuple[str, str, str]:
@@ -1289,11 +1292,19 @@ def write_profile(
     so editing a conversation row can never rewrite the account's row of that
     name.
 
-    A TOOL-ISSUED write (any call with a ``context``) that would land in the
-    ACCOUNT store is refused here: the consent seam that can authorize one is
-    not installed in S2, and the user surfaces are the way to make that change.
+    ``authorized_by`` is the host consent seam's AUDIT origin, not authority.
+    The async ask happens in the tool layer (this function is sync and runs in a
+    worker); this is where the rule is ENFORCED, because it is the one place the
+    target's owner is known under the write lock. A tool-issued write (any call
+    with a ``context``) that would land in the account store without an origin is
+    refused: create is refused by ``scope='session'`` shadowing instead, and an
+    update/reset/delete of an account row needs the user's answer.
     """
-    from local_operator.profile_scope import row_scope, scope_store
+    from local_operator.profile_scope import (
+        durable_write_refusal,
+        row_scope,
+        scope_store,
+    )
 
     if scope not in ("session", "global"):
         raise ValueError(f"unknown scope {scope!r}; use 'session' or 'global'.")
@@ -1573,19 +1584,18 @@ def write_profile(
     # goes to the row's owner. The export layer and the TUI both rely on this
     # being the same answer the composite's update uses.
     target: str = row_scope(registry, existing) if existing is not None else scope
-    if context is not None and target == "global":
-        # THE TOOL-ISSUED ACCOUNT WRITE, refused until a host can ask. The
-        # question is specific (a durable write of THIS name), so it cannot ride
-        # the session-scoped "approve all" shortcut; until that door exists the
-        # user surfaces are the only route.
-        what = "role" if kind == "role" else "agent"
-        raise ValueError(
-            f"saving a {what} for every conversation needs the user's confirmation, and "
-            "this run cannot ask for it. To keep it for THIS conversation only, retry "
-            "without scope (or with scope='session'). To add it to the user's account "
-            "yourself, use the desktop Profiles editor, the TUI /agent form, or "
-            "`lop agents`."
+    if context is not None and target == "global" and not authorized_by:
+        # THE TOOL-ISSUED ACCOUNT WRITE. Applies to update AND create: a create
+        # only lands global when the caller passed scope='global', which the
+        # tool layer has already asked the user about; an update lands global
+        # because the row is the user's, and that is still a model-initiated
+        # mutation of shared state. Session writes need no consent.
+        intent = DurableWriteIntent(
+            kind="agent",
+            operation="update" if existing is not None else "create",
+            name=name,
         )
+        raise ValueError(durable_write_refusal(intent))
 
     if existing is None:
         agent = scope_store(registry, scope).create_agent(
@@ -1632,7 +1642,11 @@ async def _op_write(
     *,
     creating: bool,
 ) -> ToolResult:
-    from local_operator.profile_scope import row_scope
+    from local_operator.profile_scope import (
+        durable_write_origin,
+        durable_write_refusal,
+        row_scope,
+    )
 
     registry = _registry(context)
     if registry is None:
@@ -1646,12 +1660,30 @@ async def _op_write(
     except Exception:  # noqa: BLE001 — an unreadable owner is treated as the account
         existing = None
     target = row_scope(registry, existing) if existing is not None else scope
+    # A row that is not a role/specialist is refused by ``write_profile`` with its
+    # own specific sentence ("... is not a role"); asking for durable consent
+    # first would replace that answer with a scope question the caller did not ask
+    # and cannot act on.
+    writable_here = existing is None or is_role(existing) or is_specialist(existing)
+    authorized_by: str | None = None
+    if target == "global" and writable_here:
+        # THE ASK HAPPENS HERE, before any mutation, and only where the target is
+        # known. ``write_profile`` re-checks the RESULT of this answer under the
+        # write lock, so a row that changed owner between the two calls cannot
+        # slip an unconsented account write through.
+        intent = DurableWriteIntent(
+            kind="agent", operation="update" if not creating else "create", name=name
+        )
+        authorized_by = await durable_write_origin(context, intent)
+        if authorized_by is None:
+            return _error(tool_call_id, "agent", durable_write_refusal(intent))
     try:
         name, kind, action_class = write_profile(
             registry,
             params,
             creating=creating,
             scope=scope,  # type: ignore[arg-type]
+            authorized_by=authorized_by,
             context=context,
         )
     except ValueError as error:
@@ -1694,7 +1726,7 @@ async def _op_write(
             "kind": kind,
             "class": action_class,
             "scope": target,
-            "authorized_by": None,
+            "authorized_by": authorized_by,
         },
     )
 

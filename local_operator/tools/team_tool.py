@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    DurableWriteIntent,
     ToolContext,
     ToolResult,
 )
@@ -422,24 +423,28 @@ async def _op_write(
         existing = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
-    from local_operator.profile_scope import row_scope, scope_store, scope_words
+    from local_operator.profile_scope import (
+        durable_write_origin,
+        durable_write_refusal,
+        row_scope,
+        scope_store,
+        scope_words,
+    )
 
     scope = params.scope or "session"
     # WHERE THIS WRITE LANDS: a create goes where the caller asked, an update to
-    # the row's owner. A tool-issued write into the ACCOUNT store is refused by
-    # ``_op_write``'s target check below while no host can ask for it; the
-    # TUI/desktop hand a plain registry and no context because the user is the
-    # actor there.
+    # the row's owner. The consent question is asked for the ACCOUNT store only,
+    # and only for a tool call — the TUI/desktop hand a plain registry and no
+    # context because the user is the actor there.
     target = row_scope(registry, existing) if existing is not None else scope
+    authorized_by: str | None = None
     if context is not None and target == "global":
-        return _error(
-            tool_call_id,
-            "team",
-            "saving a team for every conversation needs the user's confirmation, and "
-            "this run cannot ask for it. To keep it for THIS conversation only, retry "
-            "without scope (or with scope='session'). To add it to the user's account "
-            "yourself, use the desktop Teams editor, the TUI /team form, or `lop teams`.",
+        intent = DurableWriteIntent(
+            kind="team", operation="update" if not creating else "create", name=name
         )
+        authorized_by = await durable_write_origin(context, intent)
+        if authorized_by is None:
+            return _error(tool_call_id, "team", durable_write_refusal(intent))
     if creating and existing is not None:
         # Q1: a create whose name collides with an ALIAS must say so in the
         # registry's own words -- "already exists" sends the model looking
@@ -554,7 +559,7 @@ async def _op_write(
         details={
             "name": team.name,
             "scope": target,
-            "authorized_by": None,
+            "authorized_by": authorized_by,
         },
     )
 

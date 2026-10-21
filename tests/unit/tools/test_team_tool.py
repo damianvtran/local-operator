@@ -244,6 +244,31 @@ async def test_a_tool_cannot_create_in_the_account_without_the_host(context, reg
 
 
 @pytest.mark.asyncio
+async def test_a_host_approved_account_team_records_its_origin(registry) -> None:
+    seen: list[Any] = []
+
+    async def approve(intent):
+        seen.append(intent)
+        return "ask:7"
+
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=approve)
+    result = await execute_team(
+        "tc",
+        {"op": "create", "name": "durable", "scope": "global", "manager": "manager"},
+        None,
+        None,
+        context,
+    )
+
+    assert not result.is_error
+    assert "in your account" in result.text
+    assert result.details is not None
+    assert result.details["authorized_by"] == "ask:7"
+    assert seen and seen[0].kind == "team"
+    assert registry.global_registry.get_team_by_name("durable") is not None
+
+
+@pytest.mark.asyncio
 async def test_delete_removes_a_conversation_team_only(context, registry) -> None:
     await call(context, op="create", name="pod", manager="manager", members=["scout"])
 

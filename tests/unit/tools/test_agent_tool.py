@@ -1869,6 +1869,19 @@ async def test_a_role_still_stores_the_role_fields_it_is_asked_for(context, regi
 # ---------------------------------------------------------------------------
 
 
+def _consenting(registry, origin: str = "test-consent"):
+    """A context whose host approves account writes, recording each intent."""
+
+    seen: list[Any] = []
+
+    async def approve(intent):
+        seen.append(intent)
+        return origin
+
+    context = ToolContext(cwd=".", agent_registry=registry, authorize_durable_write=approve)
+    return context, seen
+
+
 @pytest.mark.asyncio
 async def test_a_tool_create_defaults_to_this_conversation(context, registry) -> None:
     body = await call(context, op="create", name="one-off", instructions="Do one thing.")
@@ -1906,6 +1919,26 @@ async def test_a_tool_cannot_create_in_the_account_without_the_host(context, reg
 
 
 @pytest.mark.asyncio
+async def test_a_host_approved_account_create_records_its_origin(registry) -> None:
+    context, seen = _consenting(registry)
+    result = await execute_agent(
+        "tc",
+        {"op": "create", "name": "durable", "scope": "global", "instructions": "Keep me."},
+        None,
+        None,
+        context,
+    )
+
+    assert not result.is_error
+    assert "in your account" in result.text
+    assert result.details is not None
+    assert result.details["scope"] == "global"
+    assert result.details["authorized_by"] == "test-consent"
+    assert seen and seen[0].kind == "agent" and seen[0].name == "durable"
+    assert registry.global_registry.get_agent_by_name("durable") is not None
+
+
+@pytest.mark.asyncio
 async def test_an_account_update_is_a_global_write_and_needs_consent(context, registry) -> None:
     """S1 routes an update to the row's owner; that makes a model-initiated
     update of an ACCOUNT row a global mutation, even with no scope argument."""
@@ -1918,6 +1951,24 @@ async def test_an_account_update_is_a_global_write_and_needs_consent(context, re
 
     assert "needs the user's confirmation" in body
     assert registry.global_registry.get_agent_system_prompt(row.id) == "Original."
+
+
+@pytest.mark.asyncio
+async def test_an_account_update_with_consent_lands_and_keeps_the_origin(registry) -> None:
+    row = registry.global_registry.create_agent(
+        _edit_fields(name="reviewer", description="mine", tags=["role"])
+    )
+    registry.global_registry.set_agent_system_prompt(row.id, "Original.")
+    context, _ = _consenting(registry, origin="ask:42")
+
+    result = await execute_agent(
+        "tc", {"op": "update", "name": "reviewer", "instructions": "Changed."}, None, None, context
+    )
+
+    assert not result.is_error
+    assert result.details is not None
+    assert result.details["authorized_by"] == "ask:42"
+    assert registry.global_registry.get_agent_system_prompt(row.id) == "Changed."
 
 
 @pytest.mark.asyncio
