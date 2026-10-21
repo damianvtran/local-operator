@@ -4553,6 +4553,79 @@ def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _move_hand_over_sentence(session_id: str, devices: Sequence[str], *, leaving: bool) -> str:
+    """The ONE sentence for "a device stayed silent, so nothing was handed over".
+
+    WHY A COMPOSER RATHER THAN THREE F-STRINGS (``docs/design/mesh-move-outcome.md``,
+    clause 2). The move's pre-check learns the same fact from three different
+    reads — a known holder that stopped answering, a resolution read where
+    devices did not reply, and an offload whose typed destination is silent —
+    and the operator's reported experience was a move that looked like it had
+    started when it had not. One situation gets one sentence, the rule
+    ``session.remote_open``'s composers already follow; two spellings would let
+    one surface keep a fix the other lost.
+
+    ``leaving`` decides the tail and nothing else: when the request would have
+    left the session the true statement is that the user is still in it, and
+    for a move of ANOTHER session the true one is that the session is still
+    where it was. Saying "you are still in it" there would address a screen the
+    user is not looking at.
+    """
+    from local_operator.resume import UNNAMED_DEVICE
+
+    names = [name or UNNAMED_DEVICE for name in devices]
+    if len(names) == 1:
+        who = f"{names[0]} is not answering"
+    else:
+        who = f"{', '.join(names[:-1])} and {names[-1]} are not answering"
+    tail = "you are still in it" if leaving else "it is still here"
+    return f"{who} right now, so {session_id} could not be handed over. Nothing changed; {tail}."
+
+
+def _offload_target_refusal(
+    typed: str, session_id: str, root: Path, *, leaving: bool
+) -> str | None:
+    """The refusal for an offload whose typed destination peer is not answering.
+
+    WHY THE PEER IS RESOLVED FROM WHAT THE USER TYPED. ``--to`` names a device;
+    the move's own destination resolution belongs to the CLI, so this only has
+    to answer "is the peer I am about to leave for known to be silent". It
+    resolves the same vocabulary ``/new remote`` offers (``known_peers``: the
+    name, or the full id), and a token it cannot resolve is NEVER a refusal —
+    the CLI owns that answer, and inventing one here would refuse spellings the
+    relay accepts.
+
+    THE SILENCE IS THE SIDEBAR'S OWN READ (``read_listing``, TTL-cached), not a
+    second fan-out: the relay reports a member that did not answer as an
+    unanswered peer with no rows, which is exactly the fact this needs. A peer
+    that answered — with or without sessions — is absent from that list and the
+    move proceeds; a failed read is not evidence of silence either, so it also
+    proceeds and lets the CLI answer.
+
+    Blocking: the listing read fans out to the mesh, so callers run this off the
+    loop.
+    """
+    from local_operator.network.peers import known_peers
+    from local_operator.session.peer_rows import read_listing
+
+    try:
+        peers = known_peers(root)
+    except Exception:  # noqa: BLE001 — an unreadable store is not a reachability claim
+        return None
+    match = next((peer for peer in peers if typed in (peer.name, peer.device_id)), None)
+    if match is None or not match.device_id:
+        return None
+    try:
+        _, unanswered = read_listing(root)
+    except Exception:  # noqa: BLE001 — a failed read is not evidence of silence
+        return None
+    if not any(peer.device_id == match.device_id for peer in unanswered):
+        return None
+    return _move_hand_over_sentence(
+        session_id, [match.name or match.device_id[:8]], leaving=leaving
+    )
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -34642,6 +34715,12 @@ class OperatorApp(App[None]):
         reopened where it now lives: attached-remote for ``--to <peer>``, local
         for ``--to local``.
 
+        THE TARGET IS READ BEFORE THAT LEAVE (design clause 2, ``docs/design/
+        mesh-move-outcome.md``): a recall from a device that is not answering,
+        or an offload to one, is refused while the user is still in the session
+        — see ``_move_target_refusal`` — because leaving first and asking after
+        is exactly the reported defect.
+
         ``--queue`` IS THE TWO GUARDS' OWN REMEDY (design §5.4): a turn in
         flight and a viewer parked elsewhere are exactly the blockers the queued
         move waits out — the merged queue path records the intent durably and
@@ -34690,11 +34769,30 @@ class OperatorApp(App[None]):
             )
             return
         self._move_in_flight = True
+        # BUILT, NOT PAINTED: the phase row is a claim that the move has started,
+        # and nothing may claim that before the target answered (design clause 2,
+        # ``docs/design/mesh-move-outcome.md``) — ``_move_target_refusal`` runs
+        # first, and only its ``None`` appends this row.
         phase_notice = NoticeBlock(self._move_phase_text(target_id, request, []), "info")
-        self._append_block(phase_notice, ends_empty_state=False)
 
         async def run() -> None:
             try:
+                try:
+                    refusal = await self._move_target_refusal(target_id, request, leaving=leaving)
+                except Exception:  # noqa: BLE001 — a failed check is not a refusal
+                    # THE CHECK IS AN HONESTY GUARD, NOT THE AUTHORITY: the CLI
+                    # resolves and refuses the destination itself, so an
+                    # unexpected failure here must not turn /move into a silent
+                    # no-op. Proceeding hands the answer to the code that owns
+                    # it, the same way an unanswered read does.
+                    logger.debug("could not pre-check the move's target", exc_info=True)
+                    refusal = None
+                if refusal is not None:
+                    # ONE NOTICE AND NOTHING ELSE: no phase row was painted, the
+                    # session was not left, and the CLI was never run.
+                    self._system_notice(refusal, "warning")
+                    return
+                self._append_block(phase_notice, ends_empty_state=False)
                 if leaving:
                     # DETACH FIRST: the move cannot retire a runtime this viewer
                     # is attached to. `/new`'s own transition is the one that
@@ -34723,14 +34821,84 @@ class OperatorApp(App[None]):
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
         await self._reload_session()
 
+    async def _move_target_refusal(
+        self, session_id: str, request: "MoveTo", *, leaving: bool
+    ) -> str | None:
+        """The sentence refusing a move before the session is left, or ``None``.
+
+        WHY THE TARGET IS ASKED BEFORE ANYTHING MOVES (design clause 2). The old
+        order — paint "moving", leave the session, then ask — is the operator's
+        reported experience: a recall from a peer that had stopped answering said
+        it was moving, left the session, and put them back on the same remote
+        conversation behind a notice that was easy to miss. A move never leaves
+        until the first step has been accepted, so this reads the target FIRST
+        and a refusal leaves the screen exactly where it was.
+
+        THE READS ARE THE SIDEBAR'S OWN (``remote_row_and_silence`` for a recall,
+        ``_offload_target_refusal`` for a typed peer) and both fan out to the
+        mesh, so they run through ``asyncio.to_thread`` and the frame stays live
+        while the peers are asked. The local half is free: a session this device
+        holds is answered from its directory, and the zero-peer case never dials.
+
+        ONLY AN ANSWERED TARGET REFUSES. A local session is not a recall (its
+        read answers ``(None, ())``, exactly like an id nobody holds), a typed
+        peer this device cannot resolve is the CLI's answer to give, and a failed
+        read is not evidence of absence — each of those proceeds, so the CLI's
+        own refusal vocabulary stays the one the user reads.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session import remote_open
+
+        root = config_dir()
+        if request.to != "local":
+            return await asyncio.to_thread(
+                _offload_target_refusal, request.to, session_id, root, leaving=leaving
+            )
+        row, unanswered = await asyncio.to_thread(
+            remote_open.remote_row_and_silence, session_id, root
+        )
+        if row is not None:
+            # A KNOWN HOLDER: the one sentence the pick uses for this state, so a
+            # recall is refused in the words the rest of the surface already says.
+            if row.reachable:
+                return None
+            return remote_open.unreachable_peer_sentence(session_id, row)
+        if unanswered:
+            return _move_hand_over_sentence(
+                session_id, [peer.name for peer in unanswered], leaving=leaving
+            )
+        if (root / "sessions" / session_id).is_dir():
+            # THIS DEVICE HOLDS IT — not a recall at all. The read above cannot
+            # tell a local directory from an id nobody holds (both answer
+            # ``(None, ())``), and refusing a session the user can see with "no
+            # device holds it" would be false; the CLI answers ``already_local``
+            # when the request runs.
+            return None
+        return f"No device that answered holds {session_id}; nothing changed."
+
     def _move_phase_text(self, session_id: str, request: "MoveTo", phases: list[str]) -> str:
-        """The live phase line: where the move is, in the contract's own order."""
+        """The live phase line: where the move is, in the contract's own order.
+
+        THE VERB IS THE HONESTY, not decoration. Before the first phase arrives
+        nothing has started — the CLI has not accepted the request yet — so an
+        empty-phase line says the request is being MADE ("requesting"), never
+        that a move is under way (design clause 2; the operator saw "moving"
+        over a move that had not begun). Once a phase is present the move exists
+        and the line says so, in the same present-continuous tense the step marks
+        read against.
+        """
         steps = []
         for phase in MOVE_PHASE_ORDER:
             mark = "✓" if phase in phases else "·"
             steps.append(f"{mark} {phase.replace('_', ' ')}")
+        marks = "  ".join(steps)
+        if not phases:
+            return (
+                f"requesting a move of {session_id} to {request.to} — "
+                f"waiting for {request.to} to accept  {marks}"
+            )
         verb = "copying" if request.keep else "moving"
-        return f"{verb} {session_id} to {request.to} — " + "  ".join(steps)
+        return f"{verb} {session_id} to {request.to} — {marks}"
 
     def _publish_move_result(
         self,
@@ -34755,7 +34923,16 @@ class OperatorApp(App[None]):
         if not result.get("ok"):
             reached = str(result.get("phase_reached") or "")
             changed = bool(result.get("changed"))
-            if left and changed:
+            code = str(result.get("code") or "")
+            if code == "duplicate":
+                # BOTH DEVICES LIST IT (clause 1's refusal), so the placement is
+                # ambiguous rather than failed: reopening "where it lives" would
+                # pick one of the two copies arbitrarily. The user stays on the
+                # screen the leave already put them on — the fresh local session —
+                # and the producer's own message says the rest, so no tail claims
+                # a way back this branch deliberately does not take.
+                tail = ""
+            elif left and changed:
                 # THE HALF-COMMITTED CASE, where round 1's sentence was simply
                 # false. ``changed=True`` means the contract says the move already
                 # DID something — the CLI's own message for the
@@ -34782,7 +34959,7 @@ class OperatorApp(App[None]):
                 tail = " Nothing changed."
             message = str(result.get("message") or "the move was refused")
             text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
-            if str(result.get("code") or "") == "viewed_elsewhere":
+            if code == "viewed_elsewhere":
                 # THE BLOCKER A WAIT CANNOT CLEAR (``mobility``'s taxonomy split,
                 # design §5.4): seen in another window or app, the queue is the
                 # route that works — the producer's own sentence says "queue the
@@ -34799,7 +34976,7 @@ class OperatorApp(App[None]):
                 # happened" in a second, louder register (seen in the frame).
                 self._transcript_view().remove_block(phase_notice)
             self._system_notice(text, "error")
-            if left:
+            if left and code != "duplicate":
                 # THE WAY BACK, and the reason the sentence above is true: every
                 # refusal that arrives AFTER the leave (``busy``,
                 # ``digest_mismatch``, ``relay_unavailable``,
@@ -34807,7 +34984,8 @@ class OperatorApp(App[None]):
                 # with ``changed=True``) has already left the session, and none of
                 # them moves it. Reopening where it LIVES is the one answer that
                 # covers both placements the pick knows: a peer's id opens
-                # attached-remote, a local id resumes.
+                # attached-remote, a local id resumes. ``duplicate`` is the one
+                # exception, for the reason its own branch states.
                 self._reopen_where_the_session_lives(session_id)
             return
         if isinstance(result.get("queue"), dict):
@@ -34886,6 +35064,26 @@ class OperatorApp(App[None]):
         phase_notice.restate(self._move_phase_text(session_id, request, phases), "info")
         to_block = result.get("to_device") or {}
         target = str(to_block.get("name") or to_block.get("device_id") or request.to)
+        # COMPLETION IS A STATE THE PRODUCER VERIFIED, NEVER AN ACKNOWLEDGEMENT
+        # (design clause 1 and the Surfaces section). ``ok: true`` only means the
+        # request was accepted; a committed handoff whose destination has not
+        # promoted yet is IN PROGRESS, and the conversation is not there to
+        # reopen. ``phase`` is kept as the second half of the gate because the
+        # phase vocabulary already says how far the verified steps got.
+        state = str(result.get("state") or "completed")
+        phase = str(result.get("phase") or "")
+        if state != "completed" or phase not in ("committed", "done"):
+            # NOTHING HAS LANDED, so nothing may say it has: an in-progress
+            # receipt names the step and leaves the user where they are. After a
+            # leave that is the fresh local session, which is honest — the move
+            # really has not arrived.
+            noted = f" ({phase})" if phase else ""
+            self._system_notice(
+                f"The move of {session_id} to {target} is still in progress{noted}; "
+                "it has not landed there yet.",
+                "note",
+            )
+            return
         new_id = str(result.get("new_session_id") or session_id)
         if result.get("mode") == "keep":
             receipt = f"Copied {session_id} to {target} as {new_id}; the original is untouched."
@@ -34910,12 +35108,11 @@ class OperatorApp(App[None]):
         # request rides `note`'s muted ink, and a finished move should not look
         # like a different class of event than the queue it came through.
         self._system_notice(receipt, "note")
-        if str(result.get("phase") or "") not in ("committed", "done"):
-            return
-        # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both
-        # answers: a peer's id opens attached-remote (`_open_session_or_refuse`),
-        # a local id resumes. The peer cache is dropped first so the pick does
-        # not answer from a listing taken before the move committed.
+        # REOPEN WHERE IT LIVES, and only now that the state gate above proved
+        # it landed. The sidebar's pick path already knows both answers: a peer's
+        # id opens attached-remote (`_open_session_or_refuse`), a local id
+        # resumes. The peer cache is dropped first so the pick does not answer
+        # from a listing taken before the move committed.
         self._reopen_where_the_session_lives(new_id)
 
     def _reopen_where_the_session_lives(self, session_id: str) -> None:
