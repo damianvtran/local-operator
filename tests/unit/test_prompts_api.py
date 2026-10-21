@@ -682,6 +682,11 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )
+    # `artifact_data` is createIf-gated on a stored anthropic OAuth grant, which
+    # a bare CI host does not hold — presence-only stub, same rule as above.
+    from local_operator.tools import artifact_data_tool
+
+    monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
 
     tools = create_tools(
         ToolContext(
