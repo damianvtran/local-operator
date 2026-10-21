@@ -398,6 +398,56 @@ class TestCatalogueParity:
         problems = i18n_check.check_catalogues()
         assert any("arguments" in p for p in problems)
 
+    def test_number_may_inflect_as_a_plural(self, tmp_path, monkeypatch, i18n_check) -> None:
+        """A count en writes as a bare number may become an ICU plural.
+
+        Urdu `گھنٹہ`/`گھنٹے` and Hindi `घंटा`/`घंटे` have no invariant form, so
+        `{count, number} h` cannot render "3 hours" correctly — the upgrade
+        keeps the same argument, position and number value."""
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                "ur/demo.json": {
+                    "demo.x": "{count, plural, one {# گھنٹہ} other {# گھنٹے}}"
+                },
+            },
+        )
+        assert i18n_check.check_catalogues() == []
+
+    def test_a_plural_may_not_collapse_to_a_bare_number(
+        self, tmp_path, monkeypatch, i18n_check
+    ) -> None:
+        """The reverse is still a failure: dropping branches would lose the
+        grammar the en source already expresses."""
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{n, plural, one {# item} other {# items}}"},
+                "fr/demo.json": {"demo.x": "{n, number} articles"},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("arguments" in p for p in problems)
+
+    def test_number_upgrade_keeps_the_argument_name(
+        self, tmp_path, monkeypatch, i18n_check
+    ) -> None:
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                "ur/demo.json": {
+                    "demo.x": "{n, plural, one {# گھنٹہ} other {# گھنٹے}}"
+                },
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("arguments" in p for p in problems)
+
     def test_invalid_plural_category_for_the_locale(
         self, tmp_path, monkeypatch, i18n_check
     ) -> None:
