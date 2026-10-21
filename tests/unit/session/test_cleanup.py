@@ -1839,12 +1839,10 @@ def test_hand_off_takes_the_directory_out_of_the_store_then_the_sweep_ages_it(
     (target,) = _store(tmp_path, 1)
     store = tmp_path / "sessions"
 
-    assert (
-        cleanup.hand_off_session_dir(
-            target, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
-        )
-        is True
+    first = cleanup.hand_off_session_dir(
+        target, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
     )
+    assert first.handed is True, first
     assert not target.exists()
     # THE RECEIPT SURVIVES THE MOVE, and says "moved", not "deleted".
     logged = [
@@ -1856,12 +1854,10 @@ def test_hand_off_takes_the_directory_out_of_the_store_then_the_sweep_ages_it(
     assert logged[-1]["actor"] == "mesh:test"
     # ABSENT IS THE DESIRED POST-STATE: the crash window after the rename must not
     # be read as a failure to hand the directory away.
-    assert (
-        cleanup.hand_off_session_dir(
-            target, config_dir=tmp_path, reason="mesh-move: retry", actor="mesh:test"
-        )
-        is True
+    retry = cleanup.hand_off_session_dir(
+        target, config_dir=tmp_path, reason="mesh-move: retry", actor="mesh:test"
     )
+    assert retry.handed is True, retry
 
     handoff_root = tmp_path / "network" / cleanup.HANDED_AWAY_DIRNAME
     handoff_root.mkdir(parents=True, exist_ok=True)
@@ -1875,3 +1871,49 @@ def test_hand_off_takes_the_directory_out_of_the_store_then_the_sweep_ages_it(
     assert cleanup.sweep_handed_away(tmp_path) == ["aged.1.token"]
     assert not aged.exists()
     assert fresh.is_dir()
+
+
+def test_a_refused_handoff_names_its_cause(tmp_path: Path) -> None:
+    """Q-4: the refusal says WHY the directory could not be handed away.
+
+    The measured run surfaced only "this device could not hand <id> away, so
+    nothing was moved" — true, but nothing a person can act on. ``HandOffOutcome``
+    carries the cause the caller now puts in that sentence *and* logs, so the two
+    shapes that have different remedies are distinguishable: a guard that refused
+    (the directory is not a session this module may remove) and a rename that
+    failed (the filesystem refused the commit, and a retry may work).
+    """
+    # 1. THE GUARD: a directory that is not directly under a ``sessions/`` store.
+    # ``hand_off_session_dir`` marks the parent on the way in, so the marker is not
+    # what refuses this — the location is.
+    stray = tmp_path / "not-a-store" / "abc123"
+    stray.mkdir(parents=True)
+    (stray / "transcript.jsonl").write_text("", encoding="utf-8")
+
+    refused = cleanup.hand_off_session_dir(
+        stray, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
+    )
+
+    assert refused.handed is False, refused
+    assert "the store guard refused" in refused.reason, refused
+    assert "not directly under a 'sessions/' directory" in refused.reason, refused
+    assert stray.is_dir(), "a refused handoff must leave the directory where it was"
+
+    # 2. THE RENAME: an unwritable quarantine root (the shape of the measured
+    # EACCES run) fails the commit. It is REPORTED with the OSError in the reason
+    # rather than raised, so both callers word the rollback the same way — and the
+    # directory is still in the store, which is what makes the rollback legal.
+    (target,) = _store(tmp_path, 1)
+    network = tmp_path / "network"
+    network.mkdir(exist_ok=True)
+    os.chmod(network, 0o500)
+    try:
+        unusable = cleanup.hand_off_session_dir(
+            target, config_dir=tmp_path, reason="mesh-move: test", actor="mesh:test"
+        )
+    finally:
+        os.chmod(network, 0o700)
+
+    assert unusable.handed is False, unusable
+    assert "could not be renamed" in unusable.reason, unusable
+    assert target.is_dir()

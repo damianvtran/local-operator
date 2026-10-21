@@ -87,7 +87,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
@@ -1060,6 +1060,21 @@ def remove_session_dir(
     return True
 
 
+class HandOffOutcome(NamedTuple):
+    """What :func:`hand_off_session_dir` did, and WHY when it did not.
+
+    ``handed`` is the bool the callers used to get back wholesale. ``reason`` is a
+    short human cause, never a code: it is what the refusal sentence shows the
+    person reading it ("this device could not hand <id> away (<reason>), so
+    nothing was moved"), and a caller that only logged a bare ``False`` left them
+    with a refusal that named the step and not the cause (QA round 1, Q-4). It is
+    also logged here, so this device's relay log carries the same words.
+    """
+
+    handed: bool
+    reason: str
+
+
 def hand_off_session_dir(
     target: Path,
     *,
@@ -1067,7 +1082,7 @@ def hand_off_session_dir(
     reason: str,
     actor: str,
     title: str = "",
-) -> bool:
+) -> HandOffOutcome:
     """Atomically take a session directory OUT of the store, then delete it.
 
     THE COMMIT POINT OF A MESH MOVE (``docs/design/mesh-move-outcome.md`` clause 1).
@@ -1081,9 +1096,9 @@ def hand_off_session_dir(
 
     ORDER, and each step's failure has its own meaning:
 
-    1. ``True`` when ``target`` is already absent. That IS the desired post-state —
-       a retry after a crash between the rename and the tombstone must not be read
-       as a failure to hand the directory away.
+    1. ``handed=True`` when ``target`` is already absent. That IS the desired
+       post-state — a retry after a crash between the rename and the tombstone must
+       not be read as a failure to hand the directory away.
     2. The same :func:`_refusal` guard :func:`remove_session_dir` uses. A directory
        this module may not touch is left exactly where it is and the caller rolls
        the move back.
@@ -1092,8 +1107,10 @@ def hand_off_session_dir(
        the reason. A record that cannot be written refuses: a handoff nobody can
        describe afterwards is the incident shape this module exists to prevent.
     4. The rename into ``<config>/network/handed-away/`` on the same filesystem, so
-       it is atomic. Only a failure HERE raises: the caller's move has not committed
-       and must roll back. Everything after is cleanup.
+       it is atomic. A failure HERE means the caller's move has not committed and
+       must roll back; it is reported as ``handed=False`` with the ``OSError`` in
+       the reason, never raised, so every caller has ONE shape to handle. Everything
+       after is cleanup.
     5. Best-effort deletion of the quarantined tree by the one bounded removal. A
        failure logs and leaves the tree for :func:`sweep_handed_away` — it must not
        fail a move whose commit has already landed.
@@ -1106,7 +1123,7 @@ def hand_off_session_dir(
     """
     target = Path(target)
     if not target.exists():
-        return True
+        return HandOffOutcome(True, "the directory was already gone")
     mark_store(target.parent)
     refusal = _refusal(target, Path(config_dir))
     if refusal:
@@ -1118,7 +1135,7 @@ def hand_off_session_dir(
             reason,
             actor,
         )
-        return False
+        return HandOffOutcome(False, f"the store guard refused: {refusal}")
     try:
         contents: dict[str, Any] = measure_session_dir(target)
     except Exception as exc:  # noqa: BLE001 — the decision is the guards'
@@ -1140,18 +1157,26 @@ def hand_off_session_dir(
             target,
             target.parent / CLEANUP_LOG_NAME,
         )
-        return False
+        return HandOffOutcome(False, "its receipt could not be written")
     quarantine_root = Path(config_dir) / "network" / HANDED_AWAY_DIRNAME
-    quarantine_root.mkdir(parents=True, exist_ok=True)
-    # 0700: the tree it holds is a whole conversation on its way out — same user
-    # only, and the name it is filed under carries a pid-independent token so two
-    # handoffs in one nanosecond tick cannot collide.
-    os.chmod(quarantine_root, 0o700)
     quarantine = quarantine_root / f"{target.name}.{time.time_ns()}.{os.urandom(4).hex()}"
-    # THE COMMIT: no raise is caught here. An OSError is the one failure the caller
-    # must see, because nothing has been told to anybody yet and the source still
-    # holds the whole conversation.
-    os.replace(target, quarantine)
+    try:
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        # 0700: the tree it holds is a whole conversation on its way out — same user
+        # only, and the name it is filed under carries a pid-independent token so two
+        # handoffs in one nanosecond tick cannot collide.
+        os.chmod(quarantine_root, 0o700)
+        # THE COMMIT. Nothing has been told to anybody yet, so a failure here is a
+        # refusal the caller rolls back from — never a raise, so both callers (the
+        # live commit and the crash recovery) word it the same way.
+        os.replace(target, quarantine)
+    except OSError as exc:
+        logger.warning(
+            "session cleanup: REFUSED to hand %s away: the directory could not be renamed: %s",
+            target,
+            exc,
+        )
+        return HandOffOutcome(False, f"the directory could not be renamed: {exc}")
     logger.warning(
         "session cleanup: handed %s away to %s; policy=%s reason=%s actor=%s "
         "bytes=%s entries=%s transcript_bytes=%s (record: %s)",
@@ -1174,7 +1199,7 @@ def hand_off_session_dir(
             quarantine,
             exc_info=True,
         )
-    return True
+    return HandOffOutcome(True, "")
 
 
 def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AGE_S) -> list[str]:

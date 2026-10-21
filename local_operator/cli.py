@@ -6629,9 +6629,13 @@ def _sessions_move_words(
     if mobility_mod.move_receipt_state(result) != "completed":
         # THE SAME RULE, WITHOUT A QUEUE BLOCK: an in-progress receipt is a handoff
         # whose commit has not landed yet, and no surface may call that "Moved".
+        # NOT "QUEUED" EITHER (QA round 1, Q-3): no producer reaches here through the
+        # queue (that receipt carries a ``queue`` block and is worded above), so the
+        # mechanism word would name the wrong thing — this is a handoff that started
+        # and has not finished.
         return [
-            f"Queued a move of {session_id} to {target} — nothing has moved yet "
-            f"(phase: {result.get('phase') or 'in_progress'}).",
+            f"The move of {session_id} to {target} is still in progress "
+            f"(phase: {result.get('phase') or 'in_progress'}); nothing has landed yet.",
             "Run this verb again to finish it.",
         ]
     if result.get("mode") == "keep":
