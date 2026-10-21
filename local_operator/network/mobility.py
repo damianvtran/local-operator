@@ -777,7 +777,12 @@ def move_receipt_state(result: dict[str, Any]) -> Literal["completed", "in_progr
 
 
 def _duplicate_refusal(
-    server: "RelayServer", session_id: str, owner_device: str, *, phase_reached: SessionMovePhase
+    server: "RelayServer",
+    session_id: str,
+    owner_device: str,
+    *,
+    phase_reached: SessionMovePhase,
+    promoted: bool = True,
 ) -> SessionMoveRefusal:
     """The refusal for a commit the OWNER contradicts by still listing the id.
 
@@ -786,14 +791,31 @@ def _duplicate_refusal(
     had happened. The sentence names the owner, both copies, the source's retrying
     cleanup and the one rule that keeps the state from becoming two diverging
     conversations.
+
+    ``promoted=False`` IS A DIFFERENT STATE and gets its own words (review round 2,
+    R2-2): the tombstone path checks the contradiction BEFORE the promote, so on that
+    arm nothing was promoted and the only copy is still staged here while the owner
+    still lists the id. Reusing the sentence above there claimed a committed copy the
+    device does not have, and told the reader about "both copies" when there is one.
     """
     name = server._member_name(owner_device) or owner_device  # noqa: SLF001
+    if promoted:
+        state = (
+            f"so both devices now list the same conversation. The copy here is "
+            f"committed; {name}'s cleanup is retrying, and until it finishes do not "
+            "edit both copies."
+        )
+    else:
+        state = (
+            "so this device did not promote the copy it holds. The verified copy is "
+            f"still staged here and is adopted once {name}'s handoff completes; "
+            "nothing here is openable yet, and this device is not one of two live "
+            "copies."
+        )
     return _move_refusal(
         session_id,
         "duplicate",
-        f"{name} still lists {session_id} after the handoff, so both devices now list "
-        f"the same conversation. The copy here is committed; {name}'s cleanup is "
-        "retrying, and until it finishes do not edit both copies.",
+        f"{name} still lists {session_id} after the handoff, {state}",
         phase_reached=phase_reached,
         changed=True,
     )
@@ -1886,34 +1908,46 @@ def _destination_move(
                 }
             )
         except Moved as refusal:
-            if refusal.code == "unreachable":
+            if refusal.code in ("unreachable", "refused"):
                 # A LOST REPLY IS NOT A REFUSAL (review round 1, R1-2 / QA round 1,
-                # Q-1). The owner renames its directory out of ``sessions/`` and
-                # deletes the quarantine BEFORE it answers ``ready``, so a reply that
-                # never arrives is the one case where this device cannot tell "it
-                # committed" from "it did not": clearing the entry and sweeping the
-                # verified staging would destroy the ONLY copy left. Keep both, say
-                # so, and let the destination's own reconcile adopt the copy when the
-                # owner answers (its tombstone names this device).
+                # Q-1), AND NEITHER IS AN ERROR FRAME (review round 2, R2-1(b)).
+                # The owner renames its directory out of ``sessions/`` and deletes
+                # the quarantine BEFORE it answers ``ready``, so neither a reply
+                # that never arrives nor an ``op: error`` raised after the rename
+                # proves the source still holds the id: ``refused`` is the
+                # transport's word for "the peer threw", and every genuine refusal
+                # travels INSIDE the ack with its own code (``busy``,
+                # ``digest_mismatch``, ``cleanup_refused``, ``not_owner``, ...).
+                # Clearing the entry and sweeping the verified staging on either
+                # would destroy the ONLY copy left. Keep both, say so, and let the
+                # destination's own reconcile adopt the copy when the owner's
+                # record says the handoff committed.
                 note("handing_off")
                 logger.warning(
-                    "mobility: %s did not answer the commit for %s; keeping the verified "
-                    "copy under %s until its record says otherwise",
+                    "mobility: %s %s the commit for %s; keeping the verified copy "
+                    "under %s until its record says otherwise",
                     owner_name or owner_device,
+                    "did not answer" if refusal.code == "unreachable" else "failed inside",
                     session_id,
                     staging,
                 )
+                if refusal.code == "unreachable":
+                    why = f"{owner_name or owner_device} did not answer the commit"
+                else:
+                    why = (
+                        f"the commit failed on {owner_name or owner_device} after it could "
+                        f"already have taken the session out of its store ({refusal.message})"
+                    )
                 return (
                     None,
                     _move_refusal(
                         session_id,
                         "unconfirmed",
                         f"the verified copy of {session_id} is kept under {staging}: "
-                        f"{owner_name or owner_device} did not answer the commit, so this "
-                        "device cannot yet say the move is complete. It will be adopted "
-                        "here if the owner's own record says the handoff committed. Do not "
-                        "retry as though nothing happened — the source may already have "
-                        "handed its copy away.",
+                        f"{why}, so this device cannot yet say the move is complete. "
+                        "It will be adopted here if the owner's own record says the "
+                        "handoff committed. Do not retry as though nothing happened — "
+                        "the source may already have handed its copy away.",
                         phase_reached="handing_off",
                         changed=True,
                     ),
@@ -2214,7 +2248,9 @@ def _finish_from_tombstone(
     ):
         return (
             None,
-            _duplicate_refusal(server, session_id, owner_device, phase_reached="handing_off"),
+            _duplicate_refusal(
+                server, session_id, owner_device, phase_reached="handing_off", promoted=False
+            ),
             "",
         )
     promote_outcome = _promote(server, staging, session_id)
@@ -2658,6 +2694,87 @@ def _after_source_commit(root: Path, session_id: str) -> None:
             "mobility: could not clear derived state for %s after its commit",
             session_id,
             exc_info=True,
+        )
+
+
+def _settle_source_commit(
+    root: Path,
+    session_id: str,
+    *,
+    device_id: str,
+    device_name: str,
+    network_id: str,
+) -> bool:
+    """The commit's durable half: tombstone, journal clear, F5 prune. NEVER raises.
+
+    THE COMMIT POINT IS THE RENAME, NOT THIS FUNCTION (review round 2, R2-1). Every
+    caller gets here with the directory already out of ``sessions/`` and the
+    destination already told to expect a commit, so a raise here must not become the
+    relay's ``op: error`` frame: ``LinkTransport.ask`` reads that as
+    ``Moved("refused")``, and a refusal makes the destination clear its entry and
+    sweep the VERIFIED STAGING it holds — which is the only copy left once this one
+    is gone. So each step is individually guarded and the outcome is returned.
+
+    THE TOMBSTONE IS THE ONE STEP THAT DECIDES WHAT COMES NEXT, which is why it is
+    the only one whose failure shortens the work: without it the id is not durably
+    the destination's, so the journal is LEFT AT ``handing-off`` — the phase forbids
+    a rollback — and :func:`_complete_handoff` writes it on the next reconcile.
+    ``True`` means the tombstone landed; the steps after it are derived state and
+    the commit holds either way.
+    """
+    from local_operator.network.projection import write_tombstone
+    from local_operator.session.placement import clear_handoff_entry
+
+    try:
+        write_tombstone(
+            session_id,
+            device_id=device_id,
+            device_name=device_name,
+            network_id=network_id,
+            config_dir=root,
+        )
+    except Exception:  # noqa: BLE001 — a commit reported as a refusal loses the only copy
+        logger.exception(
+            "mobility: %s left the store but its tombstone could not be written; the "
+            "journal stays handing-off so reconcile completes the handoff",
+            session_id,
+        )
+        return False
+    try:
+        clear_handoff_entry(root, session_id)
+    except Exception:  # noqa: BLE001 — a stale entry is cleared from the tombstone
+        logger.exception(
+            "mobility: %s committed but its journal entry could not be cleared; the "
+            "next reconcile clears it from the tombstone",
+            session_id,
+        )
+    # The directory is gone, so the source's derived state goes with it — the same F5
+    # prune the ordinary commit runs, or the moved session's wakes would stay armed on
+    # a device that no longer holds it. Already best effort internally; the guard is
+    # this function's own promise that no failure here reaches the wire.
+    try:
+        _after_source_commit(root, session_id)
+    except Exception:  # noqa: BLE001 — derived state; the commit already landed
+        logger.exception(
+            "mobility: %s committed but its derived state could not be cleared", session_id
+        )
+    return True
+
+
+def _note_committed(server: "RelayServer", session_id: str, to_device: str) -> None:
+    """Record a commit's phase and audit — never raises (review round 2, R2-1).
+
+    ``progress_for(...).note`` releases the in-memory waiter an inviter is blocked on
+    and ``_audit`` is a never-raise by its own contract; the guard here is the same
+    rule one level down: no bookkeeping may turn a commit into a refusal frame.
+    """
+    try:
+        progress_for(server).note(session_id, "committed")
+        _audit(server, AUDIT_COMMITTED, session_id, to_device)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.exception(
+            "mobility: %s committed but its progress note or audit could not be recorded",
+            session_id,
         )
 
 
@@ -3812,23 +3929,17 @@ def _source_commit(
         # tombstone was never written. Completing the handoff is the only legal
         # direction — a rollback is forbidden from this phase by rule — and the
         # digests below are NOT recomputed: there is no directory left to hash, and
-        # the destination has already been told to expect a commit.
-        from local_operator.network.projection import write_tombstone
-
-        write_tombstone(
+        # the destination has already been told to expect a commit. Every write below
+        # is guarded: a commit reported as a refusal would make the destination sweep
+        # the verified copy it holds (review round 2, R2-1).
+        _settle_source_commit(
+            Path(server.root),
             session_id,
             device_id=to_device,
             device_name=server._member_name(to_device),  # noqa: SLF001
             network_id=link.network_id,
-            config_dir=server.root,
         )
-        clear_handoff_entry(server.root, session_id)
-        # The directory is gone, so the source's derived state goes with it — the
-        # same F5 prune the ordinary commit runs, or the moved session's wakes would
-        # stay armed on a device that no longer holds it.
-        _after_source_commit(Path(server.root), session_id)
-        progress_for(server).note(session_id, "committed")
-        _audit(server, AUDIT_COMMITTED, session_id, to_device)
+        _note_committed(server, session_id, to_device)
         return {
             "result": "committed",
             "phase": "committed",
@@ -3920,7 +4031,6 @@ def _source_commit(
     progress_for(server).note(session_id, "handing_off")
     _audit(server, AUDIT_HANDING_OFF, session_id, to_device)
 
-    from local_operator.network.projection import write_tombstone
     from local_operator.session import cleanup as cleanup_mod
 
     # THE DEFINITIONS ARE STASHED BEFORE THE DIRECTORY LEAVES (blocker Q-2), and this
@@ -4002,22 +4112,19 @@ def _source_commit(
             ),
             "session_id": session_id,
         }
-    write_tombstone(
+    # THE COMMIT IS THE RENAME ABOVE: from here the answer is ``committed`` whatever
+    # the bookkeeping does (review round 2, R2-1). A tombstone that cannot be written
+    # leaves the journal at ``handing-off`` — reconcile completes it — and nothing
+    # else in this tail may turn a commit into a refusal frame, because the
+    # destination answers a refusal by sweeping the only copy left.
+    _settle_source_commit(
+        Path(server.root),
         session_id,
         device_id=to_device,
         device_name=server._member_name(to_device),  # noqa: SLF001
         network_id=link.network_id,
-        config_dir=server.root,
     )
-    clear_handoff_entry(server.root, session_id)
-    # THE PRUNE, AND ONLY AFTER A SUCCESSFUL COMMIT (F5, design note §5.3). The
-    # commit is the instant this conversation stops living here, so this device's
-    # DERIVED state for it goes with it — and the queue record folds to ``resumed``
-    # in the same step (terminal is write-once; the driver's own tombstone poll is
-    # an idempotent second observer).
-    _after_source_commit(Path(server.root), session_id)
-    progress_for(server).note(session_id, "committed")
-    _audit(server, AUDIT_COMMITTED, session_id, to_device)
+    _note_committed(server, session_id, to_device)
     return {
         "result": "committed",
         "phase": "committed",
@@ -4740,7 +4847,6 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
     ``cleanup_pending`` — the id is the destination's and this device's leftover is
     swept later.
     """
-    from local_operator.network.projection import write_tombstone
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
@@ -4797,17 +4903,25 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
         # half-done: the phase returns to ``prepared`` and the session stays here.
         clear_handoff_entry(root, session_id)
         return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
-    write_tombstone(
+    # THE RENAME ABOVE IS THE COMMIT POINT, so nothing from here may raise (review
+    # round 2, R2-1). The tombstone is the only step whose failure changes the answer:
+    # without it the id is not durably the destination's, so the journal keeps saying
+    # ``handing-off`` (a rollback would be a lie about a commit that happened) and the
+    # next reconcile writes it — which is why this reports ``cleanup_pending`` rather
+    # than an error the inviter would read as a refusal.
+    settled = _settle_source_commit(
+        root,
         session_id,
         device_id=to_device,
         device_name=str(entry.get("to_name") or ""),
         network_id=str(entry.get("network_id") or ""),
-        config_dir=root,
     )
-    clear_handoff_entry(root, session_id)
-    # The same post-commit cleanup as the ordinary path, and for the same
-    # F5 reason: the directory is gone, so the derived state goes with it.
-    _after_source_commit(root, session_id)
+    if not settled:
+        return {
+            "session_id": session_id,
+            "action": "cleanup_pending",
+            "phase": "committed",
+        }
     return {
         "session_id": session_id,
         "action": "completed",
