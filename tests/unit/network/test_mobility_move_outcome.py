@@ -116,14 +116,21 @@ def _own_session_with_wake_index_cwd(server: Any, cwd: str, *, session_id: str =
     return directory
 
 
-def _losing_ready_ask(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+def _losing_ready_ask(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    code: str = "unreachable",
+    message: str = "the reply was lost after the commit",
+) -> dict[str, bool]:
     """Let the owner REALLY commit, then lose its answer — a lost reply, not a refusal.
 
     ``LinkTransport.ask`` raises ``Moved('unreachable')`` when the reply never
-    arrives (a timeout, a peer that died mid-answer). The deterministic spelling is
-    to deliver the frame to the real transport first — so the source takes its
-    directory out of the store and writes its tombstone, exactly as it does in the
-    field — and then raise the timeout's own exception once.
+    arrives (a timeout, a peer that died mid-answer) and ``Moved('refused')`` when the
+    peer answered an ``op: error`` frame instead of an ack (a raise inside its
+    handler). Both are the destination's "this device cannot tell", so ``code``
+    selects which spelling this cell drives. The deterministic form is to deliver the
+    frame to the real transport first — so the source takes its directory out of the
+    store and writes its tombstone, exactly as it does in the field — then raise once.
     """
     real_ask = mobility.LinkTransport.ask
     state = {"lost": False}
@@ -132,7 +139,7 @@ def _losing_ready_ask(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
         if str(frame.get("phase") or "") == "ready" and not state["lost"]:
             real_ask(self, frame, timeout=timeout)
             state["lost"] = True
-            raise mobility.Moved("unreachable", "the reply was lost after the commit")
+            raise mobility.Moved(code, message)
         return real_ask(self, frame, timeout=timeout)
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", losing_ask)
@@ -276,6 +283,8 @@ def test_a_committed_source_whose_owner_still_lists_it_is_not_a_success(
     assert result["code"] == "duplicate", result
     assert result["changed"] is True, result
     assert result["phase_reached"] == "committed", result
+    # THE POST-PROMOTE WORDING IS PRESERVED for the live path (R2-2's default).
+    assert "The copy here is committed" in result["message"], result
     # The contradiction is a fact about the OWNER's record: the promote really did
     # land here, which is why ``changed`` is True and a retry is not the remedy.
     assert _transcript(server_b.root, SESSION) == before
@@ -521,6 +530,163 @@ def test_a_lost_ready_reply_keeps_the_verified_copy_and_reports_unconfirmed(
     assert not staging.exists()
 
 
+def test_a_source_whose_tombstone_write_fails_still_commits_and_keeps_one_holder(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2-1(a): the rename is the commit point; bookkeeping cannot undo it.
+
+    Before this cell, a ``write_tombstone`` raise AFTER the quarantine rename escaped
+    ``_source_commit`` to the relay's ``op: error`` frame; ``LinkTransport.ask`` reads
+    that as ``Moved("refused")``, and the destination answers a refusal by clearing
+    its entry and sweeping the verified staging — zero copies, reported as
+    ``changed: false``. A full disk is the realistic spelling of the raise. The answer
+    must be ``committed``: the destination keeps the only copy, the source's journal
+    stays ``handing-off`` (the phase forbids a rollback), and a later reconcile on the
+    source writes the tombstone and clears the entry.
+    """
+    from local_operator.network import projection
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+
+    real_write = projection.write_tombstone
+    calls = {"n": 0}
+
+    def failing_write(session_id: str, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(28, "No space left on device")
+        real_write(session_id, **kwargs)
+
+    monkeypatch.setattr(projection, "write_tombstone", failing_write)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    # ONLY THE SOURCE'S WRITE WAS TRIED, and it raised: the destination's promote
+    # never needs a tombstone of its own.
+    assert calls["n"] == 1, calls
+    # THE MOVE IS REPORTED FOR WHAT IT IS: a real, verified commit.
+    assert result["ok"] is True, result
+    assert result["state"] == "completed", result
+    assert not source.exists()
+    assert _holders(server_a.root, server_b.root, SESSION) == [server_b.root / "sessions" / SESSION]
+    assert _transcript(server_b.root, SESSION) == before
+    # THE SOURCE'S ID IS NOT DURABLY THE DESTINATION'S YET, and it says so: the
+    # journal stays at ``handing-off``, which is the phase reconcile completes.
+    assert SESSION not in read_tombstones(server_a.root)
+    entry = read_handoff_journal(server_a.root)[SESSION]
+    assert entry["phase"] == "handing-off", entry
+
+    # THE RECOVERY THE JOURNAL PROMISES: a restarted relay finishes the bookkeeping.
+    report = mobility.reconcile(server_a.root, server=server_a, own_instance="restarted-a")
+    assert [row["action"] for row in report] == ["completed"], report
+    assert read_tombstones(server_a.root)[SESSION]["device_id"] == server_b.identity.device_id
+    assert read_handoff_journal(server_a.root) == {}
+    # ... and the id is still held exactly once.
+    assert _holders(server_a.root, server_b.root, SESSION) == [server_b.root / "sessions" / SESSION]
+
+
+def test_an_error_frame_after_the_commit_keeps_the_verified_copy_too(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2-1(b): an ``op: error`` answer is not proof of a refusal.
+
+    ``Moved("refused")`` is ``LinkTransport``'s word for a peer that raised inside its
+    handler — here the real commit ran and only the answer turned into an error frame.
+    Every GENUINE refusal travels inside the ack with its own code (``busy``,
+    ``digest_mismatch``, ``cleanup_refused``, ...), so this shape joins ``unreachable``
+    in "this device cannot tell": the staging and the entry stay, the receipt is
+    ``unconfirmed``/``changed: true``, and the reconcile adopts the copy.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    staging = sync.staging_dir(server_b.root, SESSION)
+
+    state = _losing_ready_ask(
+        monkeypatch,
+        code="refused",
+        message="net_session_move failed on this device: [Errno 28] No space left on device",
+    )
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert state["lost"] is True, "the ready frame never reached the owner"
+    assert result["ok"] is False, result
+    assert result["code"] == "unconfirmed", result
+    assert result["changed"] is True, result
+    assert result["phase_reached"] == "handing_off", result
+    # THE SENTENCE NAMES THE FAILURE THAT ACTUALLY HAPPENED, not the silence shape.
+    assert str(staging) in result["message"], result
+    assert "No space left on device" in result["message"], result
+    assert "did not answer" not in result["message"], result
+
+    # THE SOURCE REALLY COMMITTED BEFORE THE ERROR FRAME (the ask was delegated first).
+    assert not source.exists()
+    assert read_tombstones(server_a.root)[SESSION]["device_id"] == server_b.identity.device_id
+    # ... and with nothing live holding the transcript, the staging is the only copy.
+    assert _holders(server_a.root, server_b.root, SESSION) == []
+    assert (staging / "ready.json").is_file()
+    entry = read_handoff_journal(server_b.root)[SESSION]
+    assert entry["role"] == "destination", entry
+    assert entry["phase"] == "handing-off", entry
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+    # THE RECOVERY: one holder, the same bytes.
+    report = mobility.reconcile(server_b.root, server=server_b, own_instance="restarted-b")
+    assert [row["action"] for row in report] == ["promoted"], report
+    assert _holders(server_a.root, server_b.root, SESSION) == [server_b.root / "sessions" / SESSION]
+    assert _transcript(server_b.root, SESSION) == before
+    assert read_handoff_journal(server_b.root) == {}
+
+
+def test_a_recovery_whose_tombstone_cannot_be_written_reports_cleanup_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2-1(a): the crash-recovery half must not raise either.
+
+    ``_complete_handoff`` runs behind :func:`reconcile` with no request of its own, so
+    a raise here does not become an error frame — it aborts the recovery table, where
+    the later entries are other moves a person is waiting on. The phase ``handing-off``
+    forbids a rollback, so a tombstone that cannot be written leaves the journal alone
+    and reports ``cleanup_pending``: the next attempt writes it. The test then does
+    exactly that and finishes the handoff.
+    """
+    from local_operator.network import projection
+    from local_operator.session.placement import write_handoff_entry
+
+    entry = {
+        "role": "source",
+        "phase": "handing-off",
+        "to_device": "device-b",
+        "to_name": "pixel-8",
+        "network_id": "net-1",
+        "lease_epoch": "1",
+        "instance_id": "dead-relay",
+    }
+    write_handoff_entry(tmp_path, SESSION, entry)
+
+    def refusing_write(session_id: str, **kwargs: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(projection, "write_tombstone", refusing_write)
+
+    answer = mobility._complete_handoff(tmp_path, SESSION, entry)
+
+    assert answer["action"] == "cleanup_pending", answer
+    assert SESSION not in read_tombstones(tmp_path)
+    assert read_handoff_journal(tmp_path)[SESSION]["phase"] == "handing-off"
+
+    # THE NEXT ATTEMPT FINISHES IT, which is what ``cleanup_pending`` promises.
+    monkeypatch.undo()
+    finished = mobility._complete_handoff(tmp_path, SESSION, entry)
+    assert finished["action"] == "completed", finished
+    assert read_tombstones(tmp_path)[SESSION]["device_id"] == "device-b"
+    assert read_handoff_journal(tmp_path) == {}
+
+
 def test_the_tombstone_path_checks_the_contradiction_before_promoting(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -567,6 +733,12 @@ def test_the_tombstone_path_checks_the_contradiction_before_promoting(
     assert refusal["code"] == "duplicate", refusal
     assert refusal["phase_reached"] == "handing_off", refusal
     assert refusal["changed"] is True, refusal
+    # THE SENTENCE MATCHES WHAT HAPPENED (review round 2, R2-2): nothing was promoted
+    # here, so it must not claim a committed copy or two live copies.
+    assert "did not promote" in refusal["message"], refusal
+    assert "still staged here" in refusal["message"], refusal
+    assert "The copy here is committed" not in refusal["message"], refusal
+    assert "both devices now list" not in refusal["message"], refusal
     # NOTHING WAS PROMOTED, and both artefacts of the unfinished handoff survive.
     assert not (server_b.root / "sessions" / SESSION).exists()
     assert (staging / "ready.json").is_file()
