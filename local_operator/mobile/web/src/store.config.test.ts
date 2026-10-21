@@ -48,10 +48,13 @@ describe("retainConfigStream", () => {
 		// derive the initial revision count; never suppress same-locale updates.
 		// The rebase unioned both branches' slices: relay.session (main, C2) and
 		// relay.account_policy (LOH-12) join relay.shell in OWNED_SPA_NAMESPACES;
-		// relay.library is the phone Library's own en-only copy (plural count).
+		// relay.library is the phone Library's own en-only copy (plural count);
+		// relay.asks is the asks/cards slice's owned copy (ask card, sheet, dock,
+		// pending card, approval gate and disclosure).
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
+			"relay.asks",
 			"relay.library",
 			"relay.session",
 			"relay.shell",

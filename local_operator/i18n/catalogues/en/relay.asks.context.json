@@ -1,0 +1,387 @@
+{
+  "relay.asks.status.queued": {
+    "role": "queued ask state line with its countdown",
+    "tone": "Preserve casing and the em dash. The duration is a preformatted short token such as <1 m, 42 m, 3 h or 2 d; it is not a placeholder to re-format.",
+    "note": "Owned relay SPA asks copy. One line under the ask card's question; rendered from the client clock against expires_at."
+  },
+  "relay.asks.status.queued_deadline_passed": {
+    "role": "queued ask state line at or past its deadline",
+    "tone": "Preserve casing and the em dash. Lowercase start is deliberate: it follows the status word.",
+    "note": "Owned relay SPA asks copy. Used when the phone clock is past expires_at while the runtime still reports open; it must not claim a countdown."
+  },
+  "relay.asks.status.answered": {
+    "role": "settled ask receipt",
+    "tone": "Preserve casing.",
+    "note": "Owned relay SPA asks copy. The answer has been written into the transcript and the agent has been told."
+  },
+  "relay.asks.status.delivering": {
+    "role": "settled ask receipt while the response is in flight",
+    "tone": "Preserve casing.",
+    "note": "Owned relay SPA asks copy. The daemon has not yet confirmed the response rows are delivered; do not strengthen this to 'told'."
+  },
+  "relay.asks.status.late": {
+    "role": "settled ask receipt for a late answer",
+    "tone": "Preserve casing.",
+    "note": "Owned relay SPA asks copy. The answer arrived after the deadline but was accepted."
+  },
+  "relay.asks.status.declined": {
+    "role": "settled ask receipt for a refusal",
+    "tone": "Preserve casing.",
+    "note": "Owned relay SPA asks copy. The agent was told the user declined."
+  },
+  "relay.asks.status.dismissed": {
+    "role": "settled ask receipt for a dismissal",
+    "tone": "Preserve casing and the em dash.",
+    "note": "Owned relay SPA asks copy. Dismissal sends no reply; this sentence must not imply the agent was told anything."
+  },
+  "relay.asks.status.withdrawn": {
+    "role": "settled ask receipt when the agent withdrew the question",
+    "tone": "Preserve casing and the em dash.",
+    "note": "Owned relay SPA asks copy. The asker, not the user, ended the ask."
+  },
+  "relay.asks.status.expired": {
+    "role": "settled ask receipt for an expired ask",
+    "tone": "Preserve casing.",
+    "note": "Owned relay SPA asks copy. Too old to answer; the remedy is to ask the agent again."
+  },
+  "relay.asks.status.timed_out": {
+    "role": "state line for an ask that timed out",
+    "tone": "Preserve casing and the em dash; 'Timed out' is the shared state word on every surface.",
+    "note": "Owned relay SPA asks copy. Byte-identical to the desktop ASK_STATUS_COPY.timed_out sentence and the collapsed badge's word."
+  },
+  "relay.asks.status.lapsed_body": {
+    "role": "explanation shown after a timeout",
+    "tone": "Preserve casing, lowercase start.",
+    "note": "Owned relay SPA asks copy. Names what the agent does after a timeout without claiming a default it may not have used."
+  },
+  "relay.asks.card.gone": {
+    "role": "terminal sentence when the ask's conversation no longer exists",
+    "tone": "Preserve casing, lowercase start, em dash; keep 'ask' as the verb/noun the product uses.",
+    "note": "Owned relay SPA asks copy. Mirrors daemon._ASK_GONE_RESPONSE so the card can state the permanent verdict before a guaranteed refusal."
+  },
+  "relay.asks.card.secret_notice": {
+    "role": "reassurance above a secret answer field",
+    "tone": "Preserve casing, lowercase start, em dash.",
+    "note": "Owned relay SPA asks copy. The answer is sent directly and never written to the transcript."
+  },
+  "relay.asks.card.secret_notice_persisted": {
+    "role": "reassurance above a secret answer field that is also saved",
+    "tone": "Preserve casing, lowercase start, em dash.",
+    "note": "Owned relay SPA asks copy. Same fact as the sibling key plus the credential-store write; used only when the question sets persist."
+  },
+  "relay.asks.card.placeholder_secret": {
+    "role": "secret answer input placeholder",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The field is masked; a credential is pasted here."
+  },
+  "relay.asks.card.placeholder_answer": {
+    "role": "free-text answer input placeholder",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Used for ordinary questions with no options."
+  },
+  "relay.asks.card.recommended": {
+    "role": "badge suffix on a recommended option",
+    "tone": "Preserve the leading middle dot and the lowercase word.",
+    "note": "Owned relay SPA asks copy. Marks the option the model recommends; the dot separates it from the option label."
+  },
+  "relay.asks.card.choose_any": {
+    "role": "multi-select hint",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. States that more than one option may be selected."
+  },
+  "relay.asks.card.urgent": {
+    "role": "urgent marker beside the state line",
+    "tone": "Preserve the leading middle dot and the lowercase word.",
+    "note": "Owned relay SPA asks copy. Advisory only; it does not change the answer controls."
+  },
+  "relay.asks.card.dismiss": {
+    "role": "dismissal action label",
+    "tone": "Preserve casing, lowercase, em dash.",
+    "note": "Owned relay SPA asks copy. The label is also the control's width; keep it short. Dismissal sends no reply."
+  },
+  "relay.asks.card.skip": {
+    "role": "skip-one-question action label",
+    "tone": "Preserve casing, lowercase, em dash.",
+    "note": "Owned relay SPA asks copy. Submits an empty list for one question without answering it."
+  },
+  "relay.asks.card.unskip": {
+    "role": "undo-skip action label",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Reverses the sibling skip control."
+  },
+  "relay.asks.card.nothing_left": {
+    "role": "empty answerable-fields notice",
+    "tone": "Preserve casing, lowercase, em dash.",
+    "note": "Owned relay SPA asks copy. Explains that another surface has taken every question; it replaces a permanently disabled send."
+  },
+  "relay.asks.card.cold_wait": {
+    "role": "in-flight notice while a stopped session is brought up",
+    "tone": "Preserve casing, lowercase, em dash and the ~30 s bound.",
+    "note": "Owned relay SPA asks copy. Shown only while answering a cold conversation, where the operation really does cost about 30 seconds."
+  },
+  "relay.asks.card.send_answers": {
+    "role": "submit action label for a multi-question ask",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. One submit answers every question in the form."
+  },
+  "relay.asks.card.send_answer": {
+    "role": "submit action label for a single-question ask",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Singular sibling of send_answers."
+  },
+  "relay.asks.card.decline": {
+    "role": "decline action label",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Declining answers the agent that the user refused."
+  },
+  "relay.asks.card.timed_out_badge": {
+    "role": "collapsed lapsed-ask badge",
+    "tone": "Preserve casing; sentence-case state word.",
+    "note": "Owned relay SPA asks copy. The disclosure header's state word; the body states what the timeout means."
+  },
+  "relay.asks.sheet.title_waiting": {
+    "role": "asks sheet title with a live count",
+    "tone": "Preserve the leading 'asks ·' and lowercase. The count is an ICU plural over questions.",
+    "note": "Owned relay SPA asks copy. Counts questions, not asks, matching the dock and the session header."
+  },
+  "relay.asks.sheet.title_lapsed": {
+    "role": "asks sheet title when only lapsed questions remain",
+    "tone": "Preserve the leading 'asks ·' and lowercase.",
+    "note": "Owned relay SPA asks copy. Lapsed questions are read-only; the title says what the sheet holds."
+  },
+  "relay.asks.sheet.title_plain": {
+    "role": "asks sheet title with nothing waiting or lapsed",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The bare sheet name."
+  },
+  "relay.asks.sheet.loading": {
+    "role": "asks sheet loading line",
+    "tone": "Preserve casing, lowercase. The ellipsis is U+2026.",
+    "note": "Owned relay SPA asks copy. Prevents the empty state from appearing while the first read is in flight."
+  },
+  "relay.asks.sheet.empty": {
+    "role": "asks sheet empty state",
+    "tone": "Preserve casing, lowercase, em dash.",
+    "note": "Owned relay SPA asks copy. Shown only after a successful read returns no rows."
+  },
+  "relay.asks.sheet.retry": {
+    "role": "retry action after a failed read",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. A failed read must not leave closing as the only move."
+  },
+  "relay.asks.sheet.ended_wait": {
+    "role": "warning before answering in an ended conversation",
+    "tone": "Preserve casing, lowercase, em dash, and the ~30 s bound.",
+    "note": "Owned relay SPA asks copy. Answering reopens the conversation; the wait is stated before the tap."
+  },
+  "relay.asks.sheet.not_running_wait": {
+    "role": "warning before answering in a stopped conversation",
+    "tone": "Preserve casing, lowercase, em dash, and the ~30 s bound.",
+    "note": "Owned relay SPA asks copy. Answering brings the runtime up; used when the conversation exists but is not live."
+  },
+  "relay.asks.dock.waiting": {
+    "role": "minimized ask chip with a live count",
+    "tone": "Preserve casing, lowercase. Count is an ICU plural over questions.",
+    "note": "Owned relay SPA asks copy. The chip counts questions the reader can act on, never asks."
+  },
+  "relay.asks.dock.timed_out": {
+    "role": "minimized ask chip when only lapsed questions remain",
+    "tone": "Preserve casing, lowercase. Count is an ICU plural over questions.",
+    "note": "Owned relay SPA asks copy. Quiet register: the sheet behind the chip is where Dismiss lives."
+  },
+  "relay.asks.row.told": {
+    "role": "label over the detail sent to the agent",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Expands under a settled ask row."
+  },
+  "relay.asks.pending.kind_approval": {
+    "role": "pending card kind label for an approval",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The pinned meta row above the approval card's question."
+  },
+  "relay.asks.pending.kind_secret": {
+    "role": "pending card kind label for a secret request",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The card masks the value and suppresses keyboard learning."
+  },
+  "relay.asks.pending.kind_question": {
+    "role": "pending card kind label for an ordinary question",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The default kind in the pinned meta row."
+  },
+  "relay.asks.pending.options": {
+    "role": "option-count suffix in the pending meta row",
+    "tone": "Preserve the leading middle dot and lowercase. Count is an ICU plural over options.",
+    "note": "Owned relay SPA asks copy. States the total when the card caps its visible options."
+  },
+  "relay.asks.pending.question_of": {
+    "role": "multi-question counter",
+    "tone": "Preserve casing; the words Question/ of are part of the sentence.",
+    "note": "Owned relay SPA asks copy. Index is 1-based and both numbers are integers."
+  },
+  "relay.asks.pending.one_of": {
+    "role": "legacy single-question counter",
+    "tone": "Preserve casing, lowercase 'of'.",
+    "note": "Owned relay SPA asks copy. Used by the older mirrored card shape; count is the total."
+  },
+  "relay.asks.pending.remember": {
+    "role": "remember-this-choice checkbox label",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Persists the approval choice for the session."
+  },
+  "relay.asks.pending.approve": {
+    "role": "approval action label",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The primary action on an approval card."
+  },
+  "relay.asks.pending.deny": {
+    "role": "denial action label",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Paired with approve."
+  },
+  "relay.asks.pending.send": {
+    "role": "free-text answer submit label",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Submits a typed answer or secret."
+  },
+  "relay.asks.error.reach_failed": {
+    "role": "network failure fallback",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Used when fetch rejects without a daemon sentence."
+  },
+  "relay.asks.error.no_reason": {
+    "role": "refusal fallback with no daemon sentence",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. A bare HTTP status is not a reason; this names that honestly."
+  },
+  "relay.asks.error.read_timeout": {
+    "role": "asks sheet read timeout",
+    "tone": "Preserve casing, lowercase, em dash.",
+    "note": "Owned relay SPA asks copy. The bounded aggregate read did not answer."
+  },
+  "relay.asks.error.session_timeout": {
+    "role": "answer/approval timeout",
+    "tone": "Preserve casing, sentence case. Note the typographic apostrophe in didn’t.",
+    "note": "Owned relay SPA asks copy. The session did not answer within the transport bound."
+  },
+  "relay.asks.error.session_gone_reopen": {
+    "role": "pending answer failure: session gone",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. Pending card wording; the asks sheet has its own sibling sentence."
+  },
+  "relay.asks.error.session_gone_list": {
+    "role": "gate sheet failure: session gone",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. Gate sheet wording; it names the session list as the remedy."
+  },
+  "relay.asks.error.moved_on": {
+    "role": "stale tap: the question advanced",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. The card is about to repaint to the current question."
+  },
+  "relay.asks.error.already_answered_terminal": {
+    "role": "stale tap: answered on the terminal",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. Distinguishes a terminal answer from the waiting sibling."
+  },
+  "relay.asks.error.already_answered_waiting": {
+    "role": "stale tap: no longer waiting",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. Used when the daemon reports the question settled or withdrawn."
+  },
+  "relay.asks.gate.title": {
+    "role": "approval-gate sheet title",
+    "tone": "Preserve casing, sentence case.",
+    "note": "Owned relay SPA asks copy. The sheet controls this session's approval mode."
+  },
+  "relay.asks.gate.body": {
+    "role": "approval-gate explanation",
+    "tone": "Preserve casing and sentence case. 'Ask' and 'Auto' name the two modes and stay capitalised.",
+    "note": "Owned relay SPA asks copy. Two sentences: what ask does, what auto does for the rest of the session."
+  },
+  "relay.asks.gate.keep_asking": {
+    "role": "approval-gate action: ask mode",
+    "tone": "Preserve casing, lowercase; keep the parenthesised mode token (ask).",
+    "note": "Owned relay SPA asks copy. Works on an unpaired phone."
+  },
+  "relay.asks.gate.run_without": {
+    "role": "approval-gate action: auto mode",
+    "tone": "Preserve casing, lowercase; keep the parenthesised mode token (auto).",
+    "note": "Owned relay SPA asks copy. Requires operator authority and pairing."
+  },
+  "relay.asks.gate.notice_ask": {
+    "role": "in-sheet receipt after switching to ask mode",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. The sheet stays open for this path."
+  },
+  "relay.asks.gate.notice_auto": {
+    "role": "session receipt after switching to auto mode",
+    "tone": "Preserve casing, lowercase, em dash.",
+    "note": "Owned relay SPA asks copy. Rendered on the session header after the sheet closes."
+  },
+  "relay.asks.gate.not_paired_error": {
+    "role": "refusal when loosening without a pairing",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. The remedy is one tap away via the pairing prompt."
+  },
+  "relay.asks.gate.unpaired_before": {
+    "role": "unpaired warning fragment 1 of 5",
+    "tone": "Preserve casing, sentence case. This is a sentence fragment completed by the bold labels and the rest of the sibling fragments.",
+    "note": "Owned relay SPA asks copy. The five fragments render as one sentence with two bold mode names; keep the spaces correct at the joins."
+  },
+  "relay.asks.gate.unpaired_run_label": {
+    "role": "unpaired warning bold fragment: auto action name",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Bold inline label inside the five-fragment sentence; it names the action that needs pairing."
+  },
+  "relay.asks.gate.unpaired_middle": {
+    "role": "unpaired warning fragment 3 of 5",
+    "tone": "Preserve casing, sentence case.",
+    "note": "Owned relay SPA asks copy. Sits between the two bold labels; keep the leading space correct at the join."
+  },
+  "relay.asks.gate.unpaired_ask_label": {
+    "role": "unpaired warning bold fragment: ask mode name",
+    "tone": "Preserve casing, lowercase.",
+    "note": "Owned relay SPA asks copy. Bold inline label; it names the mode that never needs a pairing."
+  },
+  "relay.asks.gate.unpaired_after": {
+    "role": "unpaired warning fragment 5 of 5",
+    "tone": "Preserve casing, lowercase, full stop.",
+    "note": "Owned relay SPA asks copy. Closes the five-fragment sentence."
+  },
+  "relay.asks.gate.operator_refused": {
+    "role": "operator authority refusal with the runtime's sentence",
+    "tone": "Preserve casing and the backticked command. {message} is the runtime's own sentence and is not reworded.",
+    "note": "Owned relay SPA asks copy. The only local addition is the trailing step the machine's refusal cannot know: this surface is the paired phone."
+  },
+  "relay.asks.disclosure.held_shut": {
+    "role": "disabled disclosure tooltip",
+    "tone": "Preserve casing, sentence case, em dash.",
+    "note": "Owned relay SPA asks copy. A phone has no hover, so the same rule is also stated in the header row."
+  },
+  "relay.asks.disclosure.answer_first": {
+    "role": "disabled disclosure inline hint",
+    "tone": "Preserve the leading middle dot and lowercase.",
+    "note": "Owned relay SPA asks copy. Sits beside the chevron; it must stay short enough not to wrap a measured single-line header."
+  },
+  "relay.asks.duration.less_than_minute": {
+    "role": "compact countdown below one minute",
+    "tone": "Preserve the less-than sign and the space; the unit abbreviation may be localized.",
+    "note": "Owned relay SPA asks copy. A deadline inside the next minute is stated as a bound, never rounded up to '1 m'."
+  },
+  "relay.asks.duration.minutes": {
+    "role": "compact countdown unit: minutes",
+    "tone": "Keep it short: this sits in a one-line state sentence on a 360px phone. Localize the unit abbreviation; the number is ICU-formatted.",
+    "note": "Owned relay SPA asks copy. The renderer passes a whole number of minutes; width is measured in the PR."
+  },
+  "relay.asks.duration.hours": {
+    "role": "compact countdown unit: hours",
+    "tone": "Keep it short; localize the unit abbreviation.",
+    "note": "Owned relay SPA asks copy. Used only for deadlines at least 90 minutes away."
+  },
+  "relay.asks.duration.days": {
+    "role": "compact countdown unit: days",
+    "tone": "Keep it short; localize the unit abbreviation.",
+    "note": "Owned relay SPA asks copy. Used only for deadlines at least 48 hours away."
+  }
+}

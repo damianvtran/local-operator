@@ -72,13 +72,17 @@ SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
 #: session view and history/start surfaces, painted by the SPA like the shell.
 #: ``relay.account_policy`` is the LOH-12 account-routing slice: the settings
 #: screen the SPA paints, with its wire.* counterpart served per §2.1 rather
-#: than bundled. Both were added independently on either side of the rebase;
-#: the tuple is one reviewed line per slice and carries all three.
+#: than bundled. ``relay.asks`` is the asks/cards slice (the relay's last
+#: planned namespace, RFC §5): the ask card, asks sheet, dock, settled row,
+#: pending decision card, approval-gate sheet and the disclosure that holds
+#: panels shut while a question waits. The tuple is one reviewed line per
+#: slice, never a glob.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
     "relay.account_policy",
     "relay.library",
+    "relay.asks",
 )
 
 GENERATED_HEADER = (

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { ENFORCED, scanSource, fingerprints, NONTRANSLATABLE } from "./check-i18n.mjs";
+import { ENFORCED, GENERATED_SOURCES, scanSource, fingerprints, NONTRANSLATABLE } from "./check-i18n.mjs";
 const script = fileURLToPath(new URL("./check-i18n.mjs", import.meta.url));
 const root = dirname(dirname(script));
 function fixture(source, baselineSource = source, scope = "src/store.ts") {
@@ -113,6 +113,39 @@ test("the activated relay.session history/start surfaces are exactly the reviewe
 	for (const scope of sessionScope) {
 		assert(Object.keys(baseline.legacy[scope] ?? {}).length > 0, `${scope} needs frozen residual fingerprints`);
 	}
+});
+test("the activated asks/cards surfaces are exactly the reviewed scope", () => {
+	const asksScope = [
+		"src/components/ask-card.tsx",
+		"src/components/ask-dock.tsx",
+		"src/components/ask-row.tsx",
+		"src/components/asks-sheet.tsx",
+		"src/components/gate-sheet.tsx",
+		"src/components/pending-card.tsx",
+		"src/components/ui/disclosure.tsx",
+		"src/lib/asks.ts",
+	];
+	for (const scope of asksScope) assert(ENFORCED.includes(scope), `${scope} must be activated`);
+	assert(!ENFORCED.includes("src/screens/pair.tsx"), "pair is a later namespace");
+	assert(!ENFORCED.includes("src/screens/agent-view.tsx"), "agent-view is a later namespace");
+	const baseline = JSON.parse(readFileSync(join(root, "i18n-baseline.json"), "utf8"));
+	// This slice extracts the files completely, so any allowance row left behind
+	// would be exactly the file exemption the gate forbids.
+	for (const scope of asksScope) assert.deepEqual(baseline.legacy[scope], {}, `${scope} must carry no residual allowance`);
+});
+test("the generated owned-copy bundle is not counted as app debt", () => {
+	const rig = fixture("");
+	try {
+		mkdirSync(join(rig.directory, "src/i18n"), { recursive: true });
+		writeFileSync(
+			join(rig.directory, "src/i18n/bundled.gen.ts"),
+			'export const BUNDLED_OWNED = { "relay.demo": { "relay.demo.title": "Generated bundle copy", "relay.demo.label": "Another generated label" } };',
+		);
+		const result = rig.run();
+		assert.equal(result.status, 0);
+		assert.match(result.stdout, /; 0 advisory legacy sink literal\(s\)/);
+		assert(GENERATED_SOURCES.has("src/i18n/bundled.gen.ts"));
+	} finally { rmSync(rig.directory, { recursive: true, force: true }); }
 });
 test("build/check/test scripts all execute the mandatory gate", () => {
 	const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
