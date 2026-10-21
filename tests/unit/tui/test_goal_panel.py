@@ -553,10 +553,16 @@ async def test_the_card_never_covers_the_docked_composer(size: tuple[int, int]) 
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=size) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
-        panel = app.query_one(GoalPanel)
+        # THE CARD HAS TO EXIST BEFORE ITS GEOMETRY MEANS ANYTHING. The failure
+        # this test reported under CI load ("the card never settled its squeeze
+        # decision": fit=(5, 0, 0), squeezed=False, region=0x0, display=False)
+        # was NOT a repaint losing a race with the assertion: the app had not
+        # adopted the session yet, so `/goal` hit its own `session is None`
+        # guard and returned before ever opening the card (`_open_goal_panel`
+        # never ran — a probe counted zero refresh calls on that path). The card
+        # was never shown, so the settle loop below spent its whole budget
+        # waiting for a class on a card that did not exist.
+        panel = await _open_card(pilot, app, session)
         shell = app.query_one("#input-shell")
         # WAIT FOR THE DECISION, NOT A FRAME. `_fit` reads the DOCK's laid-out
         # height, so the first repaint (at mount) can see a ground the final dock
@@ -606,10 +612,13 @@ async def test_a_resize_while_open_repaints_the_card_for_the_new_ground() -> Non
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
-        panel = app.query_one(GoalPanel)
+        # The same adoption precondition as the sibling above: a card opened
+        # before the app adopted the session is never shown, so the gutter
+        # assertion would describe a card that does not exist. (This test's own
+        # recorded failure on `main` was a DIFFERENT signature - "card bottom 22
+        # covers the composer at 6" after the resize - which this precondition
+        # does not explain and does not claim to fix.)
+        panel = await _open_card(pilot, app, session)
         assert panel.has_class("-squeezed") is False, "the wide card should afford its gutter"
 
         await pilot.resize_terminal(80, 12)
@@ -645,6 +654,31 @@ async def _adopted(pilot, app: OperatorApp, session: object) -> None:  # noqa: A
         if app._session is session:
             return
     raise AssertionError("the app never adopted the session")
+
+
+async def _open_card(pilot, app: OperatorApp, session: object) -> GoalPanel:  # noqa: ANN001
+    """Open the goal card and return it ONCE IT IS ON SCREEN.
+
+    THE PRECONDITION, not a longer wait. ``_cmd_goal`` returns at its own
+    ``session is None`` guard, so a ``/goal`` issued before adoption never
+    reaches ``_open_goal_panel`` and the card is never shown at all — measured
+    under CI load as ``display=False, region=0x0`` after a 200-iteration settle
+    loop had already spent its budget waiting for a class on a card that did not
+    exist. Adoption and the first paint are two separate events, so this waits
+    for both and returns the panel the caller is about to measure.
+    """
+    await _adopted(pilot, app, session)
+    app._cmd_goal("", lambda body, kind="info": None)
+    panel = app.query_one(GoalPanel)
+    for _ in range(200):
+        if panel.is_open and panel.region.height:
+            return panel
+        await pilot.pause()
+    raise AssertionError(
+        "the card was never displayed: "
+        f"open={panel.is_open}, region={panel.region!r}, "
+        f"adopted={app._session is session}, app={app.size!r}"
+    )
 
 
 @pytest.mark.asyncio
