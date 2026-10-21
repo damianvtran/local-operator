@@ -11,6 +11,7 @@
  */
 import { useState, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
+import { messageRuntime } from "../../store";
 
 /**
  * The dim that says "held shut, not broken" — applied per PART, never to the
@@ -90,7 +91,7 @@ export function Disclosure({
 				   a long-press on a disabled control surfaces nothing. */
 				title={
 					forceClosed
-						? "Held shut while a question is waiting — answer it to reopen this panel."
+						? messageRuntime.t("relay.asks.disclosure.held_shut")
 						: undefined
 				}
 				onClick={() => setOpen(!shown)}
@@ -119,7 +120,7 @@ export function Disclosure({
 					   and the label come first (D4: a failed fan-out is the least
 					   expendable token in this row). */
 					<span className={cn("shrink-0 text-meta text-ink-dim", hintClassName)}>
-						· answer first
+						{messageRuntime.t("relay.asks.disclosure.answer_first")}
 					</span>
 				) : null}
 			</button>

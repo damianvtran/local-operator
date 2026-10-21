@@ -77,12 +77,18 @@ SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
 #: ``relay.session.tags`` is the tag slice (LOH-11 C1): the tag line, the
 #: assignment sheet and the list's long-press copy, split out of ``relay.session``
 #: because the catalogues are one small owned namespace per surface.
+#: than bundled. ``relay.asks`` is the asks/cards slice (the relay's last
+#: planned namespace, RFC §5): the ask card, asks sheet, dock, settled row,
+#: pending decision card, approval-gate sheet and the disclosure that holds
+#: panels shut while a question waits. The tuple is one reviewed line per
+#: slice, never a glob.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
     "relay.session.tags",
     "relay.account_policy",
     "relay.library",
+    "relay.asks",
 )
 
 GENERATED_HEADER = (
