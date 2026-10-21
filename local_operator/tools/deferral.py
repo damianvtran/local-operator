@@ -114,6 +114,13 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # adoption removes it from this set (one line — ``network`` and
         # ``ask_withdraw`` were re-admitted on exactly this signal).
         "no_reply",
+        # ``artifact_data`` is deferred on the start-context budget's arithmetic,
+        # the ``library`` precedent: unpublished it measured +785 billed tokens
+        # over the ceiling on both arms, and it is a niche tool (only sessions
+        # that hold a claude.ai artifact link ever call it). Skills that use it
+        # name it, and the purpose phrase below keeps it findable; the first
+        # call or ``tool://`` read publishes its schema.
+        "artifact_data",
     }
 )
 
@@ -136,6 +143,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "code_requests": "PR/MR status, review rounds, CI",
     "library": "long-term asset catalog",
     "no_reply": "end a turn silently",
+    "artifact_data": "claude.ai artifact shared data store",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every

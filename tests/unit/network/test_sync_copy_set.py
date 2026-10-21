@@ -622,6 +622,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "untagged pseudo-category — a label in the registry's vocabulary, never "
         "a path or an entry of a session directory",
     ),
+    # The ``artifact_data`` tool's own name (``TOOL_NAME``): a candidate only
+    # through the NAME-suffix heuristic. The tool keeps no state on disk — its
+    # data lives in the remote claude.ai store — so a move carries nothing.
+    "local_operator/tools/artifact_data_tool.py": (
+        1,
+        "``TOOL_NAME`` ('artifact_data'): the tool's registered name, never a path "
+        "or an entry of a session directory",
+    ),
     "local_operator/asks/store.py": (
         5,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
