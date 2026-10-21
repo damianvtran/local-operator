@@ -3304,16 +3304,28 @@ def _publication_blocker(
         return "skill-validation"
     owner = prov.alias_owner(ctx.config_dir, "skill", alias)
     if owner is not None:
+        # A LINK owns this name. That really is an origin conflict, and the
+        # renderer's lineage sentence is the right one for it.
         return "origin-conflict"
     if destination.exists():
         try:
             same = destination.resolve() == Path(skill.base_dir).resolve()
         except OSError:
             same = False
+        if not same:
+            # SOMEONE ELSE'S copy (a personal skill, or a plain file) holds the
+            # alias. That is a NAME COLLISION, not an origin conflict: it earns
+            # its own reason so the renderer can say a local skill already uses
+            # this name instead of the merge-lineage sentence it maps
+            # ``origin-conflict`` to. The preview is the only surface that
+            # reports this before the user commits, so the code must be honest
+            # here rather than at the deeper confirm-time refusal.
+            return "alias-occupied"
         # An authored folder may be adopted only when it IS the published name:
         # adoption never rewrites bytes, so a differing alias would leave the
-        # managed folder named differently from its link.
-        if not same or alias != source_document.name:
+        # managed folder named differently from its link. Kept as an origin
+        # conflict: this is the source's own folder, not a taken name.
+        if alias != source_document.name:
             return "origin-conflict"
     return None
 
