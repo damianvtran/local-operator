@@ -142,6 +142,15 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # session exactly as the marker does — and on a destination where no such
     # run exists the reader refuses it (``signal_receipt.covers_run``).
     "runtime-signal.json",
+    # THE RUNTIME'S OWN EXIT RECORD (``journal.EXIT_RECORD_NAME``): the durable
+    # "when did it stop, why, and did anybody ask" of the last departure. It is
+    # evidence ABOUT a past run like the two rows above it, and it must travel
+    # for the same reason: a moved session whose listing lost it would read as
+    # "no record attests to a stop" — the same shape as a SIGKILL — on the
+    # destination, silently rewriting the session's history. Read on the
+    # destination the run key still names the departed process, so it is never
+    # mistaken for the new owner's own exit.
+    "runtime-exit.json",
     "inbox.jsonl",
     # Scoped portable memory is additional to net_memory's incremental ALL-scope
     # sync. A move must carry it even when memory replication is disabled.
