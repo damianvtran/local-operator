@@ -4719,10 +4719,11 @@ async def _prepare(
         web_search_settings=config_manager.get_config_value("web_search", None),
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
-    tools = create_tools(tool_context)
     # The classification roster's ``tool`` kind is deliberately NOT populated
-    # here: this context carries none of the session-owned ``createIf`` gates,
-    # so a snapshot would miss ``sessions``/``task``/``wait``/``jobs``/``hub``
+    # here: this context carries none of the session-owned ``createIf`` gates
+    # (``bridge_runtime`` is the exception — it is installed above because the
+    # tool table is built from this context), so a snapshot would miss
+    # ``sessions``/``task``/``wait``/``jobs``/``hub``
     # (agent review round 1, PR #1863). ``Session.set_knowledge_hooks``
     # refreshes the roster from the session's FINAL inventory instead.
 
@@ -4743,6 +4744,30 @@ async def _prepare(
         transcript_dir,
         defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
     )
+    # H5d: the bridge runtime must be resolved BEFORE the tool table is built,
+    # because `build_bridge_tool` is createIf — it returns None unless
+    # ``tool_context.bridge_runtime`` is PRESENT — so building the table first
+    # drops the `bridge` tool from every session that has a bridge. Before this
+    # fix the resolution sat ~150 lines below this point: enrollment was
+    # committed, the runtime was attached to the Session, the executor would
+    # have worked, and the model had no tool to call. Nothing outside observed
+    # the gap.
+    #
+    # The resolution needs the transcript (the designation is the session
+    # directory name), which is why it lives here and not beside the
+    # ToolContext it feeds. A session that cannot use the bridge pays no schema:
+    # a gate miss leaves the field None and the createIf behaves as before.
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    # One value, both roles: the table assembled below inspects this context for
+    # PRESENCE, and the Session executes against the same runtime. Two
+    # resolutions here would be two answers waiting to disagree.
+    tool_context.bridge_runtime = bridge_runtime
+    tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
     # placement document plus an identity — deliberately NOT on
@@ -4883,21 +4908,11 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
-    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
-    # account-bound designated session. The decision is the HOST's, taken at
-    # the ONE construction seam, and a gate miss adds NO key at all (the
-    # ordinary kwargs dict cannot drift from what existing callers built).
-    # The helper is import-light and NETWORK-FREE: it reads local
-    # enrollment/settings/availability state and constructs the runtime — no
-    # fetch, no spawn; the client stays cheap until its first request.
-    # Subagent children are built elsewhere and never receive it (see the
-    # parameter's comment on ``Session``).
-    from local_operator.team_bridge.host import bridge_runtime_for_session
-
-    bridge_runtime = bridge_runtime_for_session(
-        config_manager=config_manager,
-        session_id=transcript.directory.name,
-    )
+    # H5 (Team Bridge): the runtime resolved above is the same object the tool
+    # table was built against. It is still attached ONLY to the persisted,
+    # account-bound designated session — and subagent children are built
+    # elsewhere and never receive it (see the parameter's comment on
+    # ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
