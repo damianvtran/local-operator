@@ -1040,8 +1040,11 @@ class VariableStore:
             # credential still produces its notice. The hit's LABEL goes in: it is
             # what distinguishes a value a spelling-evidence rule recognised from one
             # a name-driven rule guessed at, and only the latter may be refused for
-            # being spelled like an identifier.
-            if not is_registerable_component(hit.value, label=hit.label):
+            # being spelled like an identifier. Its assignment CONTEXT goes in too: a match
+            # whose own prefix carries an ``=`` operator is a token being typed and
+            # stays contained, where a ``secret:`` label is a reference to an object
+            # name.
+            if not is_registerable_component(hit.value, label=hit.label, assigned=hit.assigned):
                 continue
             if hit.value in self._shape_registrations:
                 continue
