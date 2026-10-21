@@ -1,0 +1,79 @@
+# Reap superseded runs — the queue half that `cancel-in-progress` cannot reach.
+#
+# `concurrency: cancel-in-progress: true` supersedes a run when the REPLACEMENT
+# run is created. It cannot help a run that is still QUEUED when its branch
+# moves, because nothing new was created to trigger the cancellation -- and
+# under a saturated runner pool a queued run can sit for a long time. Those
+# queued-but-superseded runs are what a release gate queues behind: work whose
+# result nobody will read, holding a place in line.
+#
+# Measured on 2026-10-19, the queue's own history: 40 of 71 active runs (56%)
+# were on commits their branch had already moved past. `cancel-in-progress`
+# then removed the same-ref case; this sweep covers the residual, and it is
+# deliberately narrow.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO. It never cancels a run that has STARTED
+# (`status: queued` only), never touches `main` or `release-next-*` (a gate
+# that can be cancelled is not a gate), and for a pull-request run it requires
+# BOTH the PR head and the branch tip to have moved past the run's commit --
+# if either still points at it, the run may be the one about to be current and
+# is kept. Every rule, and the measurement behind it, is in
+# `scripts/reap_superseded_runs.py`'s docstring; the safety rules each have a
+# test in `tests/unit/test_reap_superseded_runs.py`.
+#
+# Cheap and idempotent by construction: it reads the live queue, re-derives
+# every decision, and its only write is a cancel of a run it decided is
+# superseded. Running it twice changes nothing the second time.
+
+name: Reap superseded runs
+
+on:
+  schedule:
+    # Every 20 minutes. The sweep is one API listing plus one read per queued
+    # run, so it costs far less than the queue depth it prevents -- and the
+    # grace period in the script (5 minutes) means it can never race a head
+    # move that is still in flight.
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report decisions without cancelling anything"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # The only write this workflow needs: cancelling a run.
+  actions: write
+
+# One sweep at a time. Unlike the CI workflows this does not use
+# `cancel-in-progress`: a half-finished sweep has already done its reads and
+# stopping it buys nothing, while a second copy would make the same decisions
+# concurrently.
+concurrency:
+  group: reap-superseded
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Stdlib only, like the change classifier: a sweep that needs an install
+      # is a sweep that can go red for reasons unrelated to the queue.
+      - name: Sweep the queue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          args=(--repo "$GITHUB_REPOSITORY")
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python scripts/reap_superseded_runs.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
