@@ -327,6 +327,83 @@ def plural_selectors(source: str) -> tuple[tuple[str, ...], ...]:
     return tuple(found)
 
 
+@dataclass(frozen=True)
+class PluralBranch:
+    """One branch of one plural argument, for catalogue validation.
+
+    ``empty`` means the branch has no non-whitespace content. ``renders_value``
+    means the branch renders THIS plural's own count: ICU ``#`` bound to this
+    plural, or an interpolation of the same argument as ``number``/``simple``.
+    A ``#`` inside a NESTED plural binds to that nested plural (ICU semantics)
+    and therefore does not count; one inside a nested ``select`` still binds to
+    this plural and does.
+    """
+
+    selector: str
+    empty: bool
+    renders_value: bool
+
+
+@dataclass(frozen=True)
+class PluralArgument:
+    """One plural argument and all of its branches, in source order."""
+
+    argument: str
+    branches: tuple[PluralBranch, ...]
+
+
+def plural_arguments(source: str) -> tuple[PluralArgument, ...]:
+    """Every plural argument in ``source`` with per-branch losslessness data.
+
+    The catalogue checker uses this to hold a ``number -> plural`` upgrade to
+    the conditions that make it LOSSLESS: every CLDR category of the locale is
+    present (a plural without ``one`` cannot render count 1), every branch
+    renders the value (otherwise the number silently disappears), and no
+    branch is empty. Parsing errors propagate as :class:`MessageSyntaxError`.
+    """
+    found: list[PluralArgument] = []
+
+    def renders_value(body: Sequence[_Node], argument: str, nested_plural: bool) -> bool:
+        for node in body:
+            if isinstance(node, _Hash) and not nested_plural:
+                return True
+            if isinstance(node, _Arg):
+                # `{count}` formats a numeric argument per locale too, so it
+                # renders the value just as `{count, number}` does.
+                if node.name == argument and node.kind in ("number", "simple"):
+                    return True
+                for _, child in node.parts:
+                    if renders_value(child, argument, nested_plural or node.kind == "plural"):
+                        return True
+        return False
+
+    def is_empty(body: Sequence[_Node]) -> bool:
+        return all(isinstance(node, _Text) and not node.value.strip() for node in body)
+
+    def walk(nodes: Sequence[_Node]) -> None:
+        for node in nodes:
+            if isinstance(node, _Arg):
+                if node.kind == "plural":
+                    found.append(
+                        PluralArgument(
+                            argument=node.name,
+                            branches=tuple(
+                                PluralBranch(
+                                    selector=selector,
+                                    empty=is_empty(body),
+                                    renders_value=renders_value(body, node.name, False),
+                                )
+                                for selector, body in node.parts
+                            ),
+                        )
+                    )
+                for _, body in node.parts:
+                    walk(body)
+
+    walk(parse_message(source))
+    return tuple(found)
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------

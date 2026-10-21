@@ -10,6 +10,13 @@ import pytest
 
 from local_operator.i18n import catalogues, runtime
 
+#: The generated CLDR table the catalogue checker reads; the parity test passes
+#: it to `arguments_match` so the `number -> plural` upgrade is judged by the
+#: same losslessness rule as `check_catalogues`.
+_PLURAL_RULES = json.loads(
+    (Path(runtime.__file__).with_name("data") / "plural_rules.json").read_text(encoding="utf-8")
+)
+
 #: The `wire.*` namespaces still awaiting their extraction slice: stub files
 #: that M0 shipped and no slice has populated yet (RFC §5: later slices
 #: populate them). An extraction slice removes its namespace from this tuple
@@ -205,6 +212,9 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
             assert i18n_check.arguments_match(
                 runtime.message_arguments(source[key]),
                 runtime.message_arguments(translated[key]),
+                translated_source=translated[key],
+                locale=locale,
+                plural=_PLURAL_RULES,
             ), (locale, namespace, key)
 
 

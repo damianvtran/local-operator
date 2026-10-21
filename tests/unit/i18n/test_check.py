@@ -409,12 +409,111 @@ class TestCatalogueParity:
             monkeypatch,
             {
                 "en/demo.json": {"demo.x": "{count, number} h"},
-                "ur/demo.json": {
-                    "demo.x": "{count, plural, one {# گھنٹہ} other {# گھنٹے}}"
+                "ur/demo.json": {"demo.x": "{count, plural, one {# گھنٹہ} other {# گھنٹے}}"},
+            },
+        )
+        assert i18n_check.check_catalogues() == []
+
+    @pytest.mark.parametrize(
+        ("locale", "translation"),
+        [
+            # ur's CLDR set is one/other: `other` alone cannot render count 1.
+            ("ur", "{count, plural, other {# گھنٹے}}"),
+            # ru's set is one/few/many/other: `one` is missing even though the
+            # other three are present, so this pins the FULL-set rule rather
+            # than merely "more than one branch".
+            ("ru", "{count, plural, few {# часа} many {# часов} other {# часа}}"),
+        ],
+    )
+    def test_number_upgrade_requires_every_locale_category(
+        self, tmp_path, monkeypatch, i18n_check, locale: str, translation: str
+    ) -> None:
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                f"{locale}/demo.json": {"demo.x": translation},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("missing locale categories" in p and "'one'" in p for p in problems)
+
+    def test_number_upgrade_accepts_the_full_locale_category_set(
+        self, tmp_path, monkeypatch, i18n_check
+    ) -> None:
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                "ru/demo.json": {
+                    "demo.x": (
+                        "{count, plural, one {# час} few {# часа} " "many {# часов} other {# часа}}"
+                    )
                 },
             },
         )
         assert i18n_check.check_catalogues() == []
+
+    def test_number_upgrade_requires_the_value_in_every_branch(
+        self, tmp_path, monkeypatch, i18n_check
+    ) -> None:
+        # `one` says "hour" but never renders the count, so count 1 loses its
+        # number from the sentence — accepted before this guard existed.
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                "ur/demo.json": {"demo.x": "{count, plural, one {گھنٹہ} other {# گھنٹے}}"},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("does not render the value" in p for p in problems)
+
+    def test_number_upgrade_rejects_an_empty_branch(
+        self, tmp_path, monkeypatch, i18n_check
+    ) -> None:
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                "ur/demo.json": {"demo.x": "{count, plural, one {# گھنٹہ} other {}}"},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("branch 'other' is empty" in p for p in problems)
+
+    def test_reordered_arguments_fail(self, tmp_path, monkeypatch, i18n_check) -> None:
+        # Order is part of the contract: `{second} then {first}` renders the
+        # wrong value in each slot even though both names survive.
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{first} then {second}"},
+                "fr/demo.json": {"demo.x": "{second} then {first}"},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("renamed or reordered" in p for p in problems)
+
+    def test_number_may_not_change_to_date(self, tmp_path, monkeypatch, i18n_check) -> None:
+        # A translator must not change what a value IS. `number -> plural` is
+        # the sole permitted kind change; `number -> date` would render a
+        # count as a calendar date.
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "{count, number} h"},
+                "fr/demo.json": {"demo.x": "{count, date} h"},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("changed kind 'number' -> 'date'" in p for p in problems)
 
     def test_a_plural_may_not_collapse_to_a_bare_number(
         self, tmp_path, monkeypatch, i18n_check
@@ -440,9 +539,7 @@ class TestCatalogueParity:
             monkeypatch,
             {
                 "en/demo.json": {"demo.x": "{count, number} h"},
-                "ur/demo.json": {
-                    "demo.x": "{n, plural, one {# گھنٹہ} other {# گھنٹے}}"
-                },
+                "ur/demo.json": {"demo.x": "{n, plural, one {# گھنٹہ} other {# گھنٹے}}"},
             },
         )
         problems = i18n_check.check_catalogues()
