@@ -681,7 +681,12 @@ class ExitRecord:
             at=at,
             reason=reason,
             detail=str(data.get("detail") or ""),
-            requested=bool(data.get("requested")),
+            # ``is True`` rather than ``bool(...)``: a payload carrying the STRING
+            # "false" would otherwise read as a requested stop, which is the one
+            # direction this field must never err in — it would narrate a crash as
+            # the user's own act (the wrong-verdict class QA round 1 found in the
+            # marker path). Anything that is not a JSON true is "not requested".
+            requested=data.get("requested") is True,
             build=str(data.get("build") or ""),
             free_disk_bytes=free,
             load_1m=load,
