@@ -2582,6 +2582,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "removal stays cleanup.remove_session_dir's",
     ),
     (
+        "local_operator/network/mobility.py::_unstash_session_roles",
+        "os.replace",
+        "Restores the SAME `roles/` subtree into the session when a move is refused "
+        "after stashing it: the reverse of the row above, same two paths, and it "
+        "runs only when the session directory is still present (a refusal must "
+        "change nothing)",
+    ),
+    (
+        "local_operator/session/cleanup.py::hand_off_session_dir",
+        "os.replace",
+        "THE MESH COMMIT: renames sessions/<id> into <config>/network/handed-away/ "
+        "once the destination holds a verified complete copy. The rename is what "
+        "makes 'exactly one copy' atomic — after it no scanner, listing or resume "
+        "can see the id here — and it happens before the tombstone tells the "
+        "destination anything, so a refusal leaves the conversation where it was",
+    ),
+    (
+        "local_operator/network/carry.py::_write_marker",
+        "os.replace",
+        "Atomic write of a session's own desktop.json cwd marker at the promote, "
+        "through a sibling pid-temp file. It rewrites ONE field of a bookkeeping "
+        "file the copy already carried; the transcript is never edited",
+    ),
+    (
         "local_operator/network/mobility.py::_promote",
         "<path>.unlink",
         "Removes the move's own ready.json boot marker from the just-adopted session "
@@ -3497,6 +3521,13 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
         # tmp -> .session-holds.json (the holds map, beside the log)
         "local_operator/session/cleanup.py::_write_holds",
+        # THE ONE PATH DISPLACER THAT MAY NAME A SESSION DIRECTORY, and it is this
+        # module's own function: the mesh commit renames sessions/<id> out to
+        # network/handed-away/ once the destination holds a verified copy. Every
+        # other rename in this neighbourhood is a temp-file swap; this one is
+        # argued for in the allow-list above ("the rename is what makes 'exactly
+        # one copy' atomic").
+        "local_operator/session/cleanup.py::hand_off_session_dir",
         # tmp -> .session-census.json (the census baseline, beside the log)
         "local_operator/session/census.py::_write_census",
         # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,
