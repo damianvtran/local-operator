@@ -15,10 +15,7 @@ from lop_osworld_v2_adapter.guest_disk import CommandResult
 from lop_osworld_v2_adapter.providers import aws as aws_mod
 from lop_osworld_v2_adapter.providers.aws import GuestExecutionError
 
-from tests.unit.evaluation.adapters.osworld.test_aws_provider import (
-    CREDS,
-    REGION,
-)
+from tests.unit.evaluation.adapters.osworld.test_aws_provider import CREDS, REGION
 from tests.unit.evaluation.adapters.osworld.test_guest_loss import (
     _closed_port,
     _CountingTransport,
