@@ -1217,3 +1217,57 @@ def test_a_destination_entry_with_bytes_still_staged_is_never_settled(
     assert mobility.settle_promoted_handoff(root, session_id) is True
     assert read_handoff_journal(root).get(session_id) is None
     assert handoff_guard_refusal(root, session_id) == ""
+
+
+def test_a_move_of_a_session_with_session_roles_is_refused_by_default(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """LOH-9 S2: v1 does not carry ``<session>/roles``, and a move DELETES the
+    source directory — so the default has to be a refusal that names the
+    definitions, not a silent loss no other device can restore."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "session_roles", result
+    assert "reviewer" in str(result.get("message")), result
+    assert "--drop-session-roles" in str(result.get("message")), result
+    assert directory.is_dir(), "the refusal must change nothing on the source"
+    assert not (server_b.root / "sessions" / SESSION).exists(), "and nothing on the target"
+
+
+def test_drop_session_roles_moves_and_reports_what_stayed_behind(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """The explicit opt-out: the conversation moves, the definitions stay, and the
+    receipt says so with the count and the device — never a silent drop."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+
+    result = _move(server_b, SESSION, drop_session_roles=True, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is True, result
+    carry = result.get("carry") or {}
+    assert carry.get("session_roles") == 1, result
+    notice = str(carry.get("session_roles_notice") or "")
+    assert "stayed on" in notice and "does not carry" in notice, notice
+
+    landed = server_b.root / "sessions" / SESSION
+    assert (landed / "transcript.jsonl").is_file()
+    assert not (landed / "roles").exists(), "v1 must not invent definitions on the target"

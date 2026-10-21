@@ -354,6 +354,11 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         # protocol one: the source holds an entry the copy set does not carry, so
         # moving it would delete that entry with nothing to copy it from (B-M2).
         "unlisted_content",
+        # LOH-9 S2: the conversation owns role/team definitions and a mesh move
+        # does not carry them. A data-integrity refusal like ``unlisted_content``
+        # — the remedy is promote/delete or the explicit ``--drop-session-roles``,
+        # never a retry.
+        "session_roles",
         # PR #1756 round 1 (design finding D1), and it exists for the SENTENCE
         # discipline rather than the wire: split off ``unreachable`` so a consumer
         # can tell "a peer stopped answering" (its remedy is time) from "no row
@@ -443,6 +448,16 @@ class MoveCarryBlock(TypedDict, total=False):
     #: start fresh on the destination". Subject of the negative is the STATE —
     #: the spec rows do ride the transcript (design round 1, D3/D6).
     monitors_notice: str
+    #: How many role/team definitions the source left behind because
+    #: ``--drop-session-roles`` was passed (LOH-9 S2). The COUNT is the source's
+    #: (it read the store before the commit deleted the directory), carried on the
+    #: prepare reply so the destination can state it in the receipt it produces;
+    #: absent means the move was not a role-dropping one.
+    session_roles: int
+    #: The sentence built from that count and the SOURCE device's name: "N session
+    #: role/team definition(s) stayed on <device> — a mesh move does not carry
+    #: them in this version". Present only with ``session_roles``.
+    session_roles_notice: str
 
 
 class SessionMoveResult(TypedDict):
@@ -1315,6 +1330,7 @@ def _destination_move(
     queue: bool = False,
     request_id: str = "",
     resume_queued: bool = False,
+    drop_session_roles: bool = False,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -1368,6 +1384,7 @@ def _destination_move(
 
     lease_epoch = ""
     manifest: dict[str, Any] = {}
+    session_roles_left = 0
     attempts = 0
     while True:
         try:
@@ -1449,6 +1466,11 @@ def _destination_move(
                     # is the record's own transfer and not a third party's
                     # second move — see ``_source_prepare``'s queue guard.
                     "resume_queued": bool(resume_queued),
+                    # LOH-9 S2: without this the SOURCE refuses a conversation that
+                    # owns session definitions (see ``_source_prepare``); sent on
+                    # every prepare so the key's presence does not depend on a
+                    # boolean, and an older source ignores it.
+                    "drop_session_roles": bool(drop_session_roles),
                 }
             )
         except Moved as refusal:
@@ -1491,6 +1513,10 @@ def _destination_move(
         lease_epoch = str(prepared.get("lease_epoch") or "")
         manifest_raw = prepared.get("manifest")
         manifest: dict[str, Any] = manifest_raw if isinstance(manifest_raw, dict) else {}
+        # HOW MANY DEFINITIONS THE SOURCE LEFT BEHIND. The SOURCE owns this count
+        # (it read the store before its commit deleted the directory); this side
+        # only carries it into the receipt. Absent on an older peer => 0.
+        session_roles_left = int(prepared.get("session_roles") or 0)
         note("prepared")
         break
 
@@ -1714,6 +1740,16 @@ def _destination_move(
             "",
         )
     carry_block = promote_outcome.carry
+    if session_roles_left:
+        # THE NOTICE THE TARGET RECORDS (design §3.5): the count came from the
+        # source, the device name is the source's, and the sentence rides the
+        # receipt AND the completion frame so an offload's inviter reports it too.
+        carried = dict(carry_block or {})
+        carried["session_roles"] = session_roles_left
+        carried["session_roles_notice"] = _session_roles_notice(
+            session_roles_left, owner_name or owner_device
+        )
+        carry_block = carried
     note("committed")
     if not keep:
         clear_handoff_entry(server.root, session_id)
@@ -2556,6 +2592,83 @@ def _source_status(
     }
 
 
+def _session_role_definitions(root: str | Path, session_id: str) -> list[str]:
+    """The human names of the conversation's role/team definitions, sorted.
+
+    Read through the SAME scoped registries a session builds (``profile_scope``),
+    so a row this version can create is a row this check can see, and a staging
+    or lock artifact under ``roles/`` is not counted as a definition. Any read
+    failure degrades to "no definitions": the check's job is to refuse a move
+    that would drop them, and a registry that cannot answer must not block a
+    conversation that has no roles at all — the copy path's own digest and
+    completeness checks remain the authority on the bytes.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import SESSION_ROLES_DIRNAME
+    from local_operator.teams import TeamRegistry
+
+    base = Path(root) / "sessions" / session_id / SESSION_ROLES_DIRNAME
+    if not base.exists():
+        return []
+    names: list[str] = []
+    try:
+        names.extend(
+            str(row.name)
+            for row in AgentRegistry(base, initialize=False, migrate=False).list_agents()
+        )
+    except Exception:  # noqa: BLE001 — see the docstring
+        pass
+    try:
+        names.extend(str(team.name) for team in TeamRegistry(base).list_teams())
+    except Exception:  # noqa: BLE001 — see the docstring
+        pass
+    return sorted(name for name in names if name)
+
+
+def _session_roles_notice(count: int, device_name: str) -> str:
+    """The receipt sentence for definitions a ``--drop-session-roles`` move left.
+
+    States the count, the DEVICE they remain on, and the v1 limitation in one
+    line, so a reader who later wonders why a moved conversation lost its roles
+    has the answer in the move's own receipt rather than in a design doc.
+    """
+    noun = "definition" if count == 1 else "definitions"
+    return (
+        f"{count} session role/team {noun} stayed on {device_name} — a mesh move does "
+        "not carry them in this version"
+    )
+
+
+def _session_roles_refusal(
+    server: "RelayServer", session_id: str, names: list[str]
+) -> dict[str, Any]:
+    """Refuse a move that would leave the conversation's definitions behind.
+
+    The default is the refusal (LOH-9 S2): a move deletes the source's directory,
+    so a conversation with session roles would silently lose definitions that no
+    other device holds — the opposite of "never silently lost". The message NAMES
+    them (a count alone leaves the user guessing which role is at risk) and names
+    the two ways forward, including the explicit opt-out.
+    """
+    listed = ", ".join(repr(name) for name in names)
+    from local_operator.profile_scope import scope_words
+
+    return {
+        "result": "refused",
+        "code": "session_roles",
+        "message": (
+            f"this conversation owns {len(names)} session definition(s) ({listed}), and a "
+            "mesh move does not carry them in this version: moving it would leave them "
+            f"on {server._own_label()} with nothing on the destination. "  # noqa: SLF001
+            "Promote or delete them first (delete one with the `agent` tool's op='delete' "
+            "or `team_delete`), "
+            "or re-run with --drop-session-roles to move the conversation anyway — the "
+            f"definitions stay in {scope_words('session')} on this device."
+        ),
+        "session_id": session_id,
+    }
+
+
 def _source_prepare(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2583,6 +2696,15 @@ def _source_prepare(
             "message": f"this device does not hold {session_id} any more",
             "session_id": session_id,
         }
+    # THE ROLE-DEFINITION GATE (LOH-9 S2). The copy set excludes ``roles/`` for
+    # v1, so this is the one place that can stop a deleting move from losing
+    # definitions no other device has. It runs for BOTH modes (a ``--keep`` copy
+    # would arrive without them too) and after ownership, so a third device's
+    # ask still answers ``not_owner``.
+    drop_session_roles = bool(frame.get("drop_session_roles") or False)
+    session_roles = _session_role_definitions(server.root, session_id)
+    if session_roles and not drop_session_roles:
+        return _session_roles_refusal(server, session_id, session_roles)
     try:
         existing = handoff_in_flight(server.root, session_id)
     except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
@@ -2716,6 +2838,10 @@ def _source_prepare(
             "lease_epoch": "",
             "mode": "keep",
             "manifest": manifest,
+            # The destination states what stayed behind, in the receipt it builds
+            # (see ``MoveCarryBlock.session_roles``); 0 means none, which is every
+            # ordinary move.
+            "session_roles": len(session_roles),
             "session_id": session_id,
         }
     # BEFORE ANY WORK AND BEFORE THE RETIRE: does this directory hold anything the
@@ -2892,6 +3018,7 @@ def _source_prepare(
         "lease_epoch": lease_epoch,
         "mode": "move",
         "manifest": manifest,
+        "session_roles": len(session_roles),
         "session_id": session_id,
     }
 
@@ -3188,6 +3315,9 @@ def _destination_invite(
     # this invite to START the copy it promised; the flag rides with the id so
     # the source's guard admits exactly this pull (see ``_source_prepare``).
     resume_queued = bool(frame.get("resume_queued") or False)
+    # LOH-9 S2: the inviter's explicit opt-out from the source's role-definition
+    # gate travels to the prepare this destination sends; absent reads False.
+    drop_session_roles = bool(frame.get("drop_session_roles") or False)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -3233,6 +3363,7 @@ def _destination_invite(
                 queue=queue,
                 request_id=request_id,
                 resume_queued=resume_queued,
+                drop_session_roles=drop_session_roles,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -4076,6 +4207,9 @@ def local_move_handler(server: "RelayServer") -> Any:
         # The queue record's own commit rides in the same shape (§5.4); a bare
         # move never sets it, so its absence is exactly today's behaviour.
         resume_queued = bool(frame.get("resume_queued") or False)
+        # LOH-9 S2: the explicit opt-out from the source's role-definition gate.
+        # Absent reads False, so an older caller gets the protective default.
+        drop_session_roles = bool(frame.get("drop_session_roles") or False)
         to = str(frame.get("to") or "local")
         try:
             reconcile(server.root, server=server, only=session_id)
@@ -4089,6 +4223,7 @@ def local_move_handler(server: "RelayServer") -> Any:
                 wait_s=wait_s,
                 engage_on_arrival=engage_on_arrival,
                 queue=queue,
+                drop_session_roles=drop_session_roles,
                 request_id=request_id,
                 resume_queued=resume_queued,
             )
@@ -4101,6 +4236,7 @@ def local_move_handler(server: "RelayServer") -> Any:
             engage_on_arrival=engage_on_arrival,
             queue=queue,
             request_id=request_id,
+            drop_session_roles=drop_session_roles,
         )
 
     return _handle
@@ -4116,6 +4252,7 @@ def _recall(
     queue: bool = False,
     request_id: str = "",
     resume_queued: bool = False,
+    drop_session_roles: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to local``: this device is the destination and pulls.
 
@@ -4183,6 +4320,7 @@ def _recall(
         queue=queue,
         request_id=request_id,
         resume_queued=resume_queued,
+        drop_session_roles=drop_session_roles,
     )
     return result or refusal or _move_refusal(session_id, "unreachable", "the move did not finish")
 
@@ -4288,6 +4426,7 @@ def _offload(
     engage_on_arrival: bool = False,
     queue: bool = False,
     request_id: str = "",
+    drop_session_roles: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to <peer>``: this device owns the session and asks the peer to pull.
 
@@ -4412,6 +4551,10 @@ def _offload(
                 # False for an older peer.
                 "queue": bool(queue) and not keep,
                 "request_id": request_id,
+                # LOH-9 S2: the step it configures (the source's role-definition
+                # gate) runs on the SOURCE, so the flag must travel with the
+                # invite — the destination folds it into its prepare.
+                "drop_session_roles": bool(drop_session_roles),
                 "to_device": target_device,
                 # THE SESSION'S AUTO AUTHORITY TRAVELS WITH THE INVITE, for the same
                 # reason as the two fields above: the runtime it would be applied at
@@ -4832,6 +4975,7 @@ def request_move(
     from_replica: bool = False,
     engage_on_arrival: bool = False,
     queue: bool = False,
+    drop_session_roles: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
@@ -4902,6 +5046,10 @@ def request_move(
         # carry a flag the other end must know to disregard.
         queue=bool(queue) and not keep,
         request_id=(f"cli-{session_id}-{int(time.time() * 1000)}" if (queue and not keep) else ""),
+        # THE EXPLICIT OPT-OUT FROM THE ROLE-DEFINITION GATE (LOH-9 S2). Sent on
+        # every request, never only when true, so the frame's shape does not
+        # depend on a boolean; absent on an older relay reads False.
+        drop_session_roles=bool(drop_session_roles),
     )
     if reply is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())

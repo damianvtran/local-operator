@@ -34613,6 +34613,7 @@ class OperatorApp(App[None]):
                     request.to,
                     keep=request.keep,
                     queue=request.queue,
+                    drop_session_roles=request.drop_session_roles,
                 )
             finally:
                 self._move_in_flight = False

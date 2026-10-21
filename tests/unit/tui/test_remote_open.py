@@ -66,7 +66,23 @@ def test_the_phase_order_is_the_contracts() -> None:
         ("~/src --to pixel-8", MoveTo(error=AMBIGUOUS_MOVE)),
         ("./x --to local", MoveTo(error=AMBIGUOUS_MOVE)),
         ("a b --to local", MoveTo(error=AMBIGUOUS_MOVE)),
-        ("--to x --force", MoveTo(error="/move --to takes only --keep and --queue, not '--force'")),
+        # LOH-9 S2: the role-definition opt-out is accepted anywhere, and the
+        # "only ..." refusal names it so a reader is not told the flag does not
+        # exist by an error that omits it.
+        ("--to pixel-8 --drop-session-roles", MoveTo(to="pixel-8", drop_session_roles=True)),
+        (
+            "--drop-session-roles 9f3ac1e0b7d2 --to local",
+            MoveTo("9f3ac1e0b7d2", "local", drop_session_roles=True),
+        ),
+        (
+            "--to x --force",
+            MoveTo(
+                error=(
+                    "/move --to takes only --keep, --queue and --drop-session-roles, "
+                    "not '--force'"
+                )
+            ),
+        ),
         # ``--wait`` is refused BY NAME, naming the shell route that can honour it:
         # the producer's busy sentence sends readers to a shell for this flag, and a
         # bare "unknown flag" here would be the papercut one surface over.
@@ -323,7 +339,12 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
     order: list[str] = []
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         order.append(f"move {session_id} {to} keep={keep}")
         return dict(_COMMITTED)
@@ -436,7 +457,12 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
     """
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -481,7 +507,12 @@ async def test_a_refused_move_says_so_and_reopens_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -532,7 +563,12 @@ async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
     from local_operator.network import mobility
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -572,7 +608,12 @@ async def test_a_move_of_a_session_this_tui_holds_in_the_sidebar_is_refused(
     ran: list[str] = []
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         ran.append(session_id)
         return {**_COMMITTED, "session_id": session_id, "new_session_id": session_id}
@@ -621,7 +662,13 @@ class _QueuedFake:
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     def __call__(
-        self, session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        self,
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         self.calls.append({"session_id": session_id, "to": to, "keep": keep, "queue": queue})
         return {
@@ -780,7 +827,12 @@ async def test_a_viewed_refusal_offers_the_queue_spelling_this_surface_runs(
     from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
 
     def fake_move(
-        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+        session_id: str,
+        to: str,
+        *,
+        keep: bool = False,
+        queue: bool = False,
+        drop_session_roles: bool = False,
     ) -> dict[str, Any]:
         return {
             "ok": False,
