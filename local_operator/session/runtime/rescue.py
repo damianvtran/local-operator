@@ -438,6 +438,53 @@ def _receipt_covers_run(
     return True
 
 
+def _exit_record_explains(config_dir: Path, session_id: str, pid: int, started_at: float) -> str:
+    """The exit record's reason when it EXPLAINS this death, else ``""``.
+
+    THE THIRD DURABLE EXPLANATION, beside the stop marker and the signal receipt,
+    and the one that covers the ordinary case nobody could see before: a runtime
+    that left through its own POLICY — ``process._clean_exit``'s ``idle-exit`` or
+    a build retirement — writes ``journal.EXIT_RECORD_NAME`` with ``requested``
+    False and the reason it was given. That is a completed departure, not a loss,
+    and re-engaging it would undo exactly the residency policy that ended it
+    (``docs/design-idle-reap.md``): every idle session on the machine would be
+    rescued back into existence seconds after it left.
+
+    THE RECORD MUST COVER THIS RUN. ``ExitRecord.covers_run`` is the same
+    pid+start-time rule the marker path uses, because a session can exit cleanly
+    and be resumed: the record of that EARLIER departure must not explain a later,
+    unexplained death, which is the wrong-verdict hole QA round 1 found in the
+    marker rung (Q-1) and the same mistake one artifact over.
+
+    requested`` TRUE IS NOT THIS RUNG. A covering stop marker is already refused
+    above (``refuse("stop-marker")``), and a record claiming a request with no
+    marker to back it is a claim this pass has no evidence for; falling through
+    to the existing ladder is the conservative answer where the evidence is
+    partial.
+
+    SIGTERM/SIGINT/socket-stop ARE NOT POLICY REASONS and deliberately do not
+    appear here: the 2026-09-30 sweep was a SIGTERM sweep, so a signalled exit must
+    stay reachable by the ladder that classified the survivors correctly.
+    """
+    from local_operator.session.runtime import journal
+
+    try:
+        record = journal.read_exit_record(session_dir(config_dir, session_id))
+    except Exception:  # noqa: BLE001 — evidence must never fail the pass
+        return ""
+    if record is None or record.requested or not record.covers_run(pid, started_at):
+        return ""
+    reason = str(record.reason or "")
+    # THE POLICY VOCABULARY is ``_clean_exit``'s own, matched at the vocabulary
+    # level rather than by equality because the probe-unreadable idle exit appends
+    # its evidence (``idle-exit (busy probe unusable for N samples: …)``) and the
+    # three retirement spellings all begin with the same word. A reason that is
+    # unknown to this list is left to the ladder, never silently "explained".
+    if reason == "idle-exit" or reason.startswith("idle-exit (") or reason.startswith("retiring"):
+        return reason
+    return ""
+
+
 def _marker_covers_run(config_dir: Path, session_id: str, pid: int, started_at: float) -> bool:
     """Whether a durable stop marker attests to THIS run.
 
@@ -866,6 +913,17 @@ def rescue_scan(config_dir: Path, *, now: float | None = None, apply: bool = Tru
             continue
         if _viewer_attached(config_dir, sid):
             refuse("attached")
+            continue
+
+        # THE EXPLAINED DEPARTURE, before the receipt: a runtime that left by
+        # POLICY wrote its own exit record (see ``_exit_record_explains``), and
+        # re-engaging it would fight the residency policy that ended it. A death
+        # with no record — the SIGKILL shape — falls straight through to the
+        # ladder below and stays rescue-eligible, which is the 2026-09-30
+        # calibration this rung must not weaken.
+        exit_reason = _exit_record_explains(config_dir, sid, pid, started_at)
+        if exit_reason:
+            refuse(f"exit-record:{exit_reason}")
             continue
 
         receipt = read_signal_receipt(config_dir, sid)
