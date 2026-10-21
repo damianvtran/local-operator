@@ -39,7 +39,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # The held Chinese candidate lives on a separate remote ref, not in the
     # releasable package. Pin the whole set so partial restoration cannot
     # accidentally admit nine passed groups without its failed slash audit.
-    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi")
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",
