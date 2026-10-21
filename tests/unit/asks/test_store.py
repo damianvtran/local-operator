@@ -1195,3 +1195,21 @@ def test_relay_row_ids_are_their_own_namespace():
         store.response_row_id("a-1"),
         store.timeout_row_id("a-1"),
     )
+
+
+def test_a_dismissed_relay_never_owes_a_response_row():
+    """Relay records are built by ``_relay_record``, outside the ordinary ladder, so the
+    D1 ``response_owed`` flag (design §15) cannot reach them: no agent reads a relay."""
+    dismissed = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": "a-r",
+        "at": 1_000_500,
+        "by": {"surface": "phone"},
+        "reason": "answered_in_chat",
+    }
+    records = store.fold([_relayed(), dismissed], 1_001_000, session_id="s-watch")
+    (record,) = [r for r in records if r.get("relay")]
+    assert record["status"] == store.STATUS_DISMISSED
+    assert "response_owed" not in record
+    assert store.expected_row_ids(record) == []
