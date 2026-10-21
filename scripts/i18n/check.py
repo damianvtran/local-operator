@@ -550,7 +550,7 @@ def check_catalogues() -> list[str]:
                     problems.append(f"{locale}/{namespace}: {key}: {exc}")
                     continue
                 want = msg_runtime.message_arguments(expected[key])
-                if got != want:
+                if not arguments_match(want, got):
                     problems.append(
                         f"{locale}/{namespace}: {key}: arguments {got!r} != en's {want!r}"
                     )
@@ -558,6 +558,45 @@ def check_catalogues() -> list[str]:
                     problems, locale, namespace, key, translated[key], plural, locale
                 )
     return problems
+
+
+def arguments_match(
+    source: tuple[tuple[str, str], ...], translated: tuple[tuple[str, str], ...]
+) -> bool:
+    """Whether a translation keeps en's arguments (name, order and VALUE).
+
+    Kinds must be identical with ONE deliberate exception: a locale may render
+    an en ``number`` as an ICU ``plural`` over the same argument.
+
+    WHY (Urdu/Hindi duration units, 2026-10-20): en writes the countdown unit
+    as a bare number — ``{count, number} h`` — because English's ``h`` does not
+    inflect. A language whose counted noun DOES inflect has no invariant form
+    to put there: Urdu needs ``1 گھنٹہ`` / ``3 گھنٹے`` and Hindi ``1 घंटा`` /
+    ``3 घंटे``. Without the upgrade the key is wrong on nearly every render
+    (the hours arm covers 1-47), and the wrongness is invisible to every
+    mechanical check — the "5 минута" class. The upgrade preserves the
+    argument's name, position and number VALUE; it only adds grammar, and the
+    plural categories it introduces are validated separately against the
+    locale's CLDR table.
+
+    The reverse is NOT allowed: an en plural rendered as a bare number drops
+    branches and loses the inflection, which is the defect this exists to
+    catch. Every other kind change (``simple``/``number``/``date``/``select``)
+    stays a hard failure — a translator must not change what a value IS.
+    """
+    if len(source) != len(translated):
+        return False
+    for (source_name, source_kind), (translated_name, translated_kind) in zip(
+        source, translated
+    ):
+        if source_name != translated_name:
+            return False
+        if source_kind == translated_kind:
+            continue
+        if source_kind == "number" and translated_kind == "plural":
+            continue
+        return False
+    return True
 
 
 def _check_plural_categories(

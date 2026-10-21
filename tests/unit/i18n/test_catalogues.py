@@ -151,7 +151,7 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
     # Pin only the original ten Hindi groups plus each later reviewed slice.
     # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
     # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
@@ -164,14 +164,18 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
     # The wire.memory slice adds the independently audited `wire.memory`
     # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
-    # tag slice adds `relay.session.tags` on the same terms: one audited
-    # namespace with its own fresh ledger row. The remote-compute wave (S3e)
-    # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
-    # once its independent audit row passed against the current en bytes.
+    # tag slice adds `relay.session.tags`; the remote-compute wave adds
+    # `cli.exec_remote_help` and `wire.remote_compute`; the relay.asks slice
+    # adds `relay.asks` — the SPA's ask cards, sheet and dock. Each is carried
+    # only once its independent audit row passed against the current en bytes,
+    # and its argument contract is checked with the catalogue checker's own
+    # rule (a locale may render an en `number` as an ICU plural; see
+    # `arguments_match`).
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
         "relay.session.tags",
+        "relay.asks",
         "tui.authoring",
         "tui.projects_edit",
         "tui.review",
@@ -198,8 +202,9 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         translated = catalogues.load_catalogue(locale, namespace)
         assert translated.keys() == source.keys(), (locale, namespace)
         for key in source:
-            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
-                source[key]
+            assert i18n_check.arguments_match(
+                runtime.message_arguments(source[key]),
+                runtime.message_arguments(translated[key]),
             ), (locale, namespace, key)
 
 
