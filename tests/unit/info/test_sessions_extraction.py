@@ -163,6 +163,8 @@ EXPECTED = [
         "detached": False,
         "version": "0.51.6",
         "source_ref": "4311eb653aa9",
+        "waiting_on": 0,
+        "jobs_running": None,
         "subagents_running": 2,
         "subagents_queued": 1,
         # The stored row's clock (transcript activity); None on a live row,
@@ -241,6 +243,8 @@ EXPECTED = [
         "detached": True,
         "version": "0.51.5",
         "source_ref": "",
+        "waiting_on": 0,
+        "jobs_running": None,
         "subagents_running": None,
         "subagents_queued": None,
         "last_activity_s": None,
@@ -312,6 +316,8 @@ EXPECTED = [
         # ``None``, not 0: ``_OldRecord`` has no such attribute at all, which
         # is exactly a runtime predating the fields. The distinction is the
         # whole point of the pair — see ``SessionsInfo.subagents_unreported``.
+        "waiting_on": 0,
+        "jobs_running": None,
         "subagents_running": None,
         "subagents_queued": None,
         "last_activity_s": None,

@@ -36,6 +36,7 @@ from local_operator.tools.project_tool import (
     build_project_tool,
 )
 from local_operator.tools.secret_tool import build_secret_tool
+from local_operator.tools.tags_tool import build_tags_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
 from local_operator.tools.video_tool import (
     build_generate_video_tool,
@@ -192,6 +193,10 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # cache keys on.
     "generate_voiceover": lambda context: build_generate_voiceover_tool(context),
     "generate_sound_effect": lambda context: build_generate_sound_effect_tool(context),
+    # Unconditional (the tag store sits beside every config root) and appended at
+    # the END of both tables on purpose: appending never shifts a provider-visible
+    # array prefix, which is what the prompt cache keys on.
+    "tags": lambda _context: build_tags_tool(),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -243,11 +248,13 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "video_status",
     "setting",
     "bridge",
-    # The audio pair (see the table comments): createIf-gated per direction.
-    # The newest appends, so they end both tables (the pin test moves with
-    # the newest append).
+    # The audio pair (see the table comments): createIf-gated per direction,
+    # and the newest append BEFORE `tags` below — the pin test moves with the
+    # newest append, so only `tags` ends both tables now.
     "generate_voiceover",
     "generate_sound_effect",
+    # The newest append (see the table comment above).
+    "tags",
 ]
 
 

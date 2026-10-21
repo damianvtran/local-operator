@@ -218,8 +218,12 @@ async def test_a_manual_retry_leaves_the_row_ready_to_update_not_retryable_again
     monkeypatch.setattr("local_operator.agents._fetch_hub_profile", boom)
     monkeypatch.setattr(hub, "get_agent", boom_detail)
     failed = await client.post("/v1/desktop/hub/updates/check", json=mutation())
-    (item,) = failed.json()["result"]["status"]["items"]
-    assert item["error_class"] == "hub-error" and item["state"] == "available"
+    body = failed.json()["result"]["status"]
+    (item,) = body["items"]
+    # QA F3: a carried error is reported as failed and counted, so a consumer
+    # that reads only ``state``/``counts`` does not miss the outage.
+    assert item["error_class"] == "hub-error" and item["state"] == "failed"
+    assert body["counts"]["failed"] == 1 and body["counts"]["available"] == 0
 
     monkeypatch.setattr(
         "local_operator.agents._fetch_hub_profile", lambda _c, h, **_k: hub.agents[h]

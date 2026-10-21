@@ -55,6 +55,7 @@ from local_operator.server.routes import (
     desktop_mcp,
     desktop_mesh,
     desktop_monitors,
+    desktop_preferences,
     desktop_profiles,
     desktop_projects,
     desktop_quota,
@@ -958,6 +959,15 @@ app.include_router(desktop_session_files.router)
 # the sessions router, so declaration order cannot shadow a session child; the
 # service's own content route is id-addressed and never accepts a path.
 app.include_router(desktop_library.router)
+# The desktop's own PREFERENCES: `/v1/desktop/sidebar-layout`, the sidebar's
+# persisted destination order (capability `features.sidebar_layout`). It is a
+# single-segment literal path (`/v1/desktop/sidebar-layout`) with no child
+# routes, so the only shadowing risk is a template declared ABOVE it matching
+# it first — and no block above declares a single-segment `/v1/desktop/{...}`
+# path, exactly as the wake and monitor blocks note. Registered last in the
+# desktop family rather than beside `desktop_profiles` because the preference
+# is renderer state, not a session or catalogue surface.
+app.include_router(desktop_preferences.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

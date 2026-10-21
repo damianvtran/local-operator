@@ -857,7 +857,7 @@ async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
             name="teamwork",
             manager="manager",
             members=[
-                {"role": "coder", "kind": "agent", "count": 1, "tier": "hi", "effort": "xhigh"},
+                {"role": "worker", "kind": "agent", "count": 1, "tier": "hi", "effort": "xhigh"},
                 {"role": "reviewer", "kind": "agent", "count": 1},
                 {"role": "greeter", "kind": "agent", "count": 1},
                 {"role": "scout", "kind": "agent", "count": 1, "tier": "lo"},
@@ -871,11 +871,16 @@ async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
     assert report.json()["result"]["team"] == "teamwork"
     rows = _effective(report.json())
 
-    assert rows["coder"]["tier"] == {"value": "hi", "source": "team"}
-    assert rows["coder"]["model"] == {"value": "anthropic/claude-opus-4-5", "source": "tier"}
+    # The slot's role is one that pins NOTHING: the packaged ``coder`` seed
+    # carries the inherit sentinel ("always run on the launching session's
+    # model"), and that pin outranks a roster slot's tier, so a slot that
+    # exercises the TEAM layer has to name a role with no pin of its own. The
+    # interaction between the two has its own test below.
+    assert rows["worker"]["tier"] == {"value": "hi", "source": "team"}
+    assert rows["worker"]["model"] == {"value": "anthropic/claude-opus-4-5", "source": "tier"}
     # requested is what the member asked for; value is what the model will run.
-    assert rows["coder"]["effort"] == {"value": "high", "requested": "xhigh", "source": "team"}
-    assert rows["coder"]["available"] is True and rows["coder"]["reason"] == ""
+    assert rows["worker"]["effort"] == {"value": "high", "requested": "xhigh", "source": "team"}
+    assert rows["worker"]["available"] is True and rows["worker"]["reason"] == ""
 
     assert rows["reviewer"]["tier"] == {"value": "med", "source": "row"}
     assert rows["reviewer"]["model"] == {"value": "anthropic/claude-sonnet-5-5", "source": "tier"}
@@ -995,3 +1000,39 @@ async def test_the_effective_endpoint_does_not_clamp_against_a_model_with_no_lad
     assert worker["available"] is True
     assert worker["model"] == {"value": "test/no-ladder-model", "source": "tier"}
     assert worker["effort"] == {"value": "max", "requested": "max", "source": "team"}
+
+
+async def test_a_slot_whose_role_pins_the_session_model_reports_the_session_model(api):
+    """The desktop editor must show a slot running on the session's model, even
+    when the slot itself names a tier.
+
+    A role that carries the inherit sentinel ("always run on the launching
+    session's model") outranks a roster slot's tier, so the slot's own tier
+    does not decide the model. The effective row is where the operator SEES
+    which model a slot will really use, and it must not claim a tier the
+    launch will not use — the row says the model comes from the session, and
+    the server cannot name the session's model, so the value is null.
+    """
+    from local_operator.agent_profiles import install_seed
+
+    client, root = api
+    _write_tiers(root, hi={"model": "anthropic/claude-opus-4-5", "effort": "max"})
+    assert install_seed("coder", registry=AgentRegistry(root)) is not None
+    created = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="teamwork",
+            manager="manager",
+            members=[{"role": "coder", "kind": "agent", "count": 1, "tier": "hi"}],
+        ),
+    )
+    assert created.status_code == 200, created.text
+
+    report = await client.get("/v1/desktop/teams/teamwork/effective")
+    assert report.status_code == 200, report.text
+    row = _effective(report.json())["coder"]
+    # No tier was chosen, and the model comes from the session — which a
+    # server cannot name, so the value is null rather than a guess.
+    assert row["tier"] == {"value": None, "source": "row"}
+    assert row["model"] == {"value": None, "source": "session"}
+    assert row["available"] is True and row["reason"] == ""

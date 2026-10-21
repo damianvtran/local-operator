@@ -96,8 +96,23 @@ def feature_flags() -> dict[str, Any]:
         # `hub_updates`: a renderer gated on `hub_updates` keeps its existing
         # pending-only sidebar and never polls this, while a renderer that sees
         # `hub_links` may show the healthy inventory with a direct source-scoped
-        # toggle. The legacy `/hub/updates` projection stays compatible.
+        # toggle. The legacy `/hub/updates` projection keeps its SHAPE, but it
+        # now also lists rows with `kind: "skill"` (the operator's brief: a
+        # skill failure must be visible and retryable on the same channel as
+        # agents and teams). A consumer of that projection must tolerate the
+        # third kind; it was a deliberate contract change, not a silent one.
         "hub_links": 1,
+        # THE COMPLETE INITIAL SKILLS ADAPTER: public/org remote reads, the
+        # `org_skills.list`/`org_skill.get` credential proxy, local pull/install,
+        # and initial publication (dry-run preview receipt + confirm) with the
+        # baseline/policy link row it materializes. Its OWN key rather than a
+        # bump of `hub_links`: a renderer gated on `hub_links` keeps its working
+        # agents/teams inventory and never offers a Skills surface whose pull or
+        # publish half would 404 on this backend. The key is a promise about the
+        # WHOLE adapter, so it is advertised only while every route below exists;
+        # the pin in tests/unit/server/test_desktop_hub_skill_publish.py fails if
+        # one is removed without also removing this key.
+        "hub_skills": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
@@ -116,6 +131,18 @@ def feature_flags() -> dict[str, Any]:
         # Own key: release-skewed clients must fail closed without hiding the
         # catalogue itself when durable tags are unavailable.
         "session_tags": 1,
+        # The OPTIONAL auto-tag half of a desktop fork: the `auto_tag` body key
+        # on POST /v1/desktop/sessions/{id}/fork and the naming call's tag
+        # contract behind it. Its own key rather than a bump of `session_tags`,
+        # and it exists for the STRICTER direction of skew: `Fork` inherits
+        # `extra="forbid"` (as the whole desktop plane does), so an OLDER
+        # daemon answers 422 to a body carrying `auto_tag` — a refused fork,
+        # not a degraded one. A client must therefore ask THIS key before it
+        # sends the field; absent, it omits it and the fork is byte- and
+        # behaviour-identical to today's. `session_tags` stays the gate for the
+        # tag catalogue, so a backend with the catalogue and without
+        # auto-tagging still shows tags and simply never tags a fork itself.
+        "session_tags_auto_tag": 1,
         # A catalogue that can be asked for ONE scope at a time, resumed
         # by an opaque cursor, and counted per group: the
         # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
@@ -915,6 +942,17 @@ def feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
+        # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
+        # rows above the `More` fold and the rows below it). ADDITIVE — an older
+        # renderer never calls either route — so it gates nothing for an old
+        # client; it is how a renderer learns the surface EXISTS before it
+        # offers drag handles or a row menu whose save would 404. Absent, the
+        # client MUST NOT offer customisation at all and draws the fixed default
+        # order: a drag the backend cannot persist is worse than no drag.
+        # `1` is the first contract revision; a future stored field is additive
+        # and does not bump it.
+        "sidebar_layout": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a

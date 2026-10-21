@@ -22,8 +22,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # TWENTY-TWO: the union plus independently audited P3a/P3b namespaces,
-    # plus the scratchpad-hygiene slice's hi wire.settings row.
+    # TWENTY-FOUR: the union plus independently audited P3a/P3b namespaces,
+    # the scratchpad-hygiene slice's hi wire.settings row, P4a's audited
+    # tui.viewer row (including its keyboard-hint audit refresh), and the
+    # i18n lane's audited `wire.memory` row for the namespace translated in
+    # five active locales.
     # Base is twelve (the Wave-3 ten retain their audited source pins). Main
     # added a wire.settings row for the hub-setting deletion and the LOH-19
     # review slice added a tui.review row; the earlier branch added a
@@ -37,7 +40,11 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # silently admit an unrelated held namespace or discard the previous audit
     # history.
     # P3b adds its 35-key tui.team_authoring namespace after independent audit.
-    assert len(hindi) == 22
+    # The audited `hi/wire.memory` row this branch lands makes it TWENTY-FOUR;
+    # the /tag slice's independently re-audited 27-key `tui.tags` row makes it
+    # TWENTY-FIVE. The pin stays cardinal so an unrelated held namespace cannot
+    # slip in.
+    assert len(hindi) == 25
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

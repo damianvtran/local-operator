@@ -5299,6 +5299,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # ``stall_watchdog``'s C-thread dump covers; this one is for the state the
     # C-thread dump cannot show — a loop that is RUNNING but has its turn parked
     # on an await (round 2, U6).
+    task_dump_installed = False
     if not procstate.is_windows() and debug_stacks_enabled() and debug_stacks is not None:
 
         # SIGUSR1 prints every asyncio task's stack to the child log. The child
@@ -5368,6 +5369,22 @@ async def amain(operator_cap: bytes | None = None) -> int:
         stall_watchdog.notify_on_evidence_signal(
             lambda: loop.call_soon_threadsafe(_dump_task_stacks)
         )
+        task_dump_installed = True
+    # THE READINESS LINE, and it exists because a TEST must not have to create the
+    # condition it is waiting for. The sibling runtime cells used to probe readiness
+    # by sending SIGUSR1 every 0.2 s from spawn until this block's effect appeared —
+    # a signal storm through boot's thread-churn window, and never a read of a fact
+    # the child had stated. Whether that storm or the runner produced the one SIGSEGV
+    # is NOT claimed; what the cell needed was a positive fact, and this line is it.
+    # One signal after it is the whole probe. (The #116008 all-threads walk is a
+    # constraint on the FATAL path added beside this one, not on this asyncio dump:
+    # see ``stall_watchdog._enable_fatal_report``.)
+    logger.info(
+        "signal handlers ready: clean stop on SIGTERM/SIGINT; SIGUSR1 evidence signal %s; "
+        "task-dump callback %s",
+        "installed" if stall_watchdog.evidence_signal() is not None else "not installed",
+        "installed" if task_dump_installed else "disabled",
+    )
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
@@ -5745,5 +5762,12 @@ if __name__ == "__main__":
     # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
     # both halves of that. Arming before ``main()`` also means a stall during
     # boot — the window nothing else can report — is bounded and named.
-    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe)
+    # ``fatal_report=True`` is the entry point's alone: it points CPython's fatal
+    # signal handler at the stall dump, so a native death of an armed runtime leaves
+    # a thread and a frame instead of an empty stderr. The handler is process-global
+    # and is deliberately NOT installed by an in-process caller of ``arm`` — see the
+    # argument's docstring. It covers the crash class measured on 2026-10-20 (run
+    # 39411075050: an armed runtime child died SIGSEGV before publication with no
+    # stack anywhere); the dump is the one artifact a reader already opens.
+    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe, fatal_report=True)
     sys.exit(main())

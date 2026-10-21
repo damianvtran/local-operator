@@ -146,6 +146,10 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("local_operator.hub_sync.service.build_clients", fake_clients)
     app = FastAPI()
     app.state.config_manager = ConfigManager(root)
+    # The ONE manager the app hands to every route (``get_config_manager`` reads
+    # ``app.state``), exposed so a test can prove the PROCESS's view was refreshed
+    # rather than inferring it from a response body alone.
+    holder["manager"] = app.state.config_manager
     app.state.env_config = EnvConfig()
     app.include_router(desktop_hub.router)
     app.include_router(desktop_sessions.router)
@@ -217,13 +221,252 @@ async def test_a_public_pull_installs_every_file_and_reads_back_the_contract(api
     assert record.local_alias == ALIAS and record.hub_id == HUB_ID
     assert dict(record.fields)["files"] == manifest()["files"]
 
-    # The partial-adapter milestone must NOT advertise `hub_skills` yet.
-    assert "hub_skills" not in svc_features.feature_flags()
+    # The complete-adapter milestone advertises `hub_skills` beside the links key;
+    # the route pin below fails if the routes it promises are removed.
+    assert svc_features.feature_flags().get("hub_skills") == 1
     assert "hub_links" in svc_features.feature_flags()
 
     # A public fetch is anonymous: the client carried no credential.
     (call,) = holder["anon"].calls
     assert call["with_credential"] is False
+
+
+async def test_a_pull_that_chooses_download_reports_subscribe_off_everywhere(api) -> None:
+    """A pull with ``subscribe: false`` answers OFF -- not "on until restart".
+
+    THE DEFECT this pins: the managed transaction materializes the initial policy
+    through its OWN ``ConfigManager`` (``ManagedSkillStorage._finalize`` ->
+    ``materialize_policy``), so the request's manager -- the ONE ``app.state``
+    hands to every route, and therefore the one ``GET /hub/links`` reads -- kept
+    its pre-write snapshot. A user who chose Download (subscribe off) was shown
+    "subscribed" in the pull response AND in the inventory until the process
+    restarted, while ``config.yml`` on disk already said ``subscribe: false``.
+    ``subscribe: true`` could never expose it: the creation default is also true.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    # 1. The pull response's OWN row.
+    assert row["policy"]["subscribe"] is False
+    assert row["policy"]["auto_push"] is False
+
+    # 2. The inventory in the SAME process -- no restart, no fresh manager.
+    listed = await client.get("/v1/desktop/hub/links?kind=skill")
+    assert listed.status_code == 200, listed.text
+    (inventory_row,) = listed.json()["result"]["links"]
+    assert inventory_row["link_id"] == row["link_id"]
+    assert inventory_row["policy"]["subscribe"] is False
+
+    # 3. What is actually persisted: the file was never the problem, the
+    #    process's copy of it was.
+    persisted = pol.read_policy(read_config_values(root) or {}, linked_identity(row))
+    assert persisted.policy.subscribe is False and persisted.policy.auto_push is False
+    assert persisted.revision == row["policy"]["revision"]
+
+    # 4. The manager the routes share (app.state's) is the thing that was stale
+    #    and the fix is what makes it agree with disk.
+    values = holder["manager"].get_config().values
+    assert pol.read_policy(values, linked_identity(row)).policy.subscribe is False
+
+
+async def test_a_pull_that_keeps_subscribe_on_still_reports_on(api) -> None:
+    """The control: a refresh must publish what was stored, not a constant OFF."""
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    assert row["policy"]["subscribe"] is True
+    listed = await client.get("/v1/desktop/hub/links?kind=skill")
+    (inventory_row,) = listed.json()["result"]["links"]
+    assert inventory_row["policy"]["subscribe"] is True
+
+
+async def test_a_pull_serves_the_policy_revision_the_next_edit_expects(api) -> None:
+    """No spurious ``policy-revision-changed`` on a link nothing has touched.
+
+    A policy revision is a CONTENT digest, so a stale projection does not merely
+    mislabel a bit: it serves a digest over ``subscribe: true`` that no writer can
+    ever match. The operator's first edit of the link then 409s as if someone else
+    had changed it.
+    """
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    pull = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert pull.status_code == 200, pull.text
+    row = pull.json()["result"]["link"]
+
+    patched = await client.patch(
+        f"/v1/desktop/hub/links/{row['link_id']}",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "expected_policy_revision": row["policy"]["revision"],
+            "subscribe": True,
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["result"]["policy"]["subscribe"] is True
+
+
+async def test_a_failed_refresh_never_fails_the_pull_and_the_retry_converges(
+    api, monkeypatch
+) -> None:
+    """The refresh is best-effort, and the replay arm converges (review B1).
+
+    ``reload`` parses config.yml, so it can raise (permissions, I/O, a decode
+    error). Letting that escape turns an install whose content and baseline are
+    already on disk into a 500 the client cannot read as "done" -- and the retry
+    then returned through the replay arm, which projected the pre-write snapshot:
+    the reported defect, reached through its own failure path. Both halves are
+    pinned here: the failed refresh does not fail the answer, and the retry's
+    replay row is refreshed.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    manager = holder["manager"]
+    real = manager.reload
+    calls: list[int] = []
+
+    def failing_once():
+        if not calls:
+            calls.append(1)
+            raise OSError("config.yml is momentarily unreadable")
+        return real()
+
+    monkeypatch.setattr(manager, "reload", failing_once)
+
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert first.status_code == 200, first.text
+    # The install's effects are on disk even though the process view could not be
+    # refreshed, and the failed refresh is the ONLY thing that failed.
+    assert (root / "skills" / ALIAS / "SKILL.md").exists()
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    assert prov.read_baseline(root, "skill", local_id) is not None
+    persisted = pol.read_policy(
+        read_config_values(root) or {}, linked_identity(first.json()["result"]["link"])
+    )
+    assert persisted.policy.subscribe is False
+
+    # A retry is a REPLAY (the baseline is present), and it must answer the policy
+    # the first attempt persisted rather than the creation default.
+    retry = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert retry.status_code == 200, retry.text
+    row = retry.json()["result"]["link"]
+    assert row["policy"]["subscribe"] is False
+    assert row["policy"]["revision"] == persisted.revision
+
+
+async def test_a_recovered_install_replays_the_policy_it_persisted(api, monkeypatch) -> None:
+    """Recovery finalizes a policy through its own manager; the replay refreshes (M1).
+
+    An install that commits content and dies before ``_finalize`` writes the
+    baseline is settled by the NEXT pull's ``storage.recover()``, which
+    materializes the policy through the storage's own ``ConfigManager``. The
+    request then leaves through the replay arm, so without a refresh there it
+    answered the creation default (``subscribe: true``) and a revision no writer
+    could match -- the same defect through the recovery path.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    from local_operator.hub_sync import skill_storage
+
+    real = skill_storage.write_baseline
+    calls: list[int] = []
+
+    def failing_once(config_dir, record):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("simulated finalize crash")
+        return real(config_dir, record)
+
+    monkeypatch.setattr(skill_storage, "write_baseline", failing_once)
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert first.status_code != 200, first.text
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    assert (root / "skills" / ALIAS / "SKILL.md").exists()
+    assert prov.read_baseline(root, "skill", local_id) is None
+
+    monkeypatch.setattr(skill_storage, "write_baseline", real)
+    retry = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert retry.status_code == 200, retry.text
+    result = retry.json()["result"]
+    assert result["reports"][0]["applied"] is False  # recovered, not re-installed
+    row = result["link"]
+
+    stored = pol.stored_link_policy(read_config_values(root) or {}, row["link_id"])
+    assert stored is not None and stored.subscribe is False
+    assert row["policy"]["subscribe"] is False
+    assert (
+        row["policy"]["revision"]
+        == pol.read_policy(read_config_values(root) or {}, linked_identity(row)).revision
+    )
+
+
+async def test_an_unversioned_renderer_source_is_completed_not_refused(api) -> None:
+    """The UI sends VITE_RADIENT_SERVER_BASE_URL verbatim, without `/v1`.
+
+    The route must complete it with the same rule the configured base uses and
+    answer the work, while the minted link carries the versioned origin.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="https://api.radienthq.com"),
+    )
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+    assert row["hub_source"] == BASE
+    record = prov.read_baseline(root, "skill", row["local_id"])
+    assert record is not None and record.identity is not None
+    assert record.identity.hub_source == BASE
+
+    # A DIFFERENT origin is still refused after completion.
+    holder["anon"].calls.clear()
+    refused = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="https://elsewhere.invalid"),
+    )
+    assert refused.status_code == 422, refused.text
+    assert holder["anon"].calls == []
+
+
+async def test_a_malformed_hub_source_is_the_normal_origin_conflict(api) -> None:
+    """A bracketed host fails in ``urlsplit``; the route must not leak that.
+
+    Completion runs before approval, so a raw ``ValueError`` used to reach the
+    route's generic handler and answer 409 with the parser's own sentence. The
+    refusal is the same nondisclosing 422 every unapproved origin gets, and no
+    client is built.
+    """
+
+    client, _root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_source="http://[::1"),
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "origin-conflict"
+    assert "Invalid IPv6 URL" not in detail["message"]
+    assert holder["anon"].calls == []
 
 
 async def test_an_org_pull_uses_the_org_client_and_records_the_tenant(api) -> None:
@@ -1001,3 +1244,117 @@ async def test_a_crash_in_the_rename_window_keeps_the_grant_and_recovers(api, mo
     assert record is not None and record.lineage == "clean"
     kept = pol.stored_link_policy(read_config_values(root) or {}, identity.link_id)
     assert kept is not None and kept.auto_push is True
+
+
+# -- subscribe / unpull -------------------------------------------------------------
+
+
+def subscribe_body(**fields: Any) -> dict[str, Any]:
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "hub_id": HUB_ID,
+        "hub_source": BASE,
+        "visibility": "public",
+        "tenant_id": None,
+        "local_alias": ALIAS,
+    }
+    body.update(fields)
+    return body
+
+
+async def test_a_subscribe_links_without_installing_and_replays(api) -> None:
+    """The link exists with no bytes; the same request returns the same link."""
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    body = subscribe_body()
+
+    response = await client.post("/v1/desktop/hub/skills/subscribe", json=body)
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    assert row["kind"] == "skill" and row["name"] == ALIAS
+    assert row["content_state"] == "absent" and row["local_path"] is None
+    assert row["policy"]["subscribe"] is True and row["policy"]["auto_push"] is False
+    assert row["eligibility"]["can_auto_push"] is False
+    assert row["auto_will_apply"] is False
+    assert nothing_installed(root)
+
+    record = prov.read_baseline(root, "skill", row["local_id"])
+    assert record is not None and record.content_state == "absent"
+    assert record.local_alias == ALIAS and record.identity is not None
+    assert record.recorded_by == "subscribe"
+    assert record.fields == manifest()  # the remote text this link names
+    assert len(holder["anon"].calls) == 1
+
+    # The same request id replays the stored response: no second fetch, no
+    # second baseline (the receipts discipline every mutation shares).
+    replayed = await client.post("/v1/desktop/hub/skills/subscribe", json=body)
+    replayed_result = dict(replayed.json()["result"])
+    assert replayed_result.pop("replayed", None) is True
+    assert replayed_result == response.json()["result"]
+    assert len(holder["anon"].calls) == 1
+
+    # The capability-gated inventory carries the state a client renders.
+    listed = await client.get("/v1/desktop/hub/links", params={"kind": "skill"})
+    (link_row,) = listed.json()["result"]["links"]
+    assert link_row["link_id"] == row["link_id"]
+    assert link_row["content_state"] == "absent" and link_row["local_path"] is None
+
+    # Replay, not a duplicate: a fresh request id returns the SAME link.
+    again = await client.post(
+        "/v1/desktop/hub/skills/subscribe", json={**body, "request_id": str(uuid.uuid4())}
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["result"]["link"]["link_id"] == row["link_id"]
+    assert len([r for r in prov.iter_baselines(root) if r.kind == "skill"]) == 1
+
+
+async def test_the_unpull_route_removes_the_copy_and_keeps_the_link(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    pulled = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    link = pulled.json()["result"]["link"]
+    assert (root / "skills" / ALIAS).exists()
+
+    body = {"request_id": str(uuid.uuid4()), "link_id": link["link_id"]}
+    response = await client.post("/v1/desktop/hub/skills/unpull", json=body)
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+
+    assert row["link_id"] == link["link_id"] and row["content_state"] == "absent"
+    assert row["local_path"] is None
+    assert not (root / "skills" / ALIAS).exists()
+    record = prov.read_baseline(root, "skill", link["local_id"])
+    assert record is not None and record.identity == linked_identity(link)
+    assert record.content_state == "absent"
+
+    # Unpull is a state transition, so repeating it succeeds with the same row.
+    again = await client.post(
+        "/v1/desktop/hub/skills/unpull", json={**body, "request_id": str(uuid.uuid4())}
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["result"]["link"]["content_state"] == "absent"
+
+
+async def test_a_public_subscribe_of_an_org_skill_is_one_plain_404(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, org_envelope(manifest()))
+
+    foreign = await client.post("/v1/desktop/hub/skills/subscribe", json=subscribe_body())
+    holder["anon"] = SkillClient(BASE, APIError("Not Found", status_code=404))
+    missing = await client.post("/v1/desktop/hub/skills/subscribe", json=subscribe_body())
+
+    # The PULL arm refuses the same row identically: one body for "missing" and
+    # "not yours", on both the install and the subscribe path.
+    holder["anon"] = SkillClient(BASE, org_envelope(manifest()))
+    pulled_foreign = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    holder["anon"] = SkillClient(BASE, APIError("Not Found", status_code=404))
+    pulled_missing = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+
+    assert foreign.status_code == 404 and missing.status_code == 404
+    assert foreign.json() == missing.json()
+    assert pulled_foreign.status_code == 404
+    assert pulled_foreign.json() == pulled_missing.json() == missing.json()
+    assert nothing_installed(root)
+    assert not [r for r in prov.iter_baselines(root) if r.kind == "skill"]

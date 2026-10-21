@@ -273,6 +273,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
     start counting as activity again."""
     from local_operator import resume
     from local_operator.asks import store
+    from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.runtime import registry
     from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
@@ -314,6 +315,10 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         # BOF. Bookkeeping by the same test as the rest — the user did not write
         # it, and cleanup must not bill it against the size budget.
         tail_anchor.ANCHOR_FILENAME,
+        # A desktop fork's pending auto-tag intent: a marker the fork route writes
+        # and the naming worker spends, not content the user wrote. Its mtime is
+        # the fork action, which the transcript already dates.
+        AUTO_TAG_FILENAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 

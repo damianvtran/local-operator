@@ -25,6 +25,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import sys
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -61,11 +64,24 @@ def model_wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
 
 
 @pytest.fixture
-def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> Any:
     from local_operator import agent_shell
     from local_operator.sdk import SessionRoots
 
     home = tmp_path / "home"
+    if sys.platform == "darwin":
+        import pwd
+
+        # The active seatbelt boundary refuses controller stores under the
+        # exposed per-user temp tree. HOME is already pytest-isolated, so use
+        # passwd's real home and own only this UUID child, as world-root tests do.
+        home = (
+            Path(pwd.getpwuid(os.getuid()).pw_dir)
+            / ".cache"
+            / "lop-accounting-sdk-tests"
+            / uuid.uuid4().hex
+        )
+        request.addfinalizer(lambda: shutil.rmtree(home, ignore_errors=True))
     root = home / ".local-operator"
     agent_home = home / "local-operator-home"
     work = home / "work"

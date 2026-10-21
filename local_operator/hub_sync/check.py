@@ -81,6 +81,10 @@ class ItemCheck:
     local: Mapping[str, Any] | None = None
     remote: Mapping[str, Any] | None = None
     base: Mapping[str, Any] | None = None
+    #: The record's explicit content state. ``absent`` means this link has no
+    #: managed copy (subscribe-without-pull, or an unpulled copy): the check has
+    #: no local side, and the runner/apply must never treat a merge as possible.
+    content_state: Literal["present", "absent"] = "present"
     #: B4.3 failure class when ``verdict == "unavailable"``.
     reason: str = ""
     detail: str = ""
@@ -577,6 +581,14 @@ def check_hub_skills(
     ``adapters.SkillAdapter.canonical_fields`` so a check and an outbound
     projection exclude the same local-only bytes. A skill with no baseline was
     never linked (or was made locally) and is not touched.
+
+    A link whose record says ``content_state: absent`` has NO local side: the
+    check still FETCHES the remote (that is the whole point of subscribing) and
+    reports it as a normal ``available`` item, with no three-way comparison and
+    no local fingerprint, instead of erroring on the missing directory. The
+    absence is read from the record, never inferred from the filesystem -- a
+    directory that is genuinely lost keeps the ``local-concurrent-edit`` error
+    it always had.
     """
 
     from local_operator.hub_sync.adapters import SkillAdapter
@@ -595,25 +607,47 @@ def check_hub_skills(
         if only_ids is not None and record.local_id not in only_ids:
             continue
         tenant = record.tenant_id
-        try:
-            snapshot = storage.snapshot(record.local_id)
-        except Exception as error:  # noqa: BLE001
-            checks.append(
-                ItemCheck(
-                    "skill",
-                    record.local_id,
-                    alias,
-                    record.hub_id,
-                    tenant,
-                    "unavailable",
-                    reason="local-concurrent-edit",
-                    detail=f"could not read the local skill: {error}",
-                    link_id=record.identity.link_id if record.identity is not None else None,
-                )
-            )
-            continue
-        local = adapter.canonical_fields(snapshot.document.to_json())
-        local_fp = prov.fingerprint_snapshot("skill", local)
+        absent = record.content_state == "absent"
+        local: Mapping[str, Any] | None = None
+        local_fp: str | None = None
+        if not absent:
+            try:
+                snapshot = storage.snapshot(record.local_id)
+            except Exception as error:  # noqa: BLE001
+                # A crashed unpull is settled from its own durable evidence. When
+                # that settles the record to absent this is a normal absent check;
+                # when it does not, the missing directory IS the error it has
+                # always been (an unknown loss is never re-labelled as absence).
+                try:
+                    storage.recover_unpull(local_id=record.local_id)
+                except Exception:  # noqa: BLE001 - one item's recovery never ends the tick
+                    # A config-lock timeout or an unreadable marker is THIS
+                    # item's failure: keep the original error and let the rest
+                    # of the checks proceed.
+                    logger.warning("could not settle unpull for %s", record.local_id, exc_info=True)
+                settled = prov.read_baseline(config_dir, "skill", record.local_id)
+                if settled is None or settled.content_state != "absent":
+                    checks.append(
+                        ItemCheck(
+                            "skill",
+                            record.local_id,
+                            alias,
+                            record.hub_id,
+                            tenant,
+                            "unavailable",
+                            reason="local-concurrent-edit",
+                            detail=f"could not read the local skill: {error}",
+                            link_id=(
+                                record.identity.link_id if record.identity is not None else None
+                            ),
+                        )
+                    )
+                    continue
+                record = settled
+                absent = True
+            else:
+                local = adapter.canonical_fields(snapshot.document.to_json())
+                local_fp = prov.fingerprint_snapshot("skill", local)
         client = client_for_tenant(tenant)
         if client is None:
             checks.append(
@@ -629,6 +663,7 @@ def check_hub_skills(
                     reason="no-credential",
                     detail="skills need `lop login radient` (organization sign-in)",
                     link_id=record.identity.link_id if record.identity is not None else None,
+                    content_state=record.content_state,
                 )
             )
             continue
@@ -651,6 +686,7 @@ def check_hub_skills(
                     detail=detail,
                     link_id=record.identity.link_id if record.identity is not None else None,
                     served_by=_served_by(client),
+                    content_state=record.content_state,
                 )
             )
             continue
@@ -675,8 +711,41 @@ def check_hub_skills(
                     detail=str(error)[:200],
                     link_id=record.identity.link_id if record.identity is not None else None,
                     served_by=_served_by(client),
+                    content_state=record.content_state,
                 )
             )
+            continue
+        remote_fp = prov.fingerprint_snapshot("skill", remote)
+        revision, sync_contract = _remote_meta(document)
+        if absent:
+            # NO LOCAL SIDE TO COMPARE. The remote is reported as AVAILABLE, which
+            # is the action the operator still has to take (an explicit pull);
+            # calling it up-to-date would hide that nothing is installed.
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "available",
+                    local_fp=None,
+                    remote_fp=remote_fp,
+                    local=None,
+                    remote=remote,
+                    base=None,
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                    remote_revision=revision,
+                    sync_contract=sync_contract,
+                    served_by=_served_by(client),
+                    content_state="absent",
+                )
+            )
+            continue
+        if local is None or local_fp is None:
+            # Unreachable by construction: an absent row continued above, and a
+            # present row loaded its snapshot. The guard is what keeps the
+            # compare/merge path from ever running without a local side.
             continue
         # Source-name space: the local alias is display-only, but the manifest
         # name is part of the document the engine fingerprints and merges. Rename
@@ -689,11 +758,9 @@ def check_hub_skills(
 
             local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()
             local_fp = prov.fingerprint_snapshot("skill", local)
-        remote_fp = prov.fingerprint_snapshot("skill", remote)
         known = record.recorded_by != prov.UNKNOWN_BASELINE
         base_fp = prov.fingerprint_fields("skill", record.fields) if known else None
         classification = classify(base_fp, local_fp, remote_fp, baseline_known=known)
-        revision, sync_contract = _remote_meta(document)
         checks.append(
             ItemCheck(
                 "skill",
@@ -716,6 +783,7 @@ def check_hub_skills(
                 remote_revision=revision,
                 sync_contract=sync_contract,
                 served_by=_served_by(client),
+                content_state=record.content_state,
             )
         )
     return checks

@@ -16,7 +16,11 @@ vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
-		useSessions: () => ({ sessions: [] as SessionSummary[], connected: true }),
+		/* `sessions` is a NEW array on every render here, deliberately. The screen
+		   must take the store's frame counter as a number, never derive one from
+		   array identity: that derivation re-rendered forever, and this suite
+		   HANGS (rather than fails) if it comes back. */
+		useSessions: () => ({ sessions: [] as SessionSummary[], connected: true, revision: 0 }),
 		retainSessionListStream: () => () => {},
 	};
 });

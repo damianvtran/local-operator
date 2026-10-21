@@ -250,6 +250,14 @@ BASH_DEFAULT_TIMEOUT_SECONDS = 120.0
 #: Hard cap on the per-command timeout; longer runs are a session bug, not a
 #: tool feature.
 BASH_MAX_TIMEOUT_SECONDS = 3600.0
+#: How often the live scratchpad watchdog re-walks the pad while a command runs.
+#: One walk is bounded (it stops at the cap or 20k entries), but the interval is
+#: the overshoot window: a command writing at R bytes/s can put R * PAD_TICK_S
+#: extra bytes on disk between the sample that would have caught it and the kill.
+#: A slower tick costs less loop time in aggregate but overshoots further; 1 s
+#: keeps a fast build's overshoot in the same order as the cap itself rather than
+#: letting one command reach multiple GB, which is the incident this bounds.
+PAD_TICK_S = 1.0
 #: Where ``bash.shell`` lives under ``values``, spelled ONCE and shared with
 #: the ``settings_io`` row so the reader and the writer cannot disagree about
 #: the path (the flat-vs-nested mismatch that silenced the #576 opt-out).
@@ -4032,6 +4040,49 @@ async def execute_bash(
     pad_refusal = _bash_pad_precheck(params.command, context)
     if pad_refusal is not None:
         return _error(tool_call_id, "bash", pad_refusal)
+    # The LIVE half of the same cap, measured once at spawn. The precheck above
+    # only refuses a command when the pad is ALREADY over cap; a command that
+    # starts under it can still grow the pad past the cap in one run (measured: a
+    # 4.5 GiB subagent build), and the after-the-fact ``[scratch]`` line reports
+    # only once the bytes are on disk. So an UNDER-CAP command is watched: its
+    # first sample over the cap is the breach. One bounded walk here, before the
+    # child exists; a missing pad walks as zero. It runs in a thread like the
+    # per-tick samples: a pad just under the cap with many entries can take
+    # hundreds of ms to walk, and that is a TUI frame this start-up measurement
+    # must not stall.
+    #
+    # ARMED ONLY WHEN THE COMMAND CAN REACH THE PAD (the same naming gate the
+    # post-hoc audit uses, or a cwd inside it). A long pytest/git run that never
+    # touches the pad must not pay a walk at spawn and per tick. KNOWN BLIND
+    # SPOT: a child that only reads ``LOCAL_OPERATOR_SCRATCHPAD`` from its
+    # ENVIRONMENT, without naming the pad and with a cwd outside it, is not
+    # armed — and the post-hoc audit shares that gate, so it gets neither the
+    # live watch nor the after-the-fact line.
+    #
+    # DISARMED WHEN THE PAD IS ALREADY OVER CAP. The footprint walk is
+    # cap-truncated, so two samples are LOWER BOUNDS and cannot order a shrink:
+    # files 60/60/200 under a cap of 100 read 120 at spawn, then 60+200=260 after
+    # a 60 is removed — higher than the start although the pad shrank from 320.
+    # A comparison there kills the very recovery command the guidance points at.
+    # So recovery runs; the precheck already refuses a creating command that
+    # NAMES the pad, a cwd-relative grower still gets the after-the-fact line,
+    # and an env-reading child is the documented blind spot.
+    pad_root = _scratchpad_root(context)
+    pad_watch_root: Path | None = None
+    pad_cap = 0
+    pad_start_held = 0
+    if pad_root is not None and _pad_watch_armed(params.command, _safe_cwd(context), pad_root):
+        pad_cap = scratchpad_budget_bytes()
+        try:
+            pad_start_held, start_over, _ = await asyncio.to_thread(
+                scratchpad_footprint, pad_root, pad_cap
+            )
+        except Exception:  # noqa: BLE001 — an unreadable pad must not fail the call
+            # Start-up is also "unknown, never kills": if the pad cannot be
+            # walked now, disarm rather than make every command fail on it.
+            pad_watch_root = None
+        else:
+            pad_watch_root = None if start_over else pad_root
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment (see the helper for
     # the full three-arm reasoning — it is shared with the ``sessions`` tool's
@@ -4462,6 +4513,13 @@ async def execute_bash(
     # never reported as "continues in the background" (§10).
     memory_exceeded = False
     memory_sample: memory_guard.Sample | None = None
+    # The pad watchdog's state, beside the memory guard's and for the same shape
+    # of reason: a THIRD stop condition, checked on both loops, rendered as its
+    # own head line. ``pad_held`` keeps the LAST sample so the result can name
+    # the measured figure even though the walk that produced it is gone.
+    pad_exceeded = False
+    pad_held = pad_start_held
+    next_pad_sample = loop.time() + PAD_TICK_S
     # The query budget's state, beside the memory guard's and for the same shape
     # of reason. ``query_started`` is the SPAWN time, so the advisory and the stop
     # measure the COMMAND — and a run that detaches into a background job keeps
@@ -4499,6 +4557,55 @@ async def execute_bash(
         notice = guard.soft_notice(sample)
         if notice:
             memory_advisory = notice
+        return False
+
+    async def _pad_sample() -> tuple[int, bool] | None:
+        """``(held, over)`` when this tick is due, else ``None``; never raises.
+
+        Shared by the foreground and detached loops so the two cannot disagree
+        about the cadence or the walk. The walk itself runs in a thread: it
+        touches the filesystem, and a synchronous multi-entry scan on the loop
+        thread is the frame stall every other probe here avoids. An exception
+        (an unreadable pad, a vanished root) is "unknown", which is never a kill
+        — the same rule the memory guard applies to a missing ps reading.
+
+        The cap is re-read every tick: ``session.scratchpad.max_bytes`` is LIVE
+        (the settings row promises an edit takes effect without a relaunch), so a
+        running command must obey the value in the config now, not the one
+        snapshotted at spawn. The read is a small config parse, not a pad walk.
+        """
+        nonlocal next_pad_sample, pad_cap
+        if pad_watch_root is None:
+            return None
+        now = loop.time()
+        if now < next_pad_sample:
+            return None
+        next_pad_sample = now + PAD_TICK_S
+        pad_cap = scratchpad_budget_bytes()
+        try:
+            # ``scratchpad_footprint`` stops the walk at the cap, so a huge pad
+            # costs the same as the first crossing rather than a full scan.
+            held, over, _ = await asyncio.to_thread(scratchpad_footprint, pad_watch_root, pad_cap)
+        except Exception:  # noqa: BLE001 — unknown never kills
+            return None
+        return held, over
+
+    async def _pad_tick() -> bool:
+        """Sample the pad's footprint; kill and return True on a governed breach.
+
+        Returns True the moment the kill is issued so the wait loop breaks in the
+        same tick, exactly like ``_memory_tick``.
+        """
+        nonlocal pad_exceeded, pad_held
+        sample = await _pad_sample()
+        if sample is None:
+            return False
+        held, over = sample
+        pad_held = held
+        if over:
+            pad_exceeded = True
+            _kill()
+            return True
         return False
 
     def _query_tick() -> bool:
@@ -4562,10 +4669,30 @@ async def execute_bash(
             timed_out_bg = False
             cancelled_bg = False
             memory_exceeded_bg = False
+            pad_exceeded_bg = False
+            pad_held_bg = pad_start_held
             query_stopped_bg = False
             query_elapsed_bg = 0.0
             query_advisory_bg: str | None = None
             bg_sample: memory_guard.Sample | None = None
+
+            async def _pad_tick_bg() -> bool:
+                """The detached loop's tick: same probe, same growth rule, and
+                the flag lives HERE rather than in ``pad_exceeded`` so the job
+                row reports the stop it actually took.
+                """
+                nonlocal pad_exceeded_bg, pad_held_bg
+                sample = await _pad_sample()
+                if sample is None:
+                    return False
+                held, over = sample
+                pad_held_bg = held
+                if over:
+                    pad_exceeded_bg = True
+                    _kill()
+                    return True
+                return False
+
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
 
@@ -4625,6 +4752,11 @@ async def execute_bash(
                             memory_exceeded_bg = True
                             _kill()
                             break
+                    # The pad watchdog rides the same wait. It has its own
+                    # cadence (PAD_TICK_S) because a walk is costlier than the
+                    # ps sample, and it samples in a thread for the same reason.
+                    if await _pad_tick_bg():
+                        break
                     # The query budget rides the same wait, from the SPAWN time
                     # (``query_started``), so a command that detached via steering
                     # or background=True keeps the elapsed time it already spent —
@@ -4649,7 +4781,11 @@ async def execute_bash(
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
                 await cleanup(
-                    kill=cancelled_bg or timed_out_bg or memory_exceeded_bg or query_stopped_bg
+                    kill=cancelled_bg
+                    or timed_out_bg
+                    or memory_exceeded_bg
+                    or pad_exceeded_bg
+                    or query_stopped_bg
                 )
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
@@ -4663,6 +4799,18 @@ async def execute_bash(
             )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            # Pad before memory: both can fire in the same tick, and the pad
+            # line names the remedy the operator has to take on disk. Same head
+            # position and structured keys as the foreground result.
+            if pad_exceeded_bg:
+                head = _scratchpad_cap_exceeded_message(pad_held_bg, pad_cap)
+                report_progress(
+                    {
+                        "scratchpad_cap_exceeded": True,
+                        "scratchpad_held_bytes": pad_held_bg,
+                        "scratchpad_cap_bytes": pad_cap,
+                    }
+                )
             if memory_exceeded_bg:
                 head = (
                     guard.over_budget_message(bg_sample)
@@ -4834,6 +4982,11 @@ async def execute_bash(
                 next_mem_sample = loop.time() + mem_tick
                 if await _memory_tick():
                     break
+            # The pad watchdog keeps its own cadence; ``_pad_tick`` returns False
+            # until one is due, so calling it on every 250 ms pass costs a clock
+            # read and no walk. A probe failure is "unknown", never a kill.
+            if await _pad_tick():
+                break
             # The query budget rides the same iteration. It is checked every
             # tick (not on the memory cadence) because it needs no probe at all —
             # it is a clock read, and a stop that waited a 250 ms tick to be
@@ -4877,6 +5030,25 @@ async def execute_bash(
             # No job manager to own a detached child: kill rather than leak.
             _kill()
             raise
+        if pad_exceeded:
+            # The same §10 rule for the pad watchdog: a pad-killed command must
+            # never be reported as "continues in the background". Checked BEFORE
+            # the memory branch because the pad line is the actionable one when
+            # both fired in the same tick.
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            return _error(
+                tool_call_id,
+                "bash",
+                f"{_scratchpad_cap_exceeded_message(pad_held, pad_cap)}\n"
+                f"{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+                details={
+                    "scratchpad_cap_exceeded": True,
+                    "scratchpad_held_bytes": pad_held,
+                    "scratchpad_cap_bytes": pad_cap,
+                },
+            )
         if memory_exceeded:
             # §10: a memory-killed command must NEVER be reported as "continues
             # in the background". The guard set the flag before its _kill(), so if
@@ -5019,6 +5191,16 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    if pad_exceeded:
+        # Same head position and ordinary-_error choice as the memory line: the
+        # command was satisfiable, the machine said no, and the head is what a
+        # tool card keeps. Pad wins if the memory guard fired in the same tick.
+        parts.insert(0, _scratchpad_cap_exceeded_message(pad_held, pad_cap))
+        details = dict(spill_details or {})
+        details["scratchpad_cap_exceeded"] = True
+        details["scratchpad_held_bytes"] = pad_held
+        details["scratchpad_cap_bytes"] = pad_cap
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     if memory_exceeded:
         # The MEMORY LIMIT EXCEEDED line goes FIRST, exactly where TIMEOUT goes,
         # because the tool card keeps the HEAD of at most 40 lines — a line at the
@@ -7691,17 +7873,19 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
 
     Contract, all of it load-bearing:
 
-    * THE MENTION GATE is the no-latency guarantee. This runs on every bash
-      result, so a command that does not NAME the pad returns ``""`` after
-      pure string work — ZERO filesystem calls. ``_command_names_pad`` owns the
-      spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
+    * THE MENTION GATE keeps the common case cheap. This runs on every bash
+      result: a command that does not NAME the pad (and is not running under
+      it) returns ``""`` after string compares plus, for an outside cwd, the
+      resolve pair that rules out a symlink alias. ``_command_names_pad`` owns
+      the spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
       path, and the home spellings (``~/…``/``$HOME/…``/``${HOME}/…``) the
       scan has always resolved but the gate could not reach — review round 1,
-      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. A
-      command that reaches the pad through an alias spelling of the store
-      (``/tmp`` against ``/private/tmp``) is a MISS, deliberately: resolving
-      the alias here would cost a syscall on every command to serve a spelling
-      nothing writes.
+      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. The
+      cwd arm is ``_pad_watch_armed``: a relative write under the pad must get
+      the same line even though it names nothing. A command that reaches the
+      pad only through an alias spelling of the store (``/tmp`` against
+      ``/private/tmp``) is still a MISS for the NAMING arm — the guard exists
+      for the shape, not for every spelling.
     * SHAPE arm first, and NO WALK: a CREATED target under the pad whose parent
       parts are a refused segment or whose leaf carries a refused suffix gets
       the sentence the write tools raise, ``[scratch]``-tagged (see
@@ -7752,7 +7936,12 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
     pad = _scratchpad_root(context)
     if pad is None:
         return ""
-    if not _command_names_pad(command, pad):
+    # The MENTION gate is widened to the watchdog's arming rule: a command whose
+    # cwd is inside the pad can grow it through a relative path without naming
+    # it, and that shape must still get the post-hoc budget line. The naming
+    # arm stays string-only; the cwd arm costs at most two resolves when the
+    # path is not textually inside.
+    if not _pad_watch_armed(command, _safe_cwd(context), pad):
         return ""
     # The pad walk, not the plain one: a relative operand after
     # ``cd "<pad>"`` is pad-relative (review round 1 M1), and the two known
@@ -7861,6 +8050,55 @@ def _pad_size_text(value: int, *, attributive: bool = False) -> str:
     if value >= _PAD_MIB:
         return f"{value // _PAD_MIB:,} MiB"
     return f"{value:,}-byte" if attributive else f"{value:,} bytes"
+
+
+def _pad_watch_armed(command: str, cwd: str, pad: Path) -> bool:
+    """Whether the live pad watchdog is armed for this command.
+
+    The watchdog costs one bounded recursive walk at spawn and one per tick, so
+    only a command that can plausibly reach the pad pays it: one that NAMES the
+    pad (the post-hoc audit's own string gate — the two env forms, the absolute
+    path and the home spellings) or one whose working directory is inside it (a
+    relative write then lands in the pad). Everything else — a long pytest or
+    git run — is not watched at all.
+
+    KNOWN BLIND SPOT: a child that reads ``LOCAL_OPERATOR_SCRATCHPAD`` from its
+    ENVIRONMENT without naming the pad in the command and without a cwd inside
+    it (``cd /tmp && python build.py``, where the script itself reads the
+    variable) is not armed. The post-hoc audit shares this gate, so that shape
+    gets NO live watch and NO after-the-fact line either — the honest gap, and
+    arming every command was the cost this gate exists to avoid. An
+    unresolvable cwd is not evidence the command is inside the pad, so it does
+    not arm either; the command still runs. ``scratchpad_contains`` compares
+    textually first and resolves only when that fails, so a cwd textually
+    inside the pad costs no filesystem call; an outside cwd pays the resolve
+    pair that rules out a symlink alias.
+    """
+    if _command_names_pad(command, pad):
+        return True
+    try:
+        return scratchpad_contains(Path(cwd), pad)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _scratchpad_cap_exceeded_message(held: int, cap: int) -> str:
+    """The head line for a command the pad watchdog stopped.
+
+    Plain text, no backticks (the tool card paints Text, so they would land
+    literally), and it leads with the CAUSE before the numbers for the same
+    reason the pre-execution refusal does: a card's head is the only part of a
+    long result guaranteed to survive truncation. ``held`` is the watchdog's
+    last sample and a LOWER BOUND when the pad is over — the walk stops at the
+    first crossing — so the sentence says ``>=`` rather than claiming a total.
+    """
+    return (
+        "SCRATCHPAD CAP EXCEEDED: this command's process group was stopped "
+        f"because the session scratchpad crossed its {cap:,}-byte cap "
+        f"(held ≥{held:,} bytes). Build output belongs in a git worktree outside "
+        "the session store; remove or move the output, or raise "
+        "session.scratchpad.max_bytes in /settings → Scratchpad, then retry."
+    )
 
 
 def _pad_budget_line(pad: Path) -> str:
@@ -16575,6 +16813,46 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     return extras
 
 
+def _sessions_peer_status(row: Mapping[str, Any]) -> str:
+    """Render the peer's claim without promoting a cached claim to observation.
+
+    The mesh may retain rows when a link goes down. Their identity and holder
+    remain useful, but busy/gate/wait fields are not current observations. On
+    reachable peers use the catalogue's shared status ladder, not a second
+    hand-written precedence for the sessions tool.
+    """
+    block = row.get("peer") or {}
+    if block.get("reachable") is False:
+        return "link down; status unknown"
+    from local_operator.network.projection import PeerRow
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import status_of
+    from local_operator.session.peer_rows import _live_state
+
+    claim = PeerRow.from_json(dict(row), device_id=str(block.get("device_id") or ""))
+    projected = SessionRow(
+        claim.session_id,
+        claim.started,
+        claim.conversation_name,
+        live_state=_live_state(claim),
+        pending=claim.pending,
+        waiting_on=claim.waiting_on,
+        jobs_running=claim.jobs_running,
+        subagents_running=claim.subagents_running,
+        subagents_queued=claim.subagents_queued,
+    )
+    _code, label = status_of(projected, None)
+    return label
+
+
+def _sessions_wait_phrase(row: Mapping[str, Any]) -> str:
+    """A presence addend, not a claim that every background job is awaited."""
+    from local_operator.network.types import peer_whole_int
+
+    count = peer_whole_int(row.get("waiting_on"), default=0)
+    return f"waiting on {count} {'job' if count == 1 else 'jobs'}" if count > 0 else ""
+
+
 def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = None) -> str:
     """One lean listing line: the fields a caller acts on. The full published
     row rides in ``details``, which costs no prompt tokens.
@@ -16582,7 +16860,13 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
     Identifier fields: the conversation title and session id are marked as
     spans so redaction leaves them readable; neither is a credential.
     """
-    state = str(row.get("state") or "?")
+    block = row.get("peer") or {}
+    unreachable = block.get("reachable") is False
+    state = (
+        _sessions_peer_status(row)
+        if row.get("locality") == "remote"
+        else str(row.get("state") or "?")
+    )
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     bits = [f"[{state}] {name}"]
     if row.get("session_id"):
@@ -16591,7 +16875,7 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
         bits.append(str(row["model_label"]))
-    if row.get("busy"):
+    if row.get("busy") and not unreachable:
         bits.append("busy")
     # THE ROW-LEVEL RULE, not the raw field: a STORED row carries no needs
     # claim, whatever its producer said (``network.types.row_needs_claim``) —
@@ -16600,7 +16884,7 @@ def _session_row_brief(row: Mapping[str, Any], context: ToolContext | None = Non
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and not unreachable:
         bits.append(f"pending {needs}")
     # ``uptime_s`` is meaningful only for a row with a PROCESS: a stored row
     # carries the empty default (0.0, not None), and rendering it as ``up 0ms``
@@ -16911,21 +17195,29 @@ def _sessions_info_body(
     Identifier fields: the conversation title and session id are marked spans;
     both are names the caller quotes back, not credentials.
     """
-    state = str(row.get("state") or "?")
+    state = (
+        _sessions_peer_status(row)
+        if row.get("locality") == "remote"
+        else str(row.get("state") or "?")
+    )
+    unreachable = (row.get("peer") or {}).get("reachable") is False
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     parts = [f'"{name}" — {state}']
     if row.get("session_id"):
         parts.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         parts.append(f"pid {row['pid']}")
-    if row.get("busy"):
+    if row.get("busy") and not unreachable:
         parts.append("busy")
     # No needs claim on a stored row (``network.types.row_needs_claim``).
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and not unreachable:
         parts.append(f"pending {needs}")
+    waiting = _sessions_wait_phrase(row)
+    if waiting and not unreachable:
+        parts.append(waiting)
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
     return ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
@@ -16992,7 +17284,7 @@ async def _sessions_info_mesh(
     row = next(item for item in rows if str(item.get("session_id")) == found.id)
     block = row.get("peer") or {}
     device = str(block.get("name") or block.get("device_id") or peer)
-    state = str(row.get("state") or "?")
+    state = _sessions_peer_status(row)
     # Identifier fields: the row's title and session id are names the caller
     # acts on; both are marked spans, never credentials.
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
@@ -17005,8 +17297,11 @@ async def _sessions_info_mesh(
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and block.get("reachable") is not False:
         bits.append(f"pending {needs}")
+    waiting = _sessions_wait_phrase(row)
+    if waiting and block.get("reachable") is not False:
+        bits.append(waiting)
     text = (
         ", ".join(bits) + f"\nheld by {device} — the session, its directory and its "
         "transcript live on that device; peek reads its live tail there, resume warms "
@@ -27528,6 +27823,42 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
+def _not_applied_note(entry: Mapping[str, Any]) -> str:
+    """Say so when a tier or model this call passed was NOT applied.
+
+    A role whose own pin is the inherit sentinel states an ABSOLUTE decision
+    ("always run on the launching session's model"), and it outranks anything
+    the delegating model passed. The launch still names the model the child will
+    run on, but a caller whose ``effort=`` or ``model=`` was dropped has to be
+    told: a silent substitution is the very thing this rule exists to prevent,
+    and a receipt that reads as though the pick took effect IS the substitution
+    by another name. The note is therefore appended to the launch line rather
+    than left in the model's head, and it names the value that was passed so
+    the reader can see which one was ignored. Both launch surfaces call it —
+    ``task``'s launch line and ``hub op='resume'``'s receipt — because a resume
+    re-resolves the model and is therefore a launch too.
+    """
+    if entry.get("model_selection_source") != "role_inherit":
+        return ""
+    passed: list[str] = []
+    if entry.get("effort"):
+        passed.append(f"effort={entry['effort']!r}")  # i18n: ignore model-facing tool output
+    # ``model='inherit'`` is NOT a pick this machine failed to apply: it is the
+    # wire's "no specific model" (see ``_validate_task_model``), and a role that
+    # pins the session's model produces exactly the inheritance it asked for.
+    # Reporting it as dropped would invent a substitution, which is the same
+    # class of lie in the other direction.
+    if entry.get("model_pick") and entry["model_pick"] != "inherit":
+        passed.append(f"model={entry['model_pick']!r}")  # i18n: ignore model-facing tool output
+    if not passed:
+        return ""
+    verb = "was" if len(passed) == 1 else "were"
+    return (
+        f" [the {' and '.join(passed)} you passed {verb} NOT applied: "
+        "this role pins the launching session's model]"
+    )
+
+
 def _model_clause(model: str, owns: bool | None, session_model: str) -> str:
     """``on <model>`` or ``on this session's model (<model>)``.
 
@@ -27717,6 +28048,12 @@ async def execute_task(
                     if context and context.jobs
                     else ""
                 ),
+                # WHAT THIS CALL ASKED FOR, kept beside what the launch
+                # decided: the two can differ now, and only the pair says
+                # whether the caller's pick was applied (see
+                # ``_not_applied_note``).
+                "effort": item.effort,
+                "model_pick": item.model,
             }
         )
     if not launched:
@@ -27729,6 +28066,7 @@ async def execute_task(
             if entry.get("model_selection_source")
             else ""
         )
+        + _not_applied_note(entry)
         for entry in launched
     ]
     body = (
@@ -27848,200 +28186,234 @@ async def execute_wait(
     if missing:
         return _error(tool_call_id, "wait", f"unknown job {', '.join(missing)}")
 
-    def _settled() -> Any:
-        """The first of the awaited jobs that is no longer running, or None."""
+    def _note_waiting(count: int) -> None:
+        # The callback only changes session-owned memory: a tool must not write
+        # discovery files or know its serving host. on_update is the existing
+        # serving event path, so publishing the snapshot there makes a parked
+        # wait visible now, not only after the next heartbeat. Both carry the
+        # canonical deduplicated id count, never the caller's aliases.
+        # Presence is advisory: neither observer may replace a settled result,
+        # timeout or cancellation while finally clears the parked count. Isolate
+        # them independently so a broken host callback still permits the update
+        # observer to see the transition. BaseException (notably CancelledError)
+        # deliberately remains outside these ordinary observer-failure guards.
+        if context is not None and context.note_waiting is not None:
+            try:
+                context.note_waiting(count)
+            except Exception:  # noqa: BLE001 — presence must not change wait semantics
+                logger.debug("could not record wait presence", exc_info=True)
+        if on_update is not None:
+            try:
+                on_update(AgentToolUpdate(details={"waiting_on": count}))
+            except Exception:  # noqa: BLE001 — a failed observer must not mask cancellation
+                logger.debug("could not emit wait presence", exc_info=True)
 
-        for job_id in job_ids:
-            job = jobs.get(job_id)
-            if job is not None and job.status != "running":
-                return job
-        return None
+    async def _park() -> ToolResult:
+        def _settled() -> Any:
+            """The first of the awaited jobs that is no longer running, or None."""
 
-    def _still_running() -> list[str]:
-        """The awaited ids that are still running, in the order given.
+            for job_id in job_ids:
+                job = jobs.get(job_id)
+                if job is not None and job.status != "running":
+                    return job
+            return None
 
-        The unsettled branches report THIS rather than ``job_ids[0]``: on the
-        multi-id path the first id is simply the first the caller passed and
-        may itself have settled, so pinning it in ``details`` tells a caller
-        that reads the payload (rather than parsing the text) about the wrong
-        job.
-        """
+        def _still_running() -> list[str]:
+            """The awaited ids that are still running, in the order given.
 
-        return [
-            job_id
-            for job_id in job_ids
-            if (row := jobs.get(job_id)) is not None and row.status == "running"
-        ]
+            The unsettled branches report THIS rather than ``job_ids[0]``: on the
+            multi-id path the first id is simply the first the caller passed and
+            may itself have settled, so pinning it in ``details`` tells a caller
+            that reads the payload (rather than parsing the text) about the wrong
+            job.
+            """
 
-    deadline = time.monotonic() + params.wait_ms / 1000.0
-    # Snapshot the peer count and RE-ARM the event before parking.
-    #
-    # Two halves, both load-bearing. The COUNT is what the wake decision reads
-    # (not `is_set()`), so a message that landed between two waits, or before
-    # this wait began, is still seen exactly once. The CLEAR is what stops a
-    # stale set event from making `asyncio.wait` return instantly on every
-    # iteration, which would spin this `while` loop at full speed until the
-    # deadline — the same event-loop burn `_await_any_settled` documents for
-    # evicted job rows, and worse than the poll it replaced.
-    #
-    # The producer only ever sets and increments; re-arming is the consumer's
-    # job. No `await` separates the snapshot from the clear, so the sequence is
-    # atomic with respect to the loop, and the producer runs on that same loop
-    # (see PeerArrivalProtocol), so a message cannot slip between them and be
-    # lost: it either lands before the snapshot and is counted, or after the
-    # clear and re-sets the event. Do NOT "tidy" this by moving the count and
-    # the clear adjacent to each other or by reordering them — what matters is
-    # only that nothing awaits in between.
-    peer = context.peer_arrival if context is not None else None
-    peer_event = peer.event() if peer is not None else None
-    peer_seen = peer.count() if peer is not None else 0
-    # The per-kind snapshot rides the same atomic window as the count: it is
-    # only ever DIFFED against the live tally after a wake, so the model can
-    # be told which producer woke it (peer message, scheduled wake, hub note)
-    # rather than blaming every wake on a peer.
-    peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
-    if peer_event is not None:
-        peer_event.clear()
+            return [
+                job_id
+                for job_id in job_ids
+                if (row := jobs.get(job_id)) is not None and row.status == "running"
+            ]
 
-    def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
-        """The still-running payload for a wait cut short by a message/steer.
+        deadline = time.monotonic() + params.wait_ms / 1000.0
+        # Snapshot the peer count and RE-ARM the event before parking.
+        #
+        # Two halves, both load-bearing. The COUNT is what the wake decision reads
+        # (not `is_set()`), so a message that landed between two waits, or before
+        # this wait began, is still seen exactly once. The CLEAR is what stops a
+        # stale set event from making `asyncio.wait` return instantly on every
+        # iteration, which would spin this `while` loop at full speed until the
+        # deadline — the same event-loop burn `_await_any_settled` documents for
+        # evicted job rows, and worse than the poll it replaced.
+        #
+        # The producer only ever sets and increments; re-arming is the consumer's
+        # job. No `await` separates the snapshot from the clear, so the sequence is
+        # atomic with respect to the loop, and the producer runs on that same loop
+        # (see PeerArrivalProtocol), so a message cannot slip between them and be
+        # lost: it either lands before the snapshot and is counted, or after the
+        # clear and re-sets the event. Do NOT "tidy" this by moving the count and
+        # the clear adjacent to each other or by reordering them — what matters is
+        # only that nothing awaits in between.
+        peer = context.peer_arrival if context is not None else None
+        peer_event = peer.event() if peer is not None else None
+        peer_seen = peer.count() if peer is not None else 0
+        # The per-kind snapshot rides the same atomic window as the count: it is
+        # only ever DIFFED against the live tally after a wake, so the model can
+        # be told which producer woke it (peer message, scheduled wake, hub note)
+        # rather than blaming every wake on a peer.
+        peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
+        if peer_event is not None:
+            peer_event.clear()
 
-        Deliberately the SAME shape the deadline branch returns, so the model
-        gets the job id and status back and can simply re-issue the wait. The
-        jobs are untouched: nothing is cancelled and, critically, nothing is
-        consumed, so auto-delivery still hands over the result later.
+        def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
+            """The still-running payload for a wait cut short by a message/steer.
 
-        ``arrivals`` is the per-kind count of what landed during the park
-        (``reason == "inbound"``). The kinds are the producers' message
-        types, so the note can say "a scheduled wake fired" for the user's
-        reminder and "a subagent/parent hub message" for a child speaking up,
-        and the model knows what to read before re-issuing the wait.
-        """
+            Deliberately the SAME shape the deadline branch returns, so the model
+            gets the job id and status back and can simply re-issue the wait. The
+            jobs are untouched: nothing is cancelled and, critically, nothing is
+            consumed, so auto-delivery still hands over the result later.
 
-        running = _still_running()
-        # The note must agree with details["interrupted_by"]: the text is what
-        # the model actually reads, so rendering "steering" for a cancel we
-        # cannot attribute would keep the mislabelled claim alive in the one
-        # place it matters (review finding N1).
-        details: dict[str, Any] = {
-            "job_id": (running or job_ids)[0],
-            "status": "running",
-            "interrupted_by": reason,
-        }
-        if reason == "inbound":
-            kinds = arrivals or {}
-            notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
-            note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
-            # One kind is the common case, and naming it keeps the existing
-            # machine contract (``interrupted_by == "peer_message"``) intact
-            # for peer-only wakes; several at once stay "inbound" and the
-            # breakdown rides ``arrivals``.
-            if len(kinds) == 1:
-                details["interrupted_by"] = next(iter(kinds))
-            details["arrivals"] = dict(kinds)
-        else:
-            note = "the wait was cancelled"
+            ``arrivals`` is the per-kind count of what landed during the park
+            (``reason == "inbound"``). The kinds are the producers' message
+            types, so the note can say "a scheduled wake fired" for the user's
+            reminder and "a subagent/parent hub message" for a child speaking up,
+            and the model knows what to read before re-issuing the wait.
+            """
+
+            running = _still_running()
+            # The note must agree with details["interrupted_by"]: the text is what
+            # the model actually reads, so rendering "steering" for a cancel we
+            # cannot attribute would keep the mislabelled claim alive in the one
+            # place it matters (review finding N1).
+            details: dict[str, Any] = {
+                "job_id": (running or job_ids)[0],
+                "status": "running",
+                "interrupted_by": reason,
+            }
+            if reason == "inbound":
+                kinds = arrivals or {}
+                notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
+                note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
+                # One kind is the common case, and naming it keeps the existing
+                # machine contract (``interrupted_by == "peer_message"``) intact
+                # for peer-only wakes; several at once stay "inbound" and the
+                # breakdown rides ``arrivals``.
+                if len(kinds) == 1:
+                    details["interrupted_by"] = next(iter(kinds))
+                details["arrivals"] = dict(kinds)
+            else:
+                note = "the wait was cancelled"
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {', '.join(running or job_ids)} still running ({note})",
+                details=details,
+            )
+
+        job = _settled()
+        while job is None:
+            if signal is not None and signal.aborted:
+                running = _still_running()
+                return _text(
+                    tool_call_id,
+                    "wait",
+                    f"job {', '.join(running or job_ids)} still running (wait aborted)",
+                    details={"job_id": (running or job_ids)[0], "status": "running"},
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                running = _still_running()
+                return _text(
+                    tool_call_id,
+                    "wait",
+                    f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
+                    details={"job_id": (running or job_ids)[0], "status": "running"},
+                )
+            try:
+                await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
+            except asyncio.CancelledError:
+                # `lop send --now` steers, which makes interruptible_runner cancel
+                # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
+                # the job id and telling it the wait never happened. Reporting the
+                # still-running payload ourselves makes --now and the mailbox path
+                # return the same shape.
+                #
+                # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
+                # and expects the tool to stop; a tool that swallows
+                # CancelledError unconditionally defeats that contract outright
+                # (see the abort/steer split in harness/loop.py). So re-raise when
+                # the signal is aborted, and only absorb the plain steer cancel.
+                if signal is not None and signal.aborted:
+                    raise
+                # A cancel with NO signal at all cannot be a steer: steering rides
+                # interruptible_runner, which always passes one. Absorbing it here
+                # would invent a steering event on a host that has no steering, so
+                # let it propagate as the plain cancellation it is.
+                if signal is None:
+                    raise
+                # Steering is not the only remaining cancel source - a batch
+                # teardown (`GeneratorExit` in _execute_batch's finally) cancels
+                # the task with a live, non-aborted signal too, and the tool
+                # cannot tell the two apart from here: ToolContext deliberately
+                # exposes no steering capability, and adding one just to label a
+                # string would put loop state in a tool for no behavioural gain.
+                # `interrupted_by` is machine-readable and "steering" is the one
+                # value implying a human or peer acted, so report the neutral,
+                # always-true cause instead of guessing. The still-running payload
+                # (the point of this branch) is unchanged either way.
+                return _peer_interrupt("cancelled")
+            # Settle BEFORE peer: when a job settles on the same loop iteration as
+            # a message arrives, the finished result is strictly more valuable than
+            # "a message arrived", and reporting the peer branch would describe a
+            # completed job as running (and, via _still_running() == [], pin the
+            # WRONG job id in details - the exact failure _still_running's
+            # docstring exists to prevent). The message is not lost either way: it
+            # is already parked in the session journal and lands at the next
+            # turn-safe boundary.
+            job = _settled()
+            if job is None and peer is not None and peer.count() > peer_seen:
+                arrivals = {
+                    kind: total - peer_kinds_seen.get(kind, 0)
+                    for kind, total in peer.arrivals().items()
+                    if total > peer_kinds_seen.get(kind, 0)
+                }
+                return _peer_interrupt("inbound", arrivals)
+            if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
+                return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
+        # Handing the result to the model HERE means auto-delivery must not
+        # repeat it when the session next goes idle (see Session._on_job_completed
+        # and AsyncJob.consumed).
+        cast(Any, jobs).mark_consumed(job.id)
+        text, spill_details = _job_summary(job, context)
+        if len(job_ids) > 1:
+            still = [
+                job_id
+                for job_id in job_ids
+                if job_id != job.id
+                and (other := jobs.get(job_id)) is not None
+                and other.status == "running"
+            ]
+            if still:
+                text += f"\n({len(still)} still running: {', '.join(still)})"
+        details = {"job_id": job.id, "status": job.status}
+        if spill_details:
+            details.update(spill_details)
         return _text(
             tool_call_id,
             "wait",
-            f"job {', '.join(running or job_ids)} still running ({note})",
+            text,
             details=details,
         )
 
-    job = _settled()
-    while job is None:
-        if signal is not None and signal.aborted:
-            running = _still_running()
-            return _text(
-                tool_call_id,
-                "wait",
-                f"job {', '.join(running or job_ids)} still running (wait aborted)",
-                details={"job_id": (running or job_ids)[0], "status": "running"},
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            running = _still_running()
-            return _text(
-                tool_call_id,
-                "wait",
-                f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
-                details={"job_id": (running or job_ids)[0], "status": "running"},
-            )
-        try:
-            await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
-        except asyncio.CancelledError:
-            # `lop send --now` steers, which makes interruptible_runner cancel
-            # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
-            # the job id and telling it the wait never happened. Reporting the
-            # still-running payload ourselves makes --now and the mailbox path
-            # return the same shape.
-            #
-            # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
-            # and expects the tool to stop; a tool that swallows
-            # CancelledError unconditionally defeats that contract outright
-            # (see the abort/steer split in harness/loop.py). So re-raise when
-            # the signal is aborted, and only absorb the plain steer cancel.
-            if signal is not None and signal.aborted:
-                raise
-            # A cancel with NO signal at all cannot be a steer: steering rides
-            # interruptible_runner, which always passes one. Absorbing it here
-            # would invent a steering event on a host that has no steering, so
-            # let it propagate as the plain cancellation it is.
-            if signal is None:
-                raise
-            # Steering is not the only remaining cancel source - a batch
-            # teardown (`GeneratorExit` in _execute_batch's finally) cancels
-            # the task with a live, non-aborted signal too, and the tool
-            # cannot tell the two apart from here: ToolContext deliberately
-            # exposes no steering capability, and adding one just to label a
-            # string would put loop state in a tool for no behavioural gain.
-            # `interrupted_by` is machine-readable and "steering" is the one
-            # value implying a human or peer acted, so report the neutral,
-            # always-true cause instead of guessing. The still-running payload
-            # (the point of this branch) is unchanged either way.
-            return _peer_interrupt("cancelled")
-        # Settle BEFORE peer: when a job settles on the same loop iteration as
-        # a message arrives, the finished result is strictly more valuable than
-        # "a message arrived", and reporting the peer branch would describe a
-        # completed job as running (and, via _still_running() == [], pin the
-        # WRONG job id in details - the exact failure _still_running's
-        # docstring exists to prevent). The message is not lost either way: it
-        # is already parked in the session journal and lands at the next
-        # turn-safe boundary.
-        job = _settled()
-        if job is None and peer is not None and peer.count() > peer_seen:
-            arrivals = {
-                kind: total - peer_kinds_seen.get(kind, 0)
-                for kind, total in peer.arrivals().items()
-                if total > peer_kinds_seen.get(kind, 0)
-            }
-            return _peer_interrupt("inbound", arrivals)
-        if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
-            return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
-    # Handing the result to the model HERE means auto-delivery must not
-    # repeat it when the session next goes idle (see Session._on_job_completed
-    # and AsyncJob.consumed).
-    cast(Any, jobs).mark_consumed(job.id)
-    text, spill_details = _job_summary(job, context)
-    if len(job_ids) > 1:
-        still = [
-            job_id
-            for job_id in job_ids
-            if job_id != job.id
-            and (other := jobs.get(job_id)) is not None
-            and other.status == "running"
-        ]
-        if still:
-            text += f"\n({len(still)} still running: {', '.join(still)})"
-    details = {"job_id": job.id, "status": job.status}
-    if spill_details:
-        details.update(spill_details)
-    return _text(
-        tool_call_id,
-        "wait",
-        text,
-        details=details,
-    )
+    try:
+        _note_waiting(len(job_ids))
+        return await _park()
+    finally:
+        # A parked count is meaningful only while this invocation owns the
+        # wait. Clear even if cancellation unwinds the coroutine, a row vanishes,
+        # or a producer/update callback fails: otherwise idle heartbeats would
+        # faithfully republish a wait that no longer exists. Do not intercept
+        # CancelledError here; _park preserves the existing abort/steer split.
+        _note_waiting(0)
 
 
 async def _await_any_settled(
@@ -29523,6 +29895,13 @@ async def _execute_hub_parent(
                 # Each success carries the NEW job id it was resumed as; the
                 # transcript-replay guidance is stated once in the footer
                 # rather than repeated on every line.
+                # The resume follows the LAUNCH model rule, so a role that pins
+                # the inherit sentinel ignores a ``model=`` passed here exactly
+                # as it ignores one passed to ``task``. The task path says so on
+                # its receipt; a resume that stayed silent would be the one
+                # surface where a dropped pick reads as honoured, and a resume
+                # is a launch that costs money.
+                source = str(getattr(comms.job(new_job_id), "model_selection_source", "") or "")
                 lines.append(
                     _resumed_line(
                         comms,
@@ -29532,11 +29911,9 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + (
-                        " [selection: "
-                        f"{getattr(comms.job(new_job_id), 'model_selection_source', '')}]"
-                        if getattr(comms.job(new_job_id), "model_selection_source", "")
-                        else ""
+                    + (f" [selection: {source}]" if source else "")
+                    + _not_applied_note(
+                        {"model_selection_source": source, "model_pick": params.model}
                     )
                 )
             else:
@@ -29743,9 +30120,26 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
 class AskParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    questions: list[AskQuestion] = Field(
+    # OPTIONAL since #2520, because the same tool now has two sources for the
+    # question: the model's own (``questions``) and ANOTHER SESSION'S pending ask
+    # (``relay``). The validator below holds the line at exactly one — a call
+    # that carried both would have to decide which list the receipt describes,
+    # and a call that carried neither asks nothing.
+    questions: list[AskQuestion] | None = Field(
+        default=None,
         min_length=1,
         description="The questions to ask, put to the user one screen at a time.",
+    )
+
+    # `relay` (#2520): re-raise another session's pending ask in THIS session's
+    # queue by reference. A pointer, not a copy — one answer settles both — so
+    # the ref must name the ask AND the session that owns it.
+    relay: str | None = Field(
+        default=None,
+        description=(
+            "Relay another session's pending ask instead of asking your own: "
+            "'<session_id>/<ask_id>'. One answer settles both."
+        ),
     )
 
     # The `timeout` field ships with the queued-ask engine (design
@@ -29768,6 +30162,23 @@ class AskParams(BaseModel):
             "(24 h). Out-of-range values are rejected, never clamped."
         ),
     )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "AskParams":
+        """EXACTLY ONE of `questions` / `relay` (#2520).
+
+        Enforced as a MODEL validator rather than two `required` fields because
+        the two shapes are alternatives, and a JSON schema that expressed that
+        as `oneOf` would cost the wire more than the sentence does. The message
+        is what the model reads when it gets it wrong, so it names both halves
+        and the remedy.
+        """
+        if (self.questions is not None) == (self.relay is not None):
+            raise ValueError(
+                "exactly one of `questions` or `relay` must be given: ask your own "
+                "questions, or relay another session's pending ask by ref, not both."
+            )
+        return self
 
 
 #: What the tool reports when the user closed the picker without choosing.
@@ -30023,6 +30434,8 @@ _ASK_DESCRIPTION_QUEUED = (
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
     "(floor 2 min); on a timeout notice take your own recommendation and say what "
     "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "To re-raise another session's pending ask instead, pass that one ask's "
+    "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
@@ -30178,6 +30591,35 @@ async def execute_ask(
     if bounds_error is not None:
         return _error(tool_call_id, "ask", bounds_error)
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    if params.relay is not None:
+        # A RELAY NEVER ENTERS THE BLOCKING ARM (#2520). A relay is a pointer at
+        # a row in another session's LOG; with no queue there is no log to point
+        # at and no reconciliation to derive the status, so the honest answer is
+        # the refusal below rather than a `ask_user` call that would re-ask the
+        # origin's question as this session's own (the exact copy #2520 exists to
+        # remove). Bounds were validated above, so a bad `timeout` is still a
+        # bounds error on both arms.
+        from local_operator.asks import render as _ask_render
+
+        if not callable(enqueue):
+            return _error(tool_call_id, "ask", _ask_render.RELAY_NEEDS_QUEUE)
+        relayed: Any = enqueue([], params.timeout, tool_call_id=tool_call_id, relay=params.relay)
+        if not relayed.get("ok"):
+            return _error(
+                tool_call_id,
+                "ask",
+                str(relayed.get("error") or _ask_render.RELAY_ORIGIN_UNKNOWN),
+            )
+        return _text(
+            tool_call_id,
+            "ask",
+            str(relayed.get("text") or ""),
+            details=dict(relayed.get("details") or {}),
+        )
+    # The validator guarantees `questions` here (exactly one of the two fields),
+    # but the narrowing is not in the type: one local list serves every use below
+    # so the blocking arm and the queued arm cannot disagree about what was asked.
+    questions = list(params.questions or ())
     if callable(enqueue):
         # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
         # the unchanged enqueue: one awaited clearance check, whose ONLY
@@ -30200,7 +30642,7 @@ async def execute_ask(
                 # an un-cast ``await`` on that narrowing is a pyright error
                 # about a value whose real shape is an awaited mapping-or-None.
                 verdict: Any = await cast("Any", gate)(
-                    params.questions, params.timeout, tool_call_id=tool_call_id
+                    questions, params.timeout, tool_call_id=tool_call_id
                 )
             except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
                 verdict = None
@@ -30220,7 +30662,7 @@ async def execute_ask(
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
-        outcome: Any = enqueue(params.questions, params.timeout, tool_call_id=tool_call_id)
+        outcome: Any = enqueue(questions, params.timeout, tool_call_id=tool_call_id)
         if not outcome.get("ok"):
             return _error(
                 tool_call_id,
@@ -30237,7 +30679,7 @@ async def execute_ask(
             str(outcome.get("text") or ""),
             details=dict(outcome.get("details") or {}),
         )
-    answers = await ask_user(params.questions)
+    answers = await ask_user(questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):
         # One outcome, whether the host answered None (escaped) or handed back
         # a mapping with nothing in it (confirmed an empty multi-select): the
@@ -30251,17 +30693,17 @@ async def execute_ask(
         # answer — a decline — so the batch reports that instead (UX round 1,
         # U3). A partially answered mixed batch keeps the normal path, where a
         # declined secret is already reported as ASK_SECRET_NOT_PROVIDED.
-        if any(question.secret for question in params.questions):
+        if any(question.secret for question in questions):
             return _text(tool_call_id, "ask", ASK_SECRET_UNANSWERED_TEXT)
         return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
     # Secret answers are stored by the host and reported as the KEY NAME
     # only. The raw value must never ride the tool result: that text is
     # persisted to the transcript and replayed to the provider.
-    reported = _report_secret_answers(params.questions, answers, context)
+    reported = _report_secret_answers(questions, answers, context)
     return _text(
         tool_call_id,
         "ask",
-        _ask_report(params.questions, reported),
+        _ask_report(questions, reported),
         details={"answers": {key: list(value) for key, value in reported.items()}},
     )
 

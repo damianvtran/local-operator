@@ -687,3 +687,28 @@ async def test_a_stale_job_is_refused_through_the_route_without_touching_the_new
         release.set()
         await handle.dispose()
         await pool.close()
+
+
+def test_legacy_table_document_route_preserves_formatted_cells(tmp_path, monkeypatch) -> None:
+    """Stored table spellings survive the actual serving path, not just JSON splitting."""
+    import json
+    import re
+
+    from local_operator.supplements.document import assemble_stored_component
+
+    data = {"d1": {"columns": ["price", "share"], "rows": [["$0.15", "45%"]]}}
+    blob = "<data>" + json.dumps(data) + '</data><div id="c"></div><script>'
+    blob += 'LO.table(document.getElementById("c"),"d1")</script>'
+    digest = _store(tmp_path, blob)
+    _session(tmp_path)
+    client, headers = _desktop_client(tmp_path, monkeypatch)
+    with client:
+        response = client.get(
+            f"/v1/desktop/sessions/{SESSION}/supplements/{digest}/document", headers=headers
+        )
+    assert response.status_code == 200
+    html = response.json()["html"]
+    assert html == assemble_stored_component(blob)
+    match = re.search(r'id="lo-data">(.*?)</script>', html)
+    assert match is not None
+    assert json.loads(match[1]) == data

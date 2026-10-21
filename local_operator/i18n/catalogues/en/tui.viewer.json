@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "file viewer",
+  "tui.viewer.description": "View a local text file",
+  "tui.viewer.usage": "Usage: /view <path>",
+  "tui.viewer.loading": "reading…",
+  "tui.viewer.legend": "↑↓←→ · PgUp/PgDn · Home/End\nw wrap · r reload · y copy path · o open externally · esc close",
+  "tui.viewer.truncated": "Preview truncated — limit: 1 MiB / 20,000 lines",
+  "tui.viewer.unreadable": "Cannot read this file — missing, unreadable, or outside permitted roots",
+  "tui.viewer.unsupported": "This file type has no inline preview — open it externally",
+  "tui.viewer.binary": "Cannot preview a binary file",
+  "tui.viewer.changed": "This file changed since it was listed — list it again before opening",
+  "tui.viewer.copied": "Path copied",
+  "tui.viewer.copy_failed": "Clipboard unavailable — path: {path}",
+  "tui.viewer.open_failed": "Could not open this file externally",
+  "tui.viewer.kind_code": "code",
+  "tui.viewer.kind_markdown": "markdown",
+  "tui.viewer.kind_text": "text",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "Wrapping on",
+  "tui.viewer.wrap_off": "Wrapping off"
+}

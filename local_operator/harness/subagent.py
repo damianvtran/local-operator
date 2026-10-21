@@ -373,6 +373,18 @@ class MemberModelResolution:
     #: caller (session naming) is silent about the first: a session with no
     #: ``subagents.models`` at all names itself on the parent's model by design.
     unavailable_quiet: bool = False
+    #: Whether the ROLE's own pin is the inherit sentinel -- "always run on the
+    #: launching session's model", stated absolutely.
+    #:
+    #: This is a DIFFERENT kind of statement from an ordinary tier pin, and it
+    #: is kept as its own field rather than folded into ``tier`` because the two
+    #: are resolved by different rules: a tier pin is the role's DEFAULT and a
+    #: launch may override it, while the sentinel is the role's decision and
+    #: nothing a delegating model can pass may move it. Folding them together
+    #: would make the resolver's own output unable to say which kind of pin it
+    #: honoured -- and the launch receipt has to name that difference, because
+    #: "your tier was ignored" is only honest when something ignored it.
+    role_pins_inherit: bool = False
 
     @property
     def decided_by_team(self) -> bool:
@@ -404,6 +416,30 @@ def resolve_member_model(
     * **effort** — the roster slot's ``effort`` → the chosen tier's
       ``{model, effort}`` mapping → the model's own default.
 
+    **One exception, and it is absolute: the role's own pin may BE the inherit
+    sentinel** (``effort: default`` on a role row or in a packaged seed), which
+    means "this role always runs on the launching session's model". When it is,
+    the role's decision wins outright — over the caller's ``launch_tier`` AND
+    over a roster slot's ``tier`` — and the resolution reports
+    ``role_pins_inherit``.
+
+    Why it outranks the ROSTER slot too, and not only the launch argument: every
+    layer it outranks is reachable by a DELEGATING MODEL. The ``task`` tool's
+    ``effort``/``model`` arguments are the launch tier and the explicit pick,
+    and the ``team`` tool lets a model set a roster slot's ``tier`` outright
+    (``subagents.model_choice=model``). A pin that a model could move by any of
+    those routes would not be a pin at all: the role would run on whatever the
+    delegating model last asked for, which is the failure this sentinel exists
+    to close (a coder that silently ran on a tier its parent picked instead of
+    the model the parent itself runs on). What the sentinel does NOT outrank is
+    the operator changing the role's own pin — the role row, the packaged seed
+    and the operator's registry edit are the only ways to state or withdraw it.
+
+    The ordinary tier pin keeps its documented meaning: a role's ``effort: hi``
+    is the role's DEFAULT and a launch tier may still override it. Only the
+    sentinel is absolute, because only the sentinel claims the session's model
+    rather than naming a tier.
+
     ``slot_role`` is the roster SLOT's name when it differs from the role the
     child runs as: a ``team:pod`` launch runs as pod's manager, while the
     override that moved it is stored on the ``team:pod`` slot of the PARENT's
@@ -421,13 +457,30 @@ def resolve_member_model(
     member_tier = getattr(slot, "tier", None)
     member_effort = getattr(slot, "effort", None)
 
-    if launch_tier:
-        tier: str | None = str(launch_tier).strip().lower()
-        tier_source: Literal["launch", "team", "row", "none"] = "launch"
+    # The role's OWN pin is read FIRST, and ALWAYS -- not only when nothing
+    # else could have chosen a tier. The reason is the sentinel: a role may
+    # state "always run on the launching session's model", and that statement
+    # has to be known before a launch tier or a roster tier is allowed to
+    # decide, or the absolute pin would lose to exactly the layers it exists to
+    # outrank. The read is the same one this resolver has always made, on the
+    # same freshness (the registry is re-read per launch, so a pin written
+    # between two spawns is obeyed by the next one) -- what changed is that a
+    # launch which NAMES a tier now pays for it too.
+    row_tier = _row_effort_tier(role, agent_registry)
+    role_pins_inherit = is_inherit_tier_sentinel(row_tier)
+
+    if role_pins_inherit:
+        # The role decides, and the decision is "the launching session's
+        # model": no tier is named, so the tier lookup below is skipped
+        # entirely and the sentinel is carried straight through to the launch.
+        tier: str | None = None
+        tier_source: Literal["launch", "team", "row", "none"] = "row"
+    elif launch_tier:
+        tier = str(launch_tier).strip().lower()
+        tier_source = "launch"
     elif member_tier:
         tier, tier_source = str(member_tier), "team"
     else:
-        row_tier = _row_effort_tier(role, agent_registry)
         tier, tier_source = (row_tier, "row") if row_tier else (None, "none")
 
     selector: Any = None
@@ -444,7 +497,13 @@ def resolve_member_model(
             return str(tier_level), "tier"
         return None, "model_default"
 
-    if tier is not None:
+    if role_pins_inherit:
+        # The sentinel IS the selector: the launch resolves it to the
+        # launching session's own model through the existing sentinel path
+        # (``is_inherit_tier_sentinel``), so there is no second way of saying
+        # "the session's model" here.
+        selector = INHERIT_TIER_SENTINEL
+    elif tier is not None:
         try:
             targets = read_effort_tier_targets() if tier_targets is None else tier_targets
         except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
@@ -491,6 +550,7 @@ def resolve_member_model(
         effort_source=effort_source,
         unavailable=unavailable,
         unavailable_quiet=unavailable_quiet,
+        role_pins_inherit=role_pins_inherit,
     )
 
 
@@ -501,6 +561,14 @@ def _row_effort_tier(role: str, agent_registry: Any) -> str | None:
     the reason this moved behind one function: the resolver has to know the row
     tier before it can decide whether a roster override came FIRST, and a second
     copy of the read is how the two would come apart.
+
+    **The value it returns may BE the inherit sentinel** (``default``), which
+    is not a tier name at all: it is the role saying "always run on the
+    launching session's model". The caller must recognise it before looking it
+    up in ``subagents.models`` — a tier named ``default`` is not configured on
+    any machine, so reading it as one would turn the role's absolute pin into a
+    launch failure. :func:`is_inherit_tier_sentinel` is that recognition, and
+    the resolver above is its only caller.
 
     It RAISES when the registry cannot be read, and that is deliberate rather
     than sloppy: "the registry could not be read" and "no role of that name" are

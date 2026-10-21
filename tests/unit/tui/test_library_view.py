@@ -16,6 +16,7 @@ only pins that the frame exists and that the painted text is the payload's.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -778,6 +779,71 @@ async def test_every_state_has_a_painted_sentence(calls) -> None:
         await pilot.press("end")
         await pilot.pause()
         assert "open externally" in _text(view._detail_canvas)
+
+
+@pytest.mark.asyncio
+async def test_a_host_preload_is_not_overwritten_by_the_pages_own_load(calls, monkeypatch) -> None:
+    """A payload seeded through ``load()`` outranks the page's background load.
+
+    THE FAILURE THIS REPRODUCES. ``on_mount``/``start`` begins a real
+    ``_load_worker``; ``load()`` is the host-preload seam and paints the SAME
+    payload the caller just handed it. When the worker answered AFTER the preload,
+    it called ``_apply_payload`` and replaced the rows with the service's answer —
+    usually an empty catalog on a test's fresh config root. That is exactly the
+    intermittent ``condition did not settle`` at ``space``: the selected row was
+    gone, so the key did nothing (runs 39375160299 and 39383034418, two heads, both
+    shard 3).
+
+    DETERMINISTIC BY CONSTRUCTION: the test's own worker is held on an Event until
+    the preload has landed, so the ordering that used to be a race is fixed here.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    real_fetch = LibraryView._fetch_blocking
+
+    def held_fetch(self, query):  # noqa: ANN001 — the worker's own seam
+        entered.set()
+        assert release.wait(10), "the test never released the held worker"
+        return _payload([])
+
+    monkeypatch.setattr(LibraryView, "_fetch_blocking", held_fetch)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _boot(pilot, app)
+            view = await _open(pilot, app)
+            # The page's own load is now in flight and held in its worker thread.
+            await _settle(pilot, entered.is_set)
+            view.load(_payload())
+            release.set()
+            # Give the stale worker every chance to overwrite the preload.
+            for _ in range(100):
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            assert [row["name"] for row in view.rows()][0] == "chart.png", (
+                "the page's background load replaced a host preload: " f"rows={view.rows()!r}"
+            )
+    finally:
+        release.set()
+        monkeypatch.setattr(LibraryView, "_fetch_blocking", real_fetch)
+
+
+@pytest.mark.asyncio
+async def test_a_host_preload_cancels_a_pending_building_retry(calls) -> None:
+    """A preload outranks the page's own deferred retry, not only its worker.
+
+    A ``state: building`` answer schedules ``_reload`` a moment later. If the host
+    preloads before that timer fires, the retry would replace the supplied payload
+    with the service's answer — the same failure as the in-flight worker, one
+    message later (review round 1, F-3). ``load()`` stops the timer.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view._building_timer = view.set_timer(10.0, lambda: None)
+        view.load(_payload())
+        assert view._building_timer is None, "a pending building retry survived a preload"
 
 
 @pytest.mark.asyncio

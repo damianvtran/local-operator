@@ -5,6 +5,9 @@ The UI lane's HTTP surfaces over :mod:`local_operator.team_bridge`:
 - ``GET  /v1/desktop/team-bridge/status``    — the eligibility/state read.
 - ``GET  /v1/desktop/team-bridge/settings``  — endpoint, consent record, policies.
 - ``PUT  /v1/desktop/team-bridge/settings``  — state changes (the consented write).
+- ``GET  /v1/desktop/team-bridge/directory`` — the organization's member rows,
+  the frozen ``{members:[{account_id,display_label,role,bridge_enabled,
+  bridge_state}]}`` shape, for the surface that chooses who an agent may reach.
 - ``GET  /v1/desktop/team-bridge/allowlist`` — own policy entries + honest defaults.
 - ``PUT  /v1/desktop/team-bridge/allowlist`` — the bounded replace-set.
 - ``GET  /v1/desktop/team-bridge/inbox``     — one page of agent messages, METADATA
@@ -66,6 +69,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.team_bridge.types import CONVERSATION_ID_PATTERN
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -76,10 +80,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
 
 router = APIRouter(tags=["Desktop agent messages"], dependencies=[Depends(require_desktop)])
 
-#: The server mints conversation ids as ``bcv_`` + hex; validating the grammar
-#: BEFORE interpolating an id into an upstream path is the pair lane's rule
-#: (review S-RSA-5) and applies unchanged here.
-_CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
+#: The shared minted grammar (``team_bridge.types.CONVERSATION_ID_PATTERN``):
+#: validating it BEFORE interpolating an id into an upstream path is the pair
+#: lane's rule (review S-RSA-5) and applies unchanged here. Imported rather
+#: than respelled so the agent tool and this route cannot drift apart.
+_CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: The conversation domain's other two interpolated path/query values. Both are
 #: opaque server-minted strings; this route family only has to prove they
 #: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
@@ -648,6 +653,49 @@ async def put_settings(
     return reply(payload)
 
 
+@router.get("/v1/desktop/team-bridge/directory", response_model=CRUDResponse[Any])
+async def get_directory(
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One organization's member directory (§6.1), passed through untouched.
+
+    The payload is the frozen desktop shape
+    ``{members:[{account_id, display_label, role, bridge_enabled,
+    bridge_state}]}``; this route adds nothing and drops nothing, so the pair
+    backend owns the member fields and a later additive field arrives without
+    a route change (§6.6).
+
+    ``tenant_id`` is validated BEFORE any I/O against the SAME grammar the
+    other tenant-scoped reads use, and a malformed one answers the closed
+    read-table's ``invalid_request`` (422) rather than FastAPI's echoing
+    validation body: this family never puts a caller-supplied value back on
+    the wire (S-RSA-7). Upstream refusals keep their §6.5 status and code
+    verbatim through ``_raise_bridge``, exactly like the settings read.
+    """
+
+    from local_operator.team_bridge.client import (
+        BridgeRefusal,
+        BridgeSignInRequired,
+        TeamBridgeClient,
+    )
+
+    # Imported here, not at module scope: read_context reaches the client stack,
+    # which must never ride ``lop serve``'s boot path (module docstring).
+    from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
+
+    if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+        _raise_read("invalid_request")
+    client = TeamBridgeClient(config_manager.config_dir)
+    try:
+        payload = await client.directory(tenant_id)
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    return reply(payload)
+
+
 @router.get("/v1/desktop/team-bridge/allowlist", response_model=CRUDResponse[Any])
 async def get_allowlist(
     tenant_id: str | None = Query(default=None),
@@ -1012,15 +1060,27 @@ class ConversationSendIn(_Strict):
     agent_label: str | None = Field(default=None, max_length=64)
 
 
+class ConversationJoinIn(_Strict):
+    #: The organization the join targets. Required for a caller with more than one
+    #: eligible membership; the server answers ``invalid_request`` without it.
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+
 class ConversationReadIn(_Strict):
     tenant_id: str | None = Field(default=None, max_length=128)
     seq: int | None = Field(default=None, ge=0)
     muted: bool | None = None
+    #: The per-member notification policy (agent-server #148). `muted` is the
+    #: legacy spelling of the same fact; the server refuses both at once, so the
+    #: route refuses the pair here rather than forwarding an ambiguous write.
+    notify: Literal["all", "mention", "mute"] | None = None
 
     @model_validator(mode="after")
     def _something_to_do(self) -> "ConversationReadIn":
-        if self.seq is None and self.muted is None:
-            raise ValueError("a read write needs seq, muted, or both")
+        if self.seq is None and self.muted is None and self.notify is None:
+            raise ValueError("a read write needs seq, muted, or notify")
+        if self.muted is not None and self.notify is not None:
+            raise ValueError("muted and notify cannot both be set")
         return self
 
 
@@ -1302,6 +1362,7 @@ async def conversation_consent(
 async def conversation_join(
     conversation_id: str,
     request: Request,
+    body: ConversationJoinIn | None = None,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Accept an invitation, or self-join a tenant-visible channel."""
@@ -1309,7 +1370,11 @@ async def conversation_join(
     _refuse_write_scope(request)
 
     client = _conversation_client(config_manager)
-    return reply(await _conversation_reply(client.conversation_join(conversation_id)))
+    return reply(
+        await _conversation_reply(
+            client.conversation_join(conversation_id, tenant_id=body.tenant_id if body else None)
+        )
+    )
 
 
 @router.post(
@@ -1496,7 +1561,11 @@ async def conversation_read(
     return reply(
         await _conversation_reply(
             client.conversation_read(
-                conversation_id, seq=body.seq, muted=body.muted, tenant_id=body.tenant_id
+                conversation_id,
+                seq=body.seq,
+                muted=body.muted,
+                notify=body.notify,
+                tenant_id=body.tenant_id,
             )
         )
     )

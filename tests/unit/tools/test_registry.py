@@ -293,20 +293,23 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     Bridge CoS tool, createIf-gated on the session's bridge runtime) appended
     after it, and the sound-generation wave's audio pair
     (``generate_voiceover``/``generate_sound_effect``, each createIf-gated on
-    a per-direction credential) is the newest append and now ends both
-    tables."""
-    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_voiceover", "generate_sound_effect"]
-    assert list(TOOL_BUILDERS)[-2:] == ["generate_voiceover", "generate_sound_effect"]
-    assert DEFAULT_TOOL_NAMES[-3] == "bridge"
-    assert list(TOOL_BUILDERS)[-3] == "bridge"
-    assert DEFAULT_TOOL_NAMES[-4] == "setting"
-    assert list(TOOL_BUILDERS)[-4] == "setting"
-    assert DEFAULT_TOOL_NAMES[-5] == "video_status"
-    assert list(TOOL_BUILDERS)[-5] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-6] == "generate_video"
-    assert list(TOOL_BUILDERS)[-6] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-7] == "no_reply"
-    assert list(TOOL_BUILDERS)[-7] == "no_reply"
+    a per-direction credential) appended after that — and V2-4's ``tags`` (the
+    session-tag category tool, unconditional because the store sits beside
+    every config root) is the newest append and now ends both tables."""
+    assert DEFAULT_TOOL_NAMES[-1] == "tags"
+    assert list(TOOL_BUILDERS)[-1] == "tags"
+    assert DEFAULT_TOOL_NAMES[-3:-1] == ["generate_voiceover", "generate_sound_effect"]
+    assert list(TOOL_BUILDERS)[-3:-1] == ["generate_voiceover", "generate_sound_effect"]
+    assert DEFAULT_TOOL_NAMES[-4] == "bridge"
+    assert list(TOOL_BUILDERS)[-4] == "bridge"
+    assert DEFAULT_TOOL_NAMES[-5] == "setting"
+    assert list(TOOL_BUILDERS)[-5] == "setting"
+    assert DEFAULT_TOOL_NAMES[-6] == "video_status"
+    assert list(TOOL_BUILDERS)[-6] == "video_status"
+    assert DEFAULT_TOOL_NAMES[-7] == "generate_video"
+    assert list(TOOL_BUILDERS)[-7] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-8] == "no_reply"
+    assert list(TOOL_BUILDERS)[-8] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:

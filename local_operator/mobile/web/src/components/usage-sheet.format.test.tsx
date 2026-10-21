@@ -142,7 +142,9 @@ it("formats reset and snapshot dates consistently in the catalogue locale", asyn
 	select("fr", true);
 	const stamp = Date.UTC(2026, 0, 2, 15, 4);
 	load([{ ...base, resets_at_ms: stamp }], stamp);
-	// TZ=UTC is set by the isolated command, never inferred from the host.
+	// TZ=UTC is pinned by `test.env` in vite.config.ts, never inferred from the
+	// host: without that pin these assertions describe the contributor's clock
+	// (2 of 13 fail on a UTC-5 machine, 13/13 on a UTC one).
 	expect(await screen.findByText(/Resets at 2 janv\. 2026, 15:04/)).toBeTruthy();
 	expect(screen.getByText(/As of 2 janv\. 2026, 15:04\./)).toBeTruthy();
 	expect(document.body.textContent).not.toContain("2026-01-02T15:04");

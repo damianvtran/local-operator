@@ -56,7 +56,8 @@ class PeerRow(BaseModel):
     last_seen_at: float | None = None
     #: Counted from the SAME cached row set ``GET /v1/desktop/sessions?include_peers``
     #: answers from, so the heading and this row cannot disagree on one screen.
-    session_count: int
+    # Unreachable devices cannot claim a measured empty catalogue.
+    session_count: int | None
     #: ALWAYS ``None`` in this build — see ``utils.desktop_mesh.RTT_MS``.
     rtt_ms: float | None = None
     #: The peer's build stamp as the relay read it from the handshake
