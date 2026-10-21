@@ -5,11 +5,12 @@ agent member whose endpoint consent allows it. That row carries refs only:
 ``conversation_id``, ``message_id``, ``conversation_seq`` and the member's
 ``mention`` bit. This module turns ONE such signal into a card:
 
-1. **Metadata only.** The feed plus ONE bounded history page (``after_seq``
-   from the member's last read, never the pair inbox) gives the channel name,
-   the sender's display label and dynamic kind, the mention state, the message
-   id and its conversation seq. The card carries those fields and **never the
-   body**; the body is never persisted anywhere.
+1. **Metadata only.** The feed subject carries the server-resolved display
+   name, sender label and dynamic kind, so the card needs neither the
+   person-gated conversation view nor a human read cursor. A legacy row
+   without those fields falls back to a bounded target window; the pair inbox
+   is never consulted. The card carries metadata and **never the body**; the
+   body is never persisted anywhere.
 2. **Screen, then admit.** Before any wake, the body is fetched through the
    endpoint-addressed classification endpoint, hashed against the server's
    binding hash, and run through the SAME H3 screening pipeline the pair lane
@@ -38,14 +39,11 @@ from typing import Any, Mapping
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
+from ..client import BridgeRefusal
 from ..types import ConversationFeedRef
 from .wake import CLAIM_TTL_S, _producer_fence, deliver_wake, screen_item
 
 logger = logging.getLogger(__name__)
-
-#: One bounded catch-up page. The server caps a conversation page at 100; 50
-#: keeps a single delivery bounded while still covering an ordinary gap.
-HISTORY_PAGE_LIMIT = 50
 
 #: The served guidance version the card names. Triage rules (inform /
 #: course-correct / ask, no new work, scope) live in that served text; the card
@@ -78,9 +76,10 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     """
 
     mention_line = "mention: yes" if metadata.mention else "mention: no"
+    label = _one_line(metadata.conversation_label) or "conversation"
+    sender = _one_line(metadata.sender_label) or "member"
     lines = [
-        f"Channel message · {metadata.conversation_label} · "
-        f"from {metadata.sender_label} ({metadata.sender_kind}, same tenant)",
+        f"Channel message · {label} · " f"from {sender} ({metadata.sender_kind}, same tenant)",
         # ONE home for the untrusted clause: the shipped constant, verbatim.
         BRIDGE_UNTRUSTED_CLAUSE,
         "",
@@ -90,6 +89,18 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         f"guidance: {GUIDANCE_VERSION}",
     ]
     return "\n".join(lines)
+
+
+def _one_line(value: Any, *, limit: int = 200) -> str:
+    """Collapse every whitespace run (including CR/LF) and bound the result.
+
+    A conversation name or sender label is server-resolved but not newline-free:
+    allowing one through would inject lines ahead of the untrusted clause.
+    """
+
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
 
 
 def _conversation_label(view: Mapping[str, Any]) -> str:
@@ -165,6 +176,101 @@ def _int_field(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+async def _target_message(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+) -> Mapping[str, Any] | None:
+    """The message at THIS endpoint's cursor, fetched newest-first and bounded.
+
+    ``before_seq = seq + 1`` makes the target the FIRST row when it exists: the
+    server orders newest-first and returns ``limit`` rows, so the target cannot
+    be pushed out by newer messages (the old ``after_seq`` window could be).
+    The cursor is the feed's own ``conversation_seq`` for this endpoint, never
+    the person-gated human read row.
+    """
+
+    page = await client.conversation_messages(
+        ref.conversation_id,
+        tenant_id=owner.tenant_id,
+        limit=1,
+        before_seq=ref.conversation_seq + 1,
+        endpoint_id=owner.endpoint_id,
+        access=access,
+    )
+    if not isinstance(page, Mapping) or not isinstance(page.get("messages"), list):
+        return None
+    message = _find_message(page, ref)
+    if message is None:
+        return None
+    if _int_field(message.get("seq")) != ref.conversation_seq:
+        return None
+    return message
+
+
+async def _body_from_history(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+) -> tuple[str, str] | None:
+    """Fallback for a server without the classification route (or a 404 route).
+
+    Returns the screened bytes ONLY from the target window; an absent target, a
+    null body (unadmitted) or a missing hash is ``None`` and the caller keeps
+    the hold. It is never a reason to call the message gone.
+    """
+
+    message = await _target_message(client, ref, owner, access)
+    if message is None:
+        return None
+    body = message.get("body")
+    body_hash = message.get("body_hash")
+    if not isinstance(body, str) or not isinstance(body_hash, str):
+        return None
+    return body, body_hash
+
+
+async def _fetch_body(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+) -> tuple[str, str] | None:
+    """The classification fetch, endpoint-addressed, with a legacy fallback.
+
+    The primary read is ``GET .../messages/{message_id}/body`` — it addresses
+    the message directly, so no history window can hide the target. History is
+    consulted ONLY when that route is unavailable (an older server answering
+    404/405); a transport/refusal of any other kind propagates to the handler's
+    bounded hold.
+    """
+
+    try:
+        fetched = await client.conversation_body(
+            ref.conversation_id,
+            ref.message_id,
+            tenant_id=owner.tenant_id,
+            endpoint_id=owner.endpoint_id,
+            access=access,
+        )
+    except BridgeRefusal as failure:
+        if failure.http_status in (404, 405) or failure.code in (
+            "not_found",
+            "method_not_allowed",
+        ):
+            return await _body_from_history(client, ref, owner, access)
+        raise
+    if not isinstance(fetched, Mapping) or fetched.get("message_id") != ref.message_id:
+        return None
+    body = fetched.get("body")
+    body_hash = fetched.get("body_hash")
+    if not isinstance(body, str) or not isinstance(body_hash, str):
+        return None
+    return body, body_hash
 
 
 async def _wire_for(owner: Any, config_dir: Path, auth_store: Any) -> Any:
@@ -260,83 +366,89 @@ async def handle_conversation_available(
             return {"action": "hold", "message_id": message_id, "code": fence_code}
 
         client = wire if wire is not None else await _wire_for(owner, config_dir, auth_store)
-        view = await client.conversation(
-            ref.conversation_id, tenant_id=owner.tenant_id, access=access
-        )
-        if not isinstance(view, Mapping) or view.get("id") != ref.conversation_id:
-            return {"action": "hold", "message_id": message_id, "code": "conversation_malformed"}
-        last_read_seq = _int_field(view.get("last_read_seq", 0))
-        if last_read_seq is None:
-            return {"action": "hold", "message_id": message_id, "code": "conversation_malformed"}
+        # GAP CURSOR: this endpoint's own cursor is the feed row's
+        # ``conversation_seq``. The person-gated view's ``last_read_seq`` is a
+        # HUMAN cursor and is never read here; the body route addresses the
+        # message by id, so a gap cannot hide it.
+        if ref.has_card_metadata():
+            # The NORMAL path for a conversation delivery. The feed carries the
+            # server-resolved display provenance, so the person-gated
+            # conversation view is never called: an account that owns an active
+            # agent member but has not joined as a human can still wake.
+            metadata = ConversationCardMetadata(
+                conversation_label=ref.conversation_name or "conversation",
+                sender_label=ref.sender_label or "",
+                sender_kind=ref.sender_kind or "",
+                mention=ref.mention,
+                message_id=message_id,
+                conversation_seq=ref.conversation_seq,
+            )
+            sender: Mapping[str, Any] = {
+                "account_id": "",
+                "display_label": ref.sender_label,
+            }
+        else:
+            # LEGACY/pair-shaped row (no card metadata): keep the old fallback
+            # for a server that has not grown the additive fields. This path
+            # may legitimately refuse for an agent-only membership; it is not
+            # the delivery path for the new lane.
+            try:
+                view = await client.conversation(
+                    ref.conversation_id, tenant_id=owner.tenant_id, access=access
+                )
+            except BridgeRefusal as failure:
+                return {
+                    "action": "hold",
+                    "message_id": message_id,
+                    "code": f"conversation_view_refused:{failure.code}",
+                }
+            if not isinstance(view, Mapping) or view.get("id") != ref.conversation_id:
+                return {
+                    "action": "hold",
+                    "message_id": message_id,
+                    "code": "conversation_malformed",
+                }
+            message = await _target_message(client, ref, owner, access)
+            if message is None:
+                # Absent from its own target window: keep the hold, never
+                # declare it gone (a newer-first page can be wrong; this one
+                # cannot hide the target behind later messages, but a
+                # transient read still must retry).
+                return {"action": "hold", "message_id": message_id, "code": "history_missing"}
+            raw_sender = message.get("sender")
+            if not isinstance(raw_sender, Mapping):
+                return {"action": "hold", "message_id": message_id, "code": "sender_missing"}
+            sender = dict(raw_sender)
+            sender_label = sender.get("display_label")
+            sender_kind = sender.get("kind")
+            sender_account = sender.get("account_id")
+            if (
+                not isinstance(sender_label, str)
+                or not sender_label.strip()
+                or not isinstance(sender_kind, str)
+                or sender_kind not in _SENDER_KINDS
+                or not isinstance(sender_account, str)
+                or not sender_account
+            ):
+                # A card cannot render provenance it cannot verify; a hardcoded
+                # kind or an invented label is worse than a retryable hold.
+                return {"action": "hold", "message_id": message_id, "code": "sender_malformed"}
+            metadata = ConversationCardMetadata(
+                conversation_label=_conversation_label(view),
+                sender_label=sender_label,
+                sender_kind=sender_kind,
+                mention=ref.mention,
+                message_id=message_id,
+                conversation_seq=ref.conversation_seq,
+            )
 
-        # ONE bounded page with ``after_seq``. Starting at ``seq - 1``
-        # guarantees the target itself is in the page even when the member's
-        # gap is larger than the page bound; for a one-message gap that is
-        # exactly ``last_read_seq``. The pair inbox is never consulted for
-        # conversation history.
-        after_seq = max(last_read_seq, ref.conversation_seq - 1)
-        page = await client.conversation_messages(
-            ref.conversation_id,
-            tenant_id=owner.tenant_id,
-            limit=HISTORY_PAGE_LIMIT,
-            after_seq=after_seq,
-            endpoint_id=owner.endpoint_id,
-            access=access,
-        )
-        if not isinstance(page, Mapping):
-            return {"action": "hold", "message_id": message_id, "code": "history_malformed"}
-        if not isinstance(page.get("messages"), list):
-            return {"action": "hold", "message_id": message_id, "code": "history_malformed"}
-        message = _find_message(page, ref)
-        if message is None:
-            # A signal for a message the history no longer carries (deleted or
-            # never visible to this endpoint). Nothing to card; do not guess,
-            # and retire any retry row — a later retry cannot conjure it.
-            terminal = True
-            return {"action": "skipped", "message_id": message_id}
-        if _int_field(message.get("seq")) != ref.conversation_seq:
-            return {"action": "hold", "message_id": message_id, "code": "seq_mismatch"}
-
-        sender = message.get("sender")
-        if not isinstance(sender, Mapping):
-            return {"action": "hold", "message_id": message_id, "code": "sender_missing"}
-        sender_label = sender.get("display_label")
-        sender_kind = sender.get("kind")
-        sender_account = sender.get("account_id")
-        if (
-            not isinstance(sender_label, str)
-            or not sender_label.strip()
-            or not isinstance(sender_kind, str)
-            or sender_kind not in _SENDER_KINDS
-            or not isinstance(sender_account, str)
-            or not sender_account
-        ):
-            # A card cannot render provenance it cannot verify; a hardcoded
-            # kind or an invented label is worse than a retryable hold.
-            return {"action": "hold", "message_id": message_id, "code": "sender_malformed"}
-
-        metadata = ConversationCardMetadata(
-            conversation_label=_conversation_label(view),
-            sender_label=" ".join(sender_label.split()),
-            sender_kind=str(sender_kind),
-            mention=ref.mention,
-            message_id=message_id,
-            conversation_seq=ref.conversation_seq,
-        )
-
-        fetched = await client.conversation_body(
-            ref.conversation_id,
-            message_id,
-            tenant_id=owner.tenant_id,
-            endpoint_id=owner.endpoint_id,
-            access=access,
-        )
-        if not isinstance(fetched, Mapping) or fetched.get("message_id") != message_id:
-            return {"action": "hold", "message_id": message_id, "code": "body_malformed"}
-        body_text = fetched.get("body")
-        body_hash = fetched.get("body_hash")
-        if not isinstance(body_text, str) or not isinstance(body_hash, str):
-            return {"action": "hold", "message_id": message_id, "code": "body_malformed"}
+        fetched = await _fetch_body(client, ref, owner, access)
+        if fetched is None:
+            # The target could not be read as a bound body (absent from the
+            # fallback window, or null on the context path). Keep the hold so
+            # the retry path can re-drive it.
+            return {"action": "hold", "message_id": message_id, "code": "body_unavailable"}
+        body_text, body_hash = fetched
         try:
             served_digest = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
         except UnicodeEncodeError:
@@ -461,7 +573,6 @@ async def handle_conversation_available(
 
 __all__ = [
     "GUIDANCE_VERSION",
-    "HISTORY_PAGE_LIMIT",
     "ConversationCardMetadata",
     "build_conversation_card",
     "handle_conversation_available",
