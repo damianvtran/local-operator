@@ -1,6 +1,7 @@
 """Capture the session header/status simplification out of headless Chrome.
 
-Run:  ``LOP_MOBILE_FIXTURE_PASSWORD=… .venv/bin/python scripts/mobile_status_capture.py <port> <outdir> <label>``
+Run (with the per-run password the fixture was started with, from the repo
+root): ``.venv/bin/python scripts/mobile_status_capture.py <port> <outdir> <label>``
 
 Sibling of ``mobile_spend_capture.py``, and deliberately separate: that harness
 walks PR-2's published-spend STATES, while this one photographs the OPERATOR'S
@@ -149,7 +150,10 @@ def main() -> None:
             page.shot(outdir / f"{label}-{viewport}-operator-spend-expanded.png")
             expanded = probe(page)
             if expanded["spendExpanded"] != "true":
-                failures.append(f"{viewport}: tap did not expand (aria-expanded={expanded['spendExpanded']})")
+                failures.append(
+                    f"{viewport}: tap did not expand "
+                    f"(aria-expanded={expanded['spendExpanded']})"
+                )
             if not expanded["panelPresent"]:
                 failures.append(f"{viewport}: expanded panel missing")
             if expanded["panel"] and expanded["status"]:
