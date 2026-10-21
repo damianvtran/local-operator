@@ -2505,6 +2505,19 @@ _CREDENTIAL_FLAG_WORDS = (
     r"client[-_]?secret|auth[-_]?token|access[-_]?token)"
 )
 
+#: The one flag in that vocabulary whose argument is a store ENTRY NAME rather than
+#: a credential VALUE, and the two hooks that have to agree about it: the argument
+#: pass (:func:`_is_typed_credential_assignment`) and the containment gate
+#: (:func:`_carries_assignment_operator`) both reach it through
+#: :func:`_flag_is_typed`, so a name after ``--secret`` is released in a command and
+#: never promoted to a session redaction — while ``--password``/``--token`` keep
+#: masking their argument, which is what ``main`` did and what R3-1 restored.
+_STORE_ENTRY_FLAG = "--secret"
+
+#: The flag rule's group holding the flag TOGETHER with its binder (a space or an
+#: ``=``): the hooks strip the binder to read which flag bound the value.
+_FLAG_GROUP = "flag"
+
 #: A credential FLAG immediately before the argument under test, built from the flag
 #: rule's own vocabulary rather than retyped, in either separator spelling. The
 #: joined spelling is deliberately absent: it puts the whole argument inside the flag
@@ -3876,6 +3889,29 @@ def _anchored_key_value_guard(match: Match[str]) -> bool:
     return _PEM_HEADER_PHRASE.search(match.group(2).upper()) is not None
 
 
+#: The two rule labels whose matches carry CONTEXT the hooks have to read, spelled
+#: once here so the table and the hooks cannot drift apart.
+#:
+#: ``credential-assignment`` is shared by TWO rules — the unquoted and the quoted
+#: spelling — deliberately (one operator-facing shape, two value bounds), and both
+#: lay their groups out identically. That shared layout is what lets
+#: :func:`_is_typed_credential_assignment` and :func:`_carries_assignment_operator`
+#: read a group by NAME under this label alone, instead of keying on the group's
+#: POSITION under a label another rule could one day reuse with a different layout
+#: (agent review R3-5).
+#:
+#: ``cli-credential-flag`` is the one rule whose match puts no operator between the
+#: flag and its argument, and whose own guard has already judged that argument
+#: (:func:`_flag_value_guard` releases a store NAME and usage-string syntax): a hit
+#: therefore means a credential TYPED into a command, so it must keep its mask in
+#: the argument pass where the value's spelling is name-shaped (agent review R3-1).
+#: The one exception is read from the FLAG itself (:func:`_flag_is_typed`):
+#: ``--secret`` binds a store ENTRY NAME, so a name-shaped argument after it stays a
+#: reference — the reviewer's own fix direction for R3-1.
+_ASSIGNMENT_LABEL = "credential-assignment"
+_CREDENTIAL_FLAG_LABEL = "cli-credential-flag"
+
+
 CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # --- key material, before anything that could take it apart ---------------
     Shape(
@@ -4147,9 +4183,13 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # masked. It is a floor on the VALUE only — a short value under a
     # credential-shaped name is a placeholder or a word, not a credential.
     Shape(
-        "credential-assignment",
+        _ASSIGNMENT_LABEL,
         re.compile(
-            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
+            # NAMED, not positional (agent review R3-4/R3-5): the context hooks read
+            # the name and the separator, and a group NAME cannot drift the way an
+            # index can when a rule's layout is edited — the same argument the
+            # quoted spelling's ``(?P<quote>…)`` carries below.
+            r"(?<![A-Za-z0-9_.\-])(?P<name>[A-Za-z0-9_.\-]{2,48})"
             # ``[\"']?`` before the separator so a QUOTED name is one of these:
             # ``"api_key": "…"`` is how JSON spells every one of them, and a
             # pattern that only accepts the bare ``name: value`` form misses the
@@ -4166,7 +4206,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # on credential-dense text (4000 compact lines) put the guard form and
             # the lookahead form at 1.637x and 1.636x of the previous rule's cost,
             # so the second mechanism would be cost with no benefit.
-            r"([\"']?\s*[:=]\s*)([\"']?)"
+            # ``:=`` is ONE operator, matched whole. ``[:=]`` alone left the ``=``
+            # to be swallowed by the value (``DB_PASSWORD:=…`` registered
+            # ``=<value>``, which no later occurrence matches) and left the spaced
+            # spelling ``DB_PASSWORD := …`` matching nothing at all — while both
+            # docstrings promised the two-character operator (agent review R3-4).
+            r"(?P<separator>[\"']?\s*(?::=|:|=)\s*)([\"']?)"
             rf"{_ASSIGNED_VALUE_GROUP}"
         ),
         # Keep the name, the separator and the opening quote; mask only the
@@ -4190,10 +4235,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # VALUE's bound differs, which is an implementation fact, not something an
     # operator triaging a notice can act on differently.
     Shape(
-        "credential-assignment",
+        _ASSIGNMENT_LABEL,
         re.compile(
-            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
-            r"([\"']?\s*[:=]\s*)"
+            r"(?<![A-Za-z0-9_.\-])(?P<name>[A-Za-z0-9_.\-]{2,48})"
+            # The SAME two named groups as the unquoted spelling: the two rules share
+            # this label, so a hook reading them under it must find one layout.
+            r"(?P<separator>[\"']?\s*(?::=|:|=)\s*)"
             # NAMED, not positional. The value group below stops at the delimiter
             # this group captures, and a positional backreference would silently
             # start bounding against a different group the day a group is added or
@@ -4306,7 +4353,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # and the ``-``/whitespace after it is required, so ``--token-ttl=3600``
     # (a duration) is not one of these.
     Shape(
-        "cli-credential-flag",
+        _CREDENTIAL_FLAG_LABEL,
         # ``--secret NAME[=VAR]`` in a usage string is a PLACEHOLDER: a value
         # carrying brackets or parentheses is syntax, not a secret, and masking
         # it rewrites the help text the agent is reading. The pattern stays
@@ -4352,7 +4399,10 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # untouched: the quoted branches still need three characters each, so
         # ``""`` and ``'Zx'`` stay unmasked.
         re.compile(
-            r"(?i)(--"
+            # Group 1 (``flag``) is the flag AND its binder, named because the
+            # argument pass reads the flag to tell a VALUE carrier from a NAME carrier
+            # (:func:`_flag_is_typed`); group 3 is the value.
+            r"(?i)(?P<flag>--"
             + _CREDENTIAL_FLAG_WORDS
             + r"(?:=|\s+)(?P<q>\"|')?)"
             + r"(?P<v>(?(q)(?:"
@@ -4635,9 +4685,9 @@ def is_registerable_component(
     ``mongodb://user:<pw>@host/db`` must stay contained session-wide. Omitting the
     label keeps the SAFE default: the hit is treated as name-driven and the
     identifier refusal applies. ``assigned`` is the CONTEXT half of that refusal —
-    whether the rule's match put an assignment operator before the value
-    (:attr:`ShapeHit.assigned`) — because a vendor spelling reads as a token when
-    it is assigned and as a NAME when it is referenced.
+    whether the rule TYPED the value (an operator that binds one, or a credential
+    flag whose argument is a value: :attr:`ShapeHit.assigned`) — because a vendor
+    spelling reads as a token when it is typed and as a NAME when it is referenced.
 
     Registration is a PROMOTION: the value is masked in every later result for
     the rest of the session, so a false positive here outlives the line that
@@ -4772,13 +4822,17 @@ class ShapeHit:
     #: but may not be announced AS CONTAINED: the containment notice tells the
     #: operator the value was masked, and that claim has to be true.
     complete: bool = True
-    #: Whether the rule's own match put an ASSIGNMENT OPERATOR (``=``/``:=``)
-    #: between the name and the value — an ``=`` operator says yes, a ``:`` label
-    #: says no. The CONTAINMENT gate reads it because the value's spelling cannot
-    #: separate a vendor token being ASSIGNED from a vendor-shaped NAME being
-    #: REFERENCED, and the two go opposite ways
-    #: (:func:`is_registerable_component`). Defaults to ``False``: a hit built by
-    #: hand, or by a rule with no name group, reads as a reference.
+    #: Whether the rule TYPED the value it matched — an ``=`` operator that binds
+    #: a value to a name (``=``, ``:=``), or a credential flag whose argument is a
+    #: value rather than a store entry's NAME (:func:`_flag_is_typed`). The
+    #: CONTAINMENT gate reads it because the value's spelling cannot separate a
+    #: vendor token being ASSIGNED from a vendor-shaped NAME being REFERENCED, and
+    #: the two go opposite ways (:func:`is_registerable_component`). It is answered
+    #: by the RULE (:func:`_carries_assignment_operator`) and never by the match
+    #: text: only a rule that captured its own separator can say what its prefix
+    #: means, and a query-parameter carrier is a reference however many ``=`` its
+    #: name group contains (agent review R3-2). Defaults to ``False``: a hit built
+    #: by hand, or by a rule with no name group, reads as a reference.
     assigned: bool = False
     #: Whether READABLE credential material survived the mask in this text.
     #:
@@ -4887,22 +4941,61 @@ def scrub_shapes_with_hits(
 
 
 def _carries_assignment_operator(shape: Shape, match: Match[str]) -> bool:
-    """Whether the matched PREFIX puts an assignment operator before the value.
+    """Whether this rule put an ASSIGNMENT OPERATOR before the value it matched.
 
-    The CONTEXT the containment gate needs (:func:`is_registerable_component`), read
-    from the bytes the rule consumed — the name and the separator — rather than from
-    the value, which cannot tell the two apart. An ``=`` operator types
-    a token; a ``:`` label names an object. Both are a lowercase
-    hyphen phrase on the right of a name-driven rule, and a value-only test has to
-    read them the same way.
+    The CONTEXT the containment gate needs (:func:`is_registerable_component`), and
+    it is answered by the RULE that knows its own layout, never by scanning the
+    match text for an ``=`` (agent review R3-2). A query parameter's NAME group
+    always carries the ``=`` that binds it to its value, so that scan read an
+    operator inside a parameter's NAME as an assignment and promoted a
+    vendor-shaped NAME to a session redaction — the amplifier R2-1 closed for
+    name-driven assignments, which a URL carrier then walked straight back past.
 
-    Only the prefix is examined, and only for an ``=``: a rule with no value group,
-    and a rule whose match is the value itself, report ``False``.
+    Two rules can answer yes, and each by its own evidence:
+
+    * ``credential-assignment`` — its separator group, captured by the rule, holds
+      the operator. ``=`` types a token, a ``:`` labels an object, and ``:=`` is
+      the two-character operator both spellings document.
+    * ``cli-credential-flag`` — its guard has already judged the argument
+      (:func:`_flag_value_guard` releases a store NAME and usage-string syntax), so
+      a hit means a credential was bound to the flag, and only WHITESPACE — not an
+      ``=`` — binds it. :func:`_flag_is_typed` reads the FLAG itself and answers
+      ``False`` for ``--secret``, whose argument is a store entry's NAME rather
+      than a value, so that hit reads as a reference like any other name.
+
+    Every other rule answers ``False``: it either has no separator to read or
+    knows nothing about what its prefix means, and the safe reading is the one
+    the gate started with — a reference, not an assignment.
     """
-    group = shape.secret_group
-    if not group:
+    if shape.label == _CREDENTIAL_FLAG_LABEL:
+        return _flag_is_typed(match)
+    if shape.label != _ASSIGNMENT_LABEL:
         return False
-    return "=" in match.group(0)[: match.start(group) - match.start(0)]
+    return "=" in (match.group(_ASSIGNMENT_SEPARATOR_GROUP) or "")
+
+
+def _flag_is_typed(match: Match[str]) -> bool:
+    """Whether a ``cli-credential-flag`` match bound a credential VALUE, not a NAME.
+
+    The flag's guard has judged the argument already (:func:`_flag_value_guard`
+    refuses syntax and a store-grammar NAME), and what it cannot judge is the FLAG's
+    own grammar — that is what this reads, from group 1:
+
+    * ``--secret`` binds a store ENTRY NAME (``secrets/cli.py``'s ``NAME[=VAR]``
+      metavar, and the documented way to hand a stored secret to a child), so its
+      argument is a REFERENCE: a kebab name after it must stay byte-identical in the
+      retained copy, which is the reading the result pass already gives it ("a
+      Secret name is masked at most, never contained");
+    * every other flag in the vocabulary — ``--password``, ``--token``,
+      ``--api-key`` and the rest — binds a VALUE, so a name-shaped or hyphen-phrase
+      argument after it is a passphrase TYPED into the command.
+
+    The flag is matched case-insensitively by its pattern, so it is lowered here; the
+    binder (a space or an ``=``) is trimmed off because both spellings reach this
+    hook with it attached (`_flag_value_guard` for the space, the re-scan of the inner
+    assignment for the ``=``).
+    """
+    return match.group(_FLAG_GROUP).strip().rstrip("=").lower() != _STORE_ENTRY_FLAG
 
 
 def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
@@ -5309,7 +5402,7 @@ def _is_prose_after_a_flag(hit: ShapeHit) -> bool:
     rather than left for a differential to find.
     """
     return (
-        hit.label == "cli-credential-flag"
+        hit.label == _CREDENTIAL_FLAG_LABEL
         and len(hit.value) <= _FLAG_PROSE_MAX_CHARS
         and _BARE_WORD.fullmatch(hit.value) is not None
     )
@@ -6022,18 +6115,19 @@ def _carries_credential_evidence(value: str) -> bool:
     return any(char.isupper() or char.isdigit() or not char.isalnum() for char in value)
 
 
-#: The label whose match carries an ASSIGNED NAME and its separator, and the group
-#: numbers that hold them. Both ``credential-assignment`` spellings share this
-#: layout — name, separator (with any quote before it), opening quote, value — and
-#: the table states it where the two rules are defined. No other rule's groups mean
-#: this, so the hook reads them ONLY under this label.
-_ASSIGNMENT_LABEL = "credential-assignment"
-_ASSIGNMENT_NAME_GROUP = 1
-_ASSIGNMENT_SEPARATOR_GROUP = 2
+#: The NAMES of the two groups both ``credential-assignment`` spellings capture:
+#: the assigned NAME and the SEPARATOR (with any quote before it). The table states
+#: the layout where the two rules are defined — name, separator, opening quote,
+#: value — and the hooks read it by NAME under this label, so a rule that reused the
+#: label with a different layout fails loudly at its first match (``IndexError`` on
+#: a group the match does not have) instead of reading the wrong bytes and silently
+#: releasing a credential (agent review R3-5).
+_ASSIGNMENT_NAME_GROUP = "name"
+_ASSIGNMENT_SEPARATOR_GROUP = "separator"
 
 
 def _is_typed_credential_assignment(label: str, match: Match[str]) -> bool:
-    """Whether this match ASSIGNS a value to a strong credential name.
+    """Whether this match TYPED a credential into the command rather than naming one.
 
     The distinction the argument pass has to draw between a NAME and a CREDENTIAL
     TYPED INTO A COMMAND, taken from the match the rule made rather than from the
@@ -6041,15 +6135,27 @@ def _is_typed_credential_assignment(label: str, match: Match[str]) -> bool:
     both a lowercase hyphen phrase on the right of a name-driven rule, and the two
     must go opposite ways.
 
-    What decides it is the ASSIGNMENT OPERATOR plus the name beside it:
+    What decides it is the rule's own context:
 
-    * an operator carrying ``=`` (``=``, ``:=``) TYPES a value into the command — an
+    * ``cli-credential-flag`` — the flag's guard ALREADY judged the argument
+      (:func:`_flag_value_guard` releases a store NAME, a ``NAME[=VAR]``
+      placeholder and usage-string syntax), so a hit is a credential typed after
+      the flag and only WHITESPACE binds it. Reading a separator here would say
+      "no operator" and hand the passphrase to the DNS release (agent review
+      R3-1: the three space-separated rows — mysql's ``--password``, psql's
+      ``--password`` and ``lop secret run --token`` — were published in the
+      retained copy where ``main`` masked all three, while the ``=`` spelling
+      stayed masked because its re-scan reaches an inner assignment). The
+      ``--secret`` store-NAME readings are untouched: the env-name spelling never
+      reaches this hook at all (the guard releases the value, so there is no hit),
+      and a kebab name is read as a reference by :func:`_flag_is_typed`;
+    * ``credential-assignment`` — the ASSIGNMENT OPERATOR plus the name beside it:
+      an operator carrying ``=`` (``=``, ``:=``) TYPES a value into the command — an
       environment assignment, a CLI flag, a ``--from-literal=...`` — and under a
       STRONG name (:func:`is_strong_credential_name`) that value is a credential and
-      stays masked;
-    * a ``:`` operator LABELS an entry (a dict field, a YAML key, the ``secret:``
-      line the secret sink prints), which is a REFERENCE the agent has to be able to
-      read and re-run.
+      stays masked; a ``:`` operator LABELS an entry (a dict field, a YAML key, the
+      ``secret:`` line the secret sink prints), which is a REFERENCE the agent has
+      to be able to read and re-run.
 
     The flag forms arrive here by a RE-SCAN, not by a different rule:
     ``--from-literal=password=<value>`` first matches with the name
@@ -6058,6 +6164,8 @@ def _is_typed_credential_assignment(label: str, match: Match[str]) -> bool:
     name and separator read here are the INNER assignment's, which is the one that
     types the credential.
     """
+    if label == _CREDENTIAL_FLAG_LABEL:
+        return _flag_is_typed(match)
     if label != _ASSIGNMENT_LABEL:
         return False
     name = match.group(_ASSIGNMENT_NAME_GROUP) or ""
@@ -6096,11 +6204,17 @@ def _reject_argument_shape_hit(label: str, value: str, match: Match[str]) -> boo
 
     ACCEPTED RESIDUAL, of the same family as the one
     :func:`_is_identifier_shaped_name` states: a DNS-shaped value in a ``:``
-    context (``PASSWORD: <hyphen phrase>`` in a YAML file, a dict field) is
-    released even under a strong name, because a colon labels an entry the agent
-    may be editing rather than a credential typed into a command. It is still
-    masked by the result pass and by every spelling-evidence rule, and the
-    exact-value pass contains it once the session knows it.
+    context is released even under a strong name, because a colon LABELS an entry
+    rather than binding one. That carrier is not only a file the agent edits — a
+    JSON/JSON-ish body typed into a command is in the same class, and it is the one
+    place a credential typed into a command is still kept verbatim:
+    ``curl -d '{"password": "<hyphen phrase>"}'`` retains its value in the copy
+    the transcript persists while the result pass masks the same text (agent
+    review R3-3). Narrowing that needs a JSON-aware rule: the ``:`` is genuinely
+    ambiguous between an entry's key and a body's field, and the value's spelling
+    does not separate them. The released value is still masked by the result pass
+    and by every spelling-evidence rule, and the exact-value pass contains it once
+    the session knows it.
     """
     if not value:
         return False
