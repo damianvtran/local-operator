@@ -2302,3 +2302,42 @@ def test_a_remote_rows_binding_is_the_owners_answer_and_absence_is_null(
     assert rows[0]["binding"] == {"agent": None, "team": "lopdev"}
     assert rows[1]["binding"] == {"agent": "coder", "team": None}
     assert rows[2]["binding"] == {"agent": None, "team": None}
+
+
+def test_a_peer_create_names_its_level_in_both_spellings_for_an_older_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chosen level must survive an owner that has not upgraded.
+
+    Operator report, 2026-10-21 (``Max`` showed as ``High`` on a remote
+    session): the owner's ``set_model`` hop read only ``model["effort"]`` while
+    this function forwards the route's ``reasoning_effort``, so every desktop
+    level was dropped on the peer. The owner now reads both, but a peer on an
+    older build reads only the legacy key, so the frame carries it as well. A
+    level-less pick stays level-less (no key is invented).
+    """
+    from local_operator.server.utils import desktop_mesh
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        desktop_mesh,
+        "_call",
+        lambda root, op, **fields: sent.append(fields) or {"session_id": OTHER},
+    )
+    monkeypatch.setattr(
+        "local_operator.session_factory.saved_tool_approval_is_auto", lambda root: False
+    )
+
+    chosen = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning_effort": "max"}
+    desktop_mesh.create_on_peer(tmp_path, PEER, model=chosen)
+    desktop_mesh.create_on_peer(
+        tmp_path, PEER, model={"provider": "deepseek", "model_id": "deepseek-flash"}
+    )
+
+    assert sent[0]["model"] == {**chosen, "effort": "max"}
+    assert chosen == {
+        "provider": "deepseek",
+        "model_id": "deepseek-flash",
+        "reasoning_effort": "max",
+    }, "the caller's dict is not mutated"
+    assert "effort" not in sent[1]["model"]

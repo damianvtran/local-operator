@@ -679,7 +679,18 @@ def create_on_peer(
     # the caller named one, and the pick in the vocabulary the picker itself uses.
     fields: dict[str, Any] = {"peer": peer, "cwd": cwd}
     if model is not None:
-        fields["model"] = model
+        fields["model"] = dict(model)
+        # THE LEVEL IN BOTH SPELLINGS, for a peer on an OLDER build (operator
+        # report, 2026-10-21). The owner's ``set_model`` hop read only
+        # ``model["effort"]`` before this release while the route hands this
+        # function ``reasoning_effort``, so a peer that has not upgraded dropped
+        # every chosen level and ran the model's seed. The owner now reads
+        # ``reasoning_effort`` first (``relay._set_model_on``); the legacy key is
+        # what makes the choice survive against a peer that has not. Never
+        # overrides an ``effort`` a caller already set.
+        level = model.get("reasoning_effort")
+        if isinstance(level, str) and level and not fields["model"].get("effort"):
+            fields["model"]["effort"] = level
     if target is not None:
         name = str(target.get("name") or "")
         if str(target.get("kind") or "") == "team":
