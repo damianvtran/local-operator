@@ -8287,16 +8287,6 @@ def test_a_trailing_query_segment_is_not_swallowed_or_registered() -> None:
             {"credential-assignment"},
         ),
         (
-            "https://h/v1/flags?key=glpat-" + KEBAB_IDENTIFIER,
-            "glpat-" + KEBAB_IDENTIFIER,
-            {"credential-query-param"},
-        ),
-        (
-            "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
-            "sk-" + KEBAB_IDENTIFIER,
-            {"credential-query-param"},
-        ),
-        (
             "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
             "sk-" + "abcdefghijklmnopqrstuvwxyz",
             {"credential-assignment"},
@@ -8323,6 +8313,37 @@ def test_an_issuer_prefixed_value_keeps_its_mask_and_its_label(
     scrubbed, _ = scrub_shapes_with_hits(line)
     assert value not in scrubbed
     assert set(match_shape_names(line)) == labels, f"{line!r} label moved"
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        (
+            "https://h/v1/flags?key=glpat-" + KEBAB_IDENTIFIER,
+            "glpat-" + KEBAB_IDENTIFIER,
+        ),
+        (
+            "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
+            "sk-" + KEBAB_IDENTIFIER,
+        ),
+    ],
+)
+def test_a_query_carrier_masks_a_vendor_shaped_value_without_containing_it(
+    line: str, value: str
+) -> None:
+    """R3-2: a query parameter's ``=`` is not an assignment operator.
+
+    These two rows used to sit in the parametrization above and assert promotion,
+    because the containment gate answered ``assigned`` by scanning the match text
+    for an ``=`` — and a query parameter always carries one inside its NAME group.
+    A query parameter is a REFERENCE: the value is still masked in place and still
+    carries the query rule's label, but it is not promoted to a session redaction,
+    which is R2-1's "a name is never contained" for this carrier.
+    """
+    assert not _promotes(line, value), f"{line!r} promoted a query-carried NAME"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert value not in scrubbed
+    assert set(match_shape_names(line)) == {"credential-query-param"}
 
 
 #: The corpus the released class is MEASURED over — values already exercised through

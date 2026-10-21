@@ -488,6 +488,107 @@ def test_the_passphrase_release_stops_at_the_reference_separator() -> None:
     assert store.redact_arguments("DB_PASSWORD=" + name) != "DB_PASSWORD=" + name
 
 
+#: The SPACE-separated spelling of a credential flag. Group 1 of the flag rule is the
+#: flag and its binder, so only whitespace separates the flag from its argument and
+#: the assignment rules never see an operator — the flag rule's own guard has already
+#: judged the value by the time these reach the argument pass.
+SPACE_SEPARATED_FLAG_COMMANDS = (
+    "mysql -u root --password " + BATTERY_STAPLE + " app",
+    "lop secret run --token " + BATTERY_STAPLE + " -- true",
+)
+
+
+@pytest.mark.parametrize("command", SPACE_SEPARATED_FLAG_COMMANDS)
+def test_retained_arguments_still_mask_a_space_separated_credential_flag(
+    command: str,
+) -> None:
+    """R3-1: a flag HIT means a credential was typed, whichever byte binds it.
+
+    Measured at 4575922573: the value judgement answered only for the
+    ``credential-assignment`` label, so a ``cli-credential-flag`` hit fell through to
+    the DNS release and the passphrase stayed verbatim in the retained copy — where
+    ``main`` masked the same three shapes and where the result pass still masked them.
+    The ``=`` spelling was masked only because its inner ``password=…`` re-scan is an
+    assignment, so one carrier was safe and its twin was not.
+    """
+    store = _store()
+    message = _assistant([ToolCall(id="c1", name="bash", arguments={"command": command})])
+    scrubbed = _retained(message, store).tool_calls[0].arguments["command"]
+    assert scrubbed != command
+    assert BATTERY_STAPLE not in scrubbed
+    assert REDACTION_MARKER in scrubbed
+    # ...and the executor's own copy is still untouched.
+    assert message.tool_calls[0].arguments["command"] == command
+
+
+def test_a_store_entry_name_after_secret_is_still_released() -> None:
+    """The control for R3-1: treating the flag as typed must not re-mask a NAME.
+
+    ``--secret`` binds a store ENTRY NAME in this harness's grammar (the documented
+    way to hand a stored secret to a child), so its argument is a reference and the
+    command has to reach the executor byte-identical. Both spellings of that name —
+    the env-name one the flag's own guard releases and a kebab one the DNS release
+    keeps — must survive, or the fix for the passphrase would put the ``--secret``
+    name back into the mask.
+    """
+    caps_name = "OS_" + "PROD2_" + "ADMIN_" + "PASSWORD"
+    kebab_name = "auth" + "-svc-qa"
+    store = _store()
+    for name in (caps_name, kebab_name):
+        command = "lop secret run --secret " + name + " -- true"
+        assert store.redact_arguments(command) == command
+
+
+#: A vendor-shaped NAME: a vendor prefix with an ordinary kebab tail, which the vendor
+#: rule's own token/name split reads as a NAME (the R2-1 class).
+QUERY_CARRIED_NAME = "glpat" + "-api-server"
+
+
+def test_a_query_carried_secret_name_is_masked_at_most() -> None:
+    """R3-2: a query parameter's ``=`` is not an assignment operator.
+
+    The containment gate's ``assigned`` was answered by scanning the match for an
+    ``=``, and a query parameter always carries one inside its NAME group — so a
+    vendor-shaped name under a query parameter reported assigned, and the name was
+    registered, contradicting R2-1's "a name is never contained". It is masked at
+    most: masked in place, never promoted, and the later occurrence stays readable.
+    """
+    line = "curl 'https://h/v1/x?secret=" + QUERY_CARRIED_NAME + "'"
+    store = _store()
+    out, _ = store.redact_with_report(line)
+    assert out != line
+    assert REDACTION_MARKER in out
+    assert store._shape_registrations == set()
+    assert store.redact("later " + QUERY_CARRIED_NAME) == "later " + QUERY_CARRIED_NAME
+
+
+#: An opaque value: not a DNS phrase, so the surface under test is the OPERATOR and
+#: the registration, not the name release.
+OPAQUE_VALUE = "9f" + "3c1ab77de" + "44"
+
+
+@pytest.mark.parametrize("operator", (":=", " := "))
+def test_the_two_character_assignment_operator_masks_and_registers_cleanly(
+    operator: str,
+) -> None:
+    """R3-4: ``ShapeHit.assigned`` documents ``=``/``:=``, so both must behave.
+
+    Measured at 4575922573: the separator group took only the ``:``, so the VALUE
+    swallowed the ``=`` — the registered value was the operator glued to the
+    credential, which no later occurrence matches — and the spaced spelling
+    ``DB_PASSWORD := <value>`` matched nothing at all. One operator is now read
+    whole, in both spellings, and the value registered is the value alone.
+    """
+    text = "DB_PASSWORD" + operator + OPAQUE_VALUE
+    masked = "DB_PASSWORD" + operator + REDACTION_MARKER
+    store = _store()
+    out, _ = store.redact_with_report(text)
+    assert out == masked
+    assert OPAQUE_VALUE in store._shape_registrations
+    assert ("=" + OPAQUE_VALUE) not in store._shape_registrations
+    assert store.redact_arguments(text) == masked
+
+
 #: One legal label and one label over the cap: ``_DNS_LABEL_MAX_CHARS`` is 63, so
 #: the first is the longest label a cluster can hold and the second is not a name at
 #: all (QA round 2, Q2-1).
