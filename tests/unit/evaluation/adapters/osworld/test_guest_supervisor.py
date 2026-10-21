@@ -67,6 +67,7 @@ def _script_guest(
     *,
     props: dict[str, str] | None = None,
     effective_props: dict[str, str] | None = None,
+    watchdog_props: dict[str, str] | None = None,
     ppid: int = 8000,
 ) -> tuple[Any, list[Any]]:
     """Run the exact install source; only OS-boundary modules are substituted."""
@@ -90,11 +91,19 @@ def _script_guest(
     }
     properties.update(props or {})
     calls: list[Any] = []
+    watchdog_properties = {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "ControlGroup": "/system.slice/lop-action-watchdog.service",
+    }
+    watchdog_properties.update(watchdog_props or {})
 
     def check_output(args: Any, **kwargs: Any) -> str:
         calls.append(args)
         if args[1] == "daemon-reload":
             return ""
+        if args[1] == "show" and args[2] == guest_supervisor.WATCHDOG_UNIT:
+            return "\n".join(k + "=" + v for k, v in watchdog_properties.items())
         result = properties
         if "Restart" in args:
             result = {
@@ -117,7 +126,14 @@ def _script_guest(
         "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
         "os": SimpleNamespace(getppid=lambda: ppid, readlink=os.readlink),
         "subprocess": SimpleNamespace(check_output=check_output),
-        "sys": SimpleNamespace(argv=["-c", guest_supervisor.CAPTURE_SOURCE, "5000"]),
+        "sys": SimpleNamespace(
+            argv=[
+                "-c",
+                guest_supervisor.CAPTURE_SOURCE,
+                "5000",
+                guest_supervisor.WATCHDOG_SOURCE,
+            ]
+        ),
     }
     real_import = builtins.__import__
 
@@ -145,8 +161,13 @@ def test_install_is_idempotent_and_cannot_restart_or_kill_desktop(tmp_path: Path
         if "Restart" in args
     )
     assert not any(
-        args[1] in {"restart", "start", "stop", "kill", "reset-failed"} for args in calls
+        args[1] in {"restart", "start", "stop", "kill", "reset-failed"}
+        and guest_supervisor.WATCHDOG_UNIT not in args
+        for args in calls
     )
+    # The ONLY unit the install starts is its own watchdog; the action server is
+    # never touched by the install, which is the reviewed invariant.
+    assert {args[2] for args in calls if args[1] == "start"} == {guest_supervisor.WATCHDOG_UNIT}
     policy = (
         tmp_path / "etc/systemd/system/action-server.service.d/90-lop-supervisor.conf"
     ).read_text()
@@ -2487,8 +2508,13 @@ def test_install_accepts_the_real_two_holder_layout_when_the_mainpid_owns_one(
         tmp_path / "etc/systemd/system/action-server.service.d/90-lop-supervisor.conf"
     ).read_text()
     assert "KillMode=process" in policy
-    # No restart at install time, even with a second holder present.
-    assert not any(args[1] in {"restart", "start", "stop", "kill"} for args in calls)
+    # No restart at install time, even with a second holder present. The
+    # watchdog is the only unit the install starts, and it is ours.
+    assert not any(
+        args[1] in {"restart", "start", "stop", "kill"}
+        and guest_supervisor.WATCHDOG_UNIT not in args
+        for args in calls
+    )
 
 
 def test_install_refuses_a_socket_owner_outside_the_unit_control_group(
@@ -3359,3 +3385,569 @@ def test_an_empty_pre_set_is_proved_by_start_time_and_ancestry() -> None:
         )
     )
     assert late["status"] == "stale_listener"
+
+
+# ---------------------------------------------------------------------------
+# The guest-local watchdog: its own unit, its own cgroup, its own recovery path.
+# ---------------------------------------------------------------------------
+
+
+class _StopWatchdog(Exception):
+    """Ends the script's infinite loop from the virtual clock, never from code."""
+
+
+def _execute_watchdog(
+    tmp_path: Path,
+    *,
+    active_states: list[str],
+    listening: list[bool],
+    cycles: int,
+    failures: dict[int, Exception] | None = None,
+) -> tuple[dict[str, Any], list[Any], float]:
+    """Run the shipped WATCHDOG_SOURCE against a redirected /proc and fake manager.
+
+    The fake clock advances one ``INTERVAL_S`` per cycle, so the rate limits are
+    exercised as real elapsed time instead of patched thresholds. ``failures``
+    makes the named cycle's ``systemctl`` raise: the loop must survive it.
+    """
+    root = tmp_path / "var/lib/lop-action-supervisor"
+    root.mkdir(parents=True, exist_ok=True)
+    record_path = root / "watchdog.json"
+    calls: list[Any] = []
+    clock = {"now": 0.0, "cycle": 0}
+    failures = failures or {}
+
+    def publish(listening_now: bool) -> None:
+        net = tmp_path / "proc/net"
+        net.mkdir(parents=True, exist_ok=True)
+        if listening_now:
+            (net / "tcp").write_text(
+                "  sl  local_address rem_address   st\n"
+                "   0: 00000000:1388 00000000:0000 0A 00:00000000 00000000 0 0 1000 4242\n"
+            )
+        else:
+            (net / "tcp").write_text("  sl\n")
+        (net / "tcp6").write_text("  sl\n")
+
+    def check_output(args: Any, **kwargs: Any) -> str:
+        calls.append(args)
+        if clock["cycle"] in failures:
+            raise failures[clock["cycle"]]
+        if args[1] == "show":
+            index = min(clock["cycle"], len(active_states) - 1)
+            return "ActiveState=" + active_states[index]
+        return ""
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+        clock["cycle"] += 1
+        if clock["cycle"] >= cycles:
+            raise _StopWatchdog()
+        publish(listening[min(clock["cycle"], len(listening) - 1)])
+
+    publish(listening[0])
+    modules = {
+        "pathlib": SimpleNamespace(Path=lambda p: tmp_path / str(p).lstrip("/")),
+        "subprocess": SimpleNamespace(check_output=check_output),
+        "sys": SimpleNamespace(
+            argv=[
+                "watchdog.py",
+                "action-server.service",
+                "5000",
+                str(guest_supervisor.WATCHDOG_RECORD_PATH),
+            ]
+        ),
+        "time": SimpleNamespace(monotonic=lambda: clock["now"], sleep=sleep),
+    }
+    real_import = builtins.__import__
+
+    def importer(name: str, *args: Any, **kwargs: Any) -> Any:
+        return modules[name] if name in modules else real_import(name, *args, **kwargs)
+
+    with pytest.raises(_StopWatchdog):
+        exec(
+            guest_supervisor.WATCHDOG_SOURCE,
+            {"__builtins__": {**vars(builtins), "__import__": importer}},
+        )
+    return json.loads(record_path.read_text()), calls, clock["now"]
+
+
+def _interventions(calls: list[Any]) -> list[str]:
+    return [args[1] for args in calls if args[1] in {"reset-failed", "start"}]
+
+
+def test_a_failed_unit_is_reset_and_started(tmp_path: Path) -> None:
+    record, calls, _ = _execute_watchdog(
+        tmp_path, active_states=["failed"], listening=[False], cycles=1
+    )
+    assert _interventions(calls) == ["reset-failed", "start"]
+    assert record["attempts"] == 1
+    assert record["intervened"] is True
+    assert record["last_trigger"] == "failed"
+    assert record["last_action"] == "reset-failed+start"
+    assert record["last_outcome"] == "started"
+    assert record["events"] == [
+        {
+            "us": record["last_attempt_us"],
+            "trigger": "failed",
+            "action": "reset-failed+start",
+            "outcome": "started",
+        }
+    ]
+
+
+def test_an_inactive_unit_is_started(tmp_path: Path) -> None:
+    record, calls, _ = _execute_watchdog(
+        tmp_path, active_states=["inactive"], listening=[False], cycles=1
+    )
+    assert _interventions(calls) == ["reset-failed", "start"]
+    assert record["attempts"] == 1
+    assert record["last_trigger"] == "inactive"
+
+
+def test_a_healthy_server_is_never_touched(tmp_path: Path) -> None:
+    """Zero interventions over twenty cycles of an active, listening server."""
+    record, calls, elapsed = _execute_watchdog(
+        tmp_path, active_states=["active"], listening=[True], cycles=20
+    )
+    assert _interventions(calls) == []
+    assert not any(args[1] == "restart" for args in calls)
+    assert record["attempts"] == 0
+    assert record["intervened"] is False
+    assert record["events"] == []
+    # A served port short-circuits even the unit query: the watchdog does not
+    # look for work while the action server is answering.
+    assert not any(args[1] == "show" for args in calls)
+    assert elapsed >= guest_supervisor.WATCHDOG_INTERVAL_S * 10
+
+
+def test_a_listener_without_a_healthy_unit_is_still_left_alone(tmp_path: Path) -> None:
+    """KillMode=process leaves survivors; starting beside them only fails to bind."""
+    record, calls, _ = _execute_watchdog(
+        tmp_path, active_states=["failed"], listening=[True], cycles=5
+    )
+    assert _interventions(calls) == []
+    assert record["attempts"] == 0
+
+
+def test_an_absent_listener_waits_out_the_startup_grace(tmp_path: Path) -> None:
+    record, calls, _ = _execute_watchdog(
+        tmp_path, active_states=["active"], listening=[False], cycles=5
+    )
+    # t=0/10/20 stay inside the 30 s grace; t=30 is the first eligible cycle.
+    assert record["attempts"] == 1
+    assert record["last_trigger"] == "no-listener"
+    assert _interventions(calls) == ["reset-failed", "start"]
+
+
+def test_the_rate_limit_stops_a_spin(tmp_path: Path) -> None:
+    """One intervention per MIN_INTERVAL; the suppressed cycles record throttled."""
+    record, calls, elapsed = _execute_watchdog(
+        tmp_path, active_states=["failed"], listening=[False], cycles=3
+    )
+    # t=0 intervenes, t=10/20 are inside the 30 s minimum interval.
+    assert elapsed >= 20.0
+    assert record["attempts"] == 1
+    assert record["last_outcome"] == "throttled"
+    assert _interventions(calls) == ["reset-failed", "start"]
+
+
+def test_the_cap_is_reached_and_recorded(tmp_path: Path) -> None:
+    """At most MAX_ATTEMPTS per rolling window; then the cap itself is evidence."""
+    record, calls, _ = _execute_watchdog(
+        tmp_path, active_states=["failed"], listening=[False], cycles=20
+    )
+    assert record["attempts"] == guest_supervisor.WATCHDOG_MAX_ATTEMPTS
+    assert record["capped"] is True
+    assert record["last_outcome"] == "capped"
+    assert _interventions(calls).count("reset-failed") == guest_supervisor.WATCHDOG_MAX_ATTEMPTS
+    assert len(record["events"]) <= guest_supervisor.WATCHDOG_EVENT_CAP
+
+
+def test_the_event_ring_is_bounded_across_windows(tmp_path: Path) -> None:
+    """Ten attempts over two rolling hours still leave at most eight events."""
+    record, _, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[False],
+        cycles=760,
+    )
+    assert record["attempts"] >= 2 * guest_supervisor.WATCHDOG_MAX_ATTEMPTS
+    assert len(record["events"]) == guest_supervisor.WATCHDOG_EVENT_CAP
+    assert record["events"][-1]["outcome"] == "started"
+
+
+def test_a_watchdog_error_does_not_kill_the_loop(tmp_path: Path) -> None:
+    """A raising systemctl is swallowed; a later cycle still repairs the unit."""
+    record, calls, _ = _execute_watchdog(
+        tmp_path,
+        active_states=["failed"],
+        listening=[False],
+        cycles=4,
+        failures={0: OSError("transient manager failure")},
+    )
+    assert record["attempts"] == 1
+    assert record["events"][0]["outcome"] == "started"
+    assert _interventions(calls) == ["reset-failed", "start"]
+
+
+def test_the_watchdog_record_carries_no_guest_text(tmp_path: Path) -> None:
+    record, _, _ = _execute_watchdog(
+        tmp_path, active_states=["failed"], listening=[False], cycles=1
+    )
+    assert set(record) == {
+        "schema_version",
+        "attempts",
+        "intervened",
+        "capped",
+        "last_attempt_us",
+        "last_trigger",
+        "last_action",
+        "last_outcome",
+        "events",
+    }
+    assert set(record["events"][0]) == {"us", "trigger", "action", "outcome"}
+    text = json.dumps(record)
+    assert "action-server.service" not in text
+    assert "lop-action-supervisor" not in text
+
+
+def test_the_watchdog_script_never_writes_argv_or_environment(tmp_path: Path) -> None:
+    record, _, _ = _execute_watchdog(
+        tmp_path, active_states=["failed"], listening=[False], cycles=1
+    )
+    assert "os.environ" not in guest_supervisor.WATCHDOG_SOURCE
+    # Everything the script received on argv is absent from the record: the
+    # only string values are the fixed vocabulary words.
+    values = {word for word in record.values() if isinstance(word, str)}
+    assert values <= {"none", "failed", "reset-failed+start", "started"}
+
+
+def test_the_watchdog_unit_is_installed_beside_the_drop_in(tmp_path: Path) -> None:
+    install, calls = _script_guest(tmp_path)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        install()
+    payload = json.loads(output.getvalue())
+    assert payload["installed"] is True
+    assert payload["watchdog"] == {
+        "installed": True,
+        "status": "active",
+        "cgroup_distinct": True,
+    }
+    unit = (tmp_path / "etc/systemd/system/lop-action-watchdog.service").read_text()
+    script = tmp_path / "var/lib/lop-action-supervisor/watchdog.py"
+    assert "Type=simple" in unit
+    # The watchdog is its own rate limit authority: latching it failed is the
+    # one state nothing else repairs.
+    assert "Restart=always" in unit and "StartLimitIntervalSec=0" in unit
+    assert (
+        "ExecStart=/usr/bin/python3 "
+        + str(script)
+        + " action-server.service 5000 "
+        + str(tmp_path / "var/lib/lop-action-supervisor/watchdog.json")
+    ) in unit
+    assert script.read_text() == guest_supervisor.WATCHDOG_SOURCE
+    # Enabled for boot, started now, and never aimed at the action server.
+    assert ("systemctl", "enable", guest_supervisor.WATCHDOG_UNIT) in calls
+    assert ("systemctl", "start", guest_supervisor.WATCHDOG_UNIT) in calls
+    assert not any(
+        args[1] in {"restart", "start", "reset-failed"}
+        and guest_supervisor.WATCHDOG_UNIT not in args
+        for args in calls
+    )
+    # A second install is byte-idempotent and does not re-write the unit.
+    mtime = (tmp_path / "etc/systemd/system/lop-action-watchdog.service").stat().st_mtime_ns
+    with contextlib.redirect_stdout(io.StringIO()):
+        install()
+    assert (tmp_path / "etc/systemd/system/lop-action-watchdog.service").stat().st_mtime_ns == mtime
+
+
+def test_install_refuses_a_watchdog_that_shares_the_action_server_cgroup(
+    tmp_path: Path,
+) -> None:
+    """A watchdog inside the unit it repairs dies with it: refuse, don't decorate."""
+    install, calls = _script_guest(
+        tmp_path, watchdog_props={"ControlGroup": "/system.slice/action-server.service"}
+    )
+    with pytest.raises(RuntimeError, match="watchdog unit shares the action-server cgroup"):
+        install()
+    assert not (tmp_path / "etc/systemd/system/lop-action-watchdog.service").exists()
+    assert not (
+        tmp_path / "etc/systemd/system/action-server.service.d/90-lop-supervisor.conf"
+    ).exists()
+
+
+def test_install_refuses_a_watchdog_in_a_child_of_the_action_server_cgroup(
+    tmp_path: Path,
+) -> None:
+    install, _ = _script_guest(
+        tmp_path,
+        watchdog_props={"ControlGroup": "/system.slice/action-server.service/watchdog"},
+    )
+    with pytest.raises(RuntimeError, match="watchdog unit shares the action-server cgroup"):
+        install()
+
+
+def test_install_refuses_an_inactive_watchdog(tmp_path: Path) -> None:
+    install, _ = _script_guest(tmp_path, watchdog_props={"ActiveState": "inactive"})
+    with pytest.raises(RuntimeError, match="watchdog unit is not active"):
+        install()
+    assert not (tmp_path / "etc/systemd/system/lop-action-watchdog.service").exists()
+
+
+def test_install_refuses_a_watchdog_without_a_control_group(tmp_path: Path) -> None:
+    install, _ = _script_guest(tmp_path, watchdog_props={"ControlGroup": ""})
+    with pytest.raises(RuntimeError, match="watchdog unit has no control group"):
+        install()
+
+
+# ---------------------------------------------------------------------------
+# Host side: the watchdog summary is evidence, sanitized like every other
+# guest-derived field, and it never changes a recovery outcome.
+# ---------------------------------------------------------------------------
+
+
+def _watchdog_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "attempts": 3,
+        "intervened": True,
+        "capped": False,
+        "last_attempt_us": 12_345_678,
+        "last_trigger": "failed",
+        "last_action": "reset-failed+start",
+        "last_outcome": "started",
+        "events": [
+            {
+                "us": 12_345_678,
+                "trigger": "failed",
+                "action": "reset-failed+start",
+                "outcome": "started",
+            }
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_the_watchdog_summary_is_sanitized_onto_the_receipt() -> None:
+    envelope = _envelope([])
+    envelope["watchdog"] = _watchdog_payload(
+        unit="action-server.service", argv=["/usr/bin/python3"], note="guest text"
+    )
+    records, watchdog = guest_supervisor.receipt_report(
+        "escalation=agentless\n" + json.dumps(envelope)
+    )
+    assert records == []
+    assert watchdog["status"] == "ok"
+    assert watchdog["attempts"] == 3
+    assert watchdog["intervened"] is True
+    assert watchdog["capped"] is False
+    assert watchdog["last_trigger"] == "failed"
+    assert watchdog["last_action"] == "reset-failed+start"
+    assert watchdog["last_outcome"] == "started"
+    assert watchdog["events"] == _watchdog_payload()["events"]
+    # Unknown keys are dropped whole: no unit name, argv or free text advances.
+    assert set(watchdog) == {
+        "schema_version",
+        "status",
+        "attempts",
+        "intervened",
+        "capped",
+        "last_attempt_us",
+        "last_trigger",
+        "last_action",
+        "last_outcome",
+        "events",
+    }
+    assert "action-server.service" not in json.dumps(watchdog)
+
+
+@pytest.mark.parametrize(
+    ("field", "hostile", "neutral"),
+    [
+        ("attempts", True, 0),
+        ("attempts", -1, 0),
+        ("attempts", "3", 0),
+        ("last_attempt_us", 1.5, 0),
+        ("last_trigger", "arbitrary guest text", "none"),
+        ("last_action", "systemctl start", "none"),
+        ("last_outcome", "oops", "none"),
+    ],
+)
+def test_hostile_watchdog_fields_become_neutral(
+    field: str, hostile: object, neutral: object
+) -> None:
+    envelope = _envelope([])
+    envelope["watchdog"] = _watchdog_payload(**{field: hostile})
+    _, watchdog = guest_supervisor.receipt_report(json.dumps(envelope))
+    assert watchdog[field] == neutral
+
+
+def test_the_watchdog_event_ring_is_bounded_host_side() -> None:
+    envelope = _envelope([])
+    envelope["watchdog"] = _watchdog_payload(
+        events=[
+            {"us": n, "trigger": "failed", "action": "reset-failed+start", "outcome": "started"}
+            for n in range(20)
+        ]
+    )
+    _, watchdog = guest_supervisor.receipt_report(json.dumps(envelope))
+    assert len(watchdog["events"]) == guest_supervisor.WATCHDOG_EVENT_CAP
+    assert watchdog["events"][-1]["us"] == 19
+
+
+def test_a_corrupt_watchdog_record_is_absent_not_a_failed_receipt() -> None:
+    envelope = _envelope([])
+    envelope["watchdog"] = {"schema_version": 99, "attempts": 4}
+    records, watchdog = guest_supervisor.receipt_report(json.dumps(envelope))
+    assert records == []
+    assert watchdog == guest_supervisor.empty_watchdog("unparseable")
+    envelope.pop("watchdog")
+    _, missing = guest_supervisor.receipt_report(json.dumps(envelope))
+    assert missing == guest_supervisor.empty_watchdog("absent")
+
+
+def test_install_evidence_carries_the_watchdog_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        payload = {
+            "installed": True,
+            "unit": "action-server.service",
+            "watchdog": {"installed": True, "status": "active", "cgroup_distinct": True},
+        }
+        monkeypatch.setattr(
+            provider,
+            "_run_guest_command",
+            lambda *args, **kwargs: guest_disk.CommandResult(
+                0, "escalation=agentless\n" + json.dumps(payload), ""
+            ),
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["watchdog"] == {
+            "installed": True,
+            "status": "active",
+            "cgroup_distinct": True,
+        }
+
+
+def test_install_evidence_does_not_fabricate_a_watchdog_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        monkeypatch.setattr(
+            provider,
+            "_run_guest_command",
+            lambda *args, **kwargs: guest_disk.CommandResult(
+                0,
+                'escalation=agentless\n{"installed": true, "unit": "action-server.service"}',
+                "",
+            ),
+        )
+        provider._install_guest_supervisor(_plan())
+        report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
+        assert report["installed"] is True
+        assert "watchdog" not in report
+
+
+@pytest.mark.asyncio
+async def test_a_restart_that_needed_the_watchdog_is_visible_in_the_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recovery the watchdog performed must not read as a clean episode."""
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+
+        envelope = _envelope([_restart_record()])
+        envelope["watchdog"] = _watchdog_payload(attempts=2, capped=True)
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            if _is_restart_command(argv):
+                return guest_disk.CommandResult(0, "", "")
+            if _is_restart_result_command(argv):
+                return _restart_document()
+            return guest_disk.CommandResult(0, json.dumps(envelope), "")
+
+        monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        with pytest.raises(GuestServerRecovered):
+            await provider.execute(["must_not_post()"])
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["recovered"] is True
+        assert evidence["watchdog"]["attempts"] == 2
+        assert evidence["watchdog"]["capped"] is True
+        assert evidence["watchdog"]["last_trigger"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_changed_watchdog_summary_is_written_without_a_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verified_none still surfaces interventions, and only when they change."""
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+        writes: list[str] = []
+        real_write = provider._write_supervisor_evidence
+
+        def write(name: str, value: object) -> None:
+            writes.append(name)
+            real_write(name, value)
+
+        monkeypatch.setattr(provider, "_write_supervisor_evidence", write)
+        envelope = _envelope([])
+        envelope["watchdog"] = _watchdog_payload(attempts=4)
+        monkeypatch.setattr(
+            provider,
+            "_run_guest_command",
+            lambda *args, **kwargs: guest_disk.CommandResult(0, json.dumps(envelope), ""),
+        )
+        assert provider._recover_guest_supervisor().state == "verified_none"
+        assert writes == ["guest-supervisor-recovery.json"]
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["observed"] == "verified_none"
+        assert evidence["watchdog"]["attempts"] == 4
+        # The next action sees the same summary and writes nothing new.
+        assert provider._recover_guest_supervisor().state == "verified_none"
+        assert writes == ["guest-supervisor-recovery.json"]
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_watchdog_record_never_changes_a_recovery_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        monkeypatch.setattr(provider, "_probe_control_server", lambda timeout: True)
+
+        envelope = _envelope([_restart_record()])
+        envelope["watchdog"] = "not a record"
+
+        def command(argv: Any, **kwargs: Any) -> guest_disk.CommandResult:
+            if _is_restart_command(argv):
+                return guest_disk.CommandResult(0, "", "")
+            if _is_restart_result_command(argv):
+                return _restart_document()
+            return guest_disk.CommandResult(0, json.dumps(envelope), "")
+
+        monkeypatch.setattr(aws_mod.time, "time_ns", lambda: 777)
+        monkeypatch.setattr(provider, "_run_guest_command", command)
+        with pytest.raises(GuestServerRecovered):
+            await provider.execute(["must_not_post()"])
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["recovered"] is True
+        assert evidence["watchdog"]["status"] == "unparseable"

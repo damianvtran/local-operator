@@ -731,6 +731,11 @@ class AwsProvider:
         self._supervisor_password = ""
         self._supervisor_restart: int | None = None
         self._supervisor_records: list[Any] = []
+        # The last watchdog summary the guest reported. Kept so the evidence of
+        # a LATER unreachable read still says what the watchdog had done: an
+        # episode that only survived because the watchdog revived the server
+        # must not look like one whose server never died.
+        self._supervisor_watchdog: dict[str, Any] | None = None
         # The provider's OWN secret values, for the exact-value half of the
         # console scrub (``guest_loss``): console text is the one guest-authored
         # artifact this module persists, and the AWS credentials, the session
@@ -854,6 +859,13 @@ class AwsProvider:
                         "unit": self._supervisor_unit,
                         "status": "supervised",
                     }
+                    # ADDITIVE ONLY, and never fabricated: the guest refuses to
+                    # install when its watchdog is inactive or shares the
+                    # server's cgroup, so a missing proof is recorded as absent
+                    # rather than asserted as success.
+                    watchdog = guest_supervisor.watchdog_install_status(response)
+                    if watchdog is not None:
+                        status["watchdog"] = watchdog
                 else:
                     reason = (
                         response.get("reason", "invalid response")
@@ -968,6 +980,7 @@ class AwsProvider:
                     "records_withheld": False,
                     "cause": "supervisor recovery budget exhausted; server unreachable",
                     "records": self._supervisor_records,
+                    "watchdog": self._watchdog_evidence(),
                     "final_guest_record": "not retrieved: action-server transport unavailable",
                     "guest_record_path": (
                         f"/var/lib/lop-action-supervisor/{self._supervisor_unit}.json"
@@ -987,8 +1000,29 @@ class AwsProvider:
                 )
                 if result.returncode != 0:
                     raise ValueError("receipt command failed")
-                records = guest_supervisor.receipt_records(result.stdout)
+                records, watchdog = guest_supervisor.receipt_report(result.stdout)
+                # The watchdog repairs the server THROUGH a channel the host
+                # does not have, so its record is the only trace of a death the
+                # episode survived. Surface it whenever it changes: a completed
+                # episode that needed three revivals must not read like one that
+                # needed none. Between interventions the summary is unchanged,
+                # so a healthy episode writes no extra evidence.
+                watchdog_changed = watchdog != self._supervisor_watchdog
+                self._supervisor_watchdog = watchdog
                 if not records or records[-1]["restart"] == self._supervisor_restart:
+                    if watchdog_changed:
+                        self._write_supervisor_evidence(
+                            "guest-supervisor-recovery.json",
+                            {
+                                "recovered": False,
+                                "read_failed": False,
+                                "receipt_unavailable": False,
+                                "records_withheld": False,
+                                "observed": "verified_none",
+                                "watchdog": watchdog,
+                                "records": self._supervisor_records,
+                            },
+                        )
                     return guest_supervisor.ReceiptResult("verified_none")
                 # Keep the console evidence's fail-closed treatment. A withheld
                 # stderr payload is explicitly marked, never a silent clean [].
@@ -1017,6 +1051,7 @@ class AwsProvider:
                             "failed_action_delivery": delivery,
                             "remaining_batch": "not_sent",
                             "records": self._supervisor_records,
+                            "watchdog": self._watchdog_evidence(),
                         },
                     )
                     # The existing recovery failure, with a fixed cause: the
@@ -1037,6 +1072,7 @@ class AwsProvider:
                         "failed_action_delivery": delivery,
                         "remaining_batch": "not_sent",
                         "records": self._supervisor_records,
+                        "watchdog": watchdog,
                     },
                 )
                 return guest_supervisor.ReceiptResult("new_restart")
@@ -1061,9 +1097,19 @@ class AwsProvider:
                 "failed_action_delivery": delivery,
                 "remaining_batch": "not_sent",
                 "records": self._supervisor_records,
+                "watchdog": self._watchdog_evidence(),
             },
         )
         return guest_supervisor.ReceiptResult("read_failed")
+
+    def _watchdog_evidence(self) -> dict[str, Any]:
+        """The last watchdog summary we read, or an explicit absent record.
+
+        Never fabricated: ``absent`` means no summary was ever readable in this
+        episode, which is itself the diagnostic a missing record carries.
+        """
+
+        return self._supervisor_watchdog or guest_supervisor.empty_watchdog("absent")
 
     def _restart_supervisor_unit(self, unit: str) -> dict[str, Any]:
         """Detached restart + freshness proof; never raises.
