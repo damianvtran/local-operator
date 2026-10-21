@@ -357,6 +357,14 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # as the owner of its copy, which is how a viewer refuses to open a session
     # that is not running there.
     ".session.pid": "the source process's liveness marker",
+    # The latest run's identity (``journal.RUN_RECORD_NAME``): what the listing
+    # compares an exit record against to tell "the last run exited here" from "a
+    # later run died". It names a pid on THIS device, so a copy would either be
+    # deleted by a clean exit that never happened here or make the destination's
+    # history read unknown; the destination writes its own at the next boot.
+    "runtime-run.json": (
+        "this device's latest-run marker; the destination writes its own at the next boot"
+    ),
     # Written by the destination itself, because ``home_device`` has to name the
     # NEW owner. Copying it would leave the moved session stamped as this
     # device's.

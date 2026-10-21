@@ -323,3 +323,129 @@ def test_a_non_boolean_requested_is_never_a_requested_stop(tmp_path: Path) -> No
     record = journal.read_exit_record(directory)
     assert record is not None
     assert record.requested is False
+
+
+# --- what the socket rung knows and the marker cannot (round 1, BLOCKER) ----
+
+
+def test_a_socket_stop_is_recorded_as_requested_without_waiting_for_the_marker(
+    tmp_path: Path,
+) -> None:
+    """``_clean_exit(requested=True)`` states a fact the marker cannot yet carry.
+
+    ``control._graceful_stop`` deliberately stages its stop marker AFTER the
+    target's ack, so the runtime starts exiting in the same tick the marker is
+    written — measured 3/3 as ``requested: false`` for a stop a client asked for.
+    The caller that knows says so, and the durable-evidence path is not consulted.
+    """
+    directory = _session_dir(tmp_path)
+    handle = _Handle("abc123", directory)
+    runtime = _Runtime("abc123", 1_700_000_000.0)
+
+    asyncio.run(
+        process._clean_exit(handle, runtime, reason="socket-stop", detail="stop op", requested=True)
+    )
+
+    record = journal.read_exit_record(directory)
+    assert record is not None
+    assert record.reason == "socket-stop"
+    assert record.requested is True
+
+
+def test_the_record_is_on_disk_before_dispose_runs(tmp_path: Path) -> None:
+    """The write precedes the dispose, so a kill DURING dispose still explains itself.
+
+    Dispose is the stage measured at minutes (it awaits every viewer's writer);
+    a record written after it would be absent for exactly the slow exits a reader
+    is most likely to find.
+    """
+    directory = _session_dir(tmp_path)
+    seen: list[bool] = []
+
+    class _WatchingHandle(_Handle):
+        async def dispose(self) -> None:
+            seen.append(journal.exit_record_path(directory).exists())
+            self.disposed = True
+
+    handle = _WatchingHandle("abc123", directory)
+    runtime = _Runtime("abc123", 1_700_000_000.0)
+    asyncio.run(process._clean_exit(handle, runtime, reason="idle-exit"))
+
+    assert seen == [True]
+
+
+# --- refusals the reader owes a listing --------------------------------------
+
+
+def test_a_departure_stamp_a_reader_cannot_use_is_refused(tmp_path: Path) -> None:
+    """Zero and non-finite stamps are no evidence, never an exception.
+
+    A listing renders an age from ``at``; ``inf`` used to render a fabricated
+    ``20747d`` and a zero a departure before the epoch. ``int('inf')`` raises
+    ``OverflowError``, which must be a refusal rather than an escape.
+    """
+    directory = _session_dir(tmp_path)
+    path = journal.exit_record_path(directory)
+    base = {"v": 1, "session_id": "abc123", "pid": 1, "started_at": 1.0, "reason": "idle-exit"}
+
+    for bad in (
+        {**base, "at": 0},
+        {**base, "at": -1.0},
+        {**base, "at": float("inf")},
+        {**base, "at": float("nan")},
+        {**base, "at": 1.0, "pid": float("inf")},
+        {**base, "at": 1.0, "pid": 0},
+        {**base, "at": 1.0, "started_at": float("nan")},
+        {**base, "at": 1.0, "started_at": -5.0},
+    ):
+        path.write_text(json.dumps(bad))
+        assert journal.read_exit_record(directory) is None, bad
+
+
+def test_a_record_from_another_conversation_is_refused(tmp_path: Path) -> None:
+    """The directory is the authority: a mismatched ``session_id`` is no evidence."""
+    directory = _session_dir(tmp_path)
+    journal.write_exit_record(
+        "someone-else", conversation_dir=directory, pid=1, started_at=1.0, reason="idle-exit"
+    )
+
+    assert journal.read_exit_record(directory) is None
+
+
+# --- the run key at its OTHER end (round 1, MAJOR-1) ------------------------
+
+
+def test_the_run_record_round_trips_and_only_its_own_key_clears_it(tmp_path: Path) -> None:
+    """Boot writes it; only that run's clean exit removes it."""
+    directory = _session_dir(tmp_path)
+    path = journal.write_run_record(
+        "abc123", conversation_dir=directory, pid=4242, started_at=900.0
+    )
+    assert path is not None
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+    record = journal.read_run_record(directory)
+    assert record is not None
+    assert record.covers_run(4242, 900.0)
+    assert not record.covers_run(4242, 500.0)
+
+    # A different run must not clear this one's marker: deleting a successor's
+    # record would make its eventual death read as a clean exit.
+    journal.clear_run_record(directory, pid=4242, started_at=500.0)
+    assert journal.read_run_record(directory) is not None
+
+    journal.clear_run_record(directory, pid=4242, started_at=900.0)
+    assert journal.read_run_record(directory) is None
+
+
+def test_a_clean_exit_removes_its_run_record(tmp_path: Path) -> None:
+    """The pair "exit record written, run record gone" is a completed departure."""
+    directory = _session_dir(tmp_path)
+    journal.write_run_record("abc123", conversation_dir=directory, pid=os.getpid(), started_at=42.0)
+    handle = _Handle("abc123", directory)
+    runtime = _Runtime("abc123", 42.0)
+
+    asyncio.run(process._clean_exit(handle, runtime, reason="idle-exit"))
+
+    assert journal.read_run_record(directory) is None
+    assert journal.read_exit_record(directory) is not None
