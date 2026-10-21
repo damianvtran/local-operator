@@ -302,6 +302,23 @@ def test_a_rerun_of_an_old_run_is_protected_by_the_grace_period(api):
     assert "grace period" in reason
 
 
+def _old(hours: int) -> str:
+    return (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _cancel_stub(status: int):
+    """A gh_api that answers the pre-read then fails the cancel with `status`."""
+
+    def fake(path: str, *, method: str = "GET"):
+        if method == "POST":
+            raise reaper.ApiError(f"HTTP {status}", status)
+        return {"status": "queued"}
+
+    return fake
+
+
 def test_a_transient_read_failure_keeps_the_run(api, monkeypatch):
     """Q2: an outage is not evidence that anything is gone.
 
@@ -394,3 +411,41 @@ def test_branch_tip_returns_none_only_for_a_confirmed_404(monkeypatch):
         else:
             with pytest.raises(reaper.ApiError):
                 reaper.branch_tip("o/r", "feat/x")
+
+
+def test_a_409_on_the_cancel_is_a_ghost_not_a_refusal(monkeypatch, capsys):
+    """Measured on runs 34749070299 / 34747986252.
+
+    GitHub returns 409 'Cannot cancel a workflow run that has not been queued
+    yet' for a run it reports as `queued` but never scheduled. That is
+    terminal, so it must not be counted as a refusal -- a refusal implies the
+    next sweep might succeed, and this one never will.
+    """
+    run = _run(id=99, head_branch="feat/x", created_at=_old(48), updated_at=_old(48))
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [run])
+    monkeypatch.setattr(reaper, "decide", lambda *a, **k: (True, "unresolvable"))
+    monkeypatch.setattr(reaper, "gh_api", _cancel_stub(409))
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+
+    rc = reaper.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "GHOST" in out
+    assert "REFUSE" not in out
+    assert "refused 0" in out
+    assert "ghosts 1" in out
+
+
+def test_a_403_on_the_cancel_is_still_a_refusal(monkeypatch, capsys):
+    """The other side: a permission error may be fixed, so it stays a refusal."""
+    run = _run(id=98, head_branch="feat/y", created_at=_old(48), updated_at=_old(48))
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [run])
+    monkeypatch.setattr(reaper, "decide", lambda *a, **k: (True, "unresolvable"))
+    monkeypatch.setattr(reaper, "gh_api", _cancel_stub(403))
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+
+    rc = reaper.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "REFUSE" in out
+    assert "ghosts 0" in out

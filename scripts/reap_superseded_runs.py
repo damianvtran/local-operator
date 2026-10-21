@@ -329,7 +329,7 @@ def main() -> int:
     if not runs:
         return 0
 
-    cancelled = kept = refused = 0
+    cancelled = kept = refused = ghosts = 0
     for run in runs:
         run_id = run.get("id")
         should, reason = decide(args.repo, run, args.min_age_minutes, args.max_queue_hours)
@@ -358,6 +358,21 @@ def main() -> int:
         try:
             gh_api(f"repos/{args.repo}/actions/runs/{run_id}/cancel", method="POST")
         except ApiError as exc:
+            if exc.status == 409:
+                # 409 is TERMINAL, not retryable: GitHub refuses the cancel
+                # permanently. Measured on runs 34749070299 and 34747986252 --
+                # 37 days old, branches 404, reported `queued` by the API, and
+                # both with `jobs: []`. They were never scheduled, so they hold
+                # no runner slot; retrying every 20 minutes forever would be
+                # noise with no possible success. Counted separately from a
+                # refusal (403/5xx), which may well succeed next sweep.
+                ghosts += 1
+                print(
+                    f"  GHOST  {label}: {reason} -> uncancellable ({exc}); "
+                    f"holds no runner slot",
+                    flush=True,
+                )
+                continue
             refused += 1
             print(f"  REFUSE {label}: {reason} -> {exc}", flush=True)
             continue
@@ -365,7 +380,10 @@ def main() -> int:
         print(f"  CANCEL {label}: {reason} -> ok", flush=True)
 
     verb = "would cancel" if args.dry_run else "cancelled"
-    print(f"{verb} {cancelled}, kept {kept}, refused {refused}", flush=True)
+    print(
+        f"{verb} {cancelled}, kept {kept}, refused {refused}, ghosts {ghosts}",
+        flush=True,
+    )
     return 0
 
 
