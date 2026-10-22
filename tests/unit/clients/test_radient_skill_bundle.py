@@ -275,3 +275,43 @@ def test_probe_refuses_a_non_json_body_without_echoing_it(
             radient_client.probe_skill_capabilities()
 
     assert "unrecognised" in str(caught.value)
+
+
+# -- the bearer is the CALLER's decision ------------------------------------------------
+
+
+def test_an_anonymous_client_downloads_a_public_bundle_without_a_key(
+    base_url: str,
+) -> None:
+    client = RadientClient(api_key=None, base_url=base_url)
+    with patch(
+        "local_operator.clients.radient.requests.get",
+        return_value=_stream(200, [b"archive-bytes"]),
+    ) as get:
+        result = client.download_skill_bundle("sk-1", bearer=False)
+
+    assert result.data == b"archive-bytes"
+    assert "Authorization" not in get.call_args.kwargs["headers"]
+
+
+def test_the_same_client_refuses_a_bearer_download_without_a_key(base_url: str) -> None:
+    client = RadientClient(api_key=None, base_url=base_url)
+    with patch("local_operator.clients.radient.requests.get", return_value=_stream(200, [b"x"])):
+        with pytest.raises(RuntimeError):
+            client.download_skill_bundle("sk-1")
+        with pytest.raises(RuntimeError):
+            client.download_skill_bundle("sk-1", bearer=True)
+
+
+def test_a_streamed_public_download_to_dest_writes_the_bytes(base_url: str) -> None:
+    client = RadientClient(api_key=None, base_url=base_url)
+    sink = io.BytesIO()
+    with patch(
+        "local_operator.clients.radient.requests.get",
+        return_value=_stream(200, [b"one", b"two"]),
+    ) as get:
+        result = client.download_skill_bundle("sk-1", bearer=False, dest=sink)
+
+    assert sink.getvalue() == b"onetwo"
+    assert result.data is None
+    assert "Authorization" not in get.call_args.kwargs["headers"]

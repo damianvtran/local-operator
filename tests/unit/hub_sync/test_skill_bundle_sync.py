@@ -51,7 +51,11 @@ def _authored(root: Path, *, body: str = "# Body\n") -> Path:
 
 
 def _manifest_document(
-    built: Any, *, with_publisher: bool = True, visibility: str = "public"
+    built: Any,
+    *,
+    with_publisher: bool = True,
+    visibility: str = "public",
+    tenant_id: str | None = None,
 ) -> dict[str, Any]:
     document: dict[str, Any] = {
         "document_version": 1,
@@ -60,7 +64,7 @@ def _manifest_document(
         "description": built.description,
         "bundle": built.bundle.to_json(),
         "visibility": visibility,
-        "tenant_id": None,
+        "tenant_id": tenant_id,
         "revision": '"hub-rev-1"',
         "content_revision": 1,
         "sync_contract": {"revision_cas": 1, "skills": 1, "skill_bundles": 1},
@@ -81,12 +85,14 @@ class RemoteBundle:
         *,
         contract: dict[str, Any] | None = None,
         probe_error: BaseException | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.base_url = base
-        self.api_key = None
+        self.api_key = api_key
         self.document = document
         self.data = data
         self.downloads: list[str] = []
+        self.bearers: list[bool] = []
         self.uploads: list[bytes] = []
         self.published: list[dict[str, Any]] = []
         self.upload_error: BaseException | None = None
@@ -102,7 +108,15 @@ class RemoteBundle:
     def get_skill(self, skill_id: str, **_kw: Any) -> dict[str, Any]:
         return dict(self.document)
 
-    def download_skill_bundle(self, skill_id: str, *, dest: Any = None, **_kw: Any) -> Any:
+    def download_skill_bundle(
+        self, skill_id: str, *, dest: Any = None, bearer: bool = True, **_kw: Any
+    ) -> Any:
+        # A REAL client raises on ``require_api_key`` when it holds no key; the
+        # fake mirrors that so a caller that forgot to thread the scope fails
+        # exactly where the anonymous public pull failed on a real E2E.
+        self.bearers.append(bearer)
+        if bearer and self.api_key is None:
+            raise RuntimeError("Radient API key is required for this operation")
         self.downloads.append(skill_id)
         if dest is not None:
             dest.write(self.data)
@@ -144,12 +158,26 @@ def _ctx(root: Path, client: Any) -> svc.HubSyncContext:
     )
 
 
-def _rig(tmp_path: Path, *, publisher: bool = True) -> tuple[Path, str, Any, RemoteBundle]:
+def _rig(
+    tmp_path: Path,
+    *,
+    publisher: bool = True,
+    visibility: str = "public",
+    tenant_id: str | None = None,
+) -> tuple[Path, str, Any, RemoteBundle]:
     root = tmp_path / ".local-operator"
     source = _authored(tmp_path)
     built = build_bundle(source)
     base = configured_radient_base_url(ConfigManager(root))
-    remote = RemoteBundle(base, _manifest_document(built, with_publisher=publisher), built.data)
+    remote = RemoteBundle(
+        base,
+        _manifest_document(
+            built, with_publisher=publisher, visibility=visibility, tenant_id=tenant_id
+        ),
+        built.data,
+        # An ORG client is signed in; the anonymous arm is the public one.
+        api_key="test-key" if visibility == "org" else None,
+    )
     return root, base, built, remote
 
 
@@ -181,6 +209,9 @@ def test_install_downloads_verifies_extracts_and_writes_the_baseline(tmp_path: P
     # the bytes on disk -- not the archive hash.
     assert tree_hash_of(destination) == built.tree_hash
     assert remote.downloads == [HUB_ID]
+    # A PUBLIC row is readable anonymously: the download must not demand a key
+    # from the anonymous client (the real E2E failure this pins).
+    assert remote.bearers == [False]
     record = prov.read_baseline(root, "skill", result["link"]["local_id"])
     assert record is not None
     assert "bundle" in record.fields
@@ -652,3 +683,23 @@ def test_a_failed_probe_leaves_the_store_unchanged_and_refuses(tmp_path: Path) -
     assert client.probe_calls == 1
     assert preview["reason"] == "bundle-unsupported-server"
     assert _server_sources(ctx) == {}
+
+
+def test_an_org_bundle_install_downloads_with_the_bearer(tmp_path: Path) -> None:
+    root, base, built, remote = _rig(tmp_path, visibility="org", tenant_id="org-1")
+    ctx = _ctx(root, remote)
+
+    result = svc.install_skill(
+        ctx,
+        hub_source=base,
+        hub_id=HUB_ID,
+        visibility="org",
+        tenant_id="org-1",
+        alias=NAME,
+    )
+
+    # Org rows need the signed-in client, and the org role gate replaces the
+    # public publisher confirmation.
+    assert remote.bearers == [True]
+    assert tree_hash_of(root / "skills" / NAME) == built.tree_hash
+    assert result["link"]["local_id"]
