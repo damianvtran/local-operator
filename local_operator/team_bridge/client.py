@@ -60,6 +60,7 @@ import asyncio
 import enum
 import hashlib
 import json
+import logging
 import re
 import time
 import unicodedata
@@ -82,6 +83,8 @@ from local_operator.providers.radient_credentials import (
 from local_operator.team_bridge import availability
 from local_operator.team_bridge.settings import TeamBridgeSettings
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Embedded served texts (fallbacks; the server is each text's canonical home)
 # ---------------------------------------------------------------------------
@@ -98,6 +101,10 @@ SUPPORTED_API_VERSION = 1
 #: over it is REFUSED (never truncated — truncation would make the SHA records
 #: name bytes nobody rendered).
 TEXT_CAP_BYTES = 2048
+
+#: Bound on the pre-enable feed-head read (review R2-2): the user's enable
+#: never waits longer than this on it; past it the seed falls back to cursor 0.
+SEED_HEAD_TIMEOUT_S = 3.0
 
 CONSENT_VERSION_V1 = "bridge_consent_v1"
 SCREENING_VERSION_V1 = "bridge-screen-v1"
@@ -513,6 +520,11 @@ class AcceptedTexts:
 #: round trip, and a hung read must not hold a desktop route open.
 REQUEST_TIMEOUT_S = 30.0
 
+#: Read-timeout headroom over an events long-poll's ``wait``: the hub parks
+#: for up to ``wait`` seconds and answers on a ~1 s shared-DB poll, so the
+#: client must outlast the park by more than that plus transit.
+EVENTS_PARK_MARGIN_S = 15.0
+
 #: The most of an ERROR body this client will read. Error bodies are small and
 #: content-free; the bound exists so a misbehaving proxy cannot hand us a
 #: caller-sized buffer on the failure path.
@@ -695,6 +707,16 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
         details=details,
         retry_after_seconds=retry_after,
     )
+
+
+def _refuses_field(refusal: BridgeRefusal, field: str) -> bool:
+    """Whether ``refusal`` is a 400 validation refusal naming exactly ``field``.
+
+    Narrow on purpose: only a refusal that names the field earns the
+    field-specific log line; every refusal is raised unchanged either way.
+    """
+
+    return refusal.http_status == 400 and refusal.details.get("field") == field
 
 
 def _local_settings_snapshot(config_dir: Path | None) -> TeamBridgeSettings | None:
@@ -913,6 +935,7 @@ class TeamBridgeClient:
         *,
         params: Mapping[str, Any] | None,
         body: Mapping[str, Any] | None,
+        timeout: float = REQUEST_TIMEOUT_S,
     ) -> httpx.Response:
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
@@ -920,7 +943,7 @@ class TeamBridgeClient:
         # lifetime — an injected-socket seam lands with it, deliberately not
         # half-built here (the architect's finding 5; tracked on the PR).
         async with httpx.AsyncClient(
-            timeout=REQUEST_TIMEOUT_S,
+            timeout=timeout,
             transport=self._transport,
             follow_redirects=False,
         ) as http:
@@ -1151,6 +1174,7 @@ class TeamBridgeClient:
         tenant_id: str,
         after: int | None = None,
         access: OAuthAccess | None = None,
+        wait: int | None = None,
     ) -> dict[str, Any] | None:
         """The §6.7 delivery substrate: ONE read; ``None`` = the 204 timeout.
 
@@ -1160,19 +1184,48 @@ class TeamBridgeClient:
         refresh-once discipline is mirrored here so the one special case does
         not lose it. Long-poll lifetime, reconnects and schedules are H4's;
         this is a one-shot primitive.
+
+        ``wait`` is the server-side PARK in seconds (the hub clamps it to 30).
+        WHY IT EXISTS: without it the hub answers a caught-up cursor at once,
+        and a loop that re-polls on every answer becomes a request storm — the
+        live E2E on local-operator-ui #1314 measured 124 reads in under 2 s and
+        then 429 ``rate_limited`` for 42 s. The read timeout is stretched past
+        the park (plus margin for the hub's ~1 s shared-DB poll and transit),
+        because a parked request outliving ``REQUEST_TIMEOUT_S`` would surface
+        as a client timeout instead of the server's ordinary 204. ``None``
+        keeps the plain-poll shape for one-shot callers.
+
+        ``after`` is sent whenever it is not ``None`` — INCLUDING 0. Cursor 0
+        is a real position (a fresh endpoint's), and an absent ``after`` is
+        the hub's "no cursor" arm, which answers a resync at the CURRENT head
+        and so skips the first message ever delivered.
         """
 
         pinned = access or await self.current_access()
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if after is not None:
             params["after"] = int(after)
+        timeout = REQUEST_TIMEOUT_S
+        if wait is not None:
+            params["wait"] = int(wait)
+            timeout = max(REQUEST_TIMEOUT_S, float(wait) + EVENTS_PARK_MARGIN_S)
         response = await self._dispatch(
-            "GET", "/messaging/events", pinned.access_token, params=params, body=None
+            "GET",
+            "/messaging/events",
+            pinned.access_token,
+            params=params,
+            body=None,
+            timeout=timeout,
         )
         if response.status_code == 401:
             refreshed = await self._refreshed_access(pinned)
             response = await self._dispatch(
-                "GET", "/messaging/events", refreshed.access_token, params=params, body=None
+                "GET",
+                "/messaging/events",
+                refreshed.access_token,
+                params=params,
+                body=None,
+                timeout=timeout,
             )
             if response.status_code == 401:
                 raise BridgeSignInRequired(SIGN_IN_SENTENCE)
@@ -1190,6 +1243,7 @@ class TeamBridgeClient:
         consent_version: str | None = None,
         consented_via: str | None = None,
         label: str | None = None,
+        agent_name: str | None = None,
         endpoint: Any = _UNKNOWN_ENDPOINT,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1206,6 +1260,23 @@ class TeamBridgeClient:
         request would be refused and the member could not pause during exactly
         the incident pause exists for. ``label`` with a non-``active`` state is
         therefore a caller bug, refused here before it reaches the wire.
+
+        ``agent_name`` is the chief of staff's CURRENT display name
+        (:func:`local_operator.team_bridge.cos_name.cos_display_name`), an
+        ADDITIVE, non-unique field teammates see beside the endpoint label
+        ("Aida (Ben)"). It follows ``label``'s rule — ``active`` only — because
+        it is a name change too, and bundling one into a pause is what rule 2
+        forbids. Omitted entirely when ``None``, so the body is byte-identical
+        to the pre-field shape. The paired hub accepts it on the write that
+        CREATES the endpoint too, and an older hub ignores it as an unknown
+        field (§6.6, plain ``json.Unmarshal``), so it rides the first enable.
+        There is deliberately NO strip-and-retry: the name is already repaired
+        into the label grammar (``cos_name.bridge_agent_name``), so a refusal
+        naming it is a real disagreement, and a silent re-send would turn a
+        rename re-sync into a bare ``state=active`` assertion (review R1-3).
+        Such a refusal is raised unchanged — the request's other fields are
+        never altered — and logged by its closed-set code only, never the
+        value.
 
         ``expected_account_id`` is the captured-account guard (§5.2's local
         desktop receipt; review round 1, R6/Q1): when supplied, the pinned
@@ -1234,7 +1305,7 @@ class TeamBridgeClient:
             raise ValueError(
                 f"consented_via must be one of {VALID_CONSENTED_VIA!r}; got {consented_via!r}"
             )
-        if label is not None and state != "active":
+        if (label is not None or agent_name is not None) and state != "active":
             raise ValueError(
                 "a pause or opt-out must be sent alone (RFC §5.2): send the name change "
                 "as its own request"
@@ -1255,19 +1326,39 @@ class TeamBridgeClient:
             body["consented_via"] = consented_via
         if label is not None:
             body["label"] = label
+        if agent_name is not None:
+            body["agent_name"] = agent_name
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
-        result = await self._send("PUT", "/messaging/settings", body=body, access=access)
-        self._commit_explicit_enable(
+        # R2-1: the seed position is read BEFORE the write (see _pre_enable_head).
+        head = (
+            await self._pre_enable_head(tenant_id=tenant_id, access=access)
+            if state == "active" and consent_version and tenant_id
+            else None
+        )
+        try:
+            result = await self._send("PUT", "/messaging/settings", body=body, access=access)
+        except BridgeRefusal as refusal:
+            if "agent_name" in body and _refuses_field(refusal, "agent_name"):
+                # Code and rule are a closed server set (§6.5); the name itself
+                # is user content and stays out of the log.
+                logger.warning(
+                    "team_bridge: agent_name refused: %s/%s",
+                    refusal.code,
+                    refusal.details.get("rule"),
+                )
+            raise
+        await self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
             consent_version=consent_version,
             result=result,
             access=access,
+            head=head,
         )
         return result
 
-    def _commit_explicit_enable(
+    async def _commit_explicit_enable(
         self,
         *,
         state: str,
@@ -1275,6 +1366,7 @@ class TeamBridgeClient:
         consent_version: str | None,
         result: Mapping[str, Any],
         access: OAuthAccess | None,
+        head: int | None = None,
     ) -> None:
         """Commit the native receipt for THIS user's explicit settings enable.
 
@@ -1319,7 +1411,7 @@ class TeamBridgeClient:
                 commit_settings_enrollment,
             )
 
-            commit_settings_enrollment(
+            committed = commit_settings_enrollment(
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,
@@ -1330,6 +1422,74 @@ class TeamBridgeClient:
                 cos_session_id=(local.session or None) if local is not None else None,
             )
         except Exception:  # noqa: BLE001 - the server-side enable already succeeded
+            return
+        if committed and head is not None:
+            self._seed_feed_cursor(head)
+
+    async def _pre_enable_head(self, *, tenant_id: str, access: OAuthAccess | None) -> int | None:
+        """The hub's feed head for this account, read BEFORE the enable write.
+
+        WHY BEFORE (review R2-1). The seed (R1-2) starts a never-polled store
+        at the hub's head so a previously used endpoint does not replay up to
+        7 days of feed as fresh wakes. Read AFTER the PUT, a message landing
+        between the write and the read sat at or below the seeded cursor and
+        was never woken. Read before, any message that arrives once the
+        endpoint is enabled carries a HIGHER seq than the seed, so nothing is
+        skipped; at worst a message sent just before the read is replayed
+        (at-least-once, never lost).
+
+        HOW THE CASES SEPARATE. A brand-new endpoint does not exist yet, so the
+        hub refuses this read: no head, the cursor stays 0, and its first
+        message (seq 1) arrives (F2). A used endpoint (another machine, a
+        reinstall, a wiped store) answers its current head.
+
+        BOUNDED (review R2-2): the user's enable must not wait on it, so the
+        read is capped at :data:`SEED_HEAD_TIMEOUT_S`. A timeout, a refusal or
+        any failure answers ``None`` — the F2-safe cursor 0. Only asked when
+        this machine has no committed owner, i.e. when a commit can follow.
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return None
+        try:
+            from local_operator.team_bridge.store import Store
+
+            if Store(config_dir).committed_owner_count() != 0:
+                return None
+            answer = await asyncio.wait_for(
+                self.events(tenant_id=tenant_id, access=access), timeout=SEED_HEAD_TIMEOUT_S
+            )
+        except Exception:  # noqa: BLE001 - no head is the F2-safe default (cursor 0)
+            return None
+        cursor = answer.get("cursor") if isinstance(answer, Mapping) else None
+        if isinstance(cursor, bool) or not isinstance(cursor, (int, str)):
+            return None
+        try:
+            return int(cursor)
+        except ValueError:
+            return None
+
+    def _seed_feed_cursor(self, head: int) -> None:
+        """Write the pre-enable head into the freshly committed store (R1-2/R2-1).
+
+        ``Store.seed_feed_cursor`` applies it only while the row is still the
+        untouched commit default, so it never moves a cursor a poll advanced.
+        Best-effort: a failure keeps cursor 0 (a replay, never a loss).
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+            from local_operator.team_bridge.types import feed_seq as _feed_seq
+
+            store = Store(config_dir)
+            owner = store.active_owner()
+            if owner is not None:
+                store.seed_feed_cursor(owner, _feed_seq(head))
+        except Exception:  # noqa: BLE001 - a seed failure keeps the safe default (replay)
             return
 
     async def allowlist(self, *, tenant_id: str | None = None) -> dict[str, Any]:
@@ -2300,6 +2460,13 @@ class StatusDiscipline:
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        #: ``endpoint_id -> agent_name`` this process last re-sent SUCCESSFULLY.
+        #: The debounce for :meth:`_sync_agent_name`: a hub that lags its own
+        #: echo is not re-PUT on every fresh read. Recorded only after a 2xx
+        #: (review R1-2): a network blip or a 429/503 at the one fresh read after
+        #: a rename must not suppress that name for the life of the process; a
+        #: failed attempt is retried at the next fresh read (≥ the cache TTL).
+        self._agent_name_sent: dict[str, str] = {}
 
     @property
     def base_url(self) -> str:
@@ -2432,6 +2599,7 @@ class StatusDiscipline:
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
+        await self._sync_agent_name(check, access)
         self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
         return check
 
@@ -2535,6 +2703,90 @@ class StatusDiscipline:
         if owner is not None and owner.account_id == check.account_id:
             self._sync_designation(store, owner, local.session)
         return check
+
+    async def _sync_agent_name(self, check: StatusCheck, access: OAuthAccess) -> None:
+        """Re-send the chief of staff's name after a rename, at a status boundary.
+
+        WHY HERE. A rename lands in ``aida.name`` from many writers (``/aida
+        rename``, ``/settings``, a session rename synced by ``aida.naming``) in
+        any process, none of which holds a bridge client. The status read is
+        the existing, already-rate-limited boundary (§5.1: boundaries only,
+        ≥ :data:`STATUS_CACHE_TTL_S` apart, coalesced per account), so this
+        runs only on a FRESH read — never from the cache, never on a timer.
+
+        WHY SO GUARDED. ``PUT /messaging/settings`` is a state ASSERTION with
+        no precondition field: a re-sync must send ``state=active``, and if the
+        member paused on another surface between this read and the PUT, the
+        PUT would resume them. So this fires only when every one holds:
+
+        * the answer is READY and its selected tenant is eligible with an
+          ACTIVE endpoint (never resumes a paused/disabled one it can see);
+        * the endpoint block carries the ``agent_name`` KEY — the paired hub
+          always serves it on status (``null`` when unset), so its absence
+          means an older hub that ignores the field; nothing is sent there,
+          so the race window cannot open;
+        * the echo differs from the resolved name, and this process has not
+          already re-sent that name for that endpoint (the debounce);
+
+        WHY UNDER THE STATUS LOCK. This runs inside the per-account lock the
+        fresh read holds. That serialises re-syncs, which is what keeps two
+        coalesced readers from both PUTting the same rename; the cost (one
+        bounded PUT) is paid only on the single fresh read after a rename.
+        * this machine holds the committed owner for THIS account and
+          endpoint — the user consented here, so publishing the CoS name is
+          part of the enrollment they chose, not a status read enrolling.
+
+        No ``consent_version`` is sent, so ``_commit_explicit_enable`` commits
+        nothing (consent hold, #2712), and the captured account pins the write.
+        Best-effort: any failure leaves the status answer untouched.
+        """
+
+        if self._config_dir is None or check.state != STATE_READY:
+            return
+        selected = select_tenant(check.payload)
+        endpoint = selected.get("endpoint") if selected is not None else None
+        if (
+            selected is None
+            or not bool(selected.get("eligible"))
+            or not isinstance(endpoint, Mapping)
+            or endpoint.get("state") != "active"
+            or "agent_name" not in endpoint
+        ):
+            return
+        endpoint_id = endpoint.get("id")
+        tenant_id = selected.get("tenant_id")
+        if not isinstance(endpoint_id, str) or not isinstance(tenant_id, str):
+            return
+        from local_operator.team_bridge.cos_name import cos_display_name
+
+        wanted = cos_display_name(self._config_dir)
+        if wanted is None or wanted == endpoint.get("agent_name"):
+            return
+        if self._agent_name_sent.get(endpoint_id) == wanted:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+
+            owner = Store(self._config_dir).active_owner()
+        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
+            return
+        if (
+            owner is None
+            or owner.account_id != access.account_id
+            or owner.endpoint_id != endpoint_id
+        ):
+            return
+        try:
+            await self._client.put_settings(
+                state="active",
+                tenant_id=tenant_id,
+                agent_name=wanted,
+                endpoint=endpoint,
+                expected_account_id=access.account_id,
+            )
+        except Exception:  # noqa: BLE001 - a display name never fails a status read
+            return
+        self._agent_name_sent[endpoint_id] = wanted
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.

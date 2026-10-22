@@ -502,6 +502,7 @@ async def events(
     config_dir: Path,
     access: OAuthAccess | None,
     after: FeedSeq | None = None,
+    wait: int | None = None,
     client: WireClient | None = None,
 ) -> dict[str, Any] | None:
     """ONE feed read. ``None`` = the server's 204 timeout (H4 owns lifetime).
@@ -518,8 +519,14 @@ async def events(
     _guard_owner(store, owner, access)
     wire = _client_for(config_dir, client)
     _guard_destination(owner, wire)
+    # ``wait`` is forwarded only when set, so a wire double (or an older
+    # client) without the keyword keeps working for plain one-shot reads.
+    extra: dict[str, Any] = {} if wait is None else {"wait": int(wait)}
     result = await wire.events(
-        tenant_id=owner.tenant_id, after=None if after is None else int(after), access=access
+        tenant_id=owner.tenant_id,
+        after=None if after is None else int(after),
+        access=access,
+        **extra,
     )
     if result is None:
         return None

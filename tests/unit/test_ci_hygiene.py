@@ -30,6 +30,7 @@ against the defect it claims to catch.
 
 from __future__ import annotations
 
+import ast
 import itertools
 import json
 import os
@@ -47,7 +48,7 @@ from typing import Any
 import pytest
 import yaml
 
-from scripts import ci_scope, run_bounded, shard_tests
+from scripts import check_serial_controls, ci_scope, run_bounded, shard_tests
 
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
@@ -533,17 +534,44 @@ def _shard_step_run(job: str) -> str:
     return steps[0]["run"]
 
 
+#: The unit job's SECOND pytest invocation, by step id: the serial run of the six
+#: controls (see ``SERIAL_CONTROLS`` in ci.yml). Audited by name, not ignored — a
+#: third pytest step, or this one under another id, fails ``_pytest_steps``.
+SERIAL_STEP_ID = "serial_controls"
+ORDINARY_STEP_ID = "shard_pytest"
+
+
+def _pytest_steps(job: str) -> list[dict[str, Any]]:
+    """Every step of `job` that invokes pytest, with the job's allowance enforced.
+
+    One step for every job but the unit job, which has EXACTLY two and they are the
+    ones the design names: the ordinary shard run (`shard_pytest`) and the serial
+    controls (`serial_controls`). The old rule ("exactly one pytest step") would
+    either reject the design or, relaxed to "at least one", let an arbitrary extra
+    command ride along unaudited; this keeps both honest.
+    """
+    steps = [s for s in _steps(job) if "pytest" in (s.get("run") or "")]
+    if job == "test":
+        ids = [s.get("id") for s in steps]
+        assert ids == [ORDINARY_STEP_ID, SERIAL_STEP_ID], (
+            f"{job} must run exactly its two audited pytest steps "
+            f"({ORDINARY_STEP_ID}, {SERIAL_STEP_ID}) in that order, got {ids}"
+        )
+    else:
+        assert len(steps) == 1, f"{job} must have exactly one pytest step, got {len(steps)}"
+    return steps
+
+
 def _run_step(job: str) -> str:
-    """The `run:` body of `job`'s step that actually runs the tests.
+    """The `run:` body of `job`'s step that runs its SHARD of the tests.
 
     Found by the `pytest` invocation rather than by step name, for the same
     reason `_shard_step_run` is: the assertions built on it are about what the
     step EXECUTES (does it run the partitioned list, does it keep `-n0`), and a
-    renamed step must not be able to detach them.
+    renamed step must not be able to detach them. For the unit job this is the
+    ordinary run; the serial controls have their own audit below.
     """
-    steps = [s for s in _steps(job) if "pytest" in (s.get("run") or "")]
-    assert len(steps) == 1, f"{job} must have exactly one pytest step, got {len(steps)}"
-    return steps[0]["run"]
+    return _pytest_steps(job)[0]["run"]
 
 
 #: A shell command substitution: `$(cat e2e_tests.txt | tr '\n' ' ')`. Replaced
@@ -928,6 +956,18 @@ def test_each_shard_job_timeout_exceeds_its_projected_wall(job: str) -> None:
 
     workers = 1 if tree == "e2e" else CI_UNIT_WORKERS
     projected_wall = heaviest / workers
+    if job == "test":
+        # SHARD 0 ALSO RUNS THE SERIAL CONTROLS, after its ordinary run, and that
+        # step's whole declared ceiling is added undivided — not spread across the
+        # four workers it does not use, and with nothing subtracted for the six
+        # tests the ordinary run no longer executes (their weight is not itemised
+        # in the manifest, so subtracting would be invention). The ceiling is a
+        # declared bound, not a measurement; the first CI run reports the real time.
+        serial_s = _serial_step_ceiling_seconds()
+        projected_wall = max(
+            heaviest / workers,
+            sum(weights.get(f, fallback) for f in shards[0]) / workers + serial_s,
+        )
 
     timeout = _ci_jobs()[job]["timeout-minutes"]
     assert isinstance(timeout, int)
@@ -1002,6 +1042,573 @@ def test_the_shard_job_runs_the_partitioned_list_not_the_whole_tree(job: str) ->
         assert (
             "NO_COLOR" in run and "xterm-256color" in run
         ), "the e2e shard run lost the environment the TUI suite composes a frame with"
+
+
+def _serial_ids(env: dict[str, Any] | None = None) -> list[str]:
+    """The six serial control ids, from the unit job's single source of truth."""
+    source = env if env is not None else _ci_jobs()["test"]["env"]
+    raw = source.get("SERIAL_CONTROLS")
+    assert isinstance(raw, str), "the unit job lost its SERIAL_CONTROLS list"
+    return raw.split()
+
+
+def _serial_step_ceiling_seconds() -> int:
+    step = next(s for s in _steps("test") if s.get("id") == SERIAL_STEP_ID)
+    minutes = step["timeout-minutes"]
+    assert isinstance(minutes, int)
+    return minutes * 60
+
+
+def _top_level_names(path: Path) -> list[str]:
+    """Names a pytest node id can START with after ``file::`` (functions and classes)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+
+
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    """The token after ``flag`` in a parsed command line, or None when absent."""
+    if flag not in argv:
+        return None
+    index = argv.index(flag) + 1
+    return argv[index] if index < len(argv) else None
+
+
+def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) -> list[str]:
+    """Every way the serial-control wiring can be wrong, as sentences ([] when right).
+
+    A function of plain data, so the NEGATIVE tests below can mutate a copy of the
+    real steps and prove each defect is caught — an audit that has only ever been run
+    on the correct input has never shown it can fail.
+    """
+    problems: list[str] = []
+    ids = _serial_ids(env)
+    if len(ids) != 6 or len(set(ids)) != 6:
+        problems.append(f"expected six unique serial ids, got {ids}")
+    for node_id in ids:
+        file_part, _, name = node_id.partition("::")
+        path = REPO / file_part
+        if not path.is_file():
+            problems.append(f"{node_id}: no such file")
+            continue
+        if "::" in name or name not in _top_level_names(path):
+            problems.append(f"{node_id}: not a top-level test function of that file")
+            continue
+        # `--deselect` is a PREFIX match on the node id, so a longer name that merely
+        # starts with this one would be deselected with it.
+        clashes = [n for n in _top_level_names(path) if n != name and n.startswith(name)]
+        if clashes:
+            problems.append(f"{node_id}: prefix-collides with {clashes}")
+    by_id = {s.get("id"): s for s in steps if s.get("id")}
+    ordinary, serial = by_id.get(ORDINARY_STEP_ID), by_id.get(SERIAL_STEP_ID)
+    if ordinary is None or serial is None:
+        return problems + ["the ordinary or the serial pytest step is missing"]
+    ordinary_run = ordinary.get("run") or ""
+    serial_run = serial.get("run") or ""
+    if "--deselect" not in ordinary_run or "$SERIAL_CONTROLS" not in ordinary_run:
+        problems.append("the ordinary run does not deselect $SERIAL_CONTROLS")
+    if "--cov-append" in ordinary_run or ".coverage." in ordinary_run:
+        problems.append("the ordinary run must not append or rename coverage data")
+    if serial.get("if") != "matrix.shard == 0":
+        problems.append(f"the serial step must run on shard 0 only, has if={serial.get('if')!r}")
+    if serial.get("continue-on-error"):
+        problems.append("the serial step must not continue-on-error")
+    argv = shlex.split(serial_run.replace("\\\n", " "))
+    if "-n0" not in argv:
+        problems.append("the serial run lost -n0")
+    if "$SERIAL_CONTROLS" not in argv:
+        problems.append("the serial run does not select $SERIAL_CONTROLS")
+    for required in ("--cov=local_operator", "--cov-append", "--cov-fail-under=0", "--cov-report="):
+        if required not in argv:
+            problems.append(f"the serial run lost {required}")
+    if "--cov" in argv:
+        problems.append("a bare --cov resets the coverage selection")
+    if "scripts/run_bounded.py" not in serial_run:
+        problems.append("the serial run is not bounded by run_bounded")
+    minutes = serial.get("timeout-minutes")
+    if minutes != 7:
+        problems.append(f"the serial step ceiling must be the declared 7 minutes, is {minutes!r}")
+    # THE WRAPPER'S OWN BOUND MUST FIRE INSIDE THE STEP'S: SIGTERM at --timeout, SIGKILL
+    # --grace later, both before the step's timeout-minutes cancels it from outside (an
+    # outside cancel is the path the in-child orphan guard exists for). Parsed from the
+    # real command, so an edit to either number is judged, not assumed.
+    try:
+        bound = float(_flag_value(argv, "--timeout") or "nan")
+        grace = float(_flag_value(argv, "--grace") or "nan")
+    except ValueError:
+        bound = grace = float("nan")
+    if isinstance(minutes, int) and not bound + grace < minutes * 60:
+        problems.append(
+            f"the wrapper's bound plus grace ({bound}+{grace}s) must be shorter than the "
+            f"step's {minutes} minutes, and both must be given"
+        )
+    # NO INVENTED MEMORY CAP: this job has no memory policy today, a guessed ceiling
+    # could kill a healthy test, and the wrapper refuses to start with no resolvable
+    # auto budget. Zero is passed EXPLICITLY (it reports "disabled (explicit)") so the
+    # absence is visible and a future cap is a deliberate decision.
+    if _flag_value(argv, "--memory-mb") != "0":
+        problems.append("the serial run must pass an explicit --memory-mb 0 (no invented cap)")
+    order = [ORDINARY_STEP_ID, "serial_absent", SERIAL_STEP_ID, "serial_proof"]
+    positions = [next((i for i, s in enumerate(steps) if s.get("id") == k), -1) for k in order]
+    if -1 in positions or positions != sorted(positions):
+        problems.append(f"serial steps missing or out of order: {positions}")
+    final = [i for i, s in enumerate(steps) if "mv .coverage" in (s.get("run") or "")]
+    if len(final) != 1 or final[0] <= max(positions):
+        problems.append("the coverage rename must be one step, AFTER every pytest step")
+    proof = by_id.get("serial_proof")
+    if proof is not None and "steps.serial_controls.outcome" not in str(proof.get("if")):
+        problems.append("the proof step is not gated on the serial step being attempted")
+    if proof is not None and "always()" not in str(proof.get("if")):
+        # Without it the implicit success() skips the proof exactly when the serial
+        # step FAILED or hit its bound, and a failed run would carry no verdict.
+        problems.append("the proof step must run under always(), not only on success")
+    absent = by_id.get("serial_absent")
+    if absent is not None and "always()" not in str(absent.get("if")):
+        problems.append("the absence proof must run even when the ordinary run failed")
+    uploads = [s for s in steps if "upload-artifact" in str(s.get("uses"))]
+    junit = next(
+        (s for s in uploads if "junit-timings" in str((s.get("with") or {}).get("name"))), None
+    )
+    if junit is None or "junit-serial-controls-" not in str((junit.get("with") or {}).get("path")):
+        problems.append("the junit-timings artifact does not carry the serial XML")
+    if junit is not None and str(junit.get("if")).strip() != "always()":
+        problems.append("the junit upload must stay `if: always()`")
+    return problems
+
+
+def _lint_format_problems(steps: list[dict[str, Any]]) -> list[str]:
+    """How the lint job's formatter steps can fail to report the whole answer.
+
+    Pure data in, sentences out, so the cases below can corrupt a copy of the real
+    steps. Covers only what a failed first push taught: the formatters must print their
+    diff, and must run after a successful tool install even when an earlier check failed.
+    """
+    problems: list[str] = []
+    install = next((s for s in steps if "pip install" in (s.get("run") or "")), None)
+    install_id = (install or {}).get("id")
+    if not install_id:
+        problems.append("the lint tool-install step has no id to gate the formatters on")
+    for tool in ("black", "isort"):
+        step = next((s for s in steps if (s.get("run") or "").startswith(f"{tool} --check")), None)
+        if step is None:
+            problems.append(f"no {tool} --check step")
+            continue
+        if "--diff" not in step["run"]:
+            problems.append(f"{tool} --check does not print its diff")
+        gate = " ".join(str(step.get("if") or "").split())
+        if "!cancelled()" not in gate or f"steps.{install_id}.outcome == 'success'" not in gate:
+            problems.append(f"{tool} is not gated on !cancelled() and a successful install")
+        if step.get("continue-on-error"):
+            problems.append(f"{tool} masks its failure with continue-on-error")
+    return problems
+
+
+def test_the_lint_formatters_print_their_diff_and_run_after_a_successful_install() -> None:
+    """Black and isort both report in one failed run, and neither can mask a failure."""
+    import copy
+
+    steps = _steps("lint")
+    assert _lint_format_problems(steps) == []
+
+    def gated(mutate: Any) -> list[str]:
+        changed = copy.deepcopy(steps)
+        mutate(changed)
+        return _lint_format_problems(changed)
+
+    def black(changed: list[dict[str, Any]]) -> dict[str, Any]:
+        return next(s for s in changed if (s.get("run") or "").startswith("black --check"))
+
+    assert any("diff" in p for p in gated(lambda c: black(c).update(run="black --check .")))
+    assert any("gated" in p for p in gated(lambda c: black(c).pop("if")))
+    assert any("masks" in p for p in gated(lambda c: black(c).update({"continue-on-error": True})))
+    assert any("no id" in p for p in gated(lambda c: c[2].pop("id")))
+
+
+def test_the_unit_job_runs_exactly_its_two_audited_pytest_steps() -> None:
+    """The ordinary run and the serial controls are the ONLY pytest invocations.
+
+    Mutation-tested below: a third pytest step, the serial step under another id, or
+    a missing one all fail ``_pytest_steps``.
+    """
+    steps = _pytest_steps("test")
+    assert [s["id"] for s in steps] == [ORDINARY_STEP_ID, SERIAL_STEP_ID]
+
+
+def test_the_serial_controls_are_wired_once_deselected_everywhere_and_run_on_shard_zero() -> None:
+    """The deselect/serial/proof/coverage wiring of the unit job is exactly as designed."""
+    job = _ci_jobs()["test"]
+    assert _audit_unit_serial_wiring(job["steps"], job["env"]) == []
+    # The ordinary run's deselect list is the SAME list the serial run selects: both
+    # read $SERIAL_CONTROLS, so they cannot name different tests.
+    assert "--deselect" in _run_step("test")
+
+
+def _in_run(step_id: str, old: str, new: str) -> Any:
+    """A mutation: replace ``old`` by ``new`` inside one step's ``run:`` body."""
+
+    def mutate(steps: list[dict[str, Any]]) -> None:
+        step = next(s for s in steps if s.get("id") == step_id)
+        assert old in step["run"], f"mutation target {old!r} is not in step {step_id}"
+        step["run"] = step["run"].replace(old, new)
+
+    return mutate
+
+
+def _set_field(step_id: str, **fields: Any) -> Any:
+    """A mutation: set top-level keys of one step (``if``, ``timeout-minutes``, ...)."""
+
+    def mutate(steps: list[dict[str, Any]]) -> None:
+        next(s for s in steps if s.get("id") == step_id).update(fields)
+
+    return mutate
+
+
+def _serial_xml_not_uploaded(steps: list[dict[str, Any]]) -> None:
+    upload = next(
+        s
+        for s in steps
+        if "upload-artifact" in str(s.get("uses")) and "junit" in str(s["with"]["name"])
+    )
+    upload["with"].update(path="junit-3.12-0.xml")
+
+
+def _five_ids(env: dict[str, Any]) -> None:
+    env.update(SERIAL_CONTROLS="\n".join(env["SERIAL_CONTROLS"].split()[:5]))
+
+
+def _duplicate_id(env: dict[str, Any]) -> None:
+    ids = env["SERIAL_CONTROLS"].split()
+    env.update(SERIAL_CONTROLS="\n".join(ids[:5] + ids[:1]))
+
+
+def _missing_selector(env: dict[str, Any]) -> None:
+    gone = "test_cell_a_control_the_old_observer_setup_fails_its_precondition"
+    env.update(SERIAL_CONTROLS=env["SERIAL_CONTROLS"].replace(gone, "test_nope"))
+
+
+#: (label, the problem text that corruption MUST produce, step mutation, env mutation).
+#: Keyed to the EXPECTED sentence, not merely "some problem": a corruption that trips a
+#: different guard would otherwise count as caught while its own guard is dead.
+_WIRING_MUTATIONS: list[tuple[str, str, Any, Any]] = [
+    (
+        "no deselect",
+        "does not deselect",
+        _in_run(ORDINARY_STEP_ID, "--deselect", "--ignore"),
+        None,
+    ),
+    (
+        "serial on every shard",
+        "shard 0 only",
+        _set_field(SERIAL_STEP_ID, **{"if": "true"}),
+        None,
+    ),
+    (
+        "serial under xdist",
+        "lost -n0",
+        _in_run(SERIAL_STEP_ID, "-n0", "-n4"),
+        None,
+    ),
+    (
+        "bare --cov",
+        "a bare --cov resets",
+        _in_run(SERIAL_STEP_ID, "--cov=local_operator", "--cov"),
+        None,
+    ),
+    (
+        "no append",
+        "lost --cov-append",
+        _in_run(SERIAL_STEP_ID, "--cov-append", ""),
+        None,
+    ),
+    (
+        "masked failure",
+        "continue-on-error",
+        _set_field(SERIAL_STEP_ID, **{"continue-on-error": True}),
+        None,
+    ),
+    (
+        "unbounded",
+        "is not bounded by run_bounded",
+        _in_run(SERIAL_STEP_ID, "scripts/run_bounded.py", ""),
+        None,
+    ),
+    (
+        "ceiling bumped",
+        "must be the declared 7 minutes",
+        _set_field(SERIAL_STEP_ID, **{"timeout-minutes": 20}),
+        None,
+    ),
+    (
+        "wrapper bound overflows the step",
+        "must be shorter than the step's 7 minutes",
+        _in_run(SERIAL_STEP_ID, "--timeout 400", "--timeout 420"),
+        None,
+    ),
+    (
+        "no explicit memory policy",
+        "explicit --memory-mb 0",
+        _in_run(SERIAL_STEP_ID, "--memory-mb 0", ""),
+        None,
+    ),
+    (
+        "proof only always()",
+        "not gated on the serial step being attempted",
+        _set_field("serial_proof", **{"if": "always()"}),
+        None,
+    ),
+    (
+        "proof loses always()",
+        "must run under always()",
+        _set_field("serial_proof", **{"if": "steps.serial_controls.outcome != 'skipped'"}),
+        None,
+    ),
+    (
+        "absence not always",
+        "the absence proof must run even when",
+        _set_field("serial_absent", **{"if": None}),
+        None,
+    ),
+    (
+        "rename inside the ordinary run",
+        "must not append or rename coverage data",
+        _in_run(
+            ORDINARY_STEP_ID,
+            "--cov-fail-under=0",
+            "--cov-fail-under=0; mv .coverage .coverage.x",
+        ),
+        None,
+    ),
+    (
+        "serial XML not uploaded",
+        "does not carry the serial XML",
+        _serial_xml_not_uploaded,
+        None,
+    ),
+    ("five ids", "expected six unique serial ids", None, _five_ids),
+    ("duplicate id", "expected six unique serial ids", None, _duplicate_id),
+    ("missing selector", "not a top-level test function", None, _missing_selector),
+]
+
+
+def _mutated_wiring() -> list[tuple[str, str, list[str]]]:
+    """(label, expected problem text, problems found) per deliberate corruption."""
+    import copy
+
+    job = _ci_jobs()["test"]
+    results: list[tuple[str, str, list[str]]] = []
+    for label, expected, mutate_steps, mutate_env in _WIRING_MUTATIONS:
+        steps = copy.deepcopy(job["steps"])
+        env = copy.deepcopy(job["env"])
+        if mutate_steps is not None:
+            mutate_steps(steps)
+        if mutate_env is not None:
+            mutate_env(env)
+        results.append((label, expected, _audit_unit_serial_wiring(steps, env)))
+    return results
+
+
+def test_every_wiring_defect_is_caught_by_the_audit() -> None:
+    """Each corruption is reported, and by the guard written for it (not just any guard)."""
+    missed = [
+        (label, expected, problems)
+        for label, expected, problems in _mutated_wiring()
+        if not any(expected in problem for problem in problems)
+    ]
+    assert not missed, f"the audit did not report these corruptions as expected: {missed}"
+    assert (
+        _audit_unit_serial_wiring(_ci_jobs()["test"]["steps"], _ci_jobs()["test"]["env"]) == []
+    ), "the real wiring must be clean"
+
+
+def test_a_third_or_misnamed_pytest_step_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_pytest_steps`` refuses an extra pytest command and a renamed or missing serial step."""
+    import copy
+
+    steps = copy.deepcopy(_ci_jobs()["test"]["steps"])
+    third = steps + [{"name": "sneak", "run": "python -m pytest tests/unit -q"}]
+    renamed = [dict(s, id="other") if s.get("id") == SERIAL_STEP_ID else s for s in steps]
+    missing = [s for s in steps if s.get("id") != SERIAL_STEP_ID]
+    for broken in (third, renamed, missing):
+        monkeypatch.setattr(sys.modules[__name__], "_steps", lambda _job, _s=broken: _s)
+        with pytest.raises(AssertionError, match="two audited pytest steps"):
+            _pytest_steps("test")
+
+
+def test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceiling() -> None:
+    """Shard 0's modelled wall is its weight/4 PLUS the whole 420 s, within today's 32 min.
+
+    The serial step is not divided by four (it runs ``-n0``) and nothing is subtracted
+    for the six deselected tests. The job ceiling is NOT raised to make this pass: if
+    the merge ref outgrows it, the answer is to rebalance or propose a change, so this
+    reads the ceiling that exists. Every other shard is judged by the existing rule.
+    """
+    assert _serial_step_ceiling_seconds() == 420
+    tree, total = _shard_plan("test")
+    files = shard_tests.collect_test_files(tree=tree)
+    weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
+    shards = shard_tests.partition(files, weights, fallback, total)
+    zero = sum(weights.get(f, fallback) for f in shards[0]) / CI_UNIT_WORKERS + 420
+    timeout = _ci_jobs()["test"]["timeout-minutes"]
+    assert zero <= timeout * 60 - SHARD_JOB_OVERHEAD_SECONDS, (
+        f"shard 0 projects {zero:.0f}s with the serial step against a "
+        f"{timeout * 60 - SHARD_JOB_OVERHEAD_SECONDS}s budget"
+    )
+
+
+# ---------------------------------------------------------------------------
+# scripts/check_serial_controls.py — exercised on SYNTHETIC XML only
+# ---------------------------------------------------------------------------
+
+
+def _serial_pairs() -> list[tuple[str, str]]:
+    """(JUnit classname, function) for each id of the real SERIAL_CONTROLS list."""
+    return [check_serial_controls.split_id(node_id) for node_id in _serial_ids()]
+
+
+_SERIAL = _serial_pairs()
+
+
+def _ids() -> str:
+    return " ".join(_serial_ids())
+
+
+def _case(module: str, name: str, *, verdict: str = "", drop: str = "", oracle: str = "") -> str:
+    required = check_serial_controls.REQUIRED_PROPERTIES[name]
+    props = []
+    for prop in required:
+        if prop == drop:
+            continue
+        value = "x"
+        if prop in ("walk_oracle", "status_oracle"):
+            value = oracle or (
+                "passed"
+                if name in check_serial_controls._POSITIVE
+                else "precondition: the observer saw 60 of 60"
+            )
+        props.append(f'<property name="{prop}" value="{value}"/>')
+    inner = f"<properties>{''.join(props)}</properties>{verdict}"
+    return f'<testcase classname="{module}" name="{name}" time="0.1">{inner}</testcase>'
+
+
+def _xml(tmp_path: Path, *cases: str, name: str = "j.xml") -> Path:
+    path = tmp_path / name
+    path.write_text(f"<testsuites><testsuite>{''.join(cases)}</testsuite></testsuites>")
+    return path
+
+
+def _run_checker(mode: str, junit: Path, tmp_path: Path) -> tuple[int, str]:
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = check_serial_controls.main(
+            [mode, "--junit", str(junit), "--ids", _ids(), "--summary", str(tmp_path / "s.md")]
+        )
+    return code, buffer.getvalue()
+
+
+def _all_cases(**override: Any) -> list[str]:
+    return [_case(m, n, **override.get(n, {})) for m, n in _SERIAL]
+
+
+def test_the_checker_proves_six_present_once_with_receipts(tmp_path: Path) -> None:
+    code, out = _run_checker("present", _xml(tmp_path, *_all_cases()), tmp_path)
+    assert code == 0, out
+    assert out.startswith("PASS (present)")
+    assert (tmp_path / "s.md").read_text().startswith("### Serial controls — PASS")
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "missing",
+        "skipped",
+        "failure",
+        "error",
+        "duplicate",
+        "extra",
+        "no_property",
+        "positive_failed",
+        "control_passed",
+    ],
+)
+def test_the_checker_fails_every_violation_of_the_present_contract(
+    tmp_path: Path, label: str
+) -> None:
+    cases = _all_cases()
+    first_module, first_name = _SERIAL[0]
+    control = _SERIAL[1][1]
+    if label == "missing":
+        cases = cases[1:]
+    elif label == "skipped":
+        cases[0] = _case(first_module, first_name, verdict="<skipped/>")
+    elif label == "failure":
+        cases[0] = _case(first_module, first_name, verdict="<failure>x</failure>")
+    elif label == "error":
+        cases[0] = _case(first_module, first_name, verdict="<error>x</error>")
+    elif label == "duplicate":
+        cases.append(cases[0])
+    elif label == "extra":
+        cases.append('<testcase classname="tests.unit.test_other" name="test_z" time="0"/>')
+    elif label == "no_property":
+        cases[0] = _case(first_module, first_name, drop="walk_report")
+    elif label == "positive_failed":
+        cases[0] = _case(first_module, first_name, oracle="failed: precondition")
+    elif label == "control_passed":
+        cases[1] = _case(_SERIAL[1][0], control, oracle="passed")
+    code, out = _run_checker("present", _xml(tmp_path, *cases), tmp_path)
+    assert code == 1, out
+    assert out.startswith("FAIL (present)")
+
+
+def test_the_checker_never_reads_a_missing_empty_or_garbled_xml_as_proof(
+    tmp_path: Path,
+) -> None:
+    assert _run_checker("present", tmp_path / "nope.xml", tmp_path)[0] == 2
+    assert _run_checker("absent", tmp_path / "nope.xml", tmp_path)[0] == 2
+    empty = _xml(tmp_path, name="empty.xml")
+    assert _run_checker("present", empty, tmp_path)[0] == 2
+    garbled = tmp_path / "bad.xml"
+    garbled.write_text("<testsuites><oops")
+    assert _run_checker("absent", garbled, tmp_path)[0] == 2
+
+
+def test_the_checker_proves_absence_and_fails_when_a_control_ran_in_the_shard(
+    tmp_path: Path,
+) -> None:
+    other = '<testcase classname="tests.unit.test_other" name="test_z" time="0"/>'
+    assert _run_checker("absent", _xml(tmp_path, other), tmp_path)[0] == 0
+    code, out = _run_checker("absent", _xml(tmp_path, other, _all_cases()[0]), tmp_path)
+    assert code == 1, out
+    assert "ran in the ordinary shard run" in out
+
+
+def test_the_checker_help_survives_stripped_docstrings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``python -OO`` strips docstrings, so ``__doc__`` is None and ``--help`` must still work.
+
+    The description used to be ``__doc__.split(...)``, which pyright rejects
+    (``reportOptionalMemberAccess``) and which would raise ``AttributeError`` here. The
+    module attribute is set to None in-process, so no child is started.
+    """
+    monkeypatch.setattr(check_serial_controls, "__doc__", None)
+    with pytest.raises(SystemExit) as stop:
+        check_serial_controls.main(["--help"])
+    assert stop.value.code == 0
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_the_checker_blocks_an_id_it_has_no_receipt_contract_for(tmp_path: Path) -> None:
+    junit = _xml(tmp_path, *_all_cases())
+    code = check_serial_controls.main(
+        ["present", "--junit", str(junit), "--ids", "tests/unit/test_x.py::test_unknown"]
+    )
+    assert code == 2
 
 
 @pytest.mark.parametrize("job", SHARD_JOB_IDS)
