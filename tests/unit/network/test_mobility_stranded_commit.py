@@ -312,3 +312,23 @@ def test_an_invite_names_the_endpoint_the_relay_actually_listens_on(
         "the invite named no endpoint at all, so `join @file` refuses `no_host` and the "
         f"operator has to pass --host by hand (this device advertises {live})"
     )
+
+
+def test_the_wait_observes_the_queued_marker_the_prepare_path_sets(
+    request: pytest.FixtureRequest,
+) -> None:
+    """Round 3: `note()` recorded the phase but never signalled its Event.
+
+    `_await_own_progress` polls ``wait_for(session, "queued", 0.0)``; with nothing
+    setting that Event the queued outcome was unreachable, and the caller rendered
+    "nothing was changed" while the queue's driver ran the move to completion.
+    """
+    server_a = request.getfixturevalue("pair")[0]
+    _owned_session(server_a)
+    progress = mobility.progress_for(server_a)
+    progress.forget(SESSION)
+    progress.note(SESSION, "queued")
+
+    outcome, refusal = mobility._await_own_progress(server_a, SESSION, budget=0.5)
+
+    assert (outcome, refusal) == ("queued", None), (outcome, refusal)

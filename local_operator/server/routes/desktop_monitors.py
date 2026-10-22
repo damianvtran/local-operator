@@ -275,6 +275,7 @@ def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[
         due = _as_int(raw.get("next_due_at"))
         last = _as_int(raw.get("last_check_at")) or 0
         disabled = bool(raw.get("disabled"))
+        blind = bool(raw.get("blind"))
         until = _as_int(raw.get("until_at"))
         expired = until is not None and until <= now_ms
         # The CLI's precedence (``cli._monitor_state_word``): dormancy wins
@@ -288,6 +289,11 @@ def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[
             state = "disabled"
         elif expired:
             state = "expired"
+        elif blind:
+            # Armed and ticking, but its result cannot be compared, so nothing
+            # it sees reaches the operator — a fifth state because "armed"
+            # would advertise a watch that is reporting.
+            state = "blind"
         else:
             state = "armed"
         arguments = raw.get("arguments")
@@ -318,6 +324,9 @@ def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[
                 state=state,
                 unavailable_since=monitor_store.unavailable_since_of(raw),
                 health=monitor_store.health_hint({**raw, "next_due_at": due}, now_ms),
+                blind=bool(raw.get("blind")),
+                blind_reason=str(raw.get("blind_reason") or ""),
+                suppressed=_suppressed_counts(raw.get("suppressed")),
             )
         )
     rows.sort(key=lambda row: (row.next_due_at is None, row.next_due_at or 0, row.id))
@@ -365,6 +374,17 @@ def _as_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def _suppressed_counts(raw: Any) -> dict[str, int]:
+    """The suppression counts, keeping only well-formed positive integers."""
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(key): value
+        for key, value in raw.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -407,6 +407,11 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_report",
         "credential_placement",
         "credential_revoke",
+        # The member-side repair pull (mesh-mcp-credentials.md §4): the CLI asks
+        # THIS device's relay to pull one copy from its owner NOW. Local for the
+        # same reason the rest of the family is: the pull needs a link, and the
+        # link lives in the relay process.
+        "credential_sync_pull",
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
@@ -1694,6 +1699,46 @@ def remove_member(
     if device_id not in record.removed_ids:
         record.removed_ids.append(device_id)
     record.pending = [entry for entry in record.pending if entry.get("device_id") != device_id]
+    # THE PLACEMENT PRUNE (design §4). The tombstone ends authority at the next
+    # handshake; the placement document is a SEPARATE file and would otherwise keep
+    # listing the removed device as a holder, so every status surface would keep
+    # promising a share nobody can take. Best-effort by contract: a prune that
+    # cannot run must never block the removal (the tombstone above is the security
+    # half), and the failure is recorded rather than swallowed.
+    pruned: list[str] = []
+    prune_failure = ""
+    try:
+        from local_operator.network.credentials import mcp_state, placement
+
+        pruned = placement.revoke_device_everywhere(record.network_id, device_id, root=root, by=by)
+        # Evidence about a login that belonged to the removed device is gone with
+        # it: a status surface must not keep naming an owner nobody can reach.
+        # Unconditional on ``pruned`` — a device that held no placement row can
+        # still have left an evidence entry behind.
+        mcp_state.forget_device(record.network_id, device_id, root=root)
+    except Exception as exc:  # noqa: BLE001 — see the block comment
+        prune_failure = exc.__class__.__name__
+    if pruned or prune_failure:
+        from local_operator.network import audit as audit_mod
+
+        # Key NAMES only. The detail shape is registered as ``credential.revoke_all``
+        # in ``audit.py``; an unregistered event would have its whole detail dropped,
+        # which is the failure mode that guard exists to prevent.
+        try:
+            audit_mod.write_event(
+                root,
+                event="credential.revoke_all",
+                network_id=record.network_id,
+                actor=by,
+                subject=device_id,
+                detail={
+                    "keys": sorted(set(pruned))[:64],
+                    "failed": bool(prune_failure),
+                    "reason": prune_failure,
+                },
+            )
+        except Exception:  # noqa: BLE001 — the audit log must not block a removal
+            pass
     outcome = rotate_epoch(
         record,
         state,
@@ -4578,6 +4623,7 @@ class RelayServer:
         self._flush_outboxes()
         self._run_start_hooks()
         self._sweep_approvals_once()
+        self._sweep_invites_once()
         self._warm_open_frame_strip()
 
     def begin_reload(self) -> None:
@@ -4693,6 +4739,25 @@ class RelayServer:
                 print(f"mesh relay: approvals sweep failed ({exc})", file=sys.stderr)
 
         thread = threading.Thread(target=_run, name="mesh-start-approvals", daemon=True)
+        thread.start()
+
+    def _sweep_invites_once(self) -> None:
+        """One best-effort sweep of dead invite entries, on the approvals sweep's terms.
+
+        Minting prunes as it appends, but a device that stops minting would keep
+        whatever it last held; the relay start is the non-timer event every device
+        reaches (``_sweep_approvals_once`` records why), so the backlog clears there
+        too. Only rows dead by their own expiry AND past retention go
+        (``store.prune_invites``), never a live token.
+        """
+
+        def _run() -> None:
+            try:
+                store.sweep_invites(self.root)
+            except Exception as exc:  # noqa: BLE001 — a sweep never fails a relay
+                print(f"mesh relay: invite sweep failed ({exc})", file=sys.stderr)
+
+        thread = threading.Thread(target=_run, name="mesh-start-invites", daemon=True)
         thread.start()
 
     def serve_forever(self) -> None:
@@ -10927,9 +10992,15 @@ class RelayServer:
                 or None,
                 device_id=str(frame.get("device_id") or ""),
             )
+            # MINTING IS WHERE THE LIST GROWS, so it is where the dead entries go:
+            # the same locked write that adds a row drops the ones past their own
+            # expiry and the retention window (``store.prune_invites``), so repeated
+            # pairing attempts no longer accumulate ``minted`` rows forever.
+            expired = store.prune_invites(record)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
+        store.forget_invite_tokens(expired, self.root)
         self.audit.record(
             AuditEvent(
                 event="invite_minted",
@@ -12221,7 +12292,11 @@ class RelayServer:
         base["invites"] = [
             {
                 "invite_id": invite.invite_id,
+                # ``state`` IS THE STORED LEDGER (minted/redeemed/consumed) and stays
+                # so on the wire; ``listed_state`` is the display word, which says
+                # ``expired`` for a minted row past its TTL (review round 1, R5).
                 "state": invite.state,
+                "listed_state": invite.listed_state(time.time()),
                 "role": invite.role,
                 "bound_device": invite.device_id,
                 "expires_at": invite.expires_at,

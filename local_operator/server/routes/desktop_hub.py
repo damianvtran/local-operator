@@ -23,10 +23,10 @@ weight until someone asks (the server-shape guard in ``tests/unit/test_import_gr
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Callable, Literal, Mapping, NoReturn, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, model_validator
 
 from local_operator.config import ConfigManager
 from local_operator.hub_sync.identity import Visibility
@@ -47,7 +47,7 @@ from local_operator.server.routes.desktop_sessions import (
 
 router = APIRouter(tags=["Desktop hub"], dependencies=[Depends(require_desktop)])
 
-Kind = Literal["agent", "team"]
+Kind = Literal["agent", "team", "skill"]
 T = TypeVar("T")
 
 
@@ -115,6 +115,67 @@ class SkillPull(Input):
     confirm_public_egress: StrictBool | None = None
 
 
+class SkillSubscribe(Input):
+    """``POST /v1/desktop/hub/skills/subscribe`` -- link without installing.
+
+    Same remote identity fields as ``SkillPull`` and none of its install policy:
+    a subscription is subscribe-on / auto-push-off by definition, so there is no
+    policy to draft. The scope pairing is enforced server-side exactly as on the
+    pull (public must not name a tenant; org must name one).
+    """
+
+    request_id: RequestID
+    hub_id: str = Field(min_length=1, max_length=128)
+    hub_source: str = Field(min_length=1, max_length=2048)
+    visibility: Literal["public", "org"]
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    local_alias: str = Field(min_length=1, max_length=128)
+
+
+class SkillUnpull(Input):
+    """``POST /v1/desktop/hub/skills/unpull`` -- remove the copy, keep the link."""
+
+    request_id: RequestID
+    link_id: str = Field(min_length=1, max_length=256)
+
+
+class SkillPublish(Input):
+    """``POST /v1/desktop/hub/skills/publish`` -- the UI's ``hub.skillPublish`` arm.
+
+    The body is the desktop contract's exact spelling (composed by
+    ``desktop-contract.ts``'s ``hub.skillPublish`` case and pinned by its zod
+    schema). ``source_skill`` names a locally authored skill from the SAME
+    sessionless catalogue the picker reads; ``local_alias`` is the managed name
+    the publication becomes. The paired scope rule is the pull route's.
+
+    The receipt pairing is the contract's own: a DRY RUN may not carry a
+    receipt or a confirmation, and a CONFIRM must carry both. Enforced here, as
+    the renderer does, so an unreviewed publication cannot be expressed by
+    omitting a field.
+    """
+
+    request_id: RequestID
+    dry_run: bool
+    source_skill: str = Field(min_length=1, max_length=128)
+    local_alias: str = Field(min_length=1, max_length=128)
+    visibility: Literal["public", "org"]
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    subscribe: StrictBool
+    auto_push: StrictBool
+    confirm_public_egress: StrictBool
+    preview_receipt: str | None = Field(default=None, min_length=1, max_length=4096)
+    confirm_publish: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _reviewed_draft(self) -> "SkillPublish":
+        if self.dry_run:
+            if self.preview_receipt is not None or self.confirm_publish is not None:
+                raise ValueError("a dry-run publication cannot carry a confirmation")
+        elif self.preview_receipt is None or self.confirm_publish is not True:
+            raise ValueError("an initial skill publication requires its reviewed draft receipt")
+        return self
+
+
 async def _run(
     request: Request,
     config_manager: ConfigManager,
@@ -160,6 +221,30 @@ def _refusal(status: int, message: str, *, code: str | None = None) -> HTTPExcep
     if code is None:
         return HTTPException(status, message)
     return HTTPException(status, {"code": code, "message": message})
+
+
+def _raise_skill_refusal(error: Any) -> NoReturn:
+    """The refusal vocabulary every skill route shares, mapped once.
+
+    A missing or foreign remote row is ONE plain 404 (never a distinguishable
+    403), a missing credential is the 401 whose remedy is signing in, a policy
+    CAS loss is the 409 the link controls reload on, an unreachable hub is the
+    502 their retry class covers, and every other named refusal is a 422 that
+    carries its code.
+    """
+
+    code = getattr(error, "code", "") or ""
+    if code == "no-credential":
+        from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
+
+        raise _refusal(401, ORG_LOGIN_REMEDY) from None
+    if code == "skill-not-found":
+        raise _refusal(404, str(error), code=code) from None
+    if code == "policy-revision-changed":
+        raise _refusal(409, str(error), code=code) from None
+    if code == "hub-upstream":
+        raise _refusal(502, str(error), code=code) from None
+    raise _refusal(422, str(error), code=code or None) from None
 
 
 def _raise_for(reports: Any) -> None:
@@ -214,7 +299,7 @@ async def check(
     from local_operator.hub_sync import service as svc
 
     def work(ctx: Any) -> dict[str, Any]:
-        kinds = (body.kind,) if body.kind else ("agent", "team")
+        kinds = (body.kind,) if body.kind else ("agent", "team", "skill")
         names = [body.name] if body.name else None
         checks = svc.check_items(ctx, kinds=kinds, names=names)
         if body.name and not checks:
@@ -465,9 +550,12 @@ async def links(
     """The full local-only links inventory: every link, healthy or not. No network.
 
     Gated on the ``hub_links:1`` capability so an older renderer never sees rows
-    it cannot act on; the legacy ``/hub/updates`` projection is unchanged. Skill
-    rows are NEW and capability-gated: an old typed agent/team-only consumer asks
-    for its kinds explicitly, so ``?kind=agent|team`` never returns a skill row.
+    it cannot act on. Skill rows are NEW and capability-gated HERE: an old typed
+    agent/team-only consumer asks for its kinds explicitly, so
+    ``?kind=agent|team`` never returns a skill row. The ``/hub/updates``
+    projection keeps its shape but DOES list skill rows now (that is the surface
+    a skill failure is retried from); this route's own kind filter is what keeps
+    the typed inventory clean.
     """
 
     from local_operator.hub_sync import service as svc
@@ -623,26 +711,7 @@ async def skill_pull(
                 confirm_public_egress=bool(body.confirm_public_egress),
             )
         except LinkError as error:
-            code = getattr(error, "code", "") or ""
-            # The refusal vocabulary the renderer branches on: a missing or
-            # foreign row is ONE plain 404 (never a distinguishable 403), a
-            # missing credential is the 401 whose remedy is signing in, a
-            # policy CAS loss is the 409 the link controls reload on, an
-            # unreachable hub is the 502 their retry class covers, and every
-            # other named refusal is a 422 that carries its code.
-            if code == "no-credential":
-                from local_operator.providers.radient_credentials import (
-                    ORG_LOGIN_REMEDY,
-                )
-
-                raise _refusal(401, ORG_LOGIN_REMEDY) from None
-            if code == "skill-not-found":
-                raise _refusal(404, str(error), code=code) from None
-            if code == "policy-revision-changed":
-                raise _refusal(409, str(error), code=code) from None
-            if code == "hub-upstream":
-                raise _refusal(502, str(error), code=code) from None
-            raise _refusal(422, str(error), code=code or None) from None
+            _raise_skill_refusal(error)
 
     async def mutate() -> dict[str, Any]:
         return await _run(request, config_manager, provider_auth_store, work)
@@ -651,5 +720,187 @@ async def skill_pull(
         return reply(
             await receipts(request).run(
                 "hub-skill-pull:" + body.request_id, body.model_dump(), mutate, retry_safe=True
+            )
+        )
+
+
+@router.post("/v1/desktop/hub/skills/subscribe", response_model=CRUDResponse)
+async def skill_subscribe(
+    body: SkillSubscribe,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Link a remote skill WITHOUT installing it (the UI's ``hub.skillSubscribe``).
+
+    The paired scope is enforced HERE as well as in the renderer, like the pull:
+    a public subscribe that names a tenant, or an org subscribe that omits one,
+    is refused before any credential could be routed. The service then runs the
+    SAME identity/fetch/envelope chain the pull runs (so a missing or foreign row
+    is the same nondisclosing 404) and writes a baseline + subscription policy
+    with no content. Replays are receipted, so a lost response returns the same
+    link instead of creating a second one.
+    """
+
+    if body.visibility == "public" and body.tenant_id:
+        raise _refusal(422, "a public skill subscribe must not name an organization")
+    if body.visibility == "org" and not body.tenant_id:
+        raise _refusal(422, "an org skill subscribe needs tenant_id")
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            return svc.subscribe_skill(
+                ctx,
+                hub_source=body.hub_source,
+                hub_id=body.hub_id,
+                visibility=body.visibility,
+                tenant_id=body.tenant_id,
+                alias=body.local_alias,
+            )
+        except LinkError as error:
+            _raise_skill_refusal(error)
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-skill-subscribe:" + body.request_id,
+                body.model_dump(),
+                mutate,
+                retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/hub/skills/unpull", response_model=CRUDResponse)
+async def skill_unpull(
+    body: SkillUnpull,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Remove one skill link's managed copy, keeping the link (``hub.skillUnpull``).
+
+    The link row comes back with ``content_state: absent``; baseline, alias
+    reservation, policy and subscription are untouched, so nothing is unlinked
+    and no other origin can claim the alias. Repeating the request is a success
+    (the intent is already true), never a 404.
+    """
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            return svc.unpull_skill(ctx, link_id=body.link_id)
+        except LinkError as error:
+            _raise_skill_refusal(error)
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-skill-unpull:" + body.request_id,
+                body.model_dump(),
+                mutate,
+                retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/hub/skills/publish", response_model=CRUDResponse)
+async def skill_publish(
+    body: SkillPublish,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Publish one locally authored skill as a NEW hub row (``hub.skillPublish``).
+
+    Dry run projects the exact bytes a confirm would send and returns the
+    preview receipt (no network); confirm re-reads the authored files, refuses
+    drift, publishes through the credentialed client, then materializes the
+    managed baseline/policy and answers the REAL ``links_snapshot`` row. The
+    refused-publication path writes nothing local except the review receipt.
+    """
+
+    if body.visibility == "public" and body.tenant_id:
+        raise _refusal(422, "a public skill publication must not name an organization")
+    if body.visibility == "org" and not body.tenant_id:
+        raise _refusal(422, "an org skill publication needs tenant_id")
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            return svc.publish_skill(
+                ctx,
+                source_skill=body.source_skill,
+                local_alias=body.local_alias,
+                visibility=body.visibility,
+                tenant_id=body.tenant_id,
+                subscribe=body.subscribe,
+                auto_push=body.auto_push,
+                confirm_public_egress=body.confirm_public_egress,
+                dry_run=body.dry_run,
+                preview_receipt=body.preview_receipt,
+            )
+        except LinkError as error:
+            code = getattr(error, "code", "") or ""
+            if code == "no-credential":
+                from local_operator.providers.radient_credentials import (
+                    ORG_LOGIN_REMEDY,
+                )
+
+                raise _refusal(401, ORG_LOGIN_REMEDY) from None
+            if code == "unauthorized":
+                from local_operator.providers.radient_credentials import (
+                    ORG_LOGIN_REMEDY,
+                )
+
+                raise _refusal(401, str(error), code=code) from None
+            if code == "skill-not-found":
+                raise _refusal(404, str(error), code=code) from None
+            if code in (
+                "preview_mismatch",
+                "preview_expired",
+                "preview_stale",
+                "policy-revision-changed",
+            ):
+                raise _refusal(409, str(error), code=code) from None
+            if code in ("hub-upstream", "hub-error"):
+                raise _refusal(502, str(error), code=code) from None
+            if code in ("not_a_member", "insufficient_role", "forbidden"):
+                raise _refusal(403, str(error), code=code) from None
+            raise _refusal(422, str(error), code=code or None) from None
+
+    async def mutate() -> dict[str, Any]:
+        result = await _run(request, config_manager, provider_auth_store, work)
+        receipt = result.get("local_link_receipt")
+        if isinstance(receipt, Mapping) and receipt.get("state") == "pending-reconciliation":
+            # A PENDING PUBLICATION IS NOT AN OUTCOME FOR THIS REQUEST ID. The
+            # remote row exists, but local reconciliation has not landed; recording
+            # the pending answer would make the UI's same-id retry (its Confirm
+            # shape) replay that answer forever instead of re-entering the
+            # service, which is the only reconciler. Unclaimed withdraws the
+            # claim inside the receipt journal's critical section and still
+            # renders this answer, so the next attempt runs for real.
+            from local_operator.server.utils.desktop_receipts import Unclaimed
+
+            raise Unclaimed(result)
+        return result
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-skill-publish:" + body.request_id, body.model_dump(), mutate, retry_safe=True
             )
         )

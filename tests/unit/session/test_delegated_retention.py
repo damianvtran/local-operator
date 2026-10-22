@@ -1549,7 +1549,7 @@ def test_the_content_drain_batches_and_the_second_pass_is_idempotent(root: Path)
     assert third.content == [] and third.content_remaining == 0
 
 
-def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
+def test_a_content_reclaim_writes_one_receipt_pair_per_pad(root: Path) -> None:
     pad = _kept_pad(root, "rowy")
     big = _stale_file(pad / "desktop-suite.log")
     size = big.stat().st_size
@@ -1557,9 +1557,17 @@ def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
     rows = [
         json.loads(line) for line in (root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
     ]
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["session"] == "rowy"
+    # TWO rows per pad, keyed by ``phase``: the planned receipt is written
+    # BEFORE the first removal (fail closed), the completed row after it. A
+    # reader pairs them; a crash between them leaves the planned half.
+    assert [row["phase"] for row in rows] == ["planned", "completed"]
+    planned, row = rows
+    assert planned["completed"] is False and row["completed"] is True
+    assert planned["session"] == row["session"] == "rowy"
+    assert planned["policy"] == row["policy"] == "delegated_scratchpad"
+    assert planned["method"] == "planned" and row["method"] == "remove"
+    assert planned["paths"] == [str(big)] and planned["paths_total"] == 1
+    assert planned["bytes"] == size and planned["entries"] == 1
     assert row["policy"] == "delegated_scratchpad"
     assert row["reason"] == "stale output"
     assert row["bytes"] == size and row["entries"] == 1
@@ -1582,6 +1590,42 @@ def test_a_content_reclaim_writes_one_log_row_per_pad(root: Path) -> None:
     ]
     assert body["completed"] == body["planned"]
     assert body["bytes"] == size and body["entries"] == 1
+
+
+def test_a_held_session_is_kept_by_both_the_record_and_content_passes(root: Path) -> None:
+    """A hold is the operator's statement; neither pass may work around it."""
+    from local_operator.session.cleanup import set_hold
+
+    directory = _mk(root, "heldgate", age_h=100)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    big = _stale_file(pad / "desktop-suite.log")
+    assert set_hold(
+        root / "sessions", "heldgate", reason="evidence in a case", by="operator", kind="evidence"
+    )
+
+    result = _pass(root)
+
+    assert directory.is_dir() and big.exists()
+    assert "heldgate" not in result.removed
+    assert ("heldgate", "held by the operator") in result.content_kept
+    assert [row for row in result.content if row.session == "heldgate"] == []
+
+
+def test_a_pad_whose_receipt_cannot_be_written_is_not_touched(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The planned row is the gate: no durable receipt, no removal."""
+    pad = _kept_pad(root, "noreceipt")
+    big = _stale_file(pad / "desktop-suite.log")
+    monkeypatch.setattr(dr, "_append_cleanup_log", lambda *_args, **_kwargs: False)
+
+    result = _pass(root)
+
+    assert big.exists(), "a pad whose receipt cannot be written must survive intact"
+    assert ("noreceipt", "cannot write the removal receipt") in result.content_kept
+    assert result.content == []
+    assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
 
 
 def test_a_manifest_write_failure_never_fails_the_removal(
@@ -1630,7 +1674,8 @@ def test_a_failed_completed_rewrite_still_names_the_taken_paths(
     monkeypatch.setattr(dr, "_write_cleanup_manifest", flaky)
     _pass(root)
     assert not big.exists(), "the completed-rewrite failure must not undo the removal"
-    row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
+    row = json.loads((root / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[-1])
+    assert row["phase"] == "completed"
     assert row["manifest"] != "" and row["manifest_error"].startswith("completed: OSError")
     assert row["paths"] == [str(big)] and row["paths_total"] == 1
     body = json.loads(Path(row["manifest"]).read_text())

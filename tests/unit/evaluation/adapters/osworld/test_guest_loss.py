@@ -21,6 +21,7 @@ socket is on loopback.
 from __future__ import annotations
 
 import base64
+import errno
 import http.client
 import json
 import socket
@@ -550,7 +551,14 @@ def _provider_over(stubs: _Stubs, tmp_path: Path, *, post: Any = None) -> AwsPro
     if post is not None:
         stubs.clients.http_post_json = post
     provider = AwsProvider(
-        CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients, sleep=stubs.sleep
+        CREDS,
+        region=REGION,
+        lease_ref="lop-ttl-x",
+        clients=stubs.clients,
+        sleep=stubs.sleep,
+        # The stub clock, so the retry/recovery BUDGETS are exercised without
+        # spending real seconds.
+        monotonic=stubs.monotonic,
     )
     env = _FakeEnv()
     env.pkgs_prefix = "{command}"
@@ -577,10 +585,12 @@ class _CountingTransport:
 async def test_a_refused_guest_is_reported_not_sent_and_the_batch_is_not_replayed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The 043 case end to end on the provider: one attempt, a ``not_sent`` receipt.
+    """The 043 case end to end on the provider: bounded attempts, a ``not_sent`` receipt.
 
-    The readiness probe confirms the control server is gone, so exactly ONE
-    request is attempted and the second statement of the batch never runs.
+    A closed port whose readiness probe also fails is the case the retry bound
+    exists for: the probe rides the failed path, so it is evidence and not a
+    veto, and four attempts (~3.5 s) is the whole intervention before the
+    episode fails exactly as it did before the policy existed.
     """
 
     monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
@@ -593,15 +603,17 @@ async def test_a_refused_guest_is_reported_not_sent_and_the_batch_is_not_replaye
         with pytest.raises(GuestExecutionError) as raised:
             await provider.execute(["first()", "second()"])
 
-    assert transport.calls == 1
+    assert transport.calls == aws_mod.TRANSPORT_RETRY_ATTEMPTS
     assert "guest down: readiness check failed" in str(raised.value)
-    assert stubs.slept == []
+    assert len(stubs.slept) == aws_mod.TRANSPORT_RETRY_ATTEMPTS - 1, "no settle on a failed batch"
+    assert all(0 < delay <= 2.5 for delay in stubs.slept), stubs.slept
     error = raised.value
     assert error.delivery == guest_loss.DELIVERY_NOT_SENT
     message = str(error)
     assert "delivery=not_sent" in message
     assert "connection refused" in message
     assert "no input of this batch was applied" in message
+    assert "transport retries exhausted (4)" in message
     assert "batch not retried" in message
     # Value-free, exactly as before: no address, port, URL, command or class name.
     for leaked in ("127.0.0.1", "first()", "second()", "HTTPConnectionPool", "Errno", "/execute"):
@@ -753,7 +765,9 @@ async def test_refused_connect_recovers_with_one_delivered_request(
     assert transport.calls == 2
     assert len(received) == 1
     assert len(probes) == 1
-    assert stubs.slept == [aws_mod._EXECUTE_RETRY_DELAY_S, provider._action_delay_s]
+    assert len(stubs.slept) == 2, "one retry delay, then the batch's settle"
+    assert 0 < stubs.slept[0] <= 2.5
+    assert stubs.slept[1] == provider._action_delay_s
     assert (
         "attempt=2 delivery=not_sent error_class=ConnectionError readiness_passed=True"
         in caplog.text
@@ -762,10 +776,10 @@ async def test_refused_connect_recovers_with_one_delivered_request(
 
 
 @pytest.mark.asyncio
-async def test_three_refused_connects_exhaust_only_the_current_statement(
+async def test_a_refused_guest_exhausts_only_the_current_statement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An answering readiness endpoint cannot authorize more than three sends."""
+    """An answering readiness endpoint cannot authorize more than the bound."""
 
     monkeypatch.setattr(aws_mod, "GUEST_PORT", _closed_port())
     transport = _CountingTransport()
@@ -775,13 +789,16 @@ async def test_three_refused_connects_exhaust_only_the_current_statement(
         with pytest.raises(GuestExecutionError) as raised:
             await provider.execute(["first()", "second()"])
 
-    assert transport.calls == 3
+    assert transport.calls == aws_mod.TRANSPORT_RETRY_ATTEMPTS
     assert len(stubs.http_calls) == 1
     assert stubs.http_timeouts == [aws_mod._EXECUTE_READINESS_TIMEOUT_S]
-    assert stubs.slept == [aws_mod._EXECUTE_RETRY_DELAY_S] * 2
+    assert len(stubs.slept) == aws_mod.TRANSPORT_RETRY_ATTEMPTS - 1
     assert raised.value.delivery == guest_loss.DELIVERY_NOT_SENT
-    assert str(raised.value) == guest_loss.describe_failed_action(
-        0, guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "refused")
+    assert str(raised.value) == (
+        guest_loss.describe_failed_action(
+            0, guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "refused")
+        )
+        + "; transport retries exhausted (4)"
     )
     assert (
         "attempt=2 delivery=not_sent error_class=ConnectionError readiness_passed=True"
@@ -791,6 +808,531 @@ async def test_three_refused_connects_exhaust_only_the_current_statement(
         "attempt=3 delivery=not_sent error_class=ConnectionError readiness_passed=True"
         in caplog.text
     )
+    assert (
+        "attempt=4 delivery=not_sent error_class=ConnectionError readiness_passed=True"
+        in caplog.text
+    )
+
+
+# ---------------------------------------------------------------------------
+# The pre-delivery retry: classifier-gated, bounded, and visible
+# ---------------------------------------------------------------------------
+
+
+def _no_route(origin: str = _GUEST, path: str = "/execute") -> requests.ConnectionError:
+    """The chain ``requests`` produces when the host has no route to the guest.
+
+    ``EHOSTUNREACH`` is the cause the recorded production message -- "connection
+    could not be established, delivery=not_sent" -- names, and no other cause
+    produces that wording: a closed port says *connection refused*, a blackholed
+    SYN says *connect timed out*, and a dead acceptor behind a live listener
+    connects and then reports an unknown outcome. Built from the same urllib3
+    shape the production transport emits (``NewConnectionError`` under
+    ``MaxRetryError`` under ``requests.ConnectionError``), carrying the
+    ``PreparedRequest`` the classifier requires as proof of the target.
+    """
+
+    reason = u3.NewConnectionError(
+        None,  # pyright: ignore[reportArgumentType]
+        "Failed to establish a new connection",
+    )
+    # urllib3 raises that ``from`` the OS error, so the fault is a ``__cause__``
+    # link (measured: a real refused loopback post walks
+    # ConnectionError -> MaxRetryError -> NewConnectionError -> ConnectionRefusedError).
+    # Dropping the link would lose the errno the evidence exists to record.
+    reason.__cause__ = OSError(errno.EHOSTUNREACH, "No route to host")
+    return requests.ConnectionError(
+        u3.MaxRetryError(None, path, reason),  # type: ignore[arg-type]
+        request=requests.Request("POST", origin + path, json={}).prepare(),
+    )
+
+
+def test_a_failure_record_names_the_element_and_never_the_text() -> None:
+    """Evidence is the closed vocabulary plus an errno: no exception text at all."""
+
+    record = guest_loss.failure_record(_no_route(_GUEST), origin=_GUEST)
+    assert record == {
+        "delivery": guest_loss.DELIVERY_NOT_SENT,
+        "kind": "connect_failed",
+        "errno": errno.EHOSTUNREACH,
+        "error_class": "ConnectionError",
+    }
+    assert "No route to host" not in json.dumps(record)
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_path_recovers_when_the_readiness_probe_also_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The production failure: EHOSTUNREACH on the host->guest hop, twice.
+
+    The readiness probe is a GET over the SAME path, so a path blip fails it too.
+    Gating the retry on that probe -- what this code did before -- turned a
+    two-second route failure into a dead episode, which is the failure this test
+    exists to prevent.
+    """
+
+    origin = f"http://127.0.0.1:{aws_mod.GUEST_PORT}"
+    attempts: list[str] = []
+    remaining = {"failures": 2}
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        attempts.append("".join(payload["command"]))
+        if remaining["failures"]:
+            remaining["failures"] -= 1
+            raise _no_route(origin)
+        return {"returncode": 0, "output": "", "error": ""}
+
+    def probe(url: str, timeout: float) -> int:
+        # A probe that CANNOT reach the guest: the path is down for it as well.
+        raise _no_route(origin, aws_mod._READY_PATH)
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path, post=post)
+        provider._clients.http_get = probe
+        await provider.execute(["first()"])
+
+    assert len(attempts) == 3, "two provably-unsent failures, then the delivery"
+    assert provider.transport_retry_summary() == {
+        "retries": 2,
+        "recovered": 1,
+        "causes": ["connect_failed"],
+    }
+    assert len(stubs.slept) == 3, "two retry delays, then the batch's settle"
+    assert provider._cache_root is not None
+    ledger = json.loads((provider._cache_root / "guest-transport-retries.json").read_text())
+    assert [event["attempt"] for event in ledger["events"]] == [2, 3]
+    assert [event["cause"] for event in ledger["events"]] == ["connect_failed"] * 2
+    assert [event["delivery"] for event in ledger["events"]] == ["not_sent"] * 2
+    assert all(event["delay_ms"] > 0 for event in ledger["events"])
+    # The probe is taken ONCE per statement and stamped with the attempt it was
+    # measured on, so a later event's copy is not read as a fresh measurement.
+    assert [event["readiness"]["measured_at_attempt"] for event in ledger["events"]] == [1, 1]
+    assert all(event["readiness"]["passed"] is False for event in ledger["events"])
+    assert all(event["readiness"]["kind"] == "connect_failed" for event in ledger["events"])
+    # ``connect_failed`` alone cannot tell EHOSTUNREACH from ENETUNREACH.
+    assert all(event["errno"] == errno.EHOSTUNREACH for event in ledger["events"])
+    assert ledger["recovered"] == 1
+    assert "attempt=2 delivery=not_sent" in caplog.text
+    assert "cause=connect_failed" in caplog.text
+    assert "readiness_passed=False" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_failure", ["synthetic", "refused"])
+async def test_a_recovered_retry_applies_the_action_exactly_once(
+    first_failure: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A server that counts ARRIVALS: a pre-delivery failure must not double it.
+
+    The first attempt dies before a byte leaves this host and the second is a
+    real POST to a real listener; the server's own counter is the proof that one
+    command ran. Two arms, because the exactly-once claim must not rest on a
+    hand-built exception alone: ``synthetic`` raises the EHOSTUNREACH chain up
+    front, and ``refused`` refuses a REAL socket (nothing listening) and opens
+    the listener from the readiness probe -- the same construction the recorded
+    failures had, where the path came back between the failure and the retry.
+    """
+
+    received: list[list[str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            received.append(payload["command"])
+            body = json.dumps({"returncode": 0, "output": "", "error": ""}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    if first_failure == "refused":
+        # Nothing is listening yet: the first attempt is a real ECONNREFUSED.
+        port = _closed_port()
+        server: ThreadingHTTPServer | None = None
+        thread: threading.Thread | None = None
+    else:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", port)
+    origin = f"http://127.0.0.1:{port}"
+
+    real_post = aws_mod.build_clients(CREDS, REGION).http_post_json
+    real_get = aws_mod.build_clients(CREDS, REGION).http_get
+    left = {"failures": 1}
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        if left["failures"]:
+            left["failures"] -= 1
+            if first_failure == "refused":
+                return real_post(url, payload, timeout)
+            raise _no_route(origin)
+        return real_post(url, payload, timeout)
+
+    def probe(url: str, timeout: float) -> int:
+        nonlocal server, thread
+        if first_failure == "refused" and server is None:
+            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+        return real_get(url, timeout)
+
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path, post=post)
+            provider._clients.http_get = probe
+            await provider.execute(["first()"])
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert len(received) == 1, "the action must be applied exactly once"
+    applied = base64.b64decode("".join(received[0][3:])).decode("utf-8")
+    assert "first()" in applied
+    assert provider.transport_retry_summary() == {
+        "retries": 1,
+        "recovered": 1,
+        "causes": ["refused" if first_failure == "refused" else "connect_failed"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_send_is_never_retried_even_when_a_probe_answers(
+    tmp_path: Path,
+) -> None:
+    """The fail-closed half of the policy, with a readiness probe that says 200.
+
+    The request reached the server (the handler ran), so the outcome is unknown
+    and a retry could apply it twice. The probe answering is irrelevant: the
+    classifier's verdict, not reachability, decides. Call count is 1.
+    """
+
+    applied: list[str] = []
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        applied.append("".join(payload["command"]))
+        raise requests.ReadTimeout("response lost after the request was written")
+
+    with _Stubs(http_codes=[200]) as stubs:
+        provider = _provider_over(stubs, tmp_path, post=post)
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()"])
+
+    assert len(applied) == 1, "an ambiguous delivery must be attempted exactly once"
+    assert stubs.http_calls == [], "an ambiguous delivery must not even probe"
+    assert stubs.slept == []
+    assert provider.transport_retry_summary() == {"retries": 0, "recovered": 0, "causes": []}
+    assert provider._cache_root is not None
+    assert not (provider._cache_root / "guest-transport-retries.json").exists()
+    assert raised.value.delivery == guest_loss.DELIVERY_AMBIGUOUS
+    message = str(raised.value)
+    assert "outcome is unknown; batch not retried" in message
+    assert "delivery=ambiguous" in message
+
+
+@pytest.mark.asyncio
+async def test_the_retry_bound_is_spent_then_the_episode_fails_as_today(
+    tmp_path: Path,
+) -> None:
+    """Exhaustion is bounded, monotone, and ends in the error the harness knows."""
+
+    origin = f"http://127.0.0.1:{aws_mod.GUEST_PORT}"
+    attempts: list[str] = []
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        attempts.append(url)
+        raise _no_route(origin)
+
+    def probe(url: str, timeout: float) -> int:
+        raise _no_route(origin, aws_mod._READY_PATH)
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path, post=post)
+        provider._clients.http_get = probe
+        provider._clients.ec2 = stubs.ec2 = _NoConsoleEc2()
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()", "second()"])
+
+    assert len(attempts) == aws_mod.TRANSPORT_RETRY_ATTEMPTS
+    delays = stubs.slept
+    assert len(delays) == aws_mod.TRANSPORT_RETRY_ATTEMPTS - 1
+    assert delays == sorted(delays), "backoff must grow, never shrink"
+    assert sum(delays) < 5.0, "the whole intervention is bounded to a few seconds"
+    error = raised.value
+    assert error.delivery == guest_loss.DELIVERY_NOT_SENT
+    for expected in (
+        "connection could not be established",
+        "no input of this batch was applied",
+        "delivery=not_sent",
+        "transport retries exhausted (4)",
+    ):
+        assert expected in str(error), str(error)
+    assert provider._cache_root is not None
+    ledger = json.loads((provider._cache_root / "guest-transport-retries.json").read_text())
+    assert [event["attempt"] for event in ledger["events"]] == [2, 3, 4]
+    assert ledger["recovered"] == 0
+    assert provider.transport_retry_summary()["retries"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_pre_action_path_failure_attempts_the_action_instead_of_dying(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The recorded sequence, end to end: the receipt probes fail, the action POSTs.
+
+    This is the majority of the recorded ``was not sent`` deaths, and none of
+    them ever made a request: the pre-action receipt check probed for ~3 s, gave
+    up, and the old branch synthesized a transport verdict for an action it had
+    not attempted. Here the probes are REAL refusals over a closed port, the
+    wait is spent, the evidence records which path element failed -- and the
+    action is then compiled, attempted and delivered exactly once.
+    """
+
+    port = _closed_port()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", port)
+    received: list[list[str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            received.append(payload["command"])
+            body = json.dumps({"returncode": 0, "output": "", "error": ""}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server: ThreadingHTTPServer | None = None
+    thread: threading.Thread | None = None
+    real_post = aws_mod.build_clients(CREDS, REGION).http_post_json
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        nonlocal server, thread
+        # The guest becomes reachable exactly at the action attempt -- the shape
+        # the recorded bundle had (a health POST reached the guest 2 s after the
+        # recovery record). A probe never sees this listener.
+        if server is None:
+            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+        return real_post(url, payload, timeout)
+
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path, post=post)
+            provider._supervisor_unit = "action-server.service"
+            provider._clients.http_get = aws_mod.build_clients(CREDS, REGION).http_get
+            await provider.execute(["first()"])
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert len(received) == 1, "the action must be attempted, and applied once"
+    assert sum(stubs.slept) == (aws_mod._PRE_ACTION_RECOVERY_BUDGET_S + provider._action_delay_s)
+    assert provider._cache_root is not None
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    assert evidence["read_failed"] is True
+    assert evidence["path_unreachable"] is True
+    outcomes = evidence["probe_outcomes"]
+    assert len(outcomes) == 11, "one probe plus the backoff schedule"
+    assert all(outcome["kind"] == "refused" for outcome in outcomes)
+    assert all(outcome["errno"] == errno.ECONNREFUSED for outcome in outcomes)
+    assert provider.transport_retry_summary()["retries"] == 0
+    assert "under the transport classifier" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_message_claims_no_cause_it_cannot_know(
+    tmp_path: Path,
+) -> None:
+    """Pinned: "was not attempted", no delivery verdict, and no false cause.
+
+    This branch is reached by a server that ANSWERED (503 here) as well as by an
+    ambiguous probe or a failed restart verification, so naming an unreachable
+    control server would be false in every case that gets here -- and a false
+    cause in a terminal message is exactly what sent an earlier investigation to
+    the wrong layer.
+
+    The health clause is rendered HERE, not swallowed: the EC2 stub answers
+    ``describe_instances`` (``_NoConsoleEc2`` does not, which is how the false
+    wording stayed green) and the guest POST answers 503, so the branch that
+    builds ``guest down: <cause>`` actually runs.
+    """
+
+    action_posts: list[str] = []
+    response = requests.Response()
+    response.status_code = 503
+    refusal = requests.HTTPError("guest answered 503", response=response)
+
+    class _RunningEc2(_NoConsoleEc2):
+        def describe_instances(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": kwargs["InstanceIds"][0],
+                                "State": {"Name": "running"},
+                            }
+                        ]
+                    }
+                ]
+            }
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        try:
+            decoded = base64.b64decode("".join(payload["command"][3:])).decode("utf-8")
+        except Exception:
+            decoded = ""
+        if decoded:
+            action_posts.append(decoded)
+        raise refusal
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path, post=post)
+        provider._supervisor_unit = "action-server.service"
+        provider._clients.http_get = lambda url, timeout: 503
+        provider._clients.ec2 = _RunningEc2()
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()"])
+
+    message = str(raised.value)
+    assert "guest action 1 was not attempted" in message
+    assert "delivery=" not in message, "no delivery happened, so there is no verdict"
+    assert raised.value.delivery is None
+    assert "unreachable" not in message, "the server answered"
+    assert "connection could not be established" not in message
+    assert "connection refused" not in message
+    assert "supervisor recovery budget exhausted" in message
+    # The health clause is the branch this test exists to keep honest.
+    assert "guest probe answered, not ready (status=503)" in message, message
+    assert action_posts == [], "a reachable-but-unhealthy server must not receive the action"
+    assert sum(stubs.slept) == aws_mod._PRE_ACTION_RECOVERY_BUDGET_S
+    assert provider._cache_root is not None
+    record = json.loads((provider._cache_root / "guest-health-execute.json").read_text())
+    assert record["instance_state"] == "running"
+    assert record["guest_probe"] == "error", "the probe branch must actually run"
+    assert record["cause"] == ("instance running; guest probe answered, not ready (status=503)")
+
+
+@pytest.mark.asyncio
+async def test_the_persisted_cause_names_the_answer_not_an_unreachable_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A real 503-answering server: "server unreachable" is a false cause.
+
+    The persisted cause is the line a post-mortem reads before choosing which
+    layer to investigate. It used to say "server unreachable" for EVERY
+    exhaustion -- including this one, where a real listener answered every probe
+    -- and that wording is what sent an earlier investigation at the guest.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(503)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path)
+            provider._supervisor_unit = "action-server.service"
+            provider._clients.http_get = aws_mod.build_clients(CREDS, REGION).http_get
+            result = provider._recover_guest_supervisor()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.state == "read_failed"
+    assert result.path_unreachable is False, "the server answered"
+    assert provider._cache_root is not None
+    evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+    cause = evidence["cause"]
+    assert "unreachable" not in cause.lower(), cause
+    assert "status=503" in cause, cause
+    assert cause.startswith("supervisor recovery budget exhausted"), cause
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_that_spends_the_window_stops_the_retrying(tmp_path: Path) -> None:
+    """An attempt-count bound alone allowed ~4 x 90 s per statement.
+
+    QA measured the real cost: with a DROP and the production socket deadline,
+    four attempts plus probe and backoff ran ~366 s against base's ~92 s. The
+    wall-clock window is what turns a persistent fault back into one attempt's
+    cost. The fake clock makes the 90 s instant and the assertion exact.
+    """
+
+    sent: list[str] = []
+
+    with _Stubs() as stubs:
+
+        def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            sent.append("".join(payload["command"]))
+            stubs.now += aws_mod.GUEST_COMMAND_TIMEOUT_S
+            raise _no_route(f"http://127.0.0.1:{aws_mod.GUEST_PORT}")
+
+        provider = _provider_over(stubs, tmp_path, post=post)
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()"])
+
+    assert len(sent) == 1, "a failure that already spent the window must not be retried"
+    assert stubs.slept == [], "no retry delay may be slept after the window is spent"
+    assert raised.value.delivery == guest_loss.DELIVERY_NOT_SENT
+    assert "connection could not be established" in str(raised.value)
+    assert "transport retries exhausted" not in str(raised.value)
+    assert provider._cache_root is not None
+    assert not (provider._cache_root / "guest-transport-retries.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_second_attempt_ends_the_schedule_mid_way(tmp_path: Path) -> None:
+    """The window is checked per failure, not only against the first attempt."""
+
+    sent: list[str] = []
+
+    with _Stubs() as stubs:
+
+        def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            sent.append("".join(payload["command"]))
+            if len(sent) == 2:
+                stubs.now += aws_mod.TRANSPORT_RETRY_WINDOW_S + 5.0
+            raise _no_route(f"http://127.0.0.1:{aws_mod.GUEST_PORT}")
+
+        provider = _provider_over(stubs, tmp_path, post=post)
+        with pytest.raises(GuestExecutionError):
+            await provider.execute(["first()"])
+
+    assert len(sent) == 2
+    assert len(stubs.slept) == 1, "only the first retry delay fits"
+    assert provider._cache_root is not None
+    ledger = json.loads((provider._cache_root / "guest-transport-retries.json").read_text())
+    assert [event["attempt"] for event in ledger["events"]] == [2]
 
 
 @pytest.mark.asyncio

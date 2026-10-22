@@ -154,13 +154,28 @@ class FrameLog:
             if job_id in ((frame.get("payload") or {}).get("job_trajectory_replacements") or [])
         ]
 
+    @staticmethod
+    def roster_rows(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        """Every roster row a ``frontend.update`` carries, in EITHER wire form.
+
+        Rows ride ``changes.jobs`` (a replacement, what a snapshot or seed
+        sends) OR ``job_deltas.upserted`` (the live per-row merge). A reader
+        that only knows the first form sees an EMPTY roster on every live tick:
+        this helper went blind exactly that way when the runtime started
+        sending deltas, and the assertion it fed ("the child retained no
+        events") blamed the child rather than the reader.
+        """
+        payload = frame.get("payload") or {}
+        rows = list(((payload.get("changes") or {}).get("jobs") or []))
+        rows.extend((payload.get("job_deltas") or {}).get("upserted") or [])
+        return [row for row in rows if isinstance(row, dict)]
+
     def retained_marks(self, mark: int, job_id: str) -> list[int]:
         """The retained-length figures the roster published for this job since `mark`."""
         marks: list[int] = []
         for frame in self.updates(mark):
-            jobs = ((frame.get("payload") or {}).get("changes") or {}).get("jobs") or []
-            for row in jobs:
-                if isinstance(row, dict) and row.get("id") == job_id:
+            for row in self.roster_rows(frame):
+                if row.get("id") == job_id:
                     marks.append(int(row.get("trajectory_length") or 0))
         return marks
 
@@ -294,8 +309,7 @@ async def test_the_desktop_stream_carries_a_watched_childs_trajectory(
                         lambda log, mark: any(
                             frame["type"] == "frontend.update"
                             and any(
-                                row.get("id") == bash_job
-                                for row in (frame["payload"].get("changes", {}).get("jobs") or [])
+                                row.get("id") == bash_job for row in FrameLog.roster_rows(frame)
                             )
                             for frame in log.since(mark)
                         ),

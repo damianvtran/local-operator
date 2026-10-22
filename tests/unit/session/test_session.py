@@ -7093,3 +7093,46 @@ async def test_the_after_settled_success_snapshot_reads_complete_only(
     release.set()
     await asyncio.wait_for(dispose_task, timeout=10)
     await asyncio.wait_for(asyncio.shield(task), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_receipt_does_not_clear_a_stop_but_a_decline_does(tmp_path):
+    """D2 (design docs/design/ask-nonblocking.md §15): tidying an ask is not a new
+    instruction. A ``dismissed`` ask_response is stopped-work residue; a decline
+    hands the decision back and stays fresh intent."""
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.session.session import Session
+
+    def row(status: str) -> CustomMessage:
+        return CustomMessage(
+            custom_type=ASK_RESPONSE_MESSAGE_TYPE,
+            attribution="user",
+            id=f"ask-response-{status}",
+            details={"ask_id": "a-1", "status": status},
+        )
+
+    assert Session._is_stopped_work_residue([row("dismissed")]) is True
+    assert Session._is_stopped_work_residue([row("declined")]) is False
+    assert Session._is_stopped_work_residue([row("answered")]) is False
+
+
+@pytest.mark.asyncio
+async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_path):
+    """D6 predicate: pending abort AND no turn in flight. Idle-without-abort and
+    mid-turn are both "running"."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+    assert session.ask_agent_running() is True  # idle, never stopped
+    session.abort("interrupted")
+    assert session.ask_agent_running() is False  # stop pending, nothing running
+    session._is_streaming = True
+    assert session.ask_agent_running() is True  # the turn is still unwinding
+    session._is_streaming = False
+    await session._turn_lock.acquire()
+    try:
+        assert session.ask_agent_running() is True
+    finally:
+        session._turn_lock.release()
+    await session.prompt("hello")  # a fresh prompt clears the stop
+    assert session.ask_agent_running() is True
+    await session.dispose()

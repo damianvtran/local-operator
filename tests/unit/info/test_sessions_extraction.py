@@ -225,6 +225,13 @@ EXPECTED = [
         # is ``False`` rather than null.
         "stall_dump": None,
         "stall_held": False,
+        # THE EXIT RECORD'S THREE READINGS, appended after the stall pair for the
+        # same append-only reason: a stored row can say when and why its runtime
+        # left, and ``None``/""/``None`` here is "no record attests to one" — the
+        # SIGKILL shape — rather than a fabricated stop time.
+        "stopped_at_s": None,
+        "stop_reason": "",
+        "stop_requested": None,
     },
     {
         "state": "live",
@@ -295,6 +302,13 @@ EXPECTED = [
         # is ``False`` rather than null.
         "stall_dump": None,
         "stall_held": False,
+        # THE EXIT RECORD'S THREE READINGS, appended after the stall pair for the
+        # same append-only reason: a stored row can say when and why its runtime
+        # left, and ``None``/""/``None`` here is "no record attests to one" — the
+        # SIGKILL shape — rather than a fabricated stop time.
+        "stopped_at_s": None,
+        "stop_reason": "",
+        "stop_requested": None,
     },
     {
         "state": "stale",
@@ -370,6 +384,13 @@ EXPECTED = [
         # is ``False`` rather than null.
         "stall_dump": None,
         "stall_held": False,
+        # THE EXIT RECORD'S THREE READINGS, appended after the stall pair for the
+        # same append-only reason: a stored row can say when and why its runtime
+        # left, and ``None``/""/``None`` here is "no record attests to one" — the
+        # SIGKILL shape — rather than a fabricated stop time.
+        "stopped_at_s": None,
+        "stop_reason": "",
+        "stop_requested": None,
     },
 ]
 
@@ -676,7 +697,14 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     # path it qualifies: a reader that has ``stall_dump`` and not this one cannot
     # tell a runtime that survived its bound from one the bound ended.
     assert list(rows[0]).index("stall_dump") < list(rows[0]).index("stall_held")
-    assert list(rows[0])[-1] == "stall_held"
+    # ...AND THE EXIT RECORD'S THREE READINGS CLOSE IT. They are the newest
+    # append-only run: a stopped runtime's own account of when it left and why,
+    # beside the clocks above it. Pinned in full so a later key cannot slip
+    # between them (the published order is the contract every consumer reads).
+    assert list(rows[0]).index("stall_held") < list(rows[0]).index("stopped_at_s")
+    assert list(rows[0]).index("stopped_at_s") < list(rows[0]).index("stop_reason")
+    assert list(rows[0]).index("stop_reason") < list(rows[0]).index("stop_requested")
+    assert list(rows[0])[-1] == "stop_requested"
 
     assert (
         cli.sessions_command(
@@ -1054,6 +1082,99 @@ def test_sessions_empty_copy_names_the_search_that_was_asked_for(
     )
     assert code == 0
     assert capsys.readouterr().out.strip() == "no active lop sessions"
+
+
+def _seed_exit_record(root: Any, session_id: str, *, at: float, reason: str) -> None:
+    """One schema-valid ``runtime-exit.json`` at a chosen instant.
+
+    Written as a literal rather than through ``journal.write_exit_record`` so the
+    ``at`` is a fixture constant: the writer's own round trip is pinned in
+    ``test_exit_record.py``, and this file's subject is what the TABLE renders.
+    """
+    import json
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "runtime-exit.json").write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "kind": "runtime-exit",
+                "session_id": session_id,
+                "pid": 4242,
+                "started_at": at - 300.0,
+                "at": at,
+                "reason": reason,
+                "detail": "no work, no viewer, no wake within 90s",
+                "requested": False,
+                "build": "0.84.4@abc1234",
+                "pressure": {"free_disk_bytes": None, "load_1m": None},
+            }
+        )
+    )
+
+
+def test_the_table_shows_when_and_why_a_stored_session_stopped(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """STOPPED beside LAST_ACTIVE: an age from the exit record, and its reason.
+
+    THE QUESTION THIS ANSWERS is the operator's own, after a session vanished
+    into ``stored`` with no explanation: *when* did it stop, and *why*. The age
+    comes from the runtime's own departure, never the transcript's clock —
+    ``last_activity_s`` is the other column and keeps its meaning — and a row
+    with no record prints ``—`` in both cells rather than inventing a time.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+
+    class _Row:
+        def __init__(self, session_id: str, name: str, mtime: float) -> None:
+            self.id = session_id
+            self.name = name
+            self.mtime = mtime
+
+    rows = [
+        _Row("dead00000001", "idled out", NOW - 700.0),
+        _Row("dead00000002", "killed", NOW - 700.0),
+    ]
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", lambda d, limit=None: rows)
+    _seed_exit_record(tmp_path, "dead00000001", at=NOW - 125.0, reason="idle-exit")
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=True, limit=None)
+    )
+    assert code == 0
+    printed = capsys.readouterr().out
+    header = printed.splitlines()[0]
+    assert "STOPPED" in header and "STOP_REASON" in header, header
+    # The header keeps its shape: STOPPED is the LAST_ACTIVE-style age slot, and
+    # the reason follows it.
+    assert header.index("LAST_ACTIVE") < header.index("STOPPED")
+    assert header.index("STOPPED") < header.index("STOP_REASON")
+
+    explained = next(line for line in printed.splitlines() if "idled out" in line)
+    assert "2m" in explained, explained
+    assert "idle-exit" in explained, explained
+
+    unknown = next(line for line in printed.splitlines() if "killed" in line)
+    # No record (the SIGKILL shape): BOTH cells say unknown rather than reusing
+    # the transcript's last-activity age as a stop.
+    assert "idle-exit" not in unknown, unknown
+    cells = unknown.split()
+    assert cells.count("—") >= 2, unknown
+
+    # The default listing (no stored rows) stays byte-for-byte what it was.
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    live = capsys.readouterr().out
+    assert "STOPPED" not in live, live
 
 
 def _seed_outcome(root: Any, session_id: str, *, kind: str, reason: str, cause: str) -> None:

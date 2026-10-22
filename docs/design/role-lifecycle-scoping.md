@@ -25,7 +25,7 @@ ever. The operator wants:
 | Storage/scope | Session scope is `<session_dir>/roles/{agents,teams}` — same on-disk formats as global, no schema change, no migration |
 | Visibility | Global readers walk only `<config>/{agents,teams}`, so exclusion is structural; session pickers read a composite registry and mark rows `scope: "session"` |
 | Creation policy | Agent-tool writes default to **session**; a tool may write global only with a host-recorded user grant (never on its own initiative); user surfaces write global directly; session create refuses to shadow a global name |
-| Lifecycle | Survives turns, restart, resume, fork (copied, independent); dies with the conversation (delete/retention), survives archive; a mesh move refuses by default and can leave roles behind only with explicit confirmation plus a notice |
+| Lifecycle | Survives turns, restart, resume, fork (copied, independent); dies with the conversation (delete/retention), survives archive; a mesh move refuses by default, and a `--drop-session-roles` move stashes the definitions at a named device-level path rather than deleting them |
 | Promotion | Explicit, user-authorized `promote` op/desktop action, copy-not-move, all-or-nothing, collision-safe, team promotion copies its session-scoped members (or refuses), provenance recorded |
 | Guidance | Reuse → ephemeral → durable in tool docs + both guides; recommender indexes only the session's own composite |
 | Audit | Receipts name scope; `agent/team list` groups by scope; no new journal record type |
@@ -41,7 +41,8 @@ ever. The operator wants:
 
 Both registries are constructed with the **global config dir** on every host path:
 `server/app.py` (`app.state.agent_registry`), `session/runtime/serving.py:10464`,
-`session_factory.py:4637` (teams), `session/attached.py:1576/1631` (viewer), `exec_mode.py`,
+`session_factory.py:4610/4693` (agent and team composites), `session/attached.py:1578/1641`
+(the viewer), `exec_mode.py`,
 `exec_worker.py`, `cli.py`, `mobile/daemon.py`, `hub_sync/*`, `network/definitions.py`.
 
 The `agent`/`team` tools read the registry straight off `ToolContext`
@@ -71,7 +72,7 @@ Visibility is **on-disk identity**, not a flag: every reader walks `<config>/age
 | TUI `/agent`, `/team`, settings agents pane, org chart (`tui/app.py:19715`, `21004-21021`) | **session's** registries | natural home |
 | TUI new-chat start picker (`tui/app.py:37750-37776`) | fresh **global** registries | must stay excluded |
 | `lop agents list`, `lop team list` (`cli.py:10366/11036`) | **global** | must stay excluded |
-| Agent-hint recommender (`session_factory.py:1984`, index build at :2166) | the session's `agent_registry` | included in-session, absent elsewhere |
+| Agent-hint recommender (`session_factory.py:1984`, index build at :2175) | the session's `agent_registry` | included in-session, absent elsewhere |
 | Hub sync / mesh definitions (`hub_sync/*`, `network/definitions.py:615/631`) | global roots | must stay excluded |
 | Desktop schedules (`server/routes/schedules.py`) | global | must stay excluded (a schedule outlives a conversation) |
 
@@ -97,17 +98,22 @@ gate that refuses a non-`TeamRegistry` object is `team_tool.py:288`
   keep that schema untouched and expose scope out-of-band (see §3.3).
 - Team rosters reference members **by name** (`teams.py` docstring), so a session team's
   members resolve through whichever composite the session holds. Subagents inherit the
-  parent's registry object (`harness/subagent.py:3453/3742`), so the scope travels with
+  parent's registry object (`harness/subagent.py:4142-4143`), so the scope travels with
   delegation without a second mechanism.
 
 ### 2.5 Lifecycle surfaces
 
 - **Restart/resume**: registries are rebuilt from disk; a session dir survives, so scoped
   rows survive if they live there.
-- **Fork** (`fork.py:129` `COPIED_SIDECARS`): copies only transcript + identity sidecars; a
-  `roles/` tree would **not** be copied unless added deliberately.
-- **Delete/retention** (`session/cleanup.py:562/1139`): the only `rmtree` of a session dir;
-  scoped rows die with the conversation, correctly, but this must be asserted.
+- **Fork** (`fork.py:138` `COPIED_SIDECARS` + `_copy_roles_tree`): copies the transcript and
+  identity sidecars, and — since S3 — the parent's `roles/` tree, byte-for-byte, into the
+  fork's own directory. Without that copy the fork inherited `attachment.json` while losing
+  the definitions it names, so it opened wearing a persona it could not resolve. The copy is
+  one named directory, not a `copytree` of the session (see §3.5 for the bound and refusals).
+- **Delete/retention** (`session/cleanup.py:926` `remove_session_dir`, reached by the
+  explicit delete at `:1868` and the policy at `:2772`): the only `rmtree` of a session dir;
+  scoped rows die with the conversation, correctly, and the tests assert it — including that
+  the account stores are byte-identical before and after.
 - **Mobility/mesh** (`network/mobility.py`): transfers the session record/journal rather than
   the whole directory, so scoped files would not travel unless added deliberately. Must be
   documented (and optionally included later).
@@ -125,16 +131,16 @@ Two scopes, one owner:
 
 The scope belongs to the **conversation root** (the top-level user session), not to each
 subagent run. Children receive the parent's composite object
-(`harness/subagent.py:3453/3742`), so a role a child creates remains available to the parent
+(`harness/subagent.py:4142-4143`), so a role a child creates remains available to the parent
 and to later siblings — required for supervision and for "follow-up tasks in the same
 session".
 
 Wiring: `create_session` wraps the registries once it knows `transcript_dir` (before
-`_setup_knowledge`, `session_factory.py:4575`) only when the incoming registry is not already
+`_setup_knowledge`, `session_factory.py:4610/4693`) only when the incoming registry is not already
 scoped (a `scope_dir` marker attribute). A subagent's `create_session` therefore inherits the
 parent's composite unchanged rather than nesting a second scope. `AttachedSession` builds its
 lazy properties from `<config>/sessions/<record id>/roles` for the viewer/cold-session path
-(`attached.py:1576/1631`). Every other host (CLI `exec`, `exec_worker`, `lop agents`, `lop
+(`attached.py:1578/1641`). Every other host (CLI `exec`, `exec_worker`, `lop agents`, `lop
 team`, mobile daemon, hub, mesh) keeps plain global registries.
 
 Why `roles/` under the session dir, rather than a `scope` column in the global store:
@@ -293,11 +299,11 @@ description; the decision ladder and rationale go in `tool://agent`, `tool://tea
 | Turn/task ends, fails, is cancelled | **kept** — "ephemeral" means conversation-scoped, not turn-scoped; follow-ups must work |
 | Runtime restart / resume | kept (session dir is durable), composite rebuilt from `<session>/roles` |
 | Subagent launch | inherited by object; a child's creations land in the parent conversation scope |
-| Fork | **copied** into the fork's `roles/`, byte-for-byte, then **independent**: edits/deletes in the fork never affect the parent (and vice versa), and a fork never writes a global row. Add `roles/` to the fork copy explicitly (`fork.py` is an allow-list; `COPIED_SIDECARS` stays files and a small directory-copy step is added). |
+| Fork | **copied** into the fork's `roles/`, byte-for-byte, then **independent**: edits/deletes in the fork never affect the parent (and vice versa), and a fork never writes a global row. `fork.py` stays an allow-list (`COPIED_SIDECARS` are files); the ONE directory is copied by `_copy_roles_tree`, because the inherited `attachment.json` names definitions the fork must be able to resolve on its own. Absent `roles/` is a no-op (lazy creation is an S1 invariant), and nothing else is a source: not the stash, not `EXCLUDED_SIDECARS`, no global root. The tree is walked first and copied only if its summed FILE bytes are within `MAX_ROLES_COPY_BYTES` (**64 MiB** — a role is an `agent.yml` plus a prompt, a team a `team.yml` plus two capped briefs, so a real tree is well under a megabyte; the bound exists because the copy runs on the parent's process between turns). The walk is only a snapshot, so the same bound is re-checked by a byte-counting copy function while the bytes move, and a tree that grew past it is stopped mid-copy. A tree over the bound, a symlink anywhere in it, or an I/O failure is REFUSED: the fork directory is removed and its claim released, so no fork exists rather than a fork wearing a half tree. The copy is staged in a temp sibling inside the fork and published with one `os.replace`. |
 | Session delete | removed with the session dir (`cleanup.remove_session_dir`) — and only the addressed session's dir |
-| Retention sweep | an unarchived old session is removed with its roles; an **archived** session is protected (archive hides, it does not declare disposable — `cleanup.py` already lists archived sessions in the recent-N guard) |
+| Retention sweep | an old session is removed with its roles. An **archived** session is **not** intrinsically protected: `session/archived.py:51-58` states it is still eligible, and the only guard that can save it is the picker's ten most recent (`cleanup.py:2930-2949`), which counts archived rows while they are that recent. Once an archived session falls outside that window it is swept like any other — asserted as the documented behaviour in S3, not changed. |
 | Archive / unarchive | kept; the directory and its `roles/` are untouched |
-| Mesh move to another device | **v1 does not carry role definitions.** The move path detects `<session>/roles`; by default it **refuses** and names the roles, telling the user to promote or delete them first. `lop sessions move --drop-session-roles` proceeds, leaves the definitions behind, and the target records a notice (`N session roles stayed on <device>`) so they are never silently lost and never recreated globally. Follow-up filed for mesh-synced role definitions. |
+| Mesh move to another device | **v1 does not carry role definitions.** The move path detects `<session>/roles`; by default it **refuses** and names the roles, with the two real ways forward: stay on this device, or re-run with the drop flag. `--drop-session-roles` proceeds and — because the commit deletes the session directory — **moves the tree to a device-level stash** at `<config>/dropped-session-roles/<session_id>/` (suffixed `-2`… on a collision) with a `stash.json` naming the definitions. Nothing walks that root (no sync, retention or cleanup ownership), and the receipt/queued receipt names the exact path; the failure this replaced promised the roles "stayed" while deleting them. Follow-up filed for mesh-synced role definitions. |
 | Global hub/mesh push | never includes session rows |
 
 **Invariant: no cleanup of existing user definitions.** This change never migrates, rewrites,
@@ -432,13 +438,95 @@ release cut**.
   refusal would let a deleting move leave roles behind silently. The S2 PR carries this gate.
 - Gate: design/UX review of badge wording; i18n `--check`; tool-doc drift tests updated.
 
+**S2 status (landed 2026-10-20; PR pending).** Shipped: explicit `scope` on both write
+entry points and the composite creates; the name-shadow refusal; one create lock; scope
+receipts and `details`; `agent op='delete'` (session-only, write-tier) and a session-first
+`team_delete`; additive `scope` on catalogue/detail/command-entity rows;
+`features.profile_scope: 1`; the TUI facts badge and the `agent_listing_rows` dedupe; the
+mesh refusal and `--drop-session-roles`. Two corrections to this document, then the one
+deferral its §3.4 needed.
+
+**Correction 1 — `write_profile`'s home.** The function lives in
+`local_operator/tools/agent_tool.py`, not `agent_profiles.py`; §3.2's pointer was right,
+but the S2 bullet's phrasing read as though the shared writer belonged to the profile
+module. Nothing moved: the required `scope` keyword was added to the function where it
+already was, and `install_seed` (which IS in `agent_profiles.py`) takes scope as a
+required keyword too, routing its create through `scope_store`.
+
+**Correction 2 — `agent_listing_rows` dedupe.** §3.3 says the listing "dedupes by name".
+It did not: `seen` was populated for role/specialist rows but only CONSULTED for packaged
+seeds, so the tolerated reverse race (an account row created after a session row of the
+same name) painted the key twice. S2 makes the code true — the composite lists session
+rows first, the loop skips a later duplicate, and the surviving row's scope fact says
+which store is in force.
+
+**Deferral — the durable-write grant, and why it is not a string.** §3.4 proposed
+`ToolContext.durable_write_grant: str | None` carrying an `ask`-recorded origin. S2 ships
+a host seam instead: `ToolContext.authorize_durable_write(DurableWriteIntent) ->
+Awaitable[str | None]`, with the origin recorded in the receipt's `details` only. Three
+reasons: (a) a string on the tool context is a value a model's turn can be given, and a
+model-influenced provenance string is not consent; (b) the existing TUI approval card is
+satisfied by the session-scoped "approve all" latch without showing this specific intent,
+so wiring the seam to it would let a blanket shortcut authorize account-wide writes, and a
+non-rememberable intent-specific confirmation is new UI that S2 deliberately does not
+build; (c) an answered `ask` is not by itself human authority — `asks/queue.respond`
+writes the caller-supplied `by` (`asks/queue.py:559-565`), and `Session.bridge_decide`
+treats the in-memory admitted grant, never the ask-log fold, as the evidence
+(`session.py:11585-11589`). No host installs the callback in S2, so every tool-issued
+`scope='global'` write is refused with the user-surface remedy and the conversation-only
+retry. AC6's tool branch therefore moves to S4 with promotion, the first flow that needs
+an explicit "make this durable" answer; that slice should build the non-rememberable
+confirmation and only then install the seam.
+
+**Round-1 remediation (2026-10-20).** Review/QA/design/UX measured four behaviours the
+first S2 head got wrong, folded in here as the contract now:
+- **The drop path stashes, never deletes.** `_remove_handed_away` runs the stash for every
+  removing commit (not only flagged ones — recovery paths have no frame); a stash failure
+  leaves the directory in place (`cleanup_pending`) rather than deleting past it. The
+  refusal, the receipt and the queued receipt all name the path.
+- **`agent op='sync'` is gated on the same consent as any other account write.** It first
+  classifies with `apply=False`; a seed update that would rewrite an account row is refused
+  without consent. The hub arm is account-only, so it runs only under that consent and
+  otherwise reports that it was skipped (the session-scoped arm still runs). `install` and
+  `reset` take the caller's scope: an explicit `global` without consent is refused, never
+  silently downgraded, and both receipts name the store.
+- **A name collision is answered before the consent question.** A create whose name already
+  exists in the other store is refused with reuse/delete guidance (case-insensitive, and
+  team **aliases** count), so "retry without scope" can never loop around an occupied name.
+- **Both pickers dedupe.** `agent_listing_rows` and the team picker drop a later duplicate
+  of a name (session rows are listed first, so the row in force wins), and `list`/`show`
+  group and label by store ("this conversation" / "your account").
+- **The mesh gate fails closed.** An unreadable `roles` tree refuses with
+  `session_roles_unreadable`; it never answers "no definitions". A tree that is
+  readable but holds a row file that does not parse refuses the same way and names
+  the offending path, because the stores log-and-skip a corrupt row — an empty list
+  there is indistinguishable from a clean tree and would fail the gate open.
+- **The scope fact fits the pane.** When the 27-cell facts line cannot hold both, the
+  settings pane paints a SECOND facts row carrying the full scope token in the existing
+  `muted` ink — dropping or clipping it was measured as the failure (D1/U2).
+- **`scope` also rides the team catalogue/detail routes** (`/v1/desktop/teams`), which stay
+  account-only; the field is `"global"` there and the session composite remains behind
+  `/command-entities` only.
+- The consent refusal distinguishes **no seam** from **declined**, names ONE concrete next
+  action, and no refusal offers "promote" — that capability is S4.
+
 ### S3 — Lifecycle integration
-- Fork copies `roles/` (independent; no global writes); mesh move detects roles and refuses
-  by default, `--drop-session-roles` leaves them with a target-side notice; delete/retention/
-  archive/resume/restart tests; attach_team manager from a session row; `task(agent=<session
-  role>)` and `task(agent="team:<session team>")`; subagent inheritance and the
-  concurrent-create lock.
-- Docs: `docs/DESKTOP_API.md`, this design's lifecycle table, mesh move limitation.
+- **The one new behaviour: the fork copy.** `fork_session` copies `<parent>/roles` into the
+  fork's own directory — walked and bounded (64 MiB) before the copy, staged and published
+  with one `os.replace`, refused on a symlink or an over-bound tree with the fork directory
+  removed and its claim released. Independent in both directions; no global write; lazy
+  absence preserved; the stash and every global root stay out of reach. See §3.5.
+- **Verification only, no behaviour change** (each already resolves through the session
+  composite; S3 proves it): `task(agent=<session role>)` and
+  `task(agent="team:<session team>")`, including the existing degradation of an unknown
+  name to a full child (`harness/subagent.py:_resolve_role`); `/agent <name>`, `/team <name>`
+  and `attach_team` — **no resolver change**, both handlers already read the session's
+  composite (`attach_team` is handed the team the handler looked up); the cold viewer path;
+  name shadowing in all four launch paths; delete/retention/archive; resume/restart; the
+  agent-hint index pointing at `<session>/roles/agents/<id>`.
+- The **concurrent-create lock is S2's**, not this slice's; S3 has no lock work.
+- Docs: this design's lifecycle table (and its three corrected claims). No `DESKTOP_API.md`
+  change — no wire shape moves.
 - Exit: an isolated end-to-end scenario: create ephemeral role + team, launch both, restart
   the runtime, resume, use them again, fork, use them in the fork, delete the session.
 
@@ -559,7 +647,7 @@ checks when available.
 | Promotion overwrites a user row | `replace` requires explicit user instruction + confirmation + receipt naming the row |
 | Agent self-authorizes a global write | the tool has no path to global without a host-recorded grant; refusal is tested with no grant and with a forged/expired one |
 | Fork creates a global row or diverges silently | fork copy is directory-only, never writes the global roots; independence is tested both directions |
-| Mesh move silently loses roles | default refusal + `--drop-session-roles` confirmation + target notice; tested |
+| Mesh move silently loses roles | default refusal + `--drop-session-roles` + device-level stash whose path the receipt names; tested (stash holds the definitions after the source is gone) |
 | Scope grows unbounded in a long session | `agent list` shows the count; optional soft cap (e.g. 50 rows) with a clear refusal — decide with the tracker owner |
 
 ## 9. Harness / remote-node notes (cloud-node-1)

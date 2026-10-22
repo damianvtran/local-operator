@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +14,7 @@ from typing import Any
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.config import ConfigManager
+from local_operator.config import ConfigManager, read_config_values
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
@@ -327,7 +329,12 @@ def test_an_unusable_provider_records_the_failure_and_a_future_retry_the_sidebar
     (exposed,) = svc.status_snapshot(ctx)["items"]
     assert exposed["error_class"] == "provider-error"
     assert exposed["error_subclass"] == "request"
-    assert exposed["state"] == "available"  # indicator stays; the user resolves it
+    # A carried error is FAILED in the projection and counted (QA F3): the
+    # indicator no longer depends on a consumer also reading ``error_class``.
+    # The row stays retryable (attempts/next_retry_at above) for the user to
+    # resolve; "failed" is the state, not a dead end.
+    assert exposed["state"] == "failed"
+    assert svc.status_snapshot(ctx)["counts"]["failed"] == 1
     assert exposed["next_retry_at"] == item["next_retry_at"]
 
 
@@ -1195,8 +1202,15 @@ def test_auto_apply_holds_a_merge_that_would_empty_text_the_hub_has(env) -> None
     assert "held for review" not in manual.message  # manual stays available
 
 
-def test_the_legacy_updates_projection_never_lists_skill_rows(env) -> None:
-    """Q7: typed older consumers of /hub/updates must never receive a skill row."""
+def test_the_updates_projection_lists_skill_rows_beside_the_other_kinds(env) -> None:
+    """Skill failures live on the SAME surface as agents and teams now.
+
+    The operator's brief requires a subscribed skill's failure to be visible in
+    ``/v1/desktop/hub/updates`` and retryable through the same channel, so the
+    projection lists and counts a skill row exactly like an agent row. Kinds it
+    has never heard of are still excluded, which is what keeps an older
+    consumer's shape intact.
+    """
 
     ctx, _hub, _agents, _t, root = env
 
@@ -1204,11 +1218,17 @@ def test_the_legacy_updates_projection_never_lists_skill_rows(env) -> None:
         items = doc.setdefault("items", {})
         items["agent:a1"] = {"kind": "agent", "name": "a", "local_id": "a1", "state": "available"}
         items["skill:s1"] = {"kind": "skill", "name": "s", "local_id": "s1", "state": "available"}
+        items["mystery:x1"] = {
+            "kind": "mystery",
+            "name": "x",
+            "local_id": "x1",
+            "state": "available",
+        }
 
     st.StatusStore(root).mutate(fold)
     snapshot = svc.status_snapshot(ctx)
-    assert {row["kind"] for row in snapshot["items"]} == {"agent"}
-    assert snapshot["counts"]["available"] == 1  # the skill row is not counted either
+    assert {row["kind"] for row in snapshot["items"]} == {"agent", "skill"}
+    assert snapshot["counts"]["available"] == 2
 
 
 def test_the_check_records_the_agent_revision_and_serving_base(env) -> None:
@@ -1632,3 +1652,50 @@ def test_a_roster_merge_keeps_an_override_edited_during_the_merge(env, monkeypat
     assert [m.role for m in after.members] == ["coder", "qa"]
     coder = next(m for m in after.members if m.role == "coder")
     assert coder.tier == "hi", "the edit made inside the merge window must survive the write"
+
+
+def test_a_refresh_cannot_clobber_a_concurrent_config_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh reads AND assigns under the config write lock (review B2).
+
+    ``set_config_value`` holds ``config_write_lock`` across its read-merge-write
+    AND its ``self.config = candidate``. A refresh that parses the file outside
+    that lock and assigns inside it can publish the OLDER snapshot after a
+    concurrent writer published the newer one, leaving the process behind disk for
+    any config key -- the class of bug the refresh exists to remove.
+
+    The probe opens the assign-side gap on purpose (the read happens first, then
+    the assignment is delayed): the writer must not be able to complete inside
+    it. Without the lock the writer lands in the gap and the delayed assignment
+    resurrects the old value; with it the writer waits for the refresh.
+    """
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("theme", "light")
+    ctx = svc.HubSyncContext(
+        config_dir=tmp_path, config_manager=manager, client_for_tenant=lambda _tenant: None
+    )
+    entered = threading.Event()
+
+    def delayed_assign(self: ConfigManager) -> None:
+        fresh = self._load_config()
+        if not entered.is_set():
+            # Only the refresh thread stalls: the writer's own reload (inside
+            # ``set_config_value``) must stay fast, or it would outlast the gap
+            # and the race this test is about could not be observed at all.
+            entered.set()
+            time.sleep(0.5)
+        self.config = fresh
+
+    monkeypatch.setattr(ConfigManager, "reload", delayed_assign)
+
+    refresher = threading.Thread(target=svc._refresh_config, args=(ctx,), daemon=True)
+    refresher.start()
+    assert entered.wait(5.0), "the refresh never started"
+    manager.set_config_value("theme", "dark")
+    refresher.join(10.0)
+
+    assert not refresher.is_alive()
+    assert manager.get_config_value("theme") == "dark", "memory fell behind a newer write"
+    assert (read_config_values(tmp_path) or {})["theme"] == "dark"

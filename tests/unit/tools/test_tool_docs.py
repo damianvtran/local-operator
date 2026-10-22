@@ -233,9 +233,28 @@ _WALK_DEPTH_CAP = 2
 # 782 -> 804 (#2509): the tools/effort/delegate descriptions now say WHICH
 # kind may carry them, so the agent doc's rendered schema grew by those
 # qualifiers (the tier arm below moves with it).
+# 1001 -> 1063 (#2520, ask relay): the ``AskParams.relay`` property and the
+# queued tail's one relay clause are the whole move, and BOTH ledgers were
+# re-measured in the same pass — ``scripts/bench_context_budget.py``'s top arm
+# moves 88,825 -> 89,094 chars (+269 = ~+97 billed) and its ceiling with it,
+# while every other entry here is byte-identical. The field is mode-independent,
+# so the blocking arm's bench number moved by the same +269 chars and still
+# passes under that ceiling.
+# RE-MEASURED (LOH-9 S2): agent 804 -> 1044 and team 779 -> 1018 are the ONLY
+# entries that moved. The agent doc gains the scope ladder (reuse -> ephemeral
+# -> durable), the delete op, and the consent refusal's user surfaces; the team
+# doc gains the same scope rule and its delete semantics. Both were measured
+# through this test's own printed table on the rebased tree, whose upstream
+# baseline is the #2520 ask raise above (ask 1063, unmoved here).
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 804,
-    "ask": 1001,
+    # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
+    # fork exception on the ephemeral bullet ("a fork starts with a copy of
+    # this conversation's roles"), added because the guides and the two
+    # ``show`` messages now carry it. Measured through this test's own
+    # printed table; the ``team`` entry below moves by the same 12 for its
+    # twin sentence, and no other entry moved.
+    "agent": 1056,
+    "ask": 1063,
     "ask_withdraw": 314,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
@@ -381,6 +400,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
+    # NEW (V2-4 agent tags, 2026-10-20): the ``tags`` doc — the names-only
+    # assignment rule, the caps, the remote refusal and the receipt contract.
+    # Deliberate cost of that reference being one read away; the same tool's
+    # schema is the whole of ``scripts/bench_context_budget.py``'s raise
+    # (measurement recorded there), so the two ledgers move together.
+    # 528 -> 531 in review round 2: the receipt claim is qualified to
+    # ``assign``, because ``create``/``list``/``rename`` name categories only.
+    "tags": 531,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
@@ -389,8 +416,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # list-of-objects shape and its three field descriptions, not added
     # sentences. It is the ONLY entry that moved. Re-measured deliberately
     # through this test's own printed table; the tier arm below is unmoved
-    # because this doc does not read config.
-    "team": 779,
+    # because this doc does not read config. RE-MEASURED (LOH-9 S2): 779 ->
+    # 1018, the scope rule and delete semantics; measured with the same printed
+    # table, and the tier arm below still does not read config.
+    # RE-MEASURED (LOH-9 S3): 1018 -> 1030, the fork-copy clause; only this
+    # and the ``agent`` entry moved.
+    "team": 1030,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -418,7 +449,11 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
 #: 811 -> 833 (#2509): the same +22 the canonical table above takes, because
 #: the qualified tools/effort/delegate descriptions render on both arms.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 833, "task": 764}
+#: 833 -> 1073 (LOH-9 S2): the same scope ladder the canonical arm takes; the
+#: tier arm renders it identically, so `task` stays 764.
+#: 1073 -> 1085 (LOH-9 S3): the one-clause fork exception, the same +12 as
+#: the canonical arm; `task` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1085, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

@@ -194,6 +194,13 @@ PREFIXES_TEXT_POLICY = {
     "library": False,
     # The verbs are a selection; none of them is a prompt.
     "librarian": False,
+    # TUI-only inline lists. `prefixes_text` is the DESKTOP claim (does the
+    # desktop's command path own this trailing text), and the desktop does not
+    # offer either command; the terminal's list is driven by `ArgumentMode`.
+    # Keeping these false leaves `/tag Review` a prose message on the desktop,
+    # the direction that cannot swallow a user's sentence.
+    "tag": False,
+    "tags": False,
 }
 
 
@@ -371,6 +378,11 @@ ARGUMENT_SHAPE_POLICY = {
     # rehearsal. WORD rather than ANY, so `/delete yes please explain` stays a
     # message instead of being planned as a control the route would then run.
     "delete": ArgumentShape.WORD,
+    # A tag name may contain spaces, so `/tag Deep Work` is ONE name and the
+    # whole trailing text is the command's argument.
+    "tag": ArgumentShape.ANY,
+    # `on`/`off` are selectors; a sentence after them is prose.
+    "tags": ArgumentShape.WORD,
 }
 
 

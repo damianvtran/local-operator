@@ -245,13 +245,26 @@ async def test_the_state_word_follows_the_cli_precedence(desktop) -> None:
             _row("m2", disabled=True, disabled_reason="5 failed"),
             _row("m3", until_at=PAST),
             _row("m4", due=PAST),
+            # Review round 1, F5: expired outranks blind on every surface.
+            _row(
+                "m5",
+                until_at=PAST,
+                blind=True,
+                blind_reason="its full result is no longer in the spill store",
+            ),
         ],
     )
 
     listing = await _list(client)
 
     states = {row["id"]: row["state"] for row in listing["entries"][0]["monitors"]}
-    assert states == {"m1": "armed", "m2": "disabled", "m3": "expired", "m4": "armed"}
+    assert states == {
+        "m1": "armed",
+        "m2": "disabled",
+        "m3": "expired",
+        "m4": "armed",
+        "m5": "expired",
+    }
     # A late watch is still armed: the due time moves only on change events
     # (§10.2), so lateness between events is ordinary, not a state.
     rows = {row["id"]: row for row in listing["entries"][0]["monitors"]}
@@ -425,3 +438,32 @@ async def test_a_healthy_row_carries_no_hint(desktop) -> None:
     assert response.status_code == 200
     row = response.json()["result"]["entries"][0]["monitors"][0]
     assert row["health"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_blind_watch_is_not_reported_as_armed(desktop) -> None:
+    """Armed-and-ticking is not the same as armed-and-reporting.
+
+    The blind state rides the index row; the wire word must name it rather than
+    letting the row read as a working watch with a due clock.
+    """
+    client, root = desktop
+    _session(root, "aaaaaaaaaaaa")
+    _entry(
+        root,
+        "aaaaaaaaaaaa",
+        rows=[
+            _row(
+                "m5",
+                blind=True,
+                blind_reason="its full result is no longer in the spill store",
+            )
+        ],
+    )
+
+    listing = await _list(client)
+
+    row = listing["entries"][0]["monitors"][0]
+    assert row["state"] == "blind"
+    assert row["blind"] is True
+    assert "BLIND: cannot compare its result" in row["health"]

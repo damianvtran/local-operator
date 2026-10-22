@@ -760,12 +760,11 @@ async def test_highlighted_row_is_the_write_target_for_every_index(
 ) -> None:
     """D27: the HIGHLIGHTED row is exactly the row `s`/`a` writes, every index.
 
-    The service sorts links `(kind, name)` — agent, skill, team — while the card
-    paints agent, team, skill, and `selected_row`/`_selected` indexed `_rows`.
-    Left in service order, the highlight and the policy-write target disagreed by
-    kind. Rows are now normalised to paint order once, so the reverse-styled
-    name and the write TARGET (``selected_row``, which the toggles post) are the
-    same row at every index.
+    The service sorts links by the explicit kind order (agent, team, skill) and
+    the card paints the same order; `selected_row`/`_selected` index `_rows`.
+    The card still normalises to paint order once, so the reverse-styled name
+    and the write TARGET (``selected_row``, which the toggles post) are the same
+    row at every index regardless of how the inventory arrived.
     """
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))

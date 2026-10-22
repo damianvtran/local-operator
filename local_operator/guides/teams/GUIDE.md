@@ -42,6 +42,25 @@ for one job.
   it runs to completion without the initiator owning a new roster or managing
   its members.
 
+## Scope: this conversation or the account
+
+`team(op='create')` with no `scope` authors a CONVERSATION-SCOPED team: the roster
+and its briefs live in this conversation, usable until it ends, invisible in every
+other one, and removed with it. A fork starts with a COPY of this conversation's
+teams, after which the two sets are independent: editing or deleting one never
+touches the other. Prefer it for a grouping this task needs once. A
+team saved for every conversation is the user's decision — `scope='global'`
+requires their confirmation, and this host may not be able to ask: the refusal
+names the desktop Teams editor, the TUI `/team` form and `lop teams`, plus the
+retry without `scope`. `team_delete` removes a conversation team; an account team
+must be deleted from a user surface, which asks its own confirmation.
+
+A conversation team may roster ACCOUNT roles and specialists: those are not
+copied, and they resolve from the account in every conversation. A conversation
+TEAM nested on another roster does travel with its parent only inside this
+conversation; promoting one to the account is a separate step (not in this
+slice).
+
 ## When the user asks to create a team
 
 First, confirm no registered team covers the domain — see
