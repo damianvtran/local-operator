@@ -35080,8 +35080,18 @@ class OperatorApp(App[None]):
                 # the state and the one action (the copy paused, which relay to
                 # restart), so this tail would repeat or contradict it. The reopen
                 # still runs below; only the claim about the screen is dropped.
+                # It rests on the producer's
+                # ``changed=bool(reached and reached != "prepared")`` invariant: a
+                # reached, not-changed refusal is a paused handoff, and the
+                # producer's own sentence owns that state.
                 tail = ""
             elif changed:
+                tail = ""
+            elif reached:
+                # D2: a refusal that reached a phase ends on the producer's action
+                # ("run the move again", "run the copy again"), so the generic
+                # "Nothing changed." tail would state a second, lesser fact after
+                # it — and can contradict the discarded copy the sentence names.
                 tail = ""
             else:
                 tail = " Nothing changed."
@@ -35149,7 +35159,19 @@ class OperatorApp(App[None]):
             # conversation the failed reopen leaves current. It never says a move
             # completed: `changed` only widens it to "check where it is now", which
             # is exactly the state a half-committed handoff leaves behind.
-            if left and code == "unreachable" and not changed and home:
+            if reached:
+                # U11: the reopen itself failed, and the producer already stated the
+                # state and the action. Appending "did not answer / Nothing moved"
+                # here would replace that with the pre-check's story and hide the
+                # pause/restart remedy on the only notice the user has left. Only
+                # the placement-neutral fact that this window could not get back is
+                # added; `home` is named when a reopen had a peer to name.
+                fallback = (
+                    f"Could not move {session_id}: {message}. This window could not "
+                    f"reopen the conversation{' on ' + home if home else ''}; it is "
+                    "still there."
+                )
+            elif left and code == "unreachable" and not changed and home:
                 fallback = (
                     f"Could not move {session_id}: {home} did not answer. Nothing moved. "
                     f"This window could not reopen the conversation on {home}; it is still "
