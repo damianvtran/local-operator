@@ -414,6 +414,18 @@ def parse_mirror_request_id(value: str) -> tuple[str, int] | None:
     return head, int(tail)
 
 
+#: The operator's reasons for dismissing an ask (design §15): the same two words
+#: ``ask_withdraw`` takes, so the vocabulary is one in both directions.
+DISMISS_REASONS = ("answered_in_chat", "moot")
+DISMISS_REASON_DEFAULT = "moot"
+
+
+def normalize_dismiss_reason(value: Any) -> str:
+    """A recorded reason, or ``moot`` for a missing/unknown one (older clients)."""
+    text = str(value or "")
+    return text if text in DISMISS_REASONS else DISMISS_REASON_DEFAULT
+
+
 def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     """The transcript row ids THIS status requires, in delivery order.
 
@@ -443,12 +455,23 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
         return [response_row_id(ask_id)]
     if status == STATUS_TIMED_OUT:
         return [timeout_row_id(ask_id)]
+    if status == STATUS_DISMISSED and record.get("response_owed"):
+        # D1 (design §15): a dismissal stamped BEFORE the deadline tells the agent
+        # through the same response row a decline uses; the deadline notice is not
+        # owed for it (``notice_owed`` needs ``dismissed_at >= expires_at``).
+        return [response_row_id(ask_id)]
     if status == STATUS_DISMISSED and record.get("notice_owed"):
         return [timeout_row_id(ask_id)]
     return []
 
 
-def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool:
+def delivered_hint(
+    ask_id: str,
+    present_ids: Iterable[str],
+    status: str,
+    *,
+    response_required: bool = False,
+) -> bool:
     """Whether the row(s) THIS status requires are DURABLE in the transcript.
 
     CONSUMPTION, not handoff (design §2.2/§4, amended 2026-10-04): a row is
@@ -467,6 +490,11 @@ def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool
     sanctioned exception is the `timed_out`→`late` flip above.
     """
     present = set(present_ids)
+    if status == STATUS_DISMISSED and response_required:
+        # A PRE-DEADLINE dismissal (D1, design §15) is delivered only by its own
+        # response row. Any-row would let a deadline notice that landed first
+        # (the timeout-first race) read as "the agent was told".
+        return response_row_id(ask_id) in present
     if status in (STATUS_ANSWERED, STATUS_DECLINED, STATUS_LATE):
         # The row that pins what the model was told. A LATE ask's deadline
         # notice is NOT the delivery of its answer; the response is.
@@ -665,7 +693,12 @@ def fold(
                 dict(q) for q in (queued.get("questions") or ()) if isinstance(q, Mapping)
             ],
             "status": status,
-            "delivered": delivered_hint(ask_id, present_ids, status),
+            "delivered": delivered_hint(
+                ask_id,
+                present_ids,
+                status,
+                response_required=bool(dismissed_at and expires_at and dismissed_at < expires_at),
+            ),
         }
         if dismissed is not None:
             # A DISMISSAL DOES NOT CANCEL A NOTICE THE MODEL NEVER GOT (fork A,
@@ -690,6 +723,22 @@ def fold(
             # answer the model already has, which the notice's own N8 rule lets
             # stand.
             record["dismissed_at"] = dismissed_at
+            # The reason feeds the receipt and the response text; an older client
+            # sent none, which reads as ``moot`` (design §15).
+            record["dismissed_reason"] = normalize_dismiss_reason(dismissed.get("reason"))
+            dismissed_by = dismissed.get("by")
+            if isinstance(dismissed_by, Mapping):
+                record["dismissed_by"] = dict(dismissed_by)
+            # D1: the row a dismissal owes is decided by TIMING, not by reason. One
+            # stamped before the deadline owes the response row; at/after it, the
+            # §14 notice path below is untouched.
+            record["response_owed"] = bool(
+                dismissed_at
+                and expires_at
+                and dismissed_at < expires_at
+                and now <= window_end
+                and not record["delivered"]
+            )
             record["notice_owed"] = bool(
                 dismissed_at
                 and expires_at

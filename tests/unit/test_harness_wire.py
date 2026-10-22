@@ -632,3 +632,109 @@ def test_the_supervisor_breakpoint_is_no_longer_crossed() -> None:
     assert len(_sse_frame(event)) < SUPERVISOR_LINE_MAX_BYTES
     assert wire._frame_bytes(_socket_payload(event)) < SUPERVISOR_LINE_MAX_BYTES
     assert wire._frame_bytes(_tui_socket_payload(event)) < SUPERVISOR_LINE_MAX_BYTES
+
+
+def test_a_deep_turn_fits_by_keeping_the_newest_messages() -> None:
+    """The 1,500-row skeleton: 1,117,282 B at the socket, now a bounded tail.
+
+    THE FRAME THIS STAGE EXISTS FOR. The content stages bound what one message
+    COSTS; none of them bounds the number of messages, so a 3,001-message turn
+    crossed the 1 MiB socket line no matter how small each row was clipped to.
+    ``relay_frame_or_degraded`` then replaced the WHOLE ``agent_end`` with a
+    passive notice — the viewer lost the turn and its composer waited forever
+    on an acknowledgement carried by the same stream. The tail keeps what a
+    reader is looking at and names what it removed.
+    """
+    event = _many_row_turn(rows=1_500, per_row=500, details_chars=0)
+    payload = event.model_dump(mode="json")
+    assert wire._frame_bytes(payload) > wire.AGENT_END_FRAME_BUDGET_BYTES
+
+    bounded = wire.bound_agent_end_for_wire(payload)
+
+    assert wire._frame_bytes(bounded) <= wire.AGENT_END_FRAME_BUDGET_BYTES
+    assert bounded["messages_total"] == 3_001
+    assert bounded["messages_omitted"] == 3_001 - len(bounded["messages"])
+    assert len(bounded["messages"]) <= wire.AGENT_END_MESSAGE_TAIL_MAX
+    # A contiguous NEWEST suffix, not a sample: the rows a reader was watching
+    # when the end landed are exactly the ones kept.
+    kept = bounded["messages"]
+    original_tail = payload["messages"][-len(kept) :]
+    assert [row.get("tool_call_id") for row in kept] == [
+        row.get("tool_call_id") for row in original_tail
+    ]
+    # The counters describe what is IN the frame. A dropped row is reported by
+    # ``messages_omitted``, never as content cut from a row the reader cannot
+    # find — that was the honesty rule the dropped-row arithmetic had to keep.
+    tool_rows = [row for row in kept if row.get("role") == "tool"]
+    assert bounded["elided_tool_rows"] + bounded["clipped_tool_rows"] <= len(tool_rows)
+
+    # Every encoder shares the function, and every encoder gets the same bound.
+    assert len(_ndjson_line(event)) <= wire.AGENT_END_FRAME_BUDGET_BYTES
+    assert _size_of(_sse_payload(event)) <= wire.AGENT_END_FRAME_BUDGET_BYTES
+    assert _size_of(_socket_payload(event)) <= wire.AGENT_END_FRAME_BUDGET_BYTES
+    assert _size_of(_tui_socket_payload(event)) <= wire.AGENT_END_FRAME_BUDGET_BYTES
+    for relayed in (_socket_payload(event), _tui_socket_payload(event)):
+        assert relayed["messages_total"] == 3_001
+
+
+def test_the_dropped_messages_usage_survives_as_one_folded_aggregate() -> None:
+    """The status band must not undercount a turn the wire had to shorten.
+
+    ``EventController._handle_agent_end`` sums ``event.messages[*].usage``, and a
+    REMOTE viewer only sees what the encoder emits. Dropping rows without
+    folding their receipts would show a smaller bill than the session actually
+    incurred — so the omitted suffix rides as ONE aggregate, folded by serving
+    identity (bounded by distinct models, not by call count).
+    """
+    # A skeleton-only oversize: 3,001 messages of tiny rows, which no
+    # content stage can bring under the line — only the tail can.
+    base = _many_row_turn(rows=1_500, per_row=5, details_chars=0)
+    usage = Usage(
+        input_tokens=1_000,
+        output_tokens=10,
+        cache_read_tokens=5,
+        cache_write_tokens=2,
+        usd_cost=0.5,
+        provider="test",
+        model_id="m",
+    )
+    # ``model_copy`` rather than attribute assignment: ``messages`` is a union
+    # of message kinds, and only the assistant row's type has a ``usage``.
+    messages = [
+        (
+            message.model_copy(update={"usage": usage})
+            if isinstance(message, Message) and message.role == "assistant"
+            else copy.deepcopy(message)
+        )
+        for message in base.messages
+    ]
+    event = AgentEndEvent(messages=messages, generation=1)
+
+    bounded = wire.bound_agent_end_for_wire(event.model_dump(mode="json"))
+
+    assert bounded["messages_omitted"] > 0
+    aggregate = bounded["usage_aggregate"]
+    source = event.model_dump(mode="json")["messages"]
+    dropped_receipts = sum(
+        1 for row in source if isinstance(row, dict) and isinstance(row.get("usage"), dict)
+    ) - sum(
+        1
+        for row in bounded["messages"]
+        if isinstance(row, dict) and isinstance(row.get("usage"), dict)
+    )
+    assert dropped_receipts > 0
+    assert aggregate["input_tokens"] == dropped_receipts * 1_000
+    assert aggregate["output_tokens"] == dropped_receipts * 10
+    # Folded, not capped or concatenated: one serving identity is one receipt.
+    assert len(aggregate["cost_components"]) == 1
+    assert aggregate["cost_components"][0]["input_tokens"] == aggregate["input_tokens"]
+    # ...and it costs a few hundred bytes, not one receipt per dropped row.
+    assert len(json.dumps(aggregate)) < 2_000
+    # Retained rows keep their own receipts untouched, so nothing is counted
+    # twice and nothing is lost: aggregate + retained == the original total.
+    retained_usage = sum(
+        row["usage"]["input_tokens"]
+        for row in bounded["messages"]
+        if isinstance(row, dict) and isinstance(row.get("usage"), dict)
+    )
+    assert aggregate["input_tokens"] + retained_usage == 1_500 * 1_000

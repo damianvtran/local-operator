@@ -41,7 +41,13 @@ from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
 from ..client import BridgeRefusal
 from ..types import ConversationFeedRef
-from .wake import CLAIM_TTL_S, _producer_fence, deliver_wake, screen_item
+from .wake import (
+    CLAIM_TTL_S,
+    _producer_fence,
+    deliver_wake,
+    engagement_hold,
+    screen_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +370,13 @@ async def handle_conversation_available(
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
             return {"action": "hold", "message_id": message_id, "code": fence_code}
+        # F8: a never-used designated chief of staff whose ACCEPTED consent does
+        # not disclose engagement holds visibly before any body fetch, screen or
+        # admit; the loop re-drives it on the bounded backoff until the owner
+        # sends the session a message (see ``engagement_hold``).
+        engage_code = engagement_hold(designation, config_dir)
+        if engage_code:
+            return {"action": "hold", "message_id": message_id, "code": engage_code}
 
         client = wire if wire is not None else await _wire_for(owner, config_dir, auth_store)
         # GAP CURSOR: this endpoint's own cursor is the feed row's

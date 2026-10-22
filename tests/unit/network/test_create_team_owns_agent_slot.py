@@ -678,3 +678,35 @@ def test_the_reply_for_a_team_names_no_attached_profile(root: Path) -> None:
 
     assert detail["agent"] is None
     assert set(detail.get("team", {})) == {"name", "id", "digest"}
+
+
+def test_a_promptless_create_reports_its_team_like_a_prompted_one(root: Path) -> None:
+    """The desktop's ``/new`` sends NO prompt, and its reply must still name the team.
+
+    Operator report, 2026-10-21: a remote session created from the desktop under
+    team ``lopdev`` drew no team badge. The create body DID carry the team (the
+    desktop receipt's fingerprint matches ``target: {kind: team, name: lopdev}``)
+    and the sidecar was written, but the promptless branch answered without the
+    ``agent``/``team`` blocks, so the origin recorded ``binding.team = null``.
+    Every cell above sends ``prompt: "hi"``, which is how the gap stayed hidden;
+    this one sends none, and asserts both branches answer the same identity.
+    """
+    _mint(root)
+    _make_team(root)
+    server = _warmed_server(root)
+
+    promptless = server._op_session_create(_link(), _frame(prompt="", team="release"))
+    prompted = server._op_session_create(_link(), _frame(team="release"))
+
+    assert promptless["warming"] is True, "the cell needs the promptless branch"
+    assert promptless["team"]["name"] == "release"
+    assert promptless["agent"] is None
+    assert promptless["team"] == prompted["team"]
+    assert _sidecar(root, promptless["session_id"]) == {
+        "team": "release",
+        "agent": "",
+        "goal": "",
+    }
+    # And an unnamed promptless create still names nothing (no invented binding).
+    bare = server._op_session_create(_link(), _frame(prompt=""))
+    assert bare["team"] is None and bare["agent"] is None

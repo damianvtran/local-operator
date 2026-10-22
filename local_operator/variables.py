@@ -69,6 +69,7 @@ from local_operator.redaction_shapes import (
     is_registerable_component,
     scrub_known_json_string_values,
     scrub_secrets_with_hits,
+    scrub_shapes_for_arguments,
     scrub_values,
     shape_report,
 )
@@ -550,6 +551,42 @@ class VariableStore:
         """
         return [*self._credentials.values(), *self._redactions]
 
+    def redact_arguments(self, text: str) -> str:
+        """``LoopConfig.redact_tool_arguments``: mask credentials typed into CODE.
+
+        Tool-call arguments are the program the harness executes and the model reads
+        back from its own replayed history, so the two heuristics that are fine on a
+        tool RESULT — a name-driven assignment guess, and registering whatever it
+        matched — are wrong here. Session 6ccea512c372 showed the whole chain: a
+        Python keyword masked as an assignment value in a ``bash`` call, the masked
+        call replayed, the model writing new cells from that copy, and the cells
+        dying with ``NameError: name 'redacted' is not defined``.
+
+        So the passes are, in order:
+
+        1. the EXACT-value pass over what the session already knows
+           (:meth:`redaction_values`) — a credential typed into a command is still
+           contained, byte for byte, whatever its shape;
+        2. :func:`scrub_shapes_for_arguments` — the shape table with a value-level
+           confidence floor, which keeps the spelling-evidence rules (DSN, bearer,
+           PEM, vendor prefixes) and releases keywords, identifier-shaped names and
+           bare lowercase words;
+        3. :func:`scrub_known_json_string_values` on the copy that survives — the
+           JSON-escape spelling of a known value (a short value carried inside a
+           ``write`` body's JSON text is exactly the case this exists for), in the
+           same order :meth:`redact_with_report` uses: shape judgement first, decode
+           only the surviving published copy.
+
+        Shape hits are deliberately NOT registered: a value found in code is the
+        least trustworthy evidence in the session, and promoting one is what made
+        the incident outlive its line. A real credential reaching this path is
+        reported by the RESULT pass when its output is read — where the evidence
+        actually is.
+        """
+        values = self.redaction_values()
+        scrubbed = scrub_shapes_for_arguments(scrub_values(text, values))
+        return scrub_known_json_string_values(scrubbed, values)
+
     def identifier_span(self, value: str) -> str:
         """Wrap ``value`` in the markers that make it a redaction-exempt span.
 
@@ -1000,8 +1037,14 @@ class VariableStore:
         for hit in hits:
             # The FLOOR and the placeholder rule govern REGISTRATION only; the hit
             # itself is recorded for every mask (see ``_run_shapes``), so a short
-            # credential still produces its notice.
-            if not is_registerable_component(hit.value):
+            # credential still produces its notice. The hit's LABEL goes in: it is
+            # what distinguishes a value a spelling-evidence rule recognised from one
+            # a name-driven rule guessed at, and only the latter may be refused for
+            # being spelled like an identifier. Its assignment CONTEXT goes in too: a match
+            # whose own prefix carries an ``=`` operator is a token being typed and
+            # stays contained, where a ``secret:`` label is a reference to an object
+            # name.
+            if not is_registerable_component(hit.value, label=hit.label, assigned=hit.assigned):
                 continue
             if hit.value in self._shape_registrations:
                 continue

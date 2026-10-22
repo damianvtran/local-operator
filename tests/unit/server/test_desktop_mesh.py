@@ -1052,6 +1052,50 @@ async def test_create_on_a_peer_forwards_the_target_and_answers_the_peers_bindin
 
 
 @pytest.mark.asyncio
+async def test_a_peer_agent_whose_instructions_were_not_applied_is_not_bound(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The create's binding agrees with the listing the sidebar polls next.
+
+    Review round 1, R2 on #2754: the peer names a legacy (non-attachable) agent
+    in its reply with ``instructions_applied: false`` but records no agent on the
+    session's attachment, so its listing reads ``agent: null``. Binding the name
+    here drew a badge that the next poll took away.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": "9f3ac1e0b7d2",
+                "agent": {
+                    "name": "legacy-helper",
+                    "id": "",
+                    "kind": "agent",
+                    "instructions_applied": False,
+                    "detail": "",
+                },
+                "team": None,
+            }
+        }
+    )
+    _join(monkeypatch, relay)
+    response = await client.post(
+        "/v1/desktop/sessions",
+        json={
+            "request_id": REQUEST_ID,
+            "cwd": str(root),
+            "peer": PEER,
+            "target": {"kind": "agent", "name": "legacy-helper"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["result"]
+    assert body["binding"] == {"agent": None, "team": None}
+    assert body["identity"]["agent"]["instructions_applied"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_config_auto_create_on_a_peer_requests_unattended(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2078,3 +2122,266 @@ async def test_a_peers_delivery_claim_is_refused_in_words_not_a_404(
     )
     assert local.status_code == 200, local.text
     assert local.json()["result"] == {"claimed": False}, local.text
+
+
+# ---------------------------------------------------------------------------
+# Tombstones are not devices (2026-10-21, damian-mesh "2 devices" for one peer)
+# ---------------------------------------------------------------------------
+
+#: The OLD identity of a machine that re-joined: removed, lifecycle expired, and
+#: carrying the SAME name and endpoints as the live identity that replaced it —
+#: the shape measured on the operator's damian-mesh record.
+REJOINED_OLD = "d_" + "7" * 32
+REJOINED_NEW = "d_" + "6" * 32
+REJOINED_ENDPOINTS = ["99.79.190.164:4097", "172.31.22.23:4097"]
+
+
+def _rejoined_record(root: Path, *, self_removed: bool = False) -> None:
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="damian-mesh", self_device_id=PEER, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=PEER,
+            name="mine",
+            role="admin",
+            capabilities=["admin"],
+            removed_at=1792428000.0 if self_removed else None,
+            lifecycle="expired" if self_removed else "active",
+        )
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=REJOINED_OLD,
+            name="cloud-node-1",
+            capabilities=["list", "drive"],
+            endpoints=list(REJOINED_ENDPOINTS),
+            removed_at=1792428275.1,
+            removed_by=PEER,
+            lifecycle="expired",
+        )
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=REJOINED_NEW,
+            name="cloud-node-1",
+            capabilities=["list", "drive"],
+            endpoints=list(REJOINED_ENDPOINTS),
+        )
+    )
+    record.removed_ids.append(REJOINED_OLD)
+    network_store.save(record, root)
+
+
+def _relay_detail(network: str = "", **_fields: Any) -> dict[str, Any]:
+    """``net_show`` as the relay answers it: EVERY row, tombstones included."""
+    record = network_store.load(network)
+    return {
+        "network_id": record.network_id,
+        "name": record.name,
+        "epoch": record.epoch,
+        "trust": record.trust,
+        "members_detail": [
+            {
+                "device_id": member.device_id,
+                "name": member.name,
+                "lifecycle": member.lifecycle,
+                "role": member.role,
+                "capabilities": list(member.capabilities),
+                "endpoints": list(member.endpoints),
+                "active": member.active,
+                "suspect": member.suspect,
+            }
+            for member in record.members
+        ],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relay_up", [True, False], ids=["relay", "no-relay"])
+async def test_networks_drop_a_rejoined_devices_tombstone(
+    mesh_api, monkeypatch: pytest.MonkeyPatch, relay_up: bool
+) -> None:
+    """A machine that re-joined under a new id is ONE device, on both read paths.
+
+    The picker heads its section with ``members.length - 1`` and draws a row per
+    member, so the expired old identity was a second ``cloud-node-1`` reading
+    "unreachable" — this is the route that fed it.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _rejoined_record(root)
+    if relay_up:
+        _join(
+            monkeypatch,
+            FakeRelay(
+                {
+                    # The relay's peer table is already active-only (`peer_status`).
+                    "net_peer_ls": [
+                        {
+                            "device_id": REJOINED_NEW,
+                            "name": "cloud-node-1",
+                            "network_id": NET_ONE,
+                            "reachable": True,
+                            "reason": "",
+                        }
+                    ],
+                    "net_show": _relay_detail,
+                }
+            ),
+        )
+    else:
+        monkeypatch.setattr(network_store, "find_own_relay", lambda root=None: None)
+    result = (await client.get("/v1/desktop/networks")).json()["result"]
+    members = result["networks"][0]["members"]
+    assert sorted(member["device_id"] for member in members) == sorted([PEER, REJOINED_NEW])
+    assert [member["name"] for member in members].count("cloud-node-1") == 1
+    assert all(member["active"] for member in members)
+
+
+@pytest.mark.asyncio
+async def test_networks_keep_this_devices_own_revoked_row(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A device removed by another member still sees where it stands."""
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _rejoined_record(root, self_removed=True)
+    monkeypatch.setattr(network_store, "find_own_relay", lambda root=None: None)
+    result = (await client.get("/v1/desktop/networks")).json()["result"]
+    self_row = _member(result["networks"][0], PEER)
+    assert self_row["active"] is False
+    assert REJOINED_OLD not in {m["device_id"] for m in result["networks"][0]["members"]}
+
+
+def _revocation_record(root: Path, gone: network_types.MemberRecord) -> None:
+    """Self + one live peer + ``gone``, removed: a revocation with no re-join twin."""
+    record = network_types.NetworkRecord(
+        network_id=NET_ONE, name="home", self_device_id=PEER, self_role="admin"
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=PEER, name="mine", role="admin", capabilities=["admin"]
+        )
+    )
+    record.members.append(
+        network_types.MemberRecord(
+            device_id=REJOINED_NEW,
+            name="cloud-node-1",
+            capabilities=["list", "drive"],
+            endpoints=["127.0.0.1:4097", "10.0.0.5:4097"],
+        )
+    )
+    record.members.append(gone)
+    record.removed_ids.append(gone.device_id)
+    network_store.save(record, root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "endpoints", "kept"),
+    [
+        # A plain revocation: nothing in common with any active member. The Mesh tab
+        # draws it as revoked (dashed edge, "· 1 revoked"), so it must stay on the wire.
+        ("old-laptop", ["10.0.0.9:4097"], True),
+        # Loopback names no machine: every relay can advertise it.
+        ("old-laptop", ["127.0.0.1:4097"], True),
+        # Renamed on re-join, same routable address: still the same machine.
+        ("cloud-node-old", ["10.0.0.5:4097"], False),
+        # Same name, case and padding aside: the re-join signature.
+        (" Cloud-Node-1 ", [], False),
+    ],
+    ids=["plain-revocation", "loopback-only-overlap", "shared-endpoint", "same-name"],
+)
+async def test_networks_keep_a_revocation_and_drop_only_a_superseded_tombstone(
+    mesh_api, monkeypatch: pytest.MonkeyPatch, name: str, endpoints: list[str], kept: bool
+) -> None:
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _revocation_record(
+        root,
+        network_types.MemberRecord(
+            device_id=REJOINED_OLD,
+            name=name,
+            capabilities=["list", "drive"],
+            endpoints=endpoints,
+            removed_at=1792428275.1,
+            removed_by=PEER,
+            lifecycle="expired",
+        ),
+    )
+    monkeypatch.setattr(network_store, "find_own_relay", lambda root=None: None)
+    result = (await client.get("/v1/desktop/networks")).json()["result"]
+    by_id = {member["device_id"]: member for member in result["networks"][0]["members"]}
+    assert (REJOINED_OLD in by_id) is kept, by_id
+    if kept:
+        assert by_id[REJOINED_OLD]["active"] is False, "a revocation is marked, not hidden"
+    assert by_id[REJOINED_NEW]["active"] is True
+
+
+def test_a_remote_rows_binding_is_the_owners_answer_and_absence_is_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidebar's team badge reads ``binding.team``, so a remote row must carry it.
+
+    Operator report, 2026-10-21: this projection hardcoded ``None``/``None`` for
+    every remote row, so a session running under a team on a peer drew no team
+    badge while the same session held locally drew one. The owner's claim now
+    rides (``SessionRow.team``/``agent``); a row with no claim — an older peer —
+    is the same ``None`` as before, never a guessed team.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    teamed = SessionRow(OTHER, 1789400000.0, "under a team", team="lopdev")
+    agented = SessionRow("c" * 12, 1789400000.0, "under an agent", agent="coder")
+    older = SessionRow("d" * 12, 1789400000.0, "older peer")
+    monkeypatch.setattr(
+        peer_rows_mod, "peer_session_rows", lambda root=None, **kwargs: (teamed, agented, older)
+    )
+
+    rows = remote_session_rows(tmp_path, pins=set())
+
+    assert rows[0]["binding"] == {"agent": None, "team": "lopdev"}
+    assert rows[1]["binding"] == {"agent": "coder", "team": None}
+    assert rows[2]["binding"] == {"agent": None, "team": None}
+
+
+def test_a_peer_create_names_its_level_in_both_spellings_for_an_older_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chosen level must survive an owner that has not upgraded.
+
+    Operator report, 2026-10-21 (``Max`` showed as ``High`` on a remote
+    session): the owner's ``set_model`` hop read only ``model["effort"]`` while
+    this function forwards the route's ``reasoning_effort``, so every desktop
+    level was dropped on the peer. The owner now reads both, but a peer on an
+    older build reads only the legacy key, so the frame carries it as well. A
+    level-less pick stays level-less (no key is invented).
+    """
+    from local_operator.server.utils import desktop_mesh
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        desktop_mesh,
+        "_call",
+        lambda root, op, **fields: sent.append(fields) or {"session_id": OTHER},
+    )
+    monkeypatch.setattr(
+        "local_operator.session_factory.saved_tool_approval_is_auto", lambda root: False
+    )
+
+    chosen = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning_effort": "max"}
+    desktop_mesh.create_on_peer(tmp_path, PEER, model=chosen)
+    desktop_mesh.create_on_peer(
+        tmp_path, PEER, model={"provider": "deepseek", "model_id": "deepseek-flash"}
+    )
+
+    assert sent[0]["model"] == {**chosen, "effort": "max"}
+    assert chosen == {
+        "provider": "deepseek",
+        "model_id": "deepseek-flash",
+        "reasoning_effort": "max",
+    }, "the caller's dict is not mutated"
+    assert "effort" not in sent[1]["model"]

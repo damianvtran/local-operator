@@ -1,0 +1,21 @@
+{
+  "relay.session.tags.action": "Etiquetas…",
+  "relay.session.tags.sheet_title": "etiquetas",
+  "relay.session.tags.loading": "cargando…",
+  "relay.session.tags.empty": "aún no hay categorías de etiquetas",
+  "relay.session.tags.empty_hint": "crea una en la aplicación de escritorio o en la terminal",
+  "relay.session.tags.load_error": "No se pudo cargar el catálogo de etiquetas.",
+  "relay.session.tags.retry": "Reintentar",
+  "relay.session.tags.limit_hint": "El máximo de etiquetas por conversación es {count} — quita una para añadir otra.",
+  "relay.session.tags.primary": "principal",
+  "relay.session.tags.make_primary": "hacer de {name} la etiqueta principal",
+  "relay.session.tags.more": "{count, plural, one {# etiqueta más} many {# de etiquetas más} other {# etiquetas más}}",
+  "relay.session.tags.missing": "no está en el catálogo",
+  "relay.session.tags.saving": "guardando…",
+  "relay.session.tags.save_error": "No se pudieron guardar las etiquetas",
+  "relay.session.tags.remove_all": "Quitar todas las etiquetas",
+  "relay.session.tags.remove_all_confirm": "¿Quitar todas las etiquetas?",
+  "relay.session.tags.cancel": "Cancelar",
+  "relay.session.tags.done": "Hecho",
+  "relay.session.tags.pin_and_tags_hint": "mantén pulsada una fila para fijarla o etiquetarla"
+}

@@ -621,6 +621,13 @@ def _read(
                 # local half uses (``session/last_user.py``), so a running
                 # remote row and a running local row order by one clock.
                 last_user_at=_last_user_epoch(peer_row),
+                # The OWNER's attachment, carried so the desktop row can draw the
+                # same team badge a local row draws. ``getattr`` with a default for
+                # the same reason as the readers above: a catalogue double or an
+                # older implementation may not carry the field, and that is no
+                # claim rather than an error.
+                team=str(getattr(peer_row, "team", "") or ""),
+                agent=str(getattr(peer_row, "agent", "") or ""),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

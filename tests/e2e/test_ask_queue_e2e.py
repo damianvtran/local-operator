@@ -935,6 +935,107 @@ async def test_an_unanswered_ask_outlives_the_runtime_and_stays_open(
 
 
 # ---------------------------------------------------------------------------
+# Operator dismissal of an OPEN ask (design §15, D6)
+# ---------------------------------------------------------------------------
+
+
+def _dismiss_row_text(session: Session, ask_id: str) -> str:
+    entry = next(e for e in session.transcript.entries() if e.id == store.response_row_id(ask_id))
+    return str(getattr(entry, "payload", entry))
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_takes_an_open_ask_dismissal_without_a_turn(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6 + D2: stop the session, dismiss the OPEN ask as settled in chat. The
+    ``ask-response-<id>`` row lands in the transcript with the dismissal text and
+    NO turn runs for it; the next real turn reads it."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-d",
+                arguments=_ask_args("which db?", timeout=1800),
+            ),
+            text_turn("working"),
+            text_turn("carrying on"),
+            text_turn("spare"),
+        ]
+    )
+    session = _session(headless_tui_env, "dismiss-stopped", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "an open ask dismissed on a stopped session"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(session.transcript.directory)
+            session.abort("interrupted")
+            requests_before = len(stream.requests)
+
+            outcome = session.dismiss_ask(ask_id, by="remote", reason="answered_in_chat")
+            assert outcome == {"ok": True}
+            await _wait_for_delivery(
+                session,
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the dismissal's response row",
+            )
+            assert "settled in the conversation" in _dismiss_row_text(session, ask_id)
+            events = store.read_events(session.transcript.directory)
+            assert events[-1]["kind"] == store.EVENT_DISMISSED
+            assert events[-1]["by"] == {"surface": "remote"}
+            assert events[-1]["reason"] == "answered_in_chat"
+            # NO TURN: the row is residue, so the stop stands and nothing was sent.
+            await asyncio.sleep(0.3)
+            assert len(stream.requests) == requests_before
+            assert session.ask_agent_running() is False
+
+            # The next real turn sees it.
+            await session.prompt("continue")
+            assert any(
+                "dismissed ask" in (message.text or "")
+                for request in stream.requests[requests_before:]
+                for message in request.messages
+            ), "the next turn did not carry the dismissal row"
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_running_session_refuses_an_open_ask_dismissal_and_writes_nothing(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-r",
+                arguments=_ask_args("which db?", timeout=1800),
+            ),
+            text_turn("working"),
+        ]
+    )
+    session = _session(headless_tui_env, "dismiss-running", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "an open ask dismissal on a running session"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(session.transcript.directory)
+            events_before = store.read_events(session.transcript.directory)
+            outcome = session.dismiss_ask(ask_id, by="remote", reason="moot")
+            assert outcome["ok"] is False
+            assert "reply in chat" in outcome["error"]
+            assert store.read_events(session.transcript.directory) == events_before
+            assert not session.transcript.has_entry(store.response_row_id(ask_id))
+            assert session.ask_queue().find(ask_id)["status"] == store.STATUS_OPEN
+    finally:
+        await dispose_quietly(session)
+
+
+# ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
 

@@ -1974,6 +1974,22 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
    Preserve runtime sequence/epoch checks independently of semantic event dedupe.
+   A roster tick is a MERGE, not a replacement: `frontend.update` carries
+   `job_deltas: {upserted: [row, …], removed: [job_id, …]}` and the receiver
+   merges those rows by `id` into the roster it holds (unchanged rows keep their
+   position and identity). `job_deltas.order: [job_id, …]` is present ONLY on a
+   tick whose order the merge cannot derive (a job re-added anywhere but the
+   end); when present it is authoritative. `changes["jobs"]` remains the
+   REPLACEMENT form and is what a snapshot/seed carries; a renderer that has
+   never heard of `job_deltas` ignores it and keeps its last snapshot until the
+   next sync, which is safe. Rows in both forms are the same bounded summaries.
+   A DEGRADED frame says so rather than going silent: `frontend.update` with
+   `degraded: true, paused: true` + `degraded_reason`, and an `event` whose
+   type is `notice` with `paused: true, action: "reload"`. `paused` means the
+   stream is no longer describing canonical state; CLEAR it on the next
+   complete frame — a `frontend_sync`/`frontend.replace` snapshot or the next
+   non-degraded `frontend.update` — and re-sync rather than painting the last
+   delta. No new frame op is needed for the clear.
    `frontend.replace` is the desktop-only REPLACEMENT of that projection,
    published once per accepted move and ordered by the BRIDGE's outer `seq`
    rather than the owner's clock (see "The replacement frame" under the move

@@ -114,16 +114,63 @@ def _kinds(directory: Path) -> list[str]:
     return [str(event.get("kind")) for event in store.read_events(directory)]
 
 
-def test_a_cold_dismiss_refuses_an_open_ask_with_the_queues_own_words(tmp_path: Path):
-    """A dismissal of a still-open ask is refused in the SAME sentence the queue
-    uses, so the phone's card reads identically whichever door answered it."""
+def test_a_cold_dismiss_accepts_an_open_ask_and_records_the_reason(tmp_path: Path):
+    """D6 (design §15): a session with no runtime is "no agent work running", so an
+    OPEN ask is dismissible there. The event carries who and why."""
     directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
-    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
-    assert outcome == {
-        "ok": False,
-        "error": "only a timed-out ask can be dismissed; it is still open.",
-    }
+    outcome = _run(
+        dismiss_cold(
+            tmp_path, SESSION, ASK_ID, by="phone", reason="answered_in_chat", now_ms=NOW + 1_000
+        )
+    )
+    assert outcome == {"ok": True}
+    assert _kinds(directory) == [store.EVENT_QUEUED, store.EVENT_DISMISSED]
+    event = store.read_events(directory)[-1]
+    assert event["by"] == {"surface": "phone"}
+    assert event["reason"] == "answered_in_chat"
+
+
+def test_a_cold_dismiss_without_a_reason_records_moot(tmp_path: Path):
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    assert _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW + 1))["ok"]
+    assert store.read_events(directory)[-1]["reason"] == "moot"
+
+
+def test_a_cold_dismiss_refuses_an_unknown_reason_and_writes_nothing(tmp_path: Path):
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    outcome = _run(
+        dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", reason="because", now_ms=NOW)
+    )
+    assert outcome == {"ok": False, "error": render.DISMISS_BAD_REASON}
     assert _kinds(directory) == [store.EVENT_QUEUED]
+
+
+def test_a_cold_open_dismiss_removes_the_deadline_wake_row(tmp_path: Path):
+    """D3: the row goes because a pre-deadline dismissal owes a RESPONSE row that any
+    boot delivers, not because a deadline notice is owed."""
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    _seed_wakes(
+        directory,
+        [
+            _wake_row(store.timeout_row_id(ASK_ID), kind="ask_timeout", hidden=True),
+            _wake_row("w-user"),
+        ],
+    )
+    assert _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW + 5))["ok"]
+    assert _wake_ids(directory) == ["w-user"]
+
+
+def test_the_next_boot_delivers_a_cold_open_dismissal_as_a_response_row(tmp_path: Path):
+    """The cold dismissal boots nothing; the row is owed through the fold."""
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    assert _run(
+        dismiss_cold(
+            tmp_path, SESSION, ASK_ID, by="phone", reason="answered_in_chat", now_ms=NOW + 5
+        )
+    )["ok"]
+    (record,) = store.fold(store.read_events(directory), NOW + 10)
+    assert record["response_owed"] is True and record["delivered"] is False
+    assert store.expected_row_ids(record) == [store.response_row_id(ASK_ID)]
 
 
 def test_a_cold_dismiss_refuses_an_ask_this_session_never_queued(tmp_path: Path):
