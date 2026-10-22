@@ -209,3 +209,24 @@ async def test_an_explicit_unpin_survives_the_next_boot(
     # A human re-pin clears the intent and sticks.
     assert pins.set_pin(isolated_root, librarian_id, True) is True
     assert librarian_id not in pins.explicitly_unpinned(isolated_root)
+
+
+def test_a_failed_create_records_a_failed_create_receipt(tmp_path: Path) -> None:
+    from local_operator.librarian import bootstrap
+
+    session_id = "lib111122222"
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "created_at.json").write_text("{}", encoding="utf-8")
+
+    bootstrap._discard_failed_create(tmp_path, session_id)
+
+    assert not directory.exists()
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sessions" / ".cleanup-log.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["policy"] == "failed-create"
+    assert rows[0]["session"] == session_id
+    assert rows[0]["actor"] == "librarian"

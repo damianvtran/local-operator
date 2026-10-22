@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import ToolContext
-from local_operator.teams import TeamRegistry
+from local_operator.teams import TeamEditFields, TeamRegistry
 from local_operator.tools.team_tool import (
     build_team_delete_tool,
     build_team_tool,
@@ -17,8 +17,11 @@ from local_operator.tools.team_tool import (
 
 
 @pytest.fixture()
-def registry(tmp_path) -> TeamRegistry:
-    return TeamRegistry(tmp_path)
+def registry(tmp_path) -> Any:
+    """The SESSION's composite (see ``test_agent_tool.py::registry``)."""
+    from local_operator.profile_scope import scope_team_registry
+
+    return scope_team_registry(TeamRegistry(tmp_path), tmp_path / "session")
 
 
 @pytest.fixture()
@@ -128,9 +131,14 @@ async def test_lock_timeout_returns_structured_error_without_traceback(
     holder.create_team(TeamEditFields(name="seed"))
     monkeypatch.setattr(teams_module, "_TEAM_LOCK_TIMEOUT_S", 0.2)
 
-    registry = TeamRegistry(cfg)
+    # The tool's default is a CONVERSATION-scoped team, so the contended store is
+    # the session one (``<session>/roles``); the global lock is not touched.
+    from local_operator.profile_scope import scope_team_registry
+
+    registry = scope_team_registry(TeamRegistry(cfg), cfg / "session")
     context = ToolContext(cwd=".", team_registry=registry)
-    fd = os.open(cfg / ".teams.lock", os.O_RDWR)
+    (cfg / "session" / "roles").mkdir(parents=True, exist_ok=True)
+    fd = os.open(cfg / "session" / "roles" / ".teams.lock", os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         result = await execute_team("tc", {"op": "create", "name": "blocked"}, None, None, context)
@@ -203,3 +211,129 @@ async def test_update_resets_a_label_and_replaces_aliases(context, registry) -> 
     assert team is not None
     assert team.label == "Ops"  # reset to the derived default
     assert team.aliases == ["o2"]  # replaced wholesale, not merged
+
+
+# ---------------------------------------------------------------------------
+# LOH-9 S2 — scope on writes, consent for the account store, session deletes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_tool_create_defaults_to_this_conversation(context, registry) -> None:
+    body = await call(context, op="create", name="pod", manager="manager", members=["scout"])
+
+    assert "in this conversation" in body
+    assert registry.global_registry.get_team_by_name("pod") is None
+    assert registry.store_for("session").get_team_by_name("pod") is not None
+
+    result = await execute_team(
+        "tc", {"op": "create", "name": "pod-2", "manager": "manager"}, None, None, context
+    )
+    assert result.details is not None
+    assert result.details["scope"] == "session"
+    assert result.details["authorized_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_tool_cannot_create_in_the_account_without_the_host(context, registry) -> None:
+    body = await call(context, op="create", name="durable", scope="global", manager="manager")
+
+    assert "needs the user's confirmation" in body
+    assert "TUI `/team` form" in body
+    assert registry.global_registry.get_team_by_name("durable") is None
+
+
+@pytest.mark.asyncio
+async def test_a_host_approved_account_team_records_its_origin(registry) -> None:
+    seen: list[Any] = []
+
+    async def approve(intent):
+        seen.append(intent)
+        return "ask:7"
+
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=approve)
+    result = await execute_team(
+        "tc",
+        {"op": "create", "name": "durable", "scope": "global", "manager": "manager"},
+        None,
+        None,
+        context,
+    )
+
+    assert not result.is_error
+    assert "in your account" in result.text
+    assert result.details is not None
+    assert result.details["authorized_by"] == "ask:7"
+    assert seen and seen[0].kind == "team"
+    assert registry.global_registry.get_team_by_name("durable") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_a_conversation_team_only(context, registry) -> None:
+    await call(context, op="create", name="pod", manager="manager", members=["scout"])
+
+    body = await delete(context, "pod")
+
+    assert "from this conversation" in body
+    assert "account is unchanged" in body
+    assert registry.get_team_by_name("pod") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_an_account_team(context, registry) -> None:
+    registry.global_registry.create_team(
+        TeamEditFields(name="durable", manager="manager", members=[])
+    )
+
+    body = await delete(context, "durable")
+
+    assert "saved in the user's account" in body
+    assert registry.global_registry.get_team_by_name("durable") is not None
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation — alias collisions, grouping and scope in listings
+# ---------------------------------------------------------------------------
+
+
+def _consenting_team(registry, origin: str = "test-consent"):
+    seen: list[Any] = []
+
+    async def approve(intent):
+        seen.append(intent)
+        return origin
+
+    return (
+        ToolContext(cwd=".", team_registry=registry, authorize_durable_write=approve),
+        seen,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_session_create_over_an_account_alias_refuses_before_consent(registry) -> None:
+    """M1/R-m2: an alias resolves like a name, so it shadows like one."""
+    registry.global_registry.create_team(
+        TeamEditFields(name="release-train", manager="manager", members=[], aliases=["release"])
+    )
+    context, seen = _consenting_team(registry)
+
+    body = await call(context, op="create", name="release", manager="manager", members=[])
+
+    assert "already exists in your account" in body
+    assert seen == [], "the alias collision must not reach the consent question"
+
+
+@pytest.mark.asyncio
+async def test_list_groups_by_scope_and_show_names_it(context, registry) -> None:
+    """U1/AC13: a roster choice must say which store a team lives in."""
+    await call(context, op="create", name="here-team", manager="manager", members=[])
+    registry.global_registry.create_team(
+        TeamEditFields(name="everywhere-team", manager="manager", members=[])
+    )
+
+    listed = await call(context, op="list")
+
+    assert "teams in this conversation:" in listed
+    assert "teams saved everywhere (your account):" in listed
+    shown = await call(context, op="show", name="here-team")
+    assert "scope: this conversation" in shown

@@ -39,7 +39,9 @@
         "test",
         "sign_in",
         "remove"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     },
     {
       "id": "github",
@@ -75,7 +77,9 @@
         "reauth",
         "sign_out",
         "remove"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     },
     {
       "id": "postgres-prod",
@@ -119,7 +123,9 @@
         "test",
         "set_key",
         "remove"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     },
     {
       "id": "acme-api",
@@ -154,7 +160,9 @@
         "test",
         "add_key",
         "remove"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     },
     {
       "id": "filesystem",
@@ -188,7 +196,9 @@
       "actions": [
         "test",
         "remove"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     },
     {
       "id": "acme-broken",
@@ -221,7 +231,9 @@
       "last_seen_at": null,
       "actions": [
         "test"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     },
     {
       "id": "borrowed-github",
@@ -255,7 +267,9 @@
       "actions": [
         "test",
         "sign_in"
-      ]
+      ],
+      "credential_state": "unknown",
+      "credential_reason": ""
     }
   ],
   "verbs": [
@@ -291,7 +305,7 @@
     },
     {
       "verb": "reauth",
-      "description": "Forget first, then authorize — for an account or scope change",
+      "description": "Forget first, then authorize \u2014 for an account or scope change",
       "destructive": true,
       "offers": "oauth"
     }

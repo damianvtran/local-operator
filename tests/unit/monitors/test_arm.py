@@ -629,3 +629,47 @@ async def test_the_storm_guard_refuses_the_third_identical_name(root: Path) -> N
     assert (directory / "transcript.jsonl").read_text(encoding="utf-8") == before
     details = _latest(root, "storm01")
     assert [row["id"] for row in details["monitors"]] == ["m1", "m2"]
+
+
+def test_the_two_index_row_composers_agree_on_the_key_set(tmp_path: Path) -> None:
+    """The index is one file written by two composers, so their rows must agree.
+
+    ``store.health_hint`` reads blind/suppression facts off a row with no
+    counters file in hand; either composer dropping a key makes the hint wrong
+    for every surface that reads the index it wrote.
+    """
+    from local_operator.monitors.arm import _compose_index_rows
+    from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
+    from local_operator.monitors.settings import MonitorSettings
+    from local_operator.monitors.spec import MonitorSpec
+
+    spec = MonitorSpec(
+        id="m1",
+        name="watch",
+        tool="bash",
+        arguments={"command": "ls"},
+        every_ms=MINUTE,
+        created_at=1_700_000_000_000,
+    )
+
+    async def _run_check(monitor: Any) -> "CheckOutcome":
+        return {"text": "", "error": None}
+
+    scheduler = MonitorScheduler(
+        now=lambda: 1_700_000_000_000,
+        config_dir=tmp_path / "cfg",
+        session_id="sess",
+        settings=MonitorSettings(),
+        validate=lambda tool, args: None,
+        run_check=_run_check,
+        deliver=lambda delivery: None,
+        persist=lambda monitors: None,
+    )
+    scheduler.load([spec])
+
+    from_memory = scheduler.index_rows()[0]
+    from_disk = _compose_index_rows(tmp_path / "cfg", "sess", [spec])[0]
+
+    assert set(from_memory) == set(from_disk)
+    for key in ("suppressed", "blind", "blind_reason"):
+        assert key in from_memory

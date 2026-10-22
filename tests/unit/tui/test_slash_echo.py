@@ -134,6 +134,11 @@ ECHO_POLICY = {
     # A control command (`status` is the default), never words for the model:
     # the receipt names the Librarian's state, and `open` switches sessions.
     "librarian": False,
+    # Toggles one label and opens a list; neither is words for the model, and
+    # both handlers print their own receipt (`Added “…”`, the list itself).
+    "tag": False,
+    # A presentation preference plus its receipt; nothing reaches the model.
+    "tags": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -267,6 +272,11 @@ PROMPT_POLICY = {
     # The verbs are a selection, and a bare `/librarian` reports status; none
     # of them is a prompt.
     "librarian": False,
+    # Toggles one label and opens a list; neither is words for the model, and
+    # both handlers print their own receipt (`Added “…”`, the list itself).
+    "tag": False,
+    # A presentation preference plus its receipt; nothing reaches the model.
+    "tags": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -2728,3 +2738,37 @@ async def test_the_agent_listing_does_not_end_on_a_dangling_spacer(tmp_path) -> 
         assert blanks == 0, f"{session_cls.__name__} listing ends on {blanks} blank row(s): {lines}"
         # The spacer is only correct when it is actually spacing something.
         assert ("Send: /agent <name> <message>" in "\n".join(lines)) is expects_footer, lines
+
+
+@pytest.mark.asyncio
+async def test_the_team_picker_dedupes_a_raced_name_like_the_agent_picker(tmp_path) -> None:
+    """Q-5: a conversation team racing an account team of the same name is ONE
+    row in the picker. The listing puts session rows first, so the row in force
+    — the one a launch would use — is the one offered."""
+    from local_operator.profile_scope import scope_team_registry
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    global_registry = TeamRegistry(tmp_path / "global")
+    global_registry.create_team(
+        TeamEditFields(name="dup", manager="manager", members=[TeamMember(role="coder")])
+    )
+    registry = scope_team_registry(global_registry, tmp_path / "session")
+    # WRITTEN THROUGH THE SESSION STORE, not the composite: the composite's
+    # shadow refusal correctly blocks a NEW session create over an account name,
+    # so the duplicate this watch is for can only be a pre-existing one (a race
+    # with another writer, a store moved between scopes).
+    registry.session_registry.create_team(
+        TeamEditFields(name="dup", manager="manager", members=[TeamMember(role="reviewer")])
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        choices = app._team_choices()
+
+    assert [choice.name for choice in choices].count("dup") == 1, choices

@@ -380,19 +380,69 @@ def test_a_dismissed_notice_is_not_owed_past_the_late_window():
     assert store.expected_row_ids(record) == []
 
 
-def test_a_dismissal_before_the_deadline_owes_nothing():
-    """Only a deadline that had ALREADY passed can leave a notice undelivered.
-
-    A hand-written log may carry a dismissal dated inside the window (no surface
-    offers one — ``AskQueue.dismiss`` refuses a non-lapsed ask — but the fold is
-    total, so it has to answer). Nothing was owed at that instant, and the
-    dismissal does not invent an owed notice.
-    """
+def test_a_dismissal_before_the_deadline_owes_a_response_row_not_a_notice():
+    """D1 (design §15): only a deadline that had ALREADY passed can leave a NOTICE
+    undelivered, so a pre-deadline dismissal owes the RESPONSE row instead —
+    timing decides, never the reason."""
     events = [_queued(at=BASE, timeout_s=3600), _dismissed(at=BASE + 1_000)]
     (record,) = store.fold(events, BASE + 2_000)
     assert record["status"] == store.STATUS_DISMISSED
     assert record["notice_owed"] is False
+    assert record["response_owed"] is True
+    assert record["delivered"] is False
+    assert store.expected_row_ids(record) == [store.response_row_id("a-1")]
+
+
+def test_the_response_row_clears_a_pre_deadline_dismissal():
+    events = [_queued(at=BASE, timeout_s=3600), _dismissed(at=BASE + 1_000)]
+    (record,) = store.fold(events, BASE + 2_000, present_ids=[store.response_row_id("a-1")])
+    assert record["delivered"] is True
+    assert record["response_owed"] is False
     assert store.expected_row_ids(record) == []
+
+
+def test_timeout_first_race_keeps_the_dismissal_owed():
+    """ACCEPTED ORDER (design §3.3): a runtime boots at the deadline and writes
+    ``ask-timeout-<id>``, then a cold dismissal STAMPED BEFORE the deadline lands.
+    Both rows are true; ``delivered`` must stay false until the response exists."""
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 119_000)]
+    now = BASE + 130_000
+    (record,) = store.fold(events, now, present_ids=[store.timeout_row_id("a-1")])
+    assert record["delivered"] is False
+    assert record["response_owed"] is True
+    assert store.expected_row_ids(record) == [store.response_row_id("a-1")]
+
+
+def test_a_post_deadline_dismissal_is_unchanged_by_the_response_rule():
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(events, BASE + 200_100)
+    assert record["response_owed"] is False
+    assert record["notice_owed"] is True
+    assert store.expected_row_ids(record) == [store.timeout_row_id("a-1")]
+
+
+def test_an_answer_inside_the_window_outranks_a_pre_deadline_dismissal():
+    answered = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_ANSWERED,
+        "ask_id": "a-1",
+        "at": BASE + 500,
+        "answers": {"q1": ["x"]},
+        "by": {"surface": "tui"},
+    }
+    events = [_queued(at=BASE, timeout_s=3600), answered, _dismissed(at=BASE + 1_000)]
+    (record,) = store.fold(events, BASE + 2_000)
+    assert record["status"] == store.STATUS_ANSWERED
+
+
+def test_a_dismissal_reason_defaults_to_moot_and_is_recorded():
+    bare = _dismissed(at=BASE + 1_000)
+    (record,) = store.fold([_queued(at=BASE, timeout_s=3600), bare], BASE + 2_000)
+    assert record["dismissed_reason"] == "moot"
+    chat = dict(bare, reason="answered_in_chat")
+    (record,) = store.fold([_queued(at=BASE, timeout_s=3600), chat], BASE + 2_000)
+    assert record["dismissed_reason"] == "answered_in_chat"
+    assert record["dismissed_by"] == {"surface": "phone"}
 
 
 def test_a_dismissed_notice_already_in_the_transcript_is_not_owed():
@@ -979,3 +1029,187 @@ def test_is_lapsed_names_timed_out_only():
         None,
     ):
         assert store.is_lapsed(status) is False, status
+
+
+# ---------------------------------------------------------------------------
+# Relay rows (#2520) and the tolerance that makes them safe to introduce
+# ---------------------------------------------------------------------------
+
+
+def _relayed(
+    ask_id: str = "a-r", *, at: int = 1_000_000, origin: str = "s-other"
+) -> dict[str, Any]:
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_RELAYED,
+        "ask_id": ask_id,
+        "at": at,
+        "relay": {"session_id": origin, "ask_id": "a-1"},
+    }
+
+
+def test_a_relay_row_folds_without_a_queued_event():
+    """The one ask shape with no ``queued`` row: the watcher records a REFERENCE.
+
+    The fold emits the base record and nothing more — the questions, deadline and
+    status are the ORIGIN's and are filled in by the queue's derivation, which is
+    the only reader allowed to open another session's log.
+    """
+    records = store.fold([_relayed()], 1_000_000, session_id="s-watch")
+    assert len(records) == 1
+    record = records[0]
+    assert record["ask_id"] == "a-r"
+    assert record["session_id"] == "s-watch"
+    assert record["relay"] == {"session_id": "s-other", "ask_id": "a-1"}
+    assert record["questions"] == []
+    assert record["status"] == store.STATUS_OPEN
+    # No deadline of its own: the origin owns it.
+    assert record["expires_at"] == 0
+    assert record["timeout_s"] == 0
+
+
+def test_a_relay_row_carries_the_watchers_withdrawal_stamp():
+    withdrawn = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_WITHDRAWN,
+        "ask_id": "a-r",
+        "at": 1_000_500,
+        "by": {"surface": "agent"},
+    }
+    records = store.fold([_relayed(), withdrawn], 1_001_000, session_id="s-watch")
+    assert records[0]["relay_withdrawn_at"] == 1_000_500
+    # FOLDED, not just stamped (#2673, R1-3): every COLD reader — the cleanup
+    # probe, the cold dismissal door — sees a settled relay, so the session is
+    # prunable and the doors agree without reading the origin.
+    assert records[0]["status"] == store.STATUS_WITHDRAWN
+
+
+def test_a_relay_row_folds_a_local_dismissal_over_a_withdrawal():
+    """A dismissed relay reads dismissed, and outranks a withdrawal (§12)."""
+    dismissed = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": "a-r",
+        "at": 1_000_600,
+        "by": {"surface": "terminal"},
+    }
+    withdrawn = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_WITHDRAWN,
+        "ask_id": "a-r",
+        "at": 1_000_500,
+        "by": {"surface": "agent"},
+    }
+    assert (
+        store.fold([_relayed(), dismissed], 1_001_000, session_id="s-watch")[0]["status"]
+        == store.STATUS_DISMISSED
+    )
+    both = store.fold([_relayed(), withdrawn, dismissed], 1_001_000, session_id="s-watch")
+    assert both[0]["status"] == store.STATUS_DISMISSED
+    assert both[0]["relay_dismissed_at"] == 1_000_600
+    # The wire row must not leak the fold's internal stamps.
+    assert "relay_dismissed_at" not in store.pending_row(both[0])
+
+
+def test_an_old_shaped_log_folds_byte_identically_and_ignores_unknown_kinds():
+    """ADDITIVE, or the introduction would not be safe on a mixed tree.
+
+    Two assertions in one cell because they are one property: an old log (known
+    kinds only) and the same log plus an event kind this reader has never heard
+    of must produce the SAME records, byte for byte — and neither may grow a
+    relay/surfaced key that an older surface would then have to understand.
+    """
+    old_shaped = [_queued(), _answered(at=1_000_100)]
+    unknown = {
+        "v": store.EVENT_SCHEMA,
+        "kind": "a-kind-from-a-later-revision",
+        "ask_id": "a-1",
+        "at": 1_000_050,
+        "whatever": {"nested": True},
+    }
+    baseline = store.fold(old_shaped, 1_000_200, session_id="s1")
+    with_unknown = store.fold([*old_shaped, unknown], 1_000_200, session_id="s1")
+    assert with_unknown == baseline
+    assert json.dumps(with_unknown, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+    assert "relay" not in baseline[0]
+    assert "surfaced_in" not in baseline[0]
+    # And the WIRE row for an ordinary ask carries none of the relay keys either.
+    row = store.pending_row(baseline[0])
+    assert set(row) == {
+        "ask_id",
+        "created_at",
+        "expires_at",
+        "timeout_s",
+        "urgent",
+        "status",
+        "delivered",
+        "questions",
+        "answers",
+        "answered_by",
+        "answered_at",
+    }
+
+
+def test_a_relay_wire_row_carries_its_provenance_and_nothing_empty():
+    record = store.fold([_relayed()], 1_000_000, session_id="s-watch")[0]
+    row = store.pending_row(record)
+    assert row["relay"] == {"session_id": "s-other", "ask_id": "a-1"}
+    # Nothing empty rides beside it: the reference is the whole provenance.
+    assert set(row) == {
+        "ask_id",
+        "created_at",
+        "expires_at",
+        "timeout_s",
+        "urgent",
+        "status",
+        "delivered",
+        "questions",
+        "relay",
+    }
+
+
+def test_surfaced_rows_attach_to_the_origin_record_only():
+    surfaced = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_RELAY_SURFACED,
+        "ask_id": "a-1",
+        "at": 1_000_050,
+        "by": {"session_id": "s-watch", "ask_id": "a-r"},
+    }
+    records = store.fold([_queued(), surfaced], 1_000_100, session_id="s1")
+    assert records[0]["surfaced_in"] == [
+        {
+            "session_id": "s-watch",
+            "ask_id": "a-r",
+            "at": 1_000_050,
+        }
+    ]
+    # The surfaced row is NOT a status event: the origin's own precedence decides.
+    assert records[0]["status"] == store.STATUS_OPEN
+    assert len(records) == 1
+
+
+def test_relay_row_ids_are_their_own_namespace():
+    assert store.relay_row_id("a-1") == "ask-relay-a-1"
+    assert store.relay_row_id("a-1") not in (
+        store.response_row_id("a-1"),
+        store.timeout_row_id("a-1"),
+    )
+
+
+def test_a_dismissed_relay_never_owes_a_response_row():
+    """Relay records are built by ``_relay_record``, outside the ordinary ladder, so the
+    D1 ``response_owed`` flag (design §15) cannot reach them: no agent reads a relay."""
+    dismissed = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": "a-r",
+        "at": 1_000_500,
+        "by": {"surface": "phone"},
+        "reason": "answered_in_chat",
+    }
+    records = store.fold([_relayed(), dismissed], 1_001_000, session_id="s-watch")
+    (record,) = [r for r in records if r.get("relay")]
+    assert record["status"] == store.STATUS_DISMISSED
+    assert "response_owed" not in record
+    assert store.expected_row_ids(record) == []

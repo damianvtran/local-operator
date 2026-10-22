@@ -870,14 +870,18 @@ jobs:
     # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
     # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
     # unchanged; this is scheduling headroom, not a test-failure waiver.
-    # Raised to 32 by the composed main-recovery change: the heaviest unit
-    # shard measures 7239.26s serial, which is 1809.82s on 4 workers. At 31
-    # minutes the guard's budget is 31*60 - 60 = 1800s and the projection
-    # fails by 9.82s; at 32 it is 1860s and the projection passes by 50.18s.
-    # 32 is the guard's own minimum, ceil((1809.82 + 60)/60). This is the
-    # same one-line raise #2682 carries; it rides here only because #2694
-    # inherits the red and #2682 inherits the i18n red, so neither can land
-    # alone. Weights, workers, partition and watchdogs remain unchanged.
+    #
+    # 32 (2026-10-19 and 2026-10-21), twice over and by the same one-line change. The
+    # credential-repair slices' new test files run at the manifest's 30.786s
+    # fallback and push the heaviest shard to 7202.00s of serial weight
+    # (1800.39s on 4 workers), 0.39s past the 1800s budget at 31. At the same
+    # time the composed main-recovery change measures 7239.26s serial
+    # (1809.82s on 4 workers), 9.82s past that same budget. The larger figure
+    # dominates, and 32 is the guard's own minimum: ceil((1809.82 + 60)/60),
+    # passing by 50.18s. Both sides carried the identical `timeout-minutes: 32`
+    # and only the prose differed, so this merges the two rationales rather
+    # than raising the ceiling a second time. Weights, workers, partition and
+    # watchdogs remain unchanged.
     timeout-minutes: 32
     strategy:
       fail-fast: false

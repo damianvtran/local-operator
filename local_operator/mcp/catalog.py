@@ -568,6 +568,7 @@ def _row(
     probe: ProbeResult | None,
     running: bool,
     now: float,
+    credential: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from local_operator.mcp.tool_cache import config_digest
 
@@ -655,6 +656,20 @@ def _row(
             tool_count, last_seen_at = seen
             tool_basis = "last_seen"
 
+    # THE CREDENTIAL WORD IS A SECOND FACT, never a replacement for ``status``
+    # (design §5: no client breaks on a new status word). ``status`` says what the
+    # connection is doing; this says WHY a non-connected one is not working and
+    # whose remedy it is. The generic sign-in reason is the fallback only when the
+    # per-server read has nothing more specific to say.
+    credential_state = str((credential or {}).get("state") or "unknown")
+    credential_reason = str((credential or {}).get("reason") or "")
+    # The GENERIC sign-in reason is the one this replaces; a config-specific
+    # sentence ("the headers this server sends cannot carry a key") is a better
+    # answer to the same question and stays. ``not_started`` is not a sign-in
+    # problem at all — it means nothing has observed the server yet.
+    if credential_reason and status == "needs_sign_in" and not reason:
+        reason = credential_reason
+
     actions: list[str] = []
     if not errors:
         actions.append("test")
@@ -700,6 +715,8 @@ def _row(
         },
         "status": status,
         "status_reason": reason,
+        "credential_state": credential_state,
+        "credential_reason": credential_reason,
         "status_observed_at": observed,
         "status_basis": basis,
         "auth": auth,
@@ -755,6 +772,18 @@ def describe_servers(
     moment = time.time() if now is None else now
     available = project_scope_available(cwd)
     configs, sources = load_all_mcp_configs(cwd)
+    # ONE PASS, ONE SET OF READS (design §5): the per-server credential state is
+    # computed once for the whole document and handed to each row, so a catalog
+    # read does not open the secret store once per reference per server. A read
+    # that fails degrades to no rows — status then falls back to the existing
+    # config facts — rather than failing the page.
+    credentials: dict[str, dict[str, Any]] = {}
+    try:
+        from local_operator.mcp.credential_status import server_states
+
+        credentials = server_states(cwd, base=base, configs=configs)
+    except Exception:  # noqa: BLE001 — a status read must never break the catalog
+        credentials = {}
     servers = [
         _row(
             name,
@@ -767,6 +796,7 @@ def describe_servers(
             live=live,
             probe=(probes or {}).get(name),
             running=name in running,
+            credential=credentials.get(name),
             now=moment,
         )
         for name, cfg in configs.items()

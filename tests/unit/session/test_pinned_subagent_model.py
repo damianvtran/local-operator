@@ -712,6 +712,7 @@ def test_a_role_pin_is_honoured_under_the_operator_default(tmp_path, monkeypatch
             effort="hi",
         ),
         creating=True,
+        scope="global",
     )
     session = make_session(tmp_path)
     session.agent_registry = registry
@@ -1041,6 +1042,7 @@ def test_a_role_pin_written_after_the_session_starts_reaches_the_next_spawn(tmp_
             effort="hi",
         ),
         creating=True,
+        scope="global",
     )
 
     spec = session._resolve_subagent_model("designer", None, strict=True)
@@ -1232,6 +1234,7 @@ async def test_a_role_pinned_to_an_effort_tier_sends_that_effort(tmp_path, monke
             effort="hi",
         ),
         creating=True,
+        scope="global",
     )
     session = make_session(tmp_path)
     session.agent_registry = registry
@@ -1243,4 +1246,133 @@ async def test_a_role_pinned_to_an_effort_tier_sends_that_effort(tmp_path, monke
     [request] = stream.requests
     assert request.model.model_id == "claude-opus-5-5"
     assert request.model.reasoning_effort == "high"
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# the inherit sentinel: a role that pins the LAUNCHING SESSION's model
+# ---------------------------------------------------------------------------
+
+
+def install_coder_seed(registry) -> None:
+    """The packaged ``coder`` seed, installed as an ordinary role row.
+
+    The seed is the PUBLISHED definition of the role (the Agent Hub serves
+    these names straight from the packaged files), so a test that wants the
+    role to carry the inherit pin installs the seed rather than hand-writing a
+    row: the row is a copy of the seed, and a copy is what a teammate pulling
+    the role actually gets.
+    """
+    from local_operator.agent_profiles import install_seed
+
+    assert install_seed("coder", registry=registry, scope="global") is not None
+
+
+def test_a_role_pinning_the_session_model_runs_on_it_even_when_the_launch_passes_a_tier(
+    tmp_path, monkeypatch
+):
+    """The absolute pin: a launch tier does not move it.
+
+    The incident this closes, measured on this machine: 143 coder launches ran
+    on a tier a delegating model passed (``effort="hi"``) instead of the
+    launching session's model. The tier is CONFIGURED here, so the launch would
+    have succeeded either way — what is asserted is WHICH model the child runs
+    on, and the layer the receipt names as the decider.
+    """
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(
+        tmp_path / "config", {"hi": "anthropic/claude-sonnet-5-5"}, choice="model"
+    )
+    registry = AgentRegistry(tmp_path / "agents")
+    install_coder_seed(registry)
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+
+    spec, source = session._resolve_subagent_selection("coder", "hi", strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == (MODEL.provider, MODEL.model_id)
+    # The deciding layer is the ROLE, not the tier that was passed: the receipt
+    # has to name the layer that actually decided, or a reader would look for
+    # the tier the caller passed and find the child somewhere else entirely.
+    assert source == "role_inherit"
+
+    # And with no tier at all the answer is the same model, by the same layer.
+    spec, source = session._resolve_subagent_selection("coder", None, strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == (MODEL.provider, MODEL.model_id)
+    assert source == "role_inherit"
+
+
+@pytest.mark.asyncio
+async def test_a_role_pinning_the_session_model_launches_on_it_and_is_never_refused(
+    tmp_path, monkeypatch
+):
+    """The real launch path: the child's own request carries the session's model.
+
+    The strict path REFUSES a tier that names a model nothing is configured at,
+    so the sentinel's being resolvable is worth asserting on its own: a role
+    that pins the session's model must not die at the launch for a tier it
+    never asked for.
+    """
+    from local_operator.agents import AgentRegistry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(
+        tmp_path / "config", {"hi": "anthropic/claude-sonnet-5-5"}, choice="model"
+    )
+    registry = AgentRegistry(tmp_path / "agents")
+    install_coder_seed(registry)
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+    stream = session._stream_fn
+    assert isinstance(stream, OneShotStream)
+
+    session._launch_subagent(label="code", prompt="write it", agent="coder", effort="hi")
+    await wait_for(lambda: bool(stream.requests))
+    [request] = stream.requests
+    assert (request.model.provider, request.model.model_id) == (
+        MODEL.provider,
+        MODEL.model_id,
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_launch_receipt_says_the_passed_tier_was_not_applied(tmp_path, monkeypatch):
+    """No silent substitution: the result names the model, the layer, and the
+    tier that was dropped.
+
+    A receipt that read as though the caller's pick had taken effect would be
+    the substitution by another name — the delegating model would believe its
+    ``effort="hi"`` bought a model it did not get, and would keep buying it.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.tools.builtin import execute_task
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(
+        tmp_path / "config", {"hi": "anthropic/claude-sonnet-5-5"}, choice="model"
+    )
+    registry = AgentRegistry(tmp_path / "agents")
+    install_coder_seed(registry)
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+
+    result = await execute_task(
+        "call-1",
+        {"label": "code", "prompt": "write it", "agent": "coder", "effort": "hi"},
+        None,
+        None,
+        session._build_tool_context(),
+    )
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+    # The model the child WILL run on, the deciding layer, and the value that
+    # was passed and not applied — all three, on the one line the delegating
+    # model reads back.
+    assert f"on {MODEL.provider}/{MODEL.model_id}" in text
+    assert "selection: role_inherit" in text
+    assert "effort='hi'" in text
+    assert "NOT applied" in text
     await session.dispose()
