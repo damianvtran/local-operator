@@ -227,9 +227,11 @@ def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
     transcripts, credentials, or local provenance.
     """
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        return SkillDocument.from_json(dict(fields)).fingerprint
+        # FORM DISPATCH: a bundle link's fingerprint is its tree hash, which is
+        # recomputable from the managed directory; a document's is unchanged.
+        return skill_manifest_from_json(dict(fields)).fingerprint
     return _sha(
         json.dumps(
             dict(fields), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -239,9 +241,9 @@ def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
 
 def fingerprint_fields(kind: Kind, fields: Mapping[str, Any]) -> str:
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        return SkillDocument.from_json(dict(fields)).fingerprint
+        return skill_manifest_from_json(dict(fields)).fingerprint
     if kind == "team":
         return fingerprint_team(fields)
     return fingerprint_agent(
