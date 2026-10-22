@@ -127,18 +127,27 @@ _ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
 # whatever handler config uvicorn or the launcher installs, and dictConfig
 # (which uvicorn runs) leaves logger filters in place. The request itself is
 # untouched — only the record's text changes.
+# The optional trailing ``/`` (review R4-01): Starlette's ``redirect_slashes``
+# answers a slash-suffixed variant with a 307, and that line is access-logged
+# too, so the non-canonical form must template exactly like the canonical one.
 _ATTACHMENT_ROUTE_PATH = re.compile(
     r"^(?P<prefix>/v1/desktop/team-bridge/conversations/)[^/?#]+"
     r"(?P<middle>(?:/messages/[^/?#]+)?/attachments)(?P<tail>(?:/[^/?#]+)?)"
-    r"(?P<query>[?#].*)?$"
+    r"(?P<slash>/?)(?P<query>[?#].*)?$"
 )
+#: A Team Bridge id in a QUERY value. The routes accept only ``tenant_id``, but
+#: a request refused for an extra or unknown parameter is still access-logged
+#: with the query exactly as sent (R4-01), so any id-shaped value there is
+#: templated too rather than trusting the caller to have sent none.
+_BRIDGE_ID_IN_QUERY = re.compile(r"(?:batt|bcmsg|bcv)_[0-9A-Za-z-]+")
 
 
 def _template_attachment_path(path: str) -> str:
     """``path`` with its id segments replaced by route placeholders.
 
-    The query string is kept as is: these routes accept only ``tenant_id``
-    (anything else is refused), which is not one of the redacted ids.
+    The query string is kept for diagnosis, minus any id-shaped value: the
+    routes accept only ``tenant_id``, but a refused request logs its query
+    verbatim, so ids are templated there as well.
     """
 
     match = _ATTACHMENT_ROUTE_PATH.match(path)
@@ -148,7 +157,8 @@ def _template_attachment_path(path: str) -> str:
     if middle.startswith("/messages/"):
         middle = "/messages/:messageid/attachments"
     tail = "/:attachmentid" if match["tail"] else ""
-    return f"{match['prefix']}:conversationid{middle}{tail}{match['query'] or ''}"
+    query = _BRIDGE_ID_IN_QUERY.sub(":id", match["query"] or "")
+    return f"{match['prefix']}:conversationid{middle}{tail}{match['slash']}{query}"
 
 
 class _AttachmentPathRedaction(logging.Filter):
