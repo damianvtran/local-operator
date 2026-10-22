@@ -73,10 +73,7 @@ def _source(root: Path) -> Path:
     directory = root / NAME
     directory.mkdir(parents=True)
     (directory / "SKILL.md").write_text(
-        "---\n"
-        f"name: {NAME}\n"
-        "description: Fill and validate PDF forms.\n"
-        "---\n\n# Body\n",
+        "---\n" f"name: {NAME}\n" "description: Fill and validate PDF forms.\n" "---\n\n# Body\n",
         encoding="utf-8",
     )
     (directory / "references.md").write_text("alpha\n", encoding="utf-8")

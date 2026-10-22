@@ -46,6 +46,7 @@ from local_operator.hub_sync.provenance import (
 )
 from local_operator.hub_sync.skill_bundle import (
     SkillBundleManifest,
+    SkillBundleRef,
     bundle_manifest_from_directory,
     extract_archive,
     tree_hash_of,
@@ -126,7 +127,30 @@ class ManagedBundleStorage:
             # The local reading must reflect ACTUAL bytes: a locally edited tree
             # has a different tree hash from the baseline, which is exactly what
             # ``classify`` needs to report a local change.
-            manifest = bundle_manifest_from_directory(destination)
+            #
+            # COST: the tree hash is one scan; BUILDING the archive compresses
+            # the whole tree (measured 274.8 ms vs 33.5 ms on a 25 MB skill), so
+            # an UNCHANGED tree reuses the baseline's manifest verbatim. Only a
+            # changed tree with an entrypoint needs a fresh archive identity for
+            # the wire, and the push that follows rebuilds it anyway.
+            recorded = SkillBundleManifest.from_json(dict(record.fields))
+            current = tree_hash_of(destination)
+            if current == recorded.fingerprint:
+                manifest = recorded
+            elif (destination / "SKILL.md").is_file():
+                manifest = bundle_manifest_from_directory(destination)
+            else:
+                # A DELETED entrypoint is a LOCAL CHANGE, not a broken link: the
+                # baseline still names the skill, and the scan still yields the
+                # identity classification compares. A push then refuses by name
+                # (a bundle requires a root SKILL.md), which is the honest answer.
+                bundle_ref = recorded.bundle.to_json()
+                bundle_ref["tree_hash"] = current
+                manifest = SkillBundleManifest(
+                    name=recorded.name,
+                    description=recorded.description,
+                    bundle=SkillBundleRef.from_json(bundle_ref),
+                )
             return BundleSnapshot(local_id, record.local_alias, manifest, manifest.fingerprint)
 
     # -- writes --------------------------------------------------------------------

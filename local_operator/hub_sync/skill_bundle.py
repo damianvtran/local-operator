@@ -743,112 +743,108 @@ def _entry_mode(info: zipfile.ZipInfo) -> int:
     return info.external_attr >> 16
 
 
-def validate_archive(
-    archive: Path,
-    *,
-    expected: SkillBundleRef | None = None,
-    expected_name: str | None = None,
-    expected_description: str | None = None,
-) -> BundleInventory:
-    """Validate one archive semantically (§4, as amended by §12.3).
+def _open_archive(data: bytes) -> zipfile.ZipFile:
+    """Open the archive ONCE from the bytes already read (`_validate_bytes` shares it)."""
 
-    Order matters: the tree is hashed BEFORE anything is parsed, so a
-    ``bundle-hash-mismatch`` is reported without opening the archive; the
-    manifest's declared size/count/hash are compared before decompression; and
-    every refusal names its step. ``expected_name`` / ``expected_description``
-    are the manifest's operator fields (they live beside the reference, not
-    inside it) and are checked against ``SKILL.md`` when supplied.
-    """
-
-    archive = Path(archive)
     try:
-        info = os.lstat(archive)
-    except OSError:
-        raise _refuse("bundle-invalid", "size", "the bundle archive is missing") from None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise _refuse("bundle-invalid", "size", "the bundle archive is not a regular file")
-    if info.st_size == 0:
-        raise _refuse("bundle-invalid", "size", "the bundle archive is empty")
-    if info.st_size > MAX_ARCHIVE_BYTES:
-        raise _refuse_too_large("size", "the bundle archive exceeds 64 MiB")
-    data = _read_bounded(archive, MAX_ARCHIVE_BYTES)
-    archive_hash = hashlib.sha256(data).hexdigest()
-    if expected is not None and not hmac.compare_digest(archive_hash, expected.hash):
-        # Hash first, parse never: the manifest's identity is the bytes, so a
-        # substituted archive is refused before a zip parser sees it.
-        raise _refuse("bundle-hash-mismatch", "hash", "the bundle archive hash does not match")
-
-    entries_total = _check_frame(data)
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as opened:
-            infos = opened.infolist()
+        return zipfile.ZipFile(io.BytesIO(data))
     except (zipfile.BadZipFile, OSError, EOFError, RuntimeError, ValueError):
         raise _refuse(
             "bundle-invalid", "container", "the bundle is not a readable zip archive"
         ) from None
-    if len(infos) != entries_total:
-        raise _refuse("bundle-invalid", "container", "the bundle's entry count is inconsistent")
 
-    total_declared = 0
-    names: list[str] = []
-    for info in infos:
-        # ``orig_filename`` keeps the raw spelling; ``filename`` has already
-        # rewritten backslashes to slashes, which would make a ``..\\x`` entry
-        # look like an ordinary relative path. Validate the ORIGINAL.
-        name = info.orig_filename
-        if name != info.filename:
-            raise _refuse("bundle-invalid", "entry", "bundle entry name is ambiguous")
-        if not name or name.endswith("/"):
-            raise _refuse("bundle-invalid", "entry", "bundle archives must not carry directories")
-        try:
-            validate_bundle_path(name)
-        except SkillBundleError as exc:
-            raise _refuse("bundle-invalid", exc.step, str(exc)) from None
-        if info.flag_bits & ~0x0800:
-            # Encryption (bit 0), data descriptors (bit 3), patched data (5),
-            # strong encryption (6): none is a shape this carrier accepts.
-            raise _refuse("bundle-invalid", "entry", f"bundle entry {name!r} uses zip flags")
-        if info.compress_type not in _METHODS:
-            raise _refuse(
-                "bundle-invalid", "entry", f"bundle entry {name!r} uses an unsupported method"
-            )
-        mode = _entry_mode(info)
-        file_type = stat.S_IFMT(mode)
-        if file_type not in (0, stat.S_IFREG):
-            # symlink, device, FIFO, socket or directory MODE from the central
-            # directory. This is the single check §12.3 keeps from the old
-            # canonical-form equality.
-            raise _refuse("bundle-invalid", "entry", f"bundle entry {name!r} is not a regular file")
-        if mode & 0o7111:
-            raise _refuse(
-                "bundle-invalid", "entry", f"bundle entry {name!r} is executable or special-mode"
-            )
-        if info.file_size > MAX_FILE_BYTES:
-            raise _refuse_too_large("entry", f"bundle entry {name!r} exceeds 16 MiB")
-        if info.compress_type == _STORED and info.compress_size != info.file_size:
-            # Stored data cannot be smaller or larger than its declared size; a
-            # mismatch is either a bomb shape or a parser differential, and
-            # ``zipfile`` would silently truncate the read to the declared size.
-            raise _refuse(
-                "bundle-invalid", "content", f"bundle entry {name!r} has inconsistent sizes"
-            )
-        total_declared += info.file_size
-        if total_declared > MAX_UNCOMPRESSED_BYTES:
-            raise _refuse_too_large("size", "the bundle declares more than 96 MiB")
-        names.append(name)
-    _check_collisions(names)
-    if ENTRYPOINT not in names:
-        raise _refuse("bundle-invalid", "entrypoint", "a bundle requires a root SKILL.md")
 
-    entries: list[BundleFile] = []
-    total_actual = 0
-    with zipfile.ZipFile(io.BytesIO(data)) as opened:
-        for info in opened.infolist():
+def _validate_bytes(
+    data: bytes,
+    *,
+    expected: SkillBundleRef | None,
+    expected_name: str | None,
+    expected_description: str | None,
+    opened: zipfile.ZipFile | None = None,
+    archive_hash: str | None = None,
+) -> BundleInventory:
+    """Validate the archive BYTES, optionally through an already-open archive.
+
+    THE BYTES ARE THE INPUT, never a path: a caller that validates a path and
+    then re-opens it can have the file swapped in between (the TOCTOU
+    ``extract_archive`` used to have). ``opened`` lets extraction validate and
+    unpack through one and the same ``ZipFile`` object.
+    """
+
+    digest = archive_hash if archive_hash is not None else hashlib.sha256(data).hexdigest()
+    entries_total = _check_frame(data)
+    own = opened is None
+    archive = opened if opened is not None else _open_archive(data)
+    try:
+        infos = archive.infolist()
+        if len(infos) != entries_total:
+            raise _refuse("bundle-invalid", "container", "the bundle's entry count is inconsistent")
+
+        total_declared = 0
+        names: list[str] = []
+        for info in infos:
+            # ``orig_filename`` keeps the raw spelling; ``filename`` has already
+            # rewritten backslashes to slashes, which would make a ``..\x`` entry
+            # look like an ordinary relative path. Validate the ORIGINAL.
+            name = info.orig_filename
+            if name != info.filename:
+                raise _refuse("bundle-invalid", "entry", "bundle entry name is ambiguous")
+            if not name or name.endswith("/"):
+                raise _refuse(
+                    "bundle-invalid", "entry", "bundle archives must not carry directories"
+                )
+            try:
+                validate_bundle_path(name)
+            except SkillBundleError as exc:
+                raise _refuse("bundle-invalid", exc.step, str(exc)) from None
+            if info.flag_bits & ~0x0800:
+                # Encryption (bit 0), data descriptors (bit 3), patched data (5),
+                # strong encryption (6): none is a shape this carrier accepts.
+                raise _refuse("bundle-invalid", "entry", f"bundle entry {name!r} uses zip flags")
+            if info.compress_type not in _METHODS:
+                raise _refuse(
+                    "bundle-invalid", "entry", f"bundle entry {name!r} uses an unsupported method"
+                )
+            mode = _entry_mode(info)
+            file_type = stat.S_IFMT(mode)
+            if file_type not in (0, stat.S_IFREG):
+                # symlink, device, FIFO, socket or directory MODE from the central
+                # directory. This is the single check §12.3 keeps from the old
+                # canonical-form equality.
+                raise _refuse(
+                    "bundle-invalid", "entry", f"bundle entry {name!r} is not a regular file"
+                )
+            if mode & 0o7111:
+                raise _refuse(
+                    "bundle-invalid",
+                    "entry",
+                    f"bundle entry {name!r} is executable or special-mode",
+                )
+            if info.file_size > MAX_FILE_BYTES:
+                raise _refuse_too_large("entry", f"bundle entry {name!r} exceeds 16 MiB")
+            if info.compress_type == _STORED and info.compress_size != info.file_size:
+                # Stored data cannot be smaller or larger than its declared size; a
+                # mismatch is either a bomb shape or a parser differential, and
+                # ``zipfile`` would silently truncate the read to the declared size.
+                raise _refuse(
+                    "bundle-invalid", "content", f"bundle entry {name!r} has inconsistent sizes"
+                )
+            total_declared += info.file_size
+            if total_declared > MAX_UNCOMPRESSED_BYTES:
+                raise _refuse_too_large("size", "the bundle declares more than 96 MiB")
+            names.append(name)
+        _check_collisions(names)
+        if ENTRYPOINT not in names:
+            raise _refuse("bundle-invalid", "entrypoint", "a bundle requires a root SKILL.md")
+
+        entries: list[BundleFile] = []
+        total_actual = 0
+        for info in infos:
             name = info.orig_filename
             size = 0
-            digest = hashlib.sha256()
+            file_digest = hashlib.sha256()
             try:
-                with opened.open(info) as stream:
+                with archive.open(info) as stream:
                     while True:
                         chunk = stream.read(_CHUNK)
                         if not chunk:
@@ -868,7 +864,7 @@ def validate_archive(
                         total_actual += len(chunk)
                         if total_actual > MAX_UNCOMPRESSED_BYTES:
                             raise _refuse_too_large("content", "the bundle expands beyond 96 MiB")
-                        digest.update(chunk)
+                        file_digest.update(chunk)
             except (zipfile.BadZipFile, zlib.error):
                 # ``zipfile`` wraps a bad CRC as BadZipFile at EOF, but a corrupt
                 # DEFLATE stream escapes as ``zlib.error`` -- an uncaught
@@ -884,18 +880,22 @@ def validate_archive(
                     "content",
                     f"bundle entry {name!r} does not match its declared size",
                 )
-            entries.append(BundleFile(name, size, digest.hexdigest()))
+            entries.append(BundleFile(name, size, file_digest.hexdigest()))
 
-    by_path = {entry.path: entry for entry in entries}
-    skill_md = by_path[ENTRYPOINT]
-    if skill_md.size > MAX_SKILL_MD_BYTES:
-        raise _refuse_too_large("entrypoint", "SKILL.md exceeds 200 KiB")
-    # Read SKILL.md once more; it is ≤200 KiB and already CRC-checked above.
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as opened:
-            content = opened.read(ENTRYPOINT)
-    except (zipfile.BadZipFile, OSError, KeyError):
-        raise _refuse("bundle-invalid", "entrypoint", "SKILL.md cannot be read") from None
+        by_path = {entry.path: entry for entry in entries}
+        skill_md = by_path[ENTRYPOINT]
+        if skill_md.size > MAX_SKILL_MD_BYTES:
+            raise _refuse_too_large("entrypoint", "SKILL.md exceeds 200 KiB")
+        # Read SKILL.md from the SAME open archive; it is ≤200 KiB and already
+        # CRC-checked above.
+        try:
+            content = archive.read(ENTRYPOINT)
+        except (zipfile.BadZipFile, OSError, KeyError):
+            raise _refuse("bundle-invalid", "entrypoint", "SKILL.md cannot be read") from None
+    finally:
+        if own:
+            archive.close()
+
     try:
         text = content.decode("utf-8", errors="strict")
     except UnicodeError:
@@ -930,12 +930,60 @@ def validate_archive(
         entries=tuple(entries),
         name=str(meta["name"]),
         description=str(meta["description"]),
-        archive_hash=archive_hash,
+        archive_hash=digest,
         tree_hash=tree_hash,
         size=len(data),
         uncompressed_size=uncompressed_size,
         file_count=len(entries),
     )
+
+
+def validate_archive(
+    archive: Path,
+    *,
+    expected: SkillBundleRef | None = None,
+    expected_name: str | None = None,
+    expected_description: str | None = None,
+) -> BundleInventory:
+    """Validate one archive semantically (§4, as amended by §12.3).
+
+    Order matters: the tree is hashed BEFORE anything is parsed, so a
+    ``bundle-hash-mismatch`` is reported without opening the archive; the
+    manifest's declared size/count/hash are compared before decompression; and
+    every refusal names its step. ``expected_name`` / ``expected_description``
+    are the manifest's operator fields (they live beside the reference, not
+    inside it) and are checked against ``SKILL.md`` when supplied.
+
+    The path is read exactly ONCE: everything after that works on those bytes
+    (``_validate_bytes``), so a swap between validation and use cannot exist.
+    """
+
+    archive = Path(archive)
+    try:
+        info = os.lstat(archive)
+    except OSError:
+        raise _refuse("bundle-invalid", "size", "the bundle archive is missing") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise _refuse("bundle-invalid", "size", "the bundle archive is not a regular file")
+    if info.st_size == 0:
+        raise _refuse("bundle-invalid", "size", "the bundle archive is empty")
+    if info.st_size > MAX_ARCHIVE_BYTES:
+        raise _refuse_too_large("size", "the bundle archive exceeds 64 MiB")
+    data = _read_bounded(archive, MAX_ARCHIVE_BYTES)
+    archive_hash = hashlib.sha256(data).hexdigest()
+    if expected is not None and not hmac.compare_digest(archive_hash, expected.hash):
+        # Hash first, parse never: the manifest's identity is the bytes, so a
+        # substituted archive is refused before a zip parser sees it.
+        raise _refuse("bundle-hash-mismatch", "hash", "the bundle archive hash does not match")
+    with _open_archive(data) as opened:
+        return _validate_bytes(
+            data,
+            expected=expected,
+            expected_name=expected_name,
+            expected_description=expected_description,
+            opened=opened,
+            archive_hash=archive_hash,
+        )
 
 
 def extract_archive(
@@ -950,36 +998,61 @@ def extract_archive(
 
     ``dest`` must not exist and is created 0700; every file is created 0600 with
     ``O_EXCL|O_NOFOLLOW``, no mode from the archive is applied and nothing is
-    executed (design §5 step 4). The archive file is hashed AGAIN after unpacking
-    (a local writer could have swapped it between validation and extraction) and
-    the staged tree is re-hashed from disk; any failure removes the stage so no
-    half-installed skill can be renamed into place.
+    executed (design §5 step 4).
+
+    ONE READ, ONE OPENED ARCHIVE. The file is read once, hashed against the
+    manifest, validated and unpacked through the SAME ``zipfile.ZipFile`` over
+    those bytes -- there is no second read of the path to swap, and every
+    written path is the VALIDATED relative spelling (never ``orig_filename``
+    used raw). The extracted tree is re-hashed from disk, so a write that landed
+    somewhere unexpected cannot pass as the expected tree.
     """
 
+    archive = Path(archive)
     dest = Path(dest)
     if dest.exists() or dest.is_symlink():
         raise _refuse("bundle-invalid", "content", "the bundle staging directory already exists")
-    # Validation runs on the SAME bytes this call then unpacks (a second read
-    # would be a second chance for a local writer to swap the file); the
-    # post-extraction hash below is what catches that narrower window.
-    validate_archive(
-        archive,
-        expected=expected,
-        expected_name=expected_name,
-        expected_description=expected_description,
-    )
+    try:
+        info = os.lstat(archive)
+    except OSError:
+        raise _refuse("bundle-invalid", "size", "the bundle archive is missing") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise _refuse("bundle-invalid", "size", "the bundle archive is not a regular file")
+    if info.st_size == 0:
+        raise _refuse("bundle-invalid", "size", "the bundle archive is empty")
+    if info.st_size > MAX_ARCHIVE_BYTES:
+        raise _refuse_too_large("size", "the bundle archive exceeds 64 MiB")
+    data = _read_bounded(archive, MAX_ARCHIVE_BYTES)
+    archive_hash = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(archive_hash, expected.hash):
+        # The manifest's identity IS the bytes: refuse before a parser sees them.
+        raise _refuse("bundle-hash-mismatch", "hash", "the bundle archive hash does not match")
+    staged = ""
     try:
         os.mkdir(dest, 0o700)
-        # ``validate_archive`` already decoded every entry; unpack from the same
-        # bytes with the same counted budgets so the write path cannot regress
-        # independently of the checks above.
-        data = _read_bounded(Path(archive), MAX_ARCHIVE_BYTES)
         total = 0
-        with zipfile.ZipFile(io.BytesIO(data)) as opened:
-            for info in opened.infolist():
-                relative = info.orig_filename
-                target = dest.joinpath(*relative.split("/"))
-                _ensure_parents(dest, target.parent)
+        with _open_archive(data) as opened:
+            inventory = _validate_bytes(
+                data,
+                expected=expected,
+                expected_name=expected_name,
+                expected_description=expected_description,
+                opened=opened,
+                archive_hash=archive_hash,
+            )
+            for entry in inventory.entries:
+                parts = entry.path.split("/")
+                target = dest.joinpath(*parts)
+                # Defence in depth: the path grammar already refused traversal,
+                # and this refuses a joined target that left the stage anyway.
+                try:
+                    target.relative_to(dest)
+                except ValueError:
+                    raise _refuse(
+                        "bundle-invalid", "entry", f"bundle entry {entry.path!r} is unsafe"
+                    ) from None
+                if len(parts) > 1:
+                    _ensure_parents(dest, Path(*parts[:-1]))
                 flags = (
                     os.O_WRONLY
                     | os.O_CREAT
@@ -990,16 +1063,16 @@ def extract_archive(
                 fd = os.open(target, flags, 0o600)
                 size = 0
                 try:
-                    with os.fdopen(fd, "wb") as out, opened.open(info) as stream:
+                    with os.fdopen(fd, "wb") as out, opened.open(entry.path) as stream:
                         while True:
                             chunk = stream.read(_CHUNK)
                             if not chunk:
                                 break
                             size += len(chunk)
                             total += len(chunk)
-                            if size > info.file_size or size > MAX_FILE_BYTES:
+                            if size > entry.size or size > MAX_FILE_BYTES:
                                 raise _refuse_too_large(
-                                    "content", f"bundle entry {relative!r} exceeds its bounds"
+                                    "content", f"bundle entry {entry.path!r} exceeds its bounds"
                                 )
                             if total > MAX_UNCOMPRESSED_BYTES:
                                 raise _refuse_too_large(
@@ -1015,13 +1088,8 @@ def extract_archive(
                     raise _refuse(
                         "bundle-invalid",
                         "content",
-                        f"bundle entry {relative!r} failed its integrity check",
+                        f"bundle entry {entry.path!r} failed its integrity check",
                     ) from None
-        fresh = hashlib.sha256(_read_bounded(Path(archive), MAX_ARCHIVE_BYTES)).hexdigest()
-        if not hmac.compare_digest(fresh, expected.hash):
-            raise _refuse(
-                "bundle-hash-mismatch", "hash", "the bundle archive changed during extraction"
-            )
         staged = tree_hash_of(dest)
         if not hmac.compare_digest(staged, expected.tree_hash):
             raise _refuse("bundle-invalid", "tree", "the extracted bundle does not match its tree")
@@ -1031,17 +1099,33 @@ def extract_archive(
     return staged
 
 
-def _ensure_parents(root: Path, parent: Path) -> None:
-    """Create 0700 parents under ``root``; refuse a symlinked component."""
+def _ensure_parents(root: Path, relative: Path) -> None:
+    """Create 0700 parents for a VALIDATED relative path, refusing anything unsafe.
 
-    relative = parent.relative_to(root)
+    Independently defensive: it does not trust the caller's validation. Absolute
+    paths, drive letters, empty/``.``/``..`` components, separators inside a
+    component are refused; an existing component is accepted only when it is a
+    real directory (never a symlink), and ``FileExistsError`` is verified rather
+    than swallowed.
+    """
+
+    if relative.is_absolute() or relative.drive:
+        raise _refuse("bundle-invalid", "content", "the bundle staging path is unsafe")
+    root = Path(root)
     current = root
     for part in relative.parts:
+        if part in ("", ".", "..") or "/" in part or "\\" in part or ":" in part:
+            raise _refuse("bundle-invalid", "content", "the bundle staging path is unsafe")
         current = current / part
         try:
             os.mkdir(current, 0o700)
         except FileExistsError:
-            pass
+            # An existing component is fine only when it really is a directory:
+            # a symlink or a file here would redirect (or collide with) the write.
+            if current.is_symlink() or not current.is_dir():
+                raise _refuse(
+                    "bundle-invalid", "content", "the bundle staging path is unsafe"
+                ) from None
         except OSError:
             raise _refuse(
                 "bundle-invalid", "content", "the bundle staging path is unsafe"

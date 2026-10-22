@@ -1436,7 +1436,10 @@ def _apply_skill_bundle(
     check and this apply refuses with ``local-concurrent-edit``).
     """
 
-    from local_operator.hub_sync.skill_bundle import SkillBundleManifest, SkillValidationError
+    from local_operator.hub_sync.skill_bundle import (
+        SkillBundleManifest,
+        SkillValidationError,
+    )
     from local_operator.hub_sync.skill_bundle_storage import ManagedBundleStorage
     from local_operator.hub_sync.transactions import TransactionError
 
@@ -1477,6 +1480,17 @@ def _apply_skill_bundle(
             "the remote skill is no longer a bundle; unpull the link and pull it again",
             "needs-review",
         )
+    if record.fields and "bundle" not in record.fields:
+        # The converse: a DOCUMENT link whose hub row now carries a bundle. This
+        # is a form change, not a concurrent local edit -- saying
+        # ``local-concurrent-edit`` would send the operator hunting for a file
+        # change that does not exist.
+        return fail(
+            "bundle-form-changed",
+            "this link's baseline is a document but the hub row is a bundle; "
+            "unpull the link and pull it again",
+            "needs-review",
+        )
     alias = record.local_alias
     try:
         manifest = SkillBundleManifest.from_remote(dict(c.remote or {}))
@@ -1486,6 +1500,20 @@ def _apply_skill_bundle(
             f"the remote bundle manifest is invalid: {exc}",
             "refused",
         )
+    pinned = (record.bundle_confirmation or {}).get("publisher_id")
+    if pinned:
+        # THE PUBLISHER PIN (design §6.2). A link's update consent was given to
+        # ONE publisher; if the hub now names another, this is not an update of
+        # that skill and must not be applied silently.
+        remote_publisher = c.publisher or {}
+        remote_id = str(remote_publisher.get("id") or "")
+        if remote_id and remote_id != pinned:
+            return fail(
+                "bundle-publisher-changed",
+                "the hub row now names a different publisher than the one this link was "
+                "installed from; pull it again explicitly to accept the change",
+                "needs-review",
+            )
 
     if replace == "local":
         # "Keep my side" is already true: nothing to fetch and nothing to write.
@@ -2909,33 +2937,9 @@ def _bundle_file_list(root: Path) -> list[dict[str, Any]]:
 
 
 def _bundle_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
-    """The publisher a bundle read response NAMES, or None when it names none.
+    """The publisher a bundle read response NAMES (one parser with the check's)."""
 
-    ``published_by`` is the field the install confirmation binds to (design
-    §6.2/§12): the account id is the binding value because a display name is
-    user-controlled. A missing object is reported as None and the CALLER refuses
-    -- this never falls back to a top-level ``account_id``, because that id is
-    the requester's/serving account's in some envelopes and guessing would bind
-    a confirmation to the wrong person.
-    """
-
-    raw = document.get("published_by")
-    if not isinstance(raw, Mapping):
-        return None
-    account_id = raw.get("account_id")
-    if not isinstance(account_id, str) or not account_id.strip():
-        return None
-    publisher = {"id": account_id.strip()}
-    name = raw.get("name")
-    if not isinstance(name, str) or not name.strip():
-        # Display metadata lives beside the id on read responses; it is optional
-        # everywhere and never part of the confirmation's binding value.
-        metadata = document.get("account_metadata")
-        candidate = metadata.get("name") if isinstance(metadata, Mapping) else None
-        name = candidate if isinstance(candidate, str) else ""
-    if name.strip():
-        publisher["name"] = name.strip()
-    return publisher
+    return chk._document_publisher(document)
 
 
 def _confirm_bundle_publisher(
@@ -2956,18 +2960,21 @@ def _confirm_bundle_publisher(
     """
 
     publisher = _bundle_publisher(document)
-    facts = (
-        f"publisher {publisher['id'] if publisher else '(unnamed)'}"
-        + (f" ({publisher['name']})" if publisher and publisher.get("name") else "")
-        + f", archive sha256 {manifest.bundle.hash}, {manifest.bundle.file_count} files, "
-        f"{manifest.bundle.size} bytes"
-    )
     if publisher is None:
+        # BEFORE the prompt, never shown as "(unnamed)": there is nothing to
+        # name, so the confirmation could not bind to anyone. The action is on
+        # the publisher's side.
         raise LinkError(
-            "bundle-confirmation-required",
-            "the hub's bundle response names no publisher; refusing to install "
-            f"unconfirmed bytes ({facts})",
+            "bundle-publisher-unnamed",
+            "the hub's response names no publisher account for this bundle; ask the "
+            "publisher to republish it so the revision names an account, then pull again",
         )
+    facts = (
+        f"publisher {publisher['id']}"
+        + (f" ({publisher['name']})" if publisher.get("name") else "")
+        + f", archive sha256 {manifest.bundle.hash}, {manifest.bundle.file_count} files, "
+        f"{manifest.bundle.size} bytes packed"
+    )
     if confirm:
         return publisher
     if not confirm_publisher_id or not confirm_bundle_hash:
@@ -2976,9 +2983,8 @@ def _confirm_bundle_publisher(
             f"confirm the bundle publisher before installing ({facts}); pass "
             "confirm_publisher_id and confirm_bundle_hash, or confirm",
         )
-    if (
-        str(confirm_publisher_id).strip() != publisher["id"]
-        or not hmac.compare_digest(str(confirm_bundle_hash), manifest.bundle.hash)
+    if str(confirm_publisher_id).strip() != publisher["id"] or not hmac.compare_digest(
+        str(confirm_bundle_hash), manifest.bundle.hash
     ):
         raise LinkError(
             "bundle-confirmation-mismatch",
@@ -3030,8 +3036,11 @@ def _download_bundle_archive(
                     bearer=bearer,
                 )
         except TypeError:
-            # A test/fake client predating the keyword surface: the seam stays
-            # one call shape in production, so the fallback is bytes-in-memory.
+            # A client predating the ``bearer`` keyword takes no decision at
+            # all, so it is called bare and its own default applies: anonymous
+            # headers for a PUBLIC row (works), a required key for an org row
+            # (fails closed with a named refusal). Passing the keyword here
+            # would just raise the same TypeError again.
             result = client.download_skill_bundle(hub_id)
             if getattr(result, "data", None) is not None:
                 archive.write_bytes(result.data)
@@ -3195,9 +3204,7 @@ def _resolve_remote_skill(
         source=source, visibility=visibility, tenant_id=tenant_id, hub_id=hub_id
     )
     identity = LinkIdentity("skill", local_id, source, visibility, tenant_id, hub_id)
-    return _ResolvedRemoteSkill(
-        source, alias, identity, canonical, revision, document, client
-    )
+    return _ResolvedRemoteSkill(source, alias, identity, canonical, revision, document, client)
 
 
 def install_skill(
@@ -3385,6 +3392,7 @@ def install_skill(
                 "dry_run": True,
             }
         publisher: dict[str, str] | None = None
+        pinned: dict[str, str] | None = None
         if bundle is not None:
             if alias != bundle.name:
                 raise LinkError(
@@ -3412,7 +3420,11 @@ def install_skill(
                     "links": links_snapshot(ctx),
                     "dry_run": True,
                 }
-            if visibility == "public" and resuming_absent is None:
+            if visibility == "public":
+                # EVERY public install that writes content confirms, including a
+                # link minted by subscribe/unpull: that link's consent covers
+                # UPDATES of an installed copy, never the first installation of
+                # bytes. Only the completed-replay arm above may skip.
                 publisher = _confirm_bundle_publisher(
                     resolved.document,
                     bundle,
@@ -3420,6 +3432,13 @@ def install_skill(
                     confirm_publisher_id=confirm_publisher_id,
                     confirm_bundle_hash=confirm_bundle_hash,
                 )
+                # The confirmed fact becomes DURABLE here: a later update compares
+                # the hub's publisher against this pin (design §6.2).
+                pinned = {
+                    "publisher_id": publisher["id"],
+                    "publisher_name": publisher.get("name", ""),
+                    "archive_hash": bundle.bundle.hash,
+                }
             else:
                 publisher = _bundle_publisher(resolved.document)
 
@@ -3468,6 +3487,7 @@ def install_skill(
                 content_state="present",
                 remote_revision=revision,
                 lineage="clean",
+                bundle_confirmation=pinned,
             )
         else:
             baseline = replace(baseline, legacy_subscribe_hint=subscribe)
@@ -3478,6 +3498,7 @@ def install_skill(
             remote_revision=revision,
             lineage="clean",
             content_state="present",
+            bundle_confirmation=pinned,
         )
 
         values = read_config_values(ctx.config_dir)
@@ -3591,9 +3612,7 @@ def install_skill(
                     break
             if owned:
                 try:
-                    landed = (
-                        storage._fingerprint_path(storage.path(alias)) == local_fingerprint
-                    )
+                    landed = storage._fingerprint_path(storage.path(alias)) == local_fingerprint
                 except Exception:  # noqa: BLE001 - an unreadable destination is not a landing
                     landed = False
                 if landed:
@@ -3888,6 +3907,10 @@ def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
 #     bookkeeping did not finish. The remote outcome is persisted before any
 #     local write, so a retry resumes the SAME link instead of republishing.
 #
+#: How many archive paths a publication preview shows before it summarizes the
+#: remainder (D3): enough to recognize the skill, short enough to read.
+_BUNDLE_PREVIEW_FILES = 10
+
 # RETENTION: a draft receipt is confirmable for PUBLICATION_PREVIEW_TTL_S and
 # expires with the review. Once the hub ACCEPTS, the receipt is the only record
 # of the remote row (no baseline and no link exist yet), so it is retained
@@ -4112,12 +4135,18 @@ def _project_publication(
         # cannot represent names the alternative rather than silently routing
         # around the generalizer. Auto-fallback is refused on purpose.
         message = str(error)
-        if "--bundle" not in message:
+        code = getattr(error, "code", "") or "skill-validation"
+        # ONLY a file/bound refusal has an alternative carrier. A missing
+        # SKILL.md, a symlink or a bad path stays a layout error: suggesting
+        # --bundle there would send the operator down a wrong path.
+        if (
+            code == "skill-too-large" or "non-UTF-8" in message or "binary" in message
+        ) and "--bundle" not in message:
             message = (
-                f"{message} (if this skill needs binary files or exceeds the document "
-                "bounds, publish it with --bundle)"
+                f"{message} (a directory that needs relative binary or asset files, or "
+                "exceeds the document bounds, is published with --bundle)"
             )
-        raise LinkError(getattr(error, "code", "") or "skill-validation", message) from None
+        raise LinkError(code, message) from None
     return skill, source_document, draft
 
 
@@ -4303,16 +4332,25 @@ def preview_skill_publication(
         "reason": reason,
     }
     if form == "bundle":
-        # The reviewed facts. ``files`` is the archive's path inventory (names and
-        # sizes only, never bytes); ``publisher`` is the signed-in caller, which
-        # only the server's answer can name, so the preview carries None instead
-        # of inventing one.
+        # The reviewed facts. ``files`` is a SUMMARY of the archive's path
+        # inventory (names only, never bytes) with the remainder counted, so a
+        # 141-file skill does not paint an unusable wall of text (design D3).
+        # ``publisher`` is the signed-in caller, which only the server's answer
+        # can name, so the preview carries None instead of inventing one.
+        inventory = _bundle_file_list(Path(skill.base_dir))
         preview["form"] = "bundle"
         preview["bundle"] = {
             **_bundle_summary(draft)["bundle"],
-            "files": _bundle_file_list(Path(skill.base_dir)),
+            "files": inventory[:_BUNDLE_PREVIEW_FILES],
+            "files_more": max(0, len(inventory) - _BUNDLE_PREVIEW_FILES),
         }
         preview["publisher"] = None
+        preview["notes"] = [
+            "Bundle publication skips the generalizer; every text file is still "
+            "reviewed and binary files are summarized.",
+            "Bundles may not contain executables (any execute bit is refused), and "
+            "installing a bundle never runs code.",
+        ]
     else:
         preview["form"] = "document"
     record = dict(preview)
@@ -4906,8 +4944,8 @@ def publish_skill(
             # all -- its outcome is durable).
             from local_operator.hub_sync.skill_bundle import (
                 SkillValidationError as _BundleError,
-                build_bundle,
             )
+            from local_operator.hub_sync.skill_bundle import build_bundle
 
             try:
                 built = build_bundle(Path(skill.base_dir))

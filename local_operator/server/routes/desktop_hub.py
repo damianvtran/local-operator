@@ -247,6 +247,7 @@ _BUNDLE_STATE_REFUSALS = frozenset(
     {
         "bundle-local-changes",
         "bundle-conflict",
+        "bundle-publisher-changed",
         "bundle-form-changed",
         "bundle-alias-rename-unsupported",
         "bundle-unsupported-server",
@@ -913,12 +914,16 @@ async def skill_publish(
                 raise _refusal(401, str(error), code=code) from None
             if code == "skill-not-found":
                 raise _refusal(404, str(error), code=code) from None
-            if code in (
-                "preview_mismatch",
-                "preview_expired",
-                "preview_stale",
-                "policy-revision-changed",
-            ) or code in _BUNDLE_STATE_REFUSALS:
+            if (
+                code
+                in (
+                    "preview_mismatch",
+                    "preview_expired",
+                    "preview_stale",
+                    "policy-revision-changed",
+                )
+                or code in _BUNDLE_STATE_REFUSALS
+            ):
                 raise _refusal(409, str(error), code=code) from None
             if code in ("hub-upstream", "hub-error"):
                 raise _refusal(502, str(error), code=code) from None

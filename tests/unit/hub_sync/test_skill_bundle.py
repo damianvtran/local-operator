@@ -28,6 +28,7 @@ from local_operator.hub_sync.skill_bundle import (
     MAX_FILE_BYTES,
     MAX_FILES,
     MAX_SKILL_MD_BYTES,
+    BuiltBundle,
     SkillBundleError,
     SkillBundleManifest,
     SkillBundleRef,
@@ -88,7 +89,7 @@ def _md_bytes(name: str = NAME, description: str = DESCRIPTION) -> bytes:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# Body\n".encode()
 
 
-def _valid(tmp_path: Path) -> tuple[Path, object]:
+def _valid(tmp_path: Path) -> tuple[Path, BuiltBundle]:
     """A built bundle on disk plus its ``BuiltBundle``."""
 
     built = build_bundle(_tree(tmp_path / "source"))
@@ -648,3 +649,106 @@ def test_a_large_bundle_round_trips(tmp_path: Path) -> None:
     assert inventory.file_count == 141
     assert inventory.uncompressed_size == total + len(SKILL_MD.encode())
     assert elapsed < 120, f"large-bundle round trip took {elapsed:.1f}s"
+
+
+# -- the extraction TOCTOU and the parent-walk defense ---------------------------------
+
+
+def _escape_bytes(tmp_path: Path) -> bytes:
+    """An archive whose entry escapes the destination (``../escaped.txt``)."""
+
+    path = tmp_path / "escape.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(ENTRYPOINT, SKILL_MD)
+        archive.writestr("../escaped.txt", "pwned")
+    return path.read_bytes()
+
+
+def test_extraction_works_from_the_validated_bytes_not_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapping the file after validation must not change what is written.
+
+    The old implementation validated one read and then RE-OPENED the path, so a
+    local writer's swap between the two turned ``orig_filename`` into an
+    unvalidated write. Extraction now holds one byte string from the first read
+    to the last write.
+    """
+
+    from local_operator.hub_sync import skill_bundle as bundle_module
+
+    archive, built = _valid(tmp_path)
+    hostile = _escape_bytes(tmp_path)
+    real = bundle_module._validate_bytes
+
+    def swap_then_validate(*args, **kwargs):
+        # Simulate the swap landing exactly between validation and extraction.
+        archive.write_bytes(hostile)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bundle_module, "_validate_bytes", swap_then_validate)
+    destination = tmp_path / "stage"
+
+    assert (
+        bundle_module.extract_archive(archive, destination, expected=built.bundle)
+        == built.tree_hash
+    )
+    assert tree_hash_of(destination) == built.tree_hash
+    assert not (tmp_path / "escaped.txt").exists()
+    assert not (destination.parent / "escaped.txt").exists()
+
+
+def test_a_swapped_archive_is_refused_before_anything_is_parsed(tmp_path: Path) -> None:
+    archive, built = _valid(tmp_path)
+    archive.write_bytes(_escape_bytes(tmp_path))
+    destination = tmp_path / "stage"
+
+    with pytest.raises(SkillBundleError) as caught:
+        extract_archive(archive, destination, expected=built.bundle)
+
+    assert (caught.value.code, caught.value.step) == ("bundle-hash-mismatch", "hash")
+    assert not destination.exists()
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [Path("../x"), Path("/abs"), Path("a/../b")],
+)
+def test_ensure_parents_refuses_unsafe_components(tmp_path: Path, relative: Path) -> None:
+    from local_operator.hub_sync.skill_bundle import _ensure_parents
+
+    root = tmp_path / "root"
+    root.mkdir()
+
+    with pytest.raises(SkillBundleError) as caught:
+        _ensure_parents(root, relative)
+
+    assert caught.value.code == "bundle-invalid"
+
+
+def test_ensure_parents_refuses_a_symlinked_component(tmp_path: Path) -> None:
+    from local_operator.hub_sync.skill_bundle import _ensure_parents
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SkillBundleError) as caught:
+        _ensure_parents(root, Path("link/sub"))
+
+    assert caught.value.code == "bundle-invalid"
+    assert not (outside / "sub").exists()
+
+
+def test_ensure_parents_refuses_an_existing_file_as_a_component(tmp_path: Path) -> None:
+    from local_operator.hub_sync.skill_bundle import _ensure_parents
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "blocker").write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(SkillBundleError):
+        _ensure_parents(root, Path("blocker/sub"))
