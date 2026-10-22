@@ -2854,3 +2854,134 @@ async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
         json={"decision": "accept", "consent_version": "bridge_consent_v1"},
     )
     assert response.status_code == 422, response.text
+
+
+# -- the chief-of-staff identity: pass-throughs a future whitelist must not drop
+#
+# The directory's per-member ``agent`` block and the conversations' ``builtin``
+# flag are ADDITIVE agent-server fields (§6.6) the desktop renders "Aida (Ben)"
+# and the built-in #humans/#agents channels from. These routes pass the payload
+# through untouched today; each cell below pins one field so a later
+# projection/whitelist that drops it fails here rather than silently in the UI.
+
+
+async def test_directory_passes_the_member_agent_block_through(api):
+    client, _root, _discipline = api
+    payload = _directory_payload()
+    payload["members"][0]["agent"] = {"endpoint_id": "bep_2", "name": "Aida", "state": "active"}
+    payload["members"][1]["agent"] = None
+    FakeClient.behavior["directory"] = payload
+
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 200
+    members = response.json()["result"]["members"]
+    assert members[0]["agent"] == {"endpoint_id": "bep_2", "name": "Aida", "state": "active"}
+    assert members[1]["agent"] is None
+
+
+async def test_conversation_list_and_get_pass_the_builtin_flag_through(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [
+            {"id": "bcv_h", "kind": "channel", "name": "humans", "builtin": "humans"},
+            {"id": "bcv_d", "kind": "dm"},
+        ]
+    }
+    FakeClient.behavior["conversation"] = {
+        "id": "bcv_abc12345",
+        "kind": "channel",
+        "name": "agents",
+        "builtin": "agents",
+    }
+
+    listed = await client.get("/v1/desktop/team-bridge/conversations?tenant_id=tnt_1")
+    one = await client.get("/v1/desktop/team-bridge/conversations/bcv_abc12345?tenant_id=tnt_1")
+
+    assert listed.status_code == 200 and one.status_code == 200
+    rows = listed.json()["result"]["conversations"]
+    assert rows[0]["builtin"] == "humans"
+    # Absent stays absent: the route invents no field for an ordinary row.
+    assert "builtin" not in rows[1]
+    assert one.json()["result"]["builtin"] == "agents"
+
+
+async def test_conversation_create_forwards_an_agent_dm_member(api):
+    """Clicking a chief of staff opens a dm with that person's AGENT endpoint."""
+
+    client, _root, _d = api
+    FakeClient.behavior["create_conversation"] = {"id": "bcv_3", "kind": "dm"}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations",
+        json={
+            "tenant_id": "tnt_1",
+            "kind": "dm",
+            "members": [
+                {
+                    "account_id": "acct-b",
+                    "kind": "agent",
+                    "endpoint_id": "bep_2",
+                    "display_label": "Aida (Ben)",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_create_body"]["members"] == [
+        {
+            "account_id": "acct-b",
+            "kind": "agent",
+            "endpoint_id": "bep_2",
+            "display_label": "Aida (Ben)",
+        }
+    ]
+
+
+async def test_an_active_settings_write_carries_the_cos_name(api):
+    """The route resolves the name from runtime state; the body never supplies it."""
+
+    from local_operator import settings_io
+    from local_operator.aida import state as aida_state
+
+    client, root, _discipline = api
+    aida_state.write_state(root, {"session_id": "sess_aida"})
+    settings_io.write_setting(
+        ConfigManager(root), settings_io.BY_KEY["team_bridge.session"], "sess_aida"
+    )
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+
+    active = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "active", "consent_version": "v1", "expected_account_id": "acc_7"},
+    )
+    assert active.status_code == 200, active.text
+    assert FakeClient.behavior["last_put_kwargs"]["agent_name"] == "Aida"
+
+    paused = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_7"},
+    )
+    assert paused.status_code == 200
+    # §5.2 rule 2: a pause is sent alone.
+    assert FakeClient.behavior["last_put_kwargs"]["agent_name"] is None
+
+    # The desktop body cannot smuggle a name in (strict body).
+    smuggled = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "active", "agent_name": "Mallory", "expected_account_id": "acc_7"},
+    )
+    assert smuggled.status_code == 422
+
+
+async def test_an_active_settings_write_without_a_cos_sends_no_name(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "active", "consent_version": "v1", "expected_account_id": "acc_7"},
+    )
+
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_put_kwargs"]["agent_name"] is None
