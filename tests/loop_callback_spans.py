@@ -75,7 +75,11 @@ def _timer_site() -> str:
             break  # our own wrapper: beyond it is the harness, not a caller
         if "/textual/" not in path:
             return f"{path}:{frame.lineno}"
-        library = f"{path}:{frame.lineno}"
+        # MessagePump.set_interval/set_timer is the plumbing every timer goes
+        # through; naming it says nothing. The frame that ARMED the timer is
+        # the next one out (textual/screen.py:354 for the screen repaint).
+        if not path.endswith("/textual/message_pump.py"):
+            library = f"{path}:{frame.lineno}"
     return library or (f"{candidates[0].filename}:{candidates[0].lineno}" if candidates else "")
 
 
@@ -170,17 +174,25 @@ class CallbackSpans:
         original = Timer._tick
 
         async def tick(timer: Timer, *, next_timer: float, count: int) -> object:
+            # Only a tick on THIS loop thread can belong to a span we time.
+            # Another thread's app ticking concurrently would otherwise stamp
+            # its label on a step that never entered its callback (review
+            # round 1, R1-1).
+            if threading.get_ident() != self.thread_id:
+                return await original(timer, next_timer=next_timer, count=count)
             # Recorded before the await: the callback runs inside this very
             # step, and a later step of the same timer must not inherit it.
             self._tick_serial += 1
-            self._tick_detail = getattr(timer, "_callback_spans_label", "")
+            label = getattr(timer, "_callback_spans_label", "")
+            self._tick_detail = label
+            # A collection that starts here belongs to THIS timer, not to the
+            # anonymous task-step name the span would otherwise carry (R1-2).
+            self._gc_callback_name = label or "Timer._run_timer"
             return await original(timer, next_timer=next_timer, count=count)
 
         return tick
 
-    def _gc_started(
-        self, phase: str, info: dict[str, object]
-    ) -> None:  # pragma: no cover - exercised through the context below
+    def _gc_started(self, phase: str, info: dict[str, object]) -> None:
         # gc.callbacks is PROCESS-global, while a span is thread-local: a
         # worker thread collecting while the loop is inside a callback must not
         # be charged to that callback (QA round 1, Q1). The loop's own
