@@ -295,6 +295,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/remote_compute/config.py": (
+        2,
+        "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "
+        "URL-host vocabulary for validating the remote-compute API override — a "
+        "punycode label prefix and the loopback host name — not filesystem paths, "
+        "so nothing on disk travels or stays behind",
+    ),
     "local_operator/network/credentials/mcp_state.py": (
         2,
         "``MCP_AUTH_FILENAME``/``MCP_AUTH_LOCK_FILENAME`` ('mcp_auth.json' and its "
