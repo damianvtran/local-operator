@@ -179,7 +179,11 @@ CROSS_SESSION_TOOL_NAME = "send"
 #: 5: all-row journal ordinals and their equality domain. Earlier caches only
 #: cover the search/rail subsets; they cannot prove a visible custom row's
 #: position. Rebuilding on version mismatch is preferable to fabricating it.
-TRANSCRIPT_INDEX_VERSION = 7
+#: 8: binding notice rows no longer contribute display/search documents.
+#: Version-7 caches may already hold those now-invisible hits in their frozen
+#: prefix. Even an unchanged journal or an incremental append must rederive
+#: them under the new visibility rule, not offer jumps to hidden notices.
+TRANSCRIPT_INDEX_VERSION = 8
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -1336,9 +1340,15 @@ def _row_is_invisible(entry: dict[str, Any]) -> bool:
     silently, which is how the first version of this check came to count every
     hidden row it was written to exclude.
     """
-    from local_operator.harness.rows import is_ask_gate_divert_row, is_hidden_tool_row
+    from local_operator.harness.rows import (
+        is_ask_gate_divert_row,
+        is_binding_notice_row,
+        is_hidden_tool_row,
+    )
 
-    return is_hidden_tool_row(entry) or is_ask_gate_divert_row(entry)
+    return (
+        is_hidden_tool_row(entry) or is_ask_gate_divert_row(entry) or is_binding_notice_row(entry)
+    )
 
 
 def _carries_send_marker(pieces: list[bytes]) -> bool:

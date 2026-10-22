@@ -121,6 +121,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_PINNED_FALLBACK,
         RetrySettings,
     )
+    from local_operator.remote_compute import DEFAULT_REMOTE_COMPUTE_ENABLED
     from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
@@ -370,6 +371,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["shell_environment.mode"] = shell_env.MODE_DEFAULT
     consumers["shell_environment.inherit"] = []
     consumers["shell_environment.exclude"] = []
+    # The remote-compute preview switch, from the module that READS it (the
+    # capability bit calls ``is_enabled``). The registry carries a literal
+    # ``False`` because settings_io must not import the mesh-facing package;
+    # this entry is what keeps the two from drifting.
+    consumers["remote_compute.enabled"] = DEFAULT_REMOTE_COMPUTE_ENABLED
     # The hotkeys have a REAL single-value consumer for the same reason the
     # fork keys do, and a stricter one: `KeyAction.default` is what
     # `OperatorApp.BINDINGS` binds and what `resolved_keymap` falls back to

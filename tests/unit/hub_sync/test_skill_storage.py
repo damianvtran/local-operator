@@ -1,5 +1,6 @@
 """Narrow journal/owned-reader guards; not engine or remote publication coverage."""
 
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -8,7 +9,7 @@ import pytest
 
 from local_operator.config_writer import nonblocking_file_claim
 from local_operator.hub_sync import skill_storage
-from local_operator.hub_sync.identity import LinkIdentity
+from local_operator.hub_sync.identity import LinkError, LinkIdentity
 from local_operator.hub_sync.provenance import make_record, read_baseline
 from local_operator.hub_sync.skill_document import SkillDocument
 from local_operator.hub_sync.skill_storage import (
@@ -235,11 +236,46 @@ def test_differing_origin_cannot_claim_a_temporarily_absent_alias(tmp_path: Path
         identity=org_identity,
         local_alias=public_doc.name,
     )
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(LinkError) as refused:
         storage.apply(
             org_identity, public_doc.name, public_doc, org_baseline, expected_fingerprint=None
         )
-    assert "alias belongs to another" in str(excinfo.value)
+    # A link owning the alias is a genuine origin conflict, never a name
+    # collision: the alias-occupied category is for UNOWNED occupants (D1).
+    assert refused.value.code == "origin-conflict"
+    assert "alias belongs to another" in str(refused.value)
+
+
+def test_a_file_occupying_the_alias_is_refused_in_its_own_words(tmp_path: Path) -> None:
+    """A non-skill FILE is a different fact from an unowned skill directory.
+
+    Both entry points that meet it -- the reader (``snapshot``, which the check
+    lane uses) and unpull -- must say something is USING the name, name it, and
+    say where to move it. Neither may borrow the "a skill already exists"
+    sentence: no skill exists there.
+    """
+
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+    path = storage.path(document.name)
+    shutil.rmtree(path)
+    path.write_text("not a skill directory\n", encoding="utf-8")
+
+    for entry in (
+        lambda: storage.snapshot(identity.local_id),
+        lambda: storage.unpull(identity.local_id),
+    ):
+        with pytest.raises(LinkError) as refused:
+            entry()
+        assert refused.value.code == "alias-occupied"
+        message = str(refused.value)
+        assert f"a file named {document.name!r} is already in the skills folder" in message
+        assert "move it somewhere else, then try again" in message
+        # Distinguishable from the unowned-skill refusal (a different fact and
+        # a different sentence, though the same category).
+        assert "a skill named" not in message
+        assert "outside the hub" not in message
 
 
 def test_rename_ancestors_are_fsynced_before_swap(tmp_path: Path, monkeypatch) -> None:

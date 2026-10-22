@@ -14,6 +14,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionTagsSheet } from "./components/session-tags-sheet";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import type { TagCatalogueEntry, TagRef } from "./types";
 
 const getTags = vi.fn();
@@ -85,7 +86,10 @@ describe("the catalogue's states", () => {
 	it("says it is loading while the registry read is in flight", () => {
 		getTags.mockReturnValue(new Promise(() => {}));
 		renderSheet();
-		expect(screen.getByText("loading…")).toBeTruthy();
+		expect(screen.getAllByText("loading…").length).toBeGreaterThan(0);
+		const statuses = screen.getAllByRole("status");
+		expect(statuses).toHaveLength(1);
+		expect(statuses[0].textContent).toContain("loading…");
 		expect(screen.queryByRole("checkbox")).toBeNull();
 	});
 
@@ -108,6 +112,9 @@ describe("the catalogue's states", () => {
 		getTags.mockResolvedValueOnce({ tags: CATALOGUE });
 		renderSheet();
 		expect(await screen.findByText("Could not load the tag catalogue.")).toBeTruthy();
+		expect(screen.getAllByRole("alert").some((node) =>
+			node.textContent?.includes("Could not load the tag catalogue."),
+		)).toBe(true);
 		fireEvent.click(screen.getByRole("button", { name: "try again" }));
 		expect(await screen.findByRole("checkbox", { name: "Work" })).toBeTruthy();
 	});
@@ -181,7 +188,10 @@ describe("assignment writes", () => {
 		renderSheet();
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Work" }));
-		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
+		const status = screen.getAllByRole("status");
+		expect(status).toHaveLength(1);
+		expect(status[0].textContent).toContain("saving…");
 	});
 
 	it("paints the read-back once the write lands", async () => {
@@ -307,7 +317,7 @@ describe("a target change while a write is in flight", () => {
 		const view = render(<SessionTagsSheet {...props()} />);
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
-		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
 
 		await openB(view);
 		/* A's answer lands only now: it must not set B's draft or B's error. */
@@ -342,7 +352,7 @@ describe("a target change while a write is in flight", () => {
 		const view = render(<SessionTagsSheet {...props()} />);
 		await ready();
 		fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
-		expect(await screen.findByText("saving…")).toBeTruthy();
+		expect((await screen.findAllByText("saving…")).length).toBeGreaterThan(0);
 
 		await openB(view);
 		await act(async () => {
@@ -491,11 +501,22 @@ describe("the frame race", () => {
 });
 
 describe("copy and storage", () => {
-	/* The tag copy is advisory literal copy this slice deliberately does not
-	   extract (the catalogue keys land with the baseline i18n lane), so a bundle
-	   test would assert nothing. What must hold is that the sheet RENDERS the
-	   copy: the title, the completion control, the primary legend and label, and
-	   the destructive entry. */
+	/* The tag copy lives in its OWN namespace (``relay.session.tags``), so the
+	   bundle assertion checks that namespace rather than filtering the parent:
+	   a key that drifted back into ``relay.session`` would pass a prefix filter
+	   here while the SPA's runtime lookup missed it. 19 keys is the whole slice:
+	   the 18 sheet/list strings plus the list's long-press discoverer. */
+	it("ships every tag key in the English bundle under its own namespace", () => {
+		const messages = BUNDLED_OWNED["relay.session.tags"] ?? {};
+		const keys = Object.keys(messages);
+		expect(keys).toHaveLength(19);
+		expect(keys.every((key) => key.startsWith("relay.session.tags."))).toBe(true);
+		expect(messages["relay.session.tags.pin_and_tags_hint"]).not.toBe("");
+		for (const key of keys) expect(messages[key]).not.toBe("");
+	});
+
+	/* What the reader actually sees: the namespace is only useful if the sheet
+	   paints its copy, so the rendered strings are asserted too. */
 	it("renders the tag copy as visible text", async () => {
 		renderSheet({ assigned: [WORK], primary: "work" });
 		await ready();

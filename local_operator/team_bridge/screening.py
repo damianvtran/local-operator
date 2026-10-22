@@ -109,6 +109,11 @@ HOLD_CODES = (
     "retry_later",
     "write_once_conflict",
     "schema_damaged",
+    # Not a screening outcome: the connector's wait for the owner to SEND a
+    # message to a never-used chief-of-staff session whose accepted consent does not allow a
+    # card to engage it (team_bridge.engagement). Listed so the owner's surface
+    # renders the specific reason rather than ``unknown_hold``.
+    "open_chief_of_staff",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
@@ -676,7 +681,11 @@ def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
     text = reply[:-1] if reply.endswith("\n") else reply
     if "\r" in text:
         return None
-    lines = text.split("\n")
+    # Trailing spaces/tabs per line are tolerated, nothing else (live E2E on
+    # local-operator-ui #1314): chat models end lines with a markdown hard break
+    # ("VERDICT: deliver␠␠"), which carries no content but held every real
+    # screen as ``parse_failed``. Leading text, extra lines and CR stay refused.
+    lines = [line.rstrip(" \t") for line in text.split("\n")]
     if len(lines) != 2:
         return None
     verdict_match = _VERDICT_LINE.match(lines[0])

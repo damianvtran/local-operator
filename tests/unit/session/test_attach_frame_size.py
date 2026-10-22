@@ -504,7 +504,9 @@ def test_delta_burst_across_unwatched_jobs_fits_the_line_limit() -> None:
     assert watching_none["job_trajectory_appends"] == {}
     # Row counts still ride the roster, so a page opened later knows what to
     # fetch rather than resuming from a hole.
-    assert [job["trajectory_length"] for job in watching_none["changes"]["jobs"]] == [200] * 10
+    assert [job["trajectory_length"] for job in watching_none["job_deltas"]["upserted"]] == [
+        200
+    ] * 10
 
 
 def test_unfiltered_update_is_returned_unchanged_when_nothing_needs_dropping() -> None:
@@ -4093,6 +4095,14 @@ def test_oversized_event_frame_degrades_instead_of_killing_the_socket():
     # payload, and a bare marker would raise there and be silently swallowed.
     event = deserialize_event(sendable["data"])
     assert event.type == "notice"
+    # What turns a passive notice into an ACTIONABLE one. The viewer that
+    # receives this keeps painting the last delta otherwise, because the frame
+    # that would have moved it was the one shed — the turn never settles and
+    # the composer waits on an acknowledgement carried by the same stream.
+    # ``paused`` clears on the next complete frame (a ``frontend_sync`` or any
+    # non-degraded ``frontend_update``); no new op is needed for the clear.
+    assert sendable["data"]["paused"] is True
+    assert sendable["data"]["action"] == "reload"
 
 
 def test_oversized_frontend_update_keeps_its_sequence():
@@ -4122,6 +4132,7 @@ def test_oversized_frontend_update_keeps_its_sequence():
     assert sendable["data"]["epoch"] == "epoch-1"
     assert sendable["data"]["sequence"] == 42
     assert sendable["data"]["degraded"] is True
+    assert sendable["data"]["paused"] is True
 
 
 def test_a_degraded_frontend_update_still_validates_as_one():
@@ -6385,7 +6396,7 @@ def test_the_live_delta_bounds_a_job_rows_free_text() -> None:
     )
 
     assert update is not None
-    row = update.changes["jobs"][0]
+    row = update.job_deltas["upserted"][0]
     assert len(row["result_text"]) <= JOB_RESULT_WIRE_CHARS + 1
     assert len(row["prompt"]) <= JOB_PROMPT_WIRE_CHARS + 1
     assert row["result_text"].endswith("…"), "a clipped preview must read as clipped"
@@ -6455,7 +6466,7 @@ def test_the_live_delta_folds_a_job_rows_receipts() -> None:
     )
 
     assert update is not None
-    row = update.changes["jobs"][0]
+    row = update.job_deltas["upserted"][0]
     components = row["usage"]["cost_components"]
     assert len(components) == 1, (
         "the delta must fold the row's receipts exactly as the snapshot does; "

@@ -1707,6 +1707,268 @@ def _is_readable_hyphen_phrase(value: str) -> bool:
     )
 
 
+#: Programming-language keywords and literals. A value exactly equal to one of
+#: these is CODE, never a credential value, whatever credential word sits beside it.
+#:
+#: MEASURED FAILURE (session 6ccea512c372, 2026-10-21): the table read
+#: ``if s.get("type")=="kubernetes.io/service-account-token": continue`` as an
+#: assignment on the name ``service-account-token``, masked the value ``continue``,
+#: and REGISTERED it — so every later occurrence of the keyword in that session was
+#: rewritten: the replayed transcript of the bash call, the new ``bash``/``eval``
+#: calls the model wrote from that corrupted history, and the MCP arguments built
+#: from it. The executed cells died with ``NameError: name 'redacted' is not
+#: defined``, and the transcript no longer showed what had really run. That damage
+#: outlives the line that caused it, which is why the release is on the VALUE (the
+#: rule that masked it is irrelevant) and why :func:`is_registerable_component`
+#: refuses the same class independently of which rule matched.
+#:
+#: ACCEPTED RESIDUAL, stated rather than implied: a real credential whose ENTIRE
+#: value is literally one of these words (``PASSWORD=return``) is no longer masked
+#: by a name-driven rule. Every rule that recognises a credential by its own
+#: spelling (DSN, bearer, PEM, vendor-prefixed) is untouched, and the exact-value
+#: pass still masks the value once the session knows it. The cost of the other
+#: direction is the incident above: a keyword deleted from every later line of code.
+_CODE_KEYWORD_VALUES = frozenset(
+    {
+        "break",
+        "continue",
+        "pass",
+        "return",
+        "raise",
+        "yield",
+        "else",
+        "elif",
+        "try",
+        "finally",
+        "except",
+        "None",
+        "True",
+        "False",
+        "null",
+        "nil",
+        "undefined",
+        "await",
+        "lambda",
+        "assert",
+        "global",
+        "nonlocal",
+        "del",
+        "import",
+        "from",
+        "as",
+        "with",
+        "def",
+        "class",
+        "func",
+        "not",
+        "and",
+        "or",
+        "in",
+        "is",
+    }
+)
+
+#: The DNS-1123 label cap, in ONE place: the label pattern below is built from it
+#: and :func:`_is_dns_name` checks its hyphenated segments against it. Kubernetes
+#: spells object names in this grammar, and a Secrets Manager key path uses it per
+#: segment, so a lowercase run with a 70-character segment is not a name even
+#: though it carries no character a name cannot (QA round 2, Q2-1).
+_DNS_LABEL_MAX_CHARS = 63
+
+#: One DNS-1123 label: lowercase alphanumerics with interior hyphens, at most
+#: :data:`_DNS_LABEL_MAX_CHARS` characters, never opening or closing with a hyphen.
+_DNS_LABEL = rf"[a-z0-9](?:[a-z0-9-]{{0,{_DNS_LABEL_MAX_CHARS - 2}}}[a-z0-9])?"
+
+#: An identifier joined by PATH or DOT separators: ``user-dashboard/secrets-qa``,
+#: ``auth-svc.cluster.local``. A slash or a dot is structure no passphrase carries.
+_DNS_PATH_SHAPED = re.compile(rf"{_DNS_LABEL}(?:[./]{_DNS_LABEL})+")
+
+#: The same grammar joined by hyphens alone, written as RUNS of ``[a-z0-9]+``
+#: rather than as ``_DNS_LABEL`` segments. ``-`` is BOTH the separator and a legal
+#: interior character of a label, so the label form made every hyphen of a failing
+#: ``fullmatch`` an ambiguous split point and backtracked exponentially: measured
+#: 0.30s at 37 characters, 3.1s at 45, no return at 60 — on a pass that scans
+#: arbitrary tool output, where a fetched page or a read file supplies the token.
+#: A run cannot consume the separator, so each hyphen is crossed exactly once and
+#: the match is linear. The per-label cap is NOT in this pattern either — adding it
+#: back as ``_DNS_LABEL`` segments reintroduces the ambiguity — so
+#: :func:`_is_dns_name` checks the segments the run produced against
+#: :data:`_DNS_LABEL_MAX_CHARS` after the match. Kubernetes caps the whole object
+#: name at 253 characters; a SINGLE label is capped at 63, and a value with a
+#: longer segment is a credential (or a phrase) that merely looks like a name.
+_DNS_HYPHENATED = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)+")
+
+#: The segments that make a hyphenated identifier a RESOURCE name rather than a
+#: readable phrase: workload and environment qualifiers. This set IS the deviation
+#: from the brief's ``three or more hyphens`` boundary, and the measurement forced
+#: it: a hyphen count cannot separate a Kubernetes name from the passphrase-shaped
+#: corpus positive (``api_key=<a three-hyphen readable phrase>``) that must keep
+#: masking, while the reported false positives — ``auth-svc-qa``,
+#: ``risk-assessment-svc-qa``, ``auth-svc-user-directory-dashboard-secret`` — all
+#: carry one of these segments. The qualifier is what an operator means by "that is
+#: the name of a thing in the cluster", and it is measured against the corpus in
+#: both directions in ``tests/unit/secrets/test_redaction_code_safety.py``.
+_K8S_QUALIFIER_SEGMENTS = frozenset(
+    {
+        "blue",
+        "canary",
+        "cm",
+        "config",
+        "configmap",
+        "deploy",
+        "deployment",
+        "dev",
+        "gateway",
+        "green",
+        "ingress",
+        "job",
+        "ns",
+        "pod",
+        "pods",
+        "prod",
+        "qa",
+        "sa",
+        "secret",
+        "secrets",
+        "service",
+        "staging",
+        "svc",
+        "test",
+    }
+)
+
+
+#: A canonical lowercase UUID. This is the ONE shape excluded from
+#: :func:`_is_dns_name`, and it is excluded because the module already holds the line
+#: the other way: a UUID is an opaque CREDENTIAL value, not a name, and the readable
+#: class's digit cap exists precisely so UUIDs stay masked and contained (see the
+#: ``_is_readable_hyphen_phrase`` clauses). It satisfies the hyphenated DNS grammar
+#: exactly — ``550e8400-e29b-41d4-a716-446655440000`` is even a legal Kubernetes name —
+#: so a grammar-only refusal would silently stop containing every UUID password in
+#: the corpus (pinned by ``test_a_weak_name_still_masks_an_opaque_value``).
+_UUID_SHAPED = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _is_dns_name(value: str) -> bool:
+    """Whether ``value`` is spelled in the DNS-1123 NAME grammar in ANY form.
+
+    PURE grammar, with NO qualifier judgement and NO credential carve-out: a PATH
+    or DOTTED identifier, or a hyphen-joined run whose every segment is a legal
+    label (at most :data:`_DNS_LABEL_MAX_CHARS` characters). This is the
+    REGISTRATION refusal's predicate (:func:`is_registerable_component`), and it
+    is wider than :func:`_is_identifier_shaped_name` on purpose.
+
+    The qualifier vocabulary only decides whether the MASK is released in place.
+    Containment is the other direction and cannot depend on it: a name-driven rule
+    fires on ``secret: <object name>`` for every Secret in a cluster, and a name
+    outside the vocabulary promoted here was session-wide — the amplifier this
+    release exists to remove, reproducing for ten of nineteen realistic names
+    before this clause.
+
+    The VENDOR and UUID carve-outs this predicate used to carry are gone, and the
+    reason is that they answered a different question than the one this function
+    asks. Both shapes are OPEN-ENDED — ``glpat-<name>`` and a canonical UUID
+    satisfy this grammar — and both must keep their containment, but that is a
+    judgement about the value's EVIDENCE, not about how it is spelled. Held here,
+    the carve-out made the grammar answer ``False`` for a vendor-shaped NAME
+    (``npm-registry``, ``hf-access-token``, ``sk-learn-model``), so the
+    registration gate read "not a name" and PROMOTED it: the same session-wide
+    amplifier the whole clause exists to remove, still open for every Secret whose
+    name opens with a vendor prefix (agent review R2-1). The gates now decide, and
+    both exclusions live in them, stated where they are applied:
+
+    * :func:`is_registerable_component` refuses a DNS-shaped value from a
+      name-driven rule unless the EVIDENCE says otherwise: a vendor TOKEN (the
+      vendor rule's own judgement, which releases a spelled prefix followed by a
+      NAME — see :func:`_is_vendor_token`), a canonical UUID, or a vendor SPELLING
+      the rule's match ASSIGNED rather than referenced (an ``=`` operator types a
+      token, a ``:`` label names an object — see
+      :func:`_carries_assignment_operator`);
+    * :func:`_is_identifier_shaped_name` keeps both exclusions, so a vendor token
+      stays masked in place and a UUID stays contained.
+
+    The LABEL CAP is checked on the split rather than in the pattern: spelling the
+    hyphen form as ``_DNS_LABEL(?:-_DNS_LABEL)+`` makes every hyphen of a FAILING
+    ``fullmatch`` an ambiguous split point (0.30 s at 37 characters, no return at
+    60 — the R1-2 hazard), so the linear run form matches first and the cap is a
+    linear pass over the segments it already produced.
+    """
+    if not value:
+        return False
+    if _DNS_PATH_SHAPED.fullmatch(value) is not None:
+        return True
+    if _DNS_HYPHENATED.fullmatch(value) is None:
+        return False
+    return all(len(segment) <= _DNS_LABEL_MAX_CHARS for segment in value.split("-"))
+
+
+def _is_code_keyword_value(value: str) -> bool:
+    """Whether ``value`` is a programming-language keyword or literal.
+
+    ONE predicate for the masking release and the registration gate, because the
+    incident was the pair: the keyword was masked, then promoted to a session-wide
+    redaction, and only the second step made it survive into later turns.
+    """
+    return value in _CODE_KEYWORD_VALUES
+
+
+def _is_identifier_shaped_name(value: str) -> bool:
+    """Whether ``value`` is spelled as a DNS-1123 NAME rather than a credential.
+
+    Two spellings qualify, both carrying structure a passphrase does not:
+
+    * a PATH or DOTTED identifier (a slash or a dot joins the segments), which is
+      how a Secrets Manager key path (``user-dashboard/secrets-qa``) and a cluster
+      hostname are spelled;
+    * a HYPHEN-joined identifier carrying a workload/environment qualifier
+      segment, which is how Kubernetes object names are spelled
+      (``auth-svc-qa``, ``auth-svc-user-directory-dashboard-secret``).
+
+    Deliberately NOT released: a single lowercase word (``swordfish``), an
+    underscore-joined phrase, and a hyphenated phrase with no qualifier — the
+    passphrase-shaped corpus positives that spell such a phrase after ``DB_PASSWORD``
+    or ``api_key`` stay masked. Issuer-prefixed values are
+    refused here too: ``glpat-<name>`` satisfies the DNS grammar, and it belongs to
+    the vendor rule, which knows what it is.
+
+    ACCEPTED RESIDUAL: a real credential spelled as an identifier with a qualifier
+    segment (a password that is literally ``prod-secret``) is read as a name and
+    released by name-driven rules. It is still masked by every spelling-evidence
+    rule (DSN, bearer, PEM, vendor) and is masked by exact value once known. The
+    opposite cost — deleting the k8s Secret name an agent needed, and registering
+    it so every later line lost it too — is the incident this clause exists for.
+
+    This predicate releases the MASK only, and only inside the qualifier
+    vocabulary. CONTAINMENT is the other gate (:func:`is_registerable_component`),
+    which refuses a DNS-shaped value from a name-driven rule: a Secret name with no
+    qualifier segment is still masked IN PLACE by the name-driven assignment rule
+    that fires on ``secret: <name>``, but it is never registered, so the marker
+    never becomes the session's word for that name and every later occurrence is
+    readable again. The two OPEN-ENDED shapes the grammar accepts keep their
+    containment through that gate's own exclusions — :func:`_is_vendor_token`
+    (a vendor PREFIX alone is not enough; ``npm-registry`` is a name) and
+    :data:`_UUID_SHAPED` — and the exclusions are repeated here because a released
+    vendor token would be published, while a vendor-shaped NAME released here costs
+    one masked line.
+    """
+    if not _is_dns_name(value):
+        return False
+    # A vendor SPELLING is never a name here, whatever its tail reads like: the
+    # in-place release deletes a VALUE the agent needed to read, and a value that
+    # opens with an issuer prefix satisfies the grammar while being a credential
+    # (``glpat-<name>``). The token/name split the CONTAINMENT gate draws is
+    # deliberately not repeated: masking a vendor-shaped name in place once is
+    # recoverable, publishing a released vendor token is not.
+    if _VENDOR_PATTERN.search(value) is not None:
+        return False
+    # A UUID is an opaque credential, never a name — see :data:`_UUID_SHAPED`.
+    if _UUID_SHAPED.fullmatch(value) is not None:
+        return False
+    if _DNS_PATH_SHAPED.fullmatch(value) is not None:
+        return True
+    return bool(set(value.split("-")) & _K8S_QUALIFIER_SEGMENTS)
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1721,6 +1983,17 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     is a credential, and masking one mangles the line the agent is reading.
     """
     if is_placeholder_component(value):
+        return True
+    # CODE and NAMES first: the two clauses below are the measured releases for the
+    # session-poisoning incident (a keyword registered as a credential, and k8s /
+    # Secrets Manager names deleted from later output). They sit before every
+    # name-strength arm because neither judgement is about the name: a keyword is
+    # not a credential value under ANY name, and an identifier-shaped name is not a
+    # secret under any name either. See each predicate for the measurement and the
+    # residual it accepts.
+    if _is_code_keyword_value(value):
+        return True
+    if _is_identifier_shaped_name(value):
         return True
     if any(char in value for char in _EXPRESSION_CHARS):
         return True
@@ -2188,6 +2461,30 @@ def _vendor_tail_guard(match: Match[str]) -> bool:
     return not (_VENDOR_TAIL_IS_A_NAME.fullmatch(tail) or _VENDOR_TAIL_IS_ONE_WORD.fullmatch(tail))
 
 
+def _is_vendor_token(value: str) -> bool:
+    """Whether ``value`` is a vendor-issued TOKEN, not merely vendor-prefixed.
+
+    The distinction the containment gate needs (:func:`is_registerable_component`),
+    and it is the vendor rule's own: :data:`_VENDOR_PATTERN` finds the prefix, and
+    :func:`_vendor_tail_guard` decides whether the tail is opaque (a token) or an
+    ordinary lowercase word or phrase (a NAME — ``npm-registry``,
+    ``hf-access-token``, ``sk-learn-model``, ``pypi-index-config``).
+
+    Asking only ``_VENDOR_PATTERN.search(value)`` promotes a NAME whose first
+    segment happens to be a vendor prefix, which is the session-wide amplifier
+    agent review R2-1 measured for exactly those four names; asking the guard as
+    well keeps a real token contained (a mixed-case or digit-bearing tail, or a
+    long unbroken run) and lets the vendor-shaped NAME be refused like any other
+    name.
+
+    Derived from the vendor rule's own predicates rather than a retyped prefix or
+    tail list, because two tables that both claim to know what a vendor token is
+    drift: this one cannot disagree with the rule that does the masking.
+    """
+    match = _VENDOR_PATTERN.search(value)
+    return match is not None and _vendor_tail_guard(match)
+
+
 #: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and
 #: underscores, no lower case. ``OS_PROD2_ADMIN_PASSWORD``, ``API_KEY``.
 _ENV_NAME_SHAPED = re.compile(r"[A-Z][A-Z0-9_]*")
@@ -2207,6 +2504,19 @@ _CREDENTIAL_FLAG_WORDS = (
     r"(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
     r"client[-_]?secret|auth[-_]?token|access[-_]?token)"
 )
+
+#: The one flag in that vocabulary whose argument is a store ENTRY NAME rather than
+#: a credential VALUE, and the two hooks that have to agree about it: the argument
+#: pass (:func:`_is_typed_credential_assignment`) and the containment gate
+#: (:func:`_carries_assignment_operator`) both reach it through
+#: :func:`_flag_is_typed`, so a name after ``--secret`` is released in a command and
+#: never promoted to a session redaction — while ``--password``/``--token`` keep
+#: masking their argument, which is what ``main`` did and what R3-1 restored.
+_STORE_ENTRY_FLAG = "--secret"
+
+#: The flag rule's group holding the flag TOGETHER with its binder (a space or an
+#: ``=``): the hooks strip the binder to read which flag bound the value.
+_FLAG_GROUP = "flag"
 
 #: A credential FLAG immediately before the argument under test, built from the flag
 #: rule's own vocabulary rather than retyped, in either separator spelling. The
@@ -3579,6 +3889,29 @@ def _anchored_key_value_guard(match: Match[str]) -> bool:
     return _PEM_HEADER_PHRASE.search(match.group(2).upper()) is not None
 
 
+#: The two rule labels whose matches carry CONTEXT the hooks have to read, spelled
+#: once here so the table and the hooks cannot drift apart.
+#:
+#: ``credential-assignment`` is shared by TWO rules — the unquoted and the quoted
+#: spelling — deliberately (one operator-facing shape, two value bounds), and both
+#: lay their groups out identically. That shared layout is what lets
+#: :func:`_is_typed_credential_assignment` and :func:`_carries_assignment_operator`
+#: read a group by NAME under this label alone, instead of keying on the group's
+#: POSITION under a label another rule could one day reuse with a different layout
+#: (agent review R3-5).
+#:
+#: ``cli-credential-flag`` is the one rule whose match puts no operator between the
+#: flag and its argument, and whose own guard has already judged that argument
+#: (:func:`_flag_value_guard` releases a store NAME and usage-string syntax): a hit
+#: therefore means a credential TYPED into a command, so it must keep its mask in
+#: the argument pass where the value's spelling is name-shaped (agent review R3-1).
+#: The one exception is read from the FLAG itself (:func:`_flag_is_typed`):
+#: ``--secret`` binds a store ENTRY NAME, so a name-shaped argument after it stays a
+#: reference — the reviewer's own fix direction for R3-1.
+_ASSIGNMENT_LABEL = "credential-assignment"
+_CREDENTIAL_FLAG_LABEL = "cli-credential-flag"
+
+
 CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # --- key material, before anything that could take it apart ---------------
     Shape(
@@ -3850,9 +4183,13 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # masked. It is a floor on the VALUE only — a short value under a
     # credential-shaped name is a placeholder or a word, not a credential.
     Shape(
-        "credential-assignment",
+        _ASSIGNMENT_LABEL,
         re.compile(
-            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
+            # NAMED, not positional (agent review R3-4/R3-5): the context hooks read
+            # the name and the separator, and a group NAME cannot drift the way an
+            # index can when a rule's layout is edited — the same argument the
+            # quoted spelling's ``(?P<quote>…)`` carries below.
+            r"(?<![A-Za-z0-9_.\-])(?P<name>[A-Za-z0-9_.\-]{2,48})"
             # ``[\"']?`` before the separator so a QUOTED name is one of these:
             # ``"api_key": "…"`` is how JSON spells every one of them, and a
             # pattern that only accepts the bare ``name: value`` form misses the
@@ -3869,7 +4206,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # on credential-dense text (4000 compact lines) put the guard form and
             # the lookahead form at 1.637x and 1.636x of the previous rule's cost,
             # so the second mechanism would be cost with no benefit.
-            r"([\"']?\s*[:=]\s*)([\"']?)"
+            # ``:=`` is ONE operator, matched whole. ``[:=]`` alone left the ``=``
+            # to be swallowed by the value (``DB_PASSWORD:=…`` registered
+            # ``=<value>``, which no later occurrence matches) and left the spaced
+            # spelling ``DB_PASSWORD := …`` matching nothing at all — while both
+            # docstrings promised the two-character operator (agent review R3-4).
+            r"(?P<separator>[\"']?\s*(?::=|:|=)\s*)([\"']?)"
             rf"{_ASSIGNED_VALUE_GROUP}"
         ),
         # Keep the name, the separator and the opening quote; mask only the
@@ -3893,10 +4235,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # VALUE's bound differs, which is an implementation fact, not something an
     # operator triaging a notice can act on differently.
     Shape(
-        "credential-assignment",
+        _ASSIGNMENT_LABEL,
         re.compile(
-            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
-            r"([\"']?\s*[:=]\s*)"
+            r"(?<![A-Za-z0-9_.\-])(?P<name>[A-Za-z0-9_.\-]{2,48})"
+            # The SAME two named groups as the unquoted spelling: the two rules share
+            # this label, so a hook reading them under it must find one layout.
+            r"(?P<separator>[\"']?\s*(?::=|:|=)\s*)"
             # NAMED, not positional. The value group below stops at the delimiter
             # this group captures, and a positional backreference would silently
             # start bounding against a different group the day a group is added or
@@ -4009,7 +4353,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # and the ``-``/whitespace after it is required, so ``--token-ttl=3600``
     # (a duration) is not one of these.
     Shape(
-        "cli-credential-flag",
+        _CREDENTIAL_FLAG_LABEL,
         # ``--secret NAME[=VAR]`` in a usage string is a PLACEHOLDER: a value
         # carrying brackets or parentheses is syntax, not a secret, and masking
         # it rewrites the help text the agent is reading. The pattern stays
@@ -4055,7 +4399,10 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # untouched: the quoted branches still need three characters each, so
         # ``""`` and ``'Zx'`` stay unmasked.
         re.compile(
-            r"(?i)(--"
+            # Group 1 (``flag``) is the flag AND its binder, named because the
+            # argument pass reads the flag to tell a VALUE carrier from a NAME carrier
+            # (:func:`_flag_is_typed`); group 3 is the value.
+            r"(?i)(?P<flag>--"
             + _CREDENTIAL_FLAG_WORDS
             + r"(?:=|\s+)(?P<q>\"|')?)"
             + r"(?P<v>(?(q)(?:"
@@ -4325,19 +4672,33 @@ _MIN_REGISTERABLE_SECRET = 8
 DETECTED_COMPONENT_FLOOR = _MIN_REGISTERABLE_SECRET
 
 
-def is_registerable_component(value: str) -> bool:
+def is_registerable_component(
+    value: str, *, label: str | None = None, assigned: bool = False
+) -> bool:
     """Whether a matched value may become a session-wide redaction.
+
+    ``label`` is the rule that produced the hit. It matters because the identifier
+    refusal below is about NAME-driven hits: a rule in
+    :data:`_ARGUMENT_EVIDENCE_LABELS` recognises a credential by its own SPELLING
+    (a DSN's ``user:password@``, a ``Bearer`` token, a vendor prefix), so its value
+    is a credential even when it is also spelled like an identifier —
+    ``mongodb://user:<pw>@host/db`` must stay contained session-wide. Omitting the
+    label keeps the SAFE default: the hit is treated as name-driven and the
+    identifier refusal applies. ``assigned`` is the CONTEXT half of that refusal —
+    whether the rule TYPED the value (an operator that binds one, or a credential
+    flag whose argument is a value: :attr:`ShapeHit.assigned`) — because a vendor
+    spelling reads as a token when it is typed and as a NAME when it is referenced.
 
     Registration is a PROMOTION: the value is masked in every later result for
     the rest of the session, so a false positive here outlives the line that
     caused it (``Basic authentication`` was registered as a credential once, and
     the word was then masked in every subsequent result). What remains is the
-    LENGTH floor (:data:`DETECTED_COMPONENT_FLOOR`) plus the two refusals below —
-    a placeholder, a store-grammar name. The word-shape refusal this rule once
-    carried was removed deliberately: it left a word-shaped credential that a real
-    rule had masked free to reappear in the next result (the body comment records
-    the measurement), and such a value is now masked as a WORD rather than a
-    substring (see :func:`_word_pattern`).
+    LENGTH floor (:data:`DETECTED_COMPONENT_FLOOR`) plus the refusals below —
+    a placeholder, a store-grammar name, a code keyword, a DNS-grammar name. The
+    word-shape refusal this rule once carried was removed deliberately: it left a
+    word-shaped credential that a real rule had masked free to reappear in the next
+    result (the body comment records the measurement), and such a value is now
+    masked as a WORD rather than a substring (see :func:`_word_pattern`).
 
     **Only genuine secret VALUES can enter a redaction set** (operator directive): a
     token spelled the way a stored secret's NAME is spelled
@@ -4353,6 +4714,34 @@ def is_registerable_component(value: str) -> bool:
     and flag spellings read it as a reference and release it, as the clause in
     :func:`_value_is_not_a_credential` states — the same read the flag arms already
     take for a credential flag's one-part argument.
+
+    The same tradeoff applies to a DNS-shaped value from a name-driven rule: a
+    passphrase spelled as a hyphen phrase is masked in place but no longer
+    contained session-wide, because the identifier refusal cannot tell it from a
+    Kubernetes object name and the other direction is the incident.
+
+    The gate is the GRAMMAR (:func:`_is_dns_name`), and the two shapes the grammar
+    cannot distinguish from a name are decided HERE rather than in the grammar,
+    because they are judgements about the value's EVIDENCE and not about how it is
+    spelled:
+
+    * a vendor TOKEN — the vendor rule's own token/name split, see
+      :func:`_is_vendor_token` — still registers, so an issuer token typed under
+      ``PASSWORD=`` is contained session-wide;
+    * a canonical UUID registers too — it is an opaque credential the grammar
+      swallows (:data:`_UUID_SHAPED`), and the alternative is a UUID readable in
+      every later result;
+    * a vendor SPELLING whose tail is an ordinary lowercase word or phrase
+      registers only when the rule's match ASSIGNED it — an ``=`` operator before the
+      value, ``assigned`` in :func:`_carries_assignment_operator`.
+      ``key=glpat-<kebab phrase>`` is an issuer-prefixed token being typed and keeps
+      its containment (the round-1 measurement that made the prefix evidence at
+      all), while a ``secret:`` label is a REFERENCE to an object: the
+      prefix ALONE used to be enough for it too, which kept the promotion this
+      clause exists to stop alive for every Secret whose name opens with a vendor
+      prefix (agent review R2-1). A vendor-shaped NAME under an assignment is much
+      rarer than the reverse, and the two readings cannot be told apart from the
+      value: the match's own name and separator can tell them apart.
     """
     # Length only. The word-shape refusal was added to stop ``Basic
     # authentication`` poisoning a session, and the header rules now need their
@@ -4363,6 +4752,49 @@ def is_registerable_component(value: str) -> bool:
     if is_placeholder_component(value):
         return False
     if _is_a_name_in_the_store_grammar(value):
+        return False
+    # CODE values never become session-wide redactions, whichever rule matched
+    # matched them. This gate is INDEPENDENT of the rule on purpose: the incident
+    # (session 6ccea512c372) was not that one rule misfired, it was that the
+    # misfire was PROMOTED — the Python keyword ``continue`` and a Kubernetes
+    # Secret name were registered here, and registration is what rewrote them in
+    # every later transcript, every replayed request and every new tool call the
+    # model wrote from that corrupted history (``NameError: name 'redacted' is not
+    # defined`` in the executed cells). Masking in place is recoverable — the next
+    # read shows the marker once; promoting is not, because the marker becomes the
+    # session's own vocabulary for the word. The masking release in
+    # :func:`_value_is_not_a_credential` makes a hit of this class rare already;
+    # this gate is what holds when another rule fires first and its value reaches
+    # the store by a path that has no name context to consult.
+    if _is_code_keyword_value(value):
+        return False
+    # NAME values, over the WHOLE DNS grammar and not only the qualifier vocabulary
+    # the in-place release uses: the qualifier is what an operator means by "that is
+    # the name of a thing in the cluster", but a name-driven rule fires on
+    # ``secret: <name>`` for EVERY Secret, and the ones outside the vocabulary were
+    # still promoted here — the incident reproduced end-to-end for ten of nineteen
+    # realistic names. A name may be masked in place once; it must never become the
+    # session's word for it. Spelling-evidence rules are exempt: ``label`` names the
+    # rule, and one of those recognised a credential rather than guessing from a
+    # name.
+    #
+    # The OPEN-ENDED shapes the grammar also accepts are exempt on their EVIDENCE,
+    # not on their spelling: a vendor TOKEN and a canonical UUID are credentials
+    # however name-like they read, and refusing them here would leave a real one
+    # free to reappear once its line scrolled away. The vendor test is the vendor
+    # rule's OWN token/name split (a spelled prefix followed by an ordinary
+    # lowercase word or phrase is a name). A vendor SPELLING with a name-shaped tail
+    # is the one case the value cannot settle: ``key=glpat-<phrase>`` assigns a
+    # token, ``secret: <phrase>`` references a name, and the hit's own match says
+    # which (``assigned``). Reading the prefix alone as evidence is what kept agent
+    # review R2-1 open; reading the tail alone loses the R1-2 rows.
+    if (
+        label not in _ARGUMENT_EVIDENCE_LABELS
+        and _is_dns_name(value)
+        and not _is_vendor_token(value)
+        and _UUID_SHAPED.fullmatch(value) is None
+        and not (assigned and _VENDOR_PATTERN.search(value) is not None)
+    ):
         return False
     return len(value) >= DETECTED_COMPONENT_FLOOR
 
@@ -4390,6 +4822,18 @@ class ShapeHit:
     #: but may not be announced AS CONTAINED: the containment notice tells the
     #: operator the value was masked, and that claim has to be true.
     complete: bool = True
+    #: Whether the rule TYPED the value it matched — an ``=`` operator that binds
+    #: a value to a name (``=``, ``:=``), or a credential flag whose argument is a
+    #: value rather than a store entry's NAME (:func:`_flag_is_typed`). The
+    #: CONTAINMENT gate reads it because the value's spelling cannot separate a
+    #: vendor token being ASSIGNED from a vendor-shaped NAME being REFERENCED, and
+    #: the two go opposite ways (:func:`is_registerable_component`). It is answered
+    #: by the RULE (:func:`_carries_assignment_operator`) and never by the match
+    #: text: only a rule that captured its own separator can say what its prefix
+    #: means, and a query-parameter carrier is a reference however many ``=`` its
+    #: name group contains (agent review R3-2). Defaults to ``False``: a hit built
+    #: by hand, or by a rule with no name group, reads as a reference.
+    assigned: bool = False
     #: Whether READABLE credential material survived the mask in this text.
     #:
     #: This is the whole severity classification, and it is deliberately a
@@ -4450,12 +4894,28 @@ def shape_report(hits: Sequence[ShapeHit]) -> ShapeReport:
     )
 
 
-def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
+def scrub_shapes_with_hits(
+    text: str, *, reject: "Callable[[str, str, Match[str]], bool] | None" = None
+) -> tuple[str, list[ShapeHit]]:
     """Scrub ``text`` and report every shape that fired.
 
     The one place the table is run. :func:`scrub_shapes` and
     :func:`match_shape_names` are both views onto this, so a surface cannot
     inspect shapes without the same rules being applied to the text.
+
+    ``reject`` is the CONFIDENCE FLOOR a caller can impose on a hit, as
+    ``(label, value, match) -> bool``: a rejected hit leaves its match BYTE-IDENTICAL
+    and records nothing. It is threaded into the same scan that renders the mask, so
+    a rejected span is simply the original text (``match.group(0)``) — there is no
+    second table and no un-masking pass. :func:`scrub_shapes_for_arguments` is its
+    one caller, and the reason it exists: text that is CODE must not be rewritten by
+    a low-confidence, name-driven judgement.
+
+    The MATCH goes to the hook because the confidence is not always a property of the
+    value: a lower-case hyphen phrase is a Secret NAME on the right of ``secret:`` and
+    a passphrase on the right of a ``--password`` flag, and only the matched name and
+    separator tell them apart (:func:`_is_typed_credential_assignment`). A hook that
+    sees the value alone has to choose one reading for both.
     """
     hits: list[ShapeHit] = []
     if not text or not has_shape_anchor(text):
@@ -4463,7 +4923,7 @@ def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
         return text, hits
     # Key material first: a PEM body spans lines, so it is the one pass that has
     # to see the whole text, and it must run before anything takes it apart.
-    text = _run_shapes(_MULTILINE_SHAPES, text, hits)
+    text = _run_shapes(_MULTILINE_SHAPES, text, hits, reject)
     if len(_LINE_SHAPES) == 0:  # pragma: no cover - the table would be empty
         return text, hits
     # Then line by line, gated per line: the rules that remain are line-anchored
@@ -4474,10 +4934,102 @@ def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
             scrubbed_lines.append(line)
             continue
         line_hits: list[ShapeHit] = []
-        scrubbed_lines.append(_run_shapes(_LINE_SHAPES, line, line_hits))
+        scrubbed_lines.append(_run_shapes(_LINE_SHAPES, line, line_hits, reject))
         hits.extend(line_hits)
     text = "".join(scrubbed_lines)
     return text, _only_fully_masked(hits, text)
+
+
+def _carries_assignment_operator(shape: Shape, match: Match[str]) -> bool:
+    """Whether this rule put an ASSIGNMENT OPERATOR before the value it matched.
+
+    The CONTEXT the containment gate needs (:func:`is_registerable_component`), and
+    it is answered by the RULE that knows its own layout, never by scanning the
+    match text for an ``=`` (agent review R3-2). A query parameter's NAME group
+    always carries the ``=`` that binds it to its value, so that scan read an
+    operator inside a parameter's NAME as an assignment and promoted a
+    vendor-shaped NAME to a session redaction — the amplifier R2-1 closed for
+    name-driven assignments, which a URL carrier then walked straight back past.
+
+    Two rules can answer yes, and each by its own evidence:
+
+    * ``credential-assignment`` — its separator group, captured by the rule, holds
+      the operator. ``=`` types a token, a ``:`` labels an object, and ``:=`` is
+      the two-character operator both spellings document. A name that IS the
+      store-entry flag is the exception (:func:`_is_store_entry_flag`): the ``=``
+      spelling of that flag's argument binds a store entry's NAME, not a value, so
+      it carries no assignment.
+    * ``cli-credential-flag`` — its guard has already judged the argument
+      (:func:`_flag_value_guard` releases a store NAME and usage-string syntax), so
+      a hit means a credential was bound to the flag, and only WHITESPACE — not an
+      ``=`` — binds it. :func:`_flag_is_typed` reads the FLAG itself and answers
+      ``False`` for ``--secret``, whose argument is a store entry's NAME rather
+      than a value, so that hit reads as a reference like any other name.
+
+    Every other rule answers ``False``: it either has no separator to read or
+    knows nothing about what its prefix means, and the safe reading is the one
+    the gate started with — a reference, not an assignment.
+    """
+    if shape.label == _CREDENTIAL_FLAG_LABEL:
+        return _flag_is_typed(match)
+    if shape.label != _ASSIGNMENT_LABEL:
+        return False
+    if _is_store_entry_flag(match.group(_ASSIGNMENT_NAME_GROUP) or ""):
+        return False
+    return "=" in (match.group(_ASSIGNMENT_SEPARATOR_GROUP) or "")
+
+
+def _is_store_entry_flag(flag: str) -> bool:
+    """Whether ``flag`` is the store-entry flag, in ANY spelling the table sees.
+
+    The token reaches the judgement with its binder and, for a quoted argument, the
+    carrier's OPENING QUOTE still attached — the flag rule's group 1 is the flag AND
+    its binder, while the quoted ``credential-assignment`` rule's name group is the
+    flag alone:
+
+    * ``--secret `` — the space spelling, as the flag rule captures it;
+    * ``--secret "`` / ``--secret '`` — the same spelling with a quoted argument,
+      which that same rule matches and which the quoted assignment rule reads as a
+      name;
+    * ``--secret=`` / ``--secret="`` — the ``=`` spelling of both readings.
+
+    All of them are ONE flag, and that is what R4-1 measured: trimming only the ``=``
+    left ``--secret "`` in hand, so a QUOTED name was read as a typed VALUE — masked
+    in the retained copy where the bare spelling was released, and promoted as an
+    assignment in the result pass. The binder and the quote are TRIMMED rather than
+    compared literally because they are punctuation the carrier added, not part of
+    the flag.
+    """
+    return flag.split(maxsplit=1)[0].rstrip("=\"'").lower() == _STORE_ENTRY_FLAG
+
+
+def _flag_is_typed(match: Match[str]) -> bool:
+    """Whether a ``cli-credential-flag`` match bound a credential VALUE, not a NAME.
+
+    The flag's guard has judged the argument already (:func:`_flag_value_guard`
+    refuses syntax and a store-grammar NAME), and what it cannot judge is the FLAG's
+    own grammar — that is what this reads, from group 1:
+
+    * ``--secret`` binds a store ENTRY NAME (``secrets/cli.py``'s ``NAME[=VAR]``
+      metavar, and the documented way to hand a stored secret to a child), so its
+      argument is a REFERENCE: a kebab name after it must stay byte-identical in the
+      retained copy, which is the reading the result pass already gives it ("a
+      Secret name is masked at most, never contained");
+    * every other flag in the vocabulary — ``--password``, ``--token``,
+      ``--api-key`` and the rest — binds a VALUE, so a name-shaped or hyphen-phrase
+      argument after it is a passphrase TYPED into the command.
+
+    The flag is matched case-insensitively by its pattern, so it is lowered by
+    :func:`_is_store_entry_flag`; the binder (a space or an ``=``) and the carrier's
+    opening quote are trimmed there, because every spelling reaches this hook with
+    them attached (`_flag_value_guard` for the space, the re-scan of the inner
+    assignment for the ``=``). Leaving the opening quote on was the R4-1 defect: a
+    QUOTED name read as a typed VALUE — masked in the retained copy where the bare
+    spelling was released, and promoted as an assignment in the result pass — one
+    verdict per spelling of one argument. Both quote characters and both binders go
+    through the same trim.
+    """
+    return not _is_store_entry_flag(match.group(_FLAG_GROUP))
 
 
 def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
@@ -4505,7 +5057,12 @@ def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
         region = whole[offset:]
         if "@" in region:
             region = region.rsplit("@", 1)[0]
-    return ShapeHit(label=shape.label, value=value, window=region)
+    return ShapeHit(
+        label=shape.label,
+        value=value,
+        window=region,
+        assigned=_carries_assignment_operator(shape, match),
+    )
 
 
 #: The shortest run of a credential worth calling a leak. Short enough that a
@@ -4879,7 +5436,7 @@ def _is_prose_after_a_flag(hit: ShapeHit) -> bool:
     rather than left for a differential to find.
     """
     return (
-        hit.label == "cli-credential-flag"
+        hit.label == _CREDENTIAL_FLAG_LABEL
         and len(hit.value) <= _FLAG_PROSE_MAX_CHARS
         and _BARE_WORD.fullmatch(hit.value) is not None
     )
@@ -5199,7 +5756,12 @@ def _close_partial_masks(text: str) -> str:
     return text
 
 
-def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit]) -> str:
+def _mask_with_recorded_hit(
+    shape: Shape,
+    match: Match[str],
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None" = None,
+) -> str:
     """Record one match's hit and render its mask — the two halves ONE scan drives.
 
     **Why one pass and not two.** ``_run_shapes`` used to run ``finditer`` to collect a
@@ -5228,6 +5790,11 @@ def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit
     replacement), and rules whose replacement is a CALLABLE keep calling it.
     """
     value = _hit_value(shape, match)
+    if value and reject is not None and reject(shape.label, value, match):
+        # A rejected match is NOT a mask and NOT a hit: the span keeps its own
+        # bytes, which is what makes the confidence floor safe for text that is
+        # CODE (see :func:`scrub_shapes_for_arguments`).
+        return match.group(0)
     if value:
         hits.append(_make_hit(shape, match, value))
     # A hit is recorded for every mask, whatever the value's length: the FLOOR
@@ -5246,11 +5813,16 @@ def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit
     return match.expand(replacement)
 
 
-def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> str:
+def _run_shapes(
+    shapes: tuple[Shape, ...],
+    text: str,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None" = None,
+) -> str:
     """Apply one group of rules, in table order."""
     for shape in shapes:
         if shape.guard is not None:
-            text = _apply_guarded(shape, text, hits)
+            text = _apply_guarded(shape, text, hits, reject)
             continue
         # ``__post_init__`` guarantees one of the two is present; the checker
         # cannot see through that, so the assertion states it here as well.
@@ -5260,20 +5832,26 @@ def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> s
         # under it, and the default argument is belt and braces for a later edit that
         # defers the call. One closure per rule per TEXT, not per line: `_run_shapes`
         # runs once per anchored line of a tool result.
-        text = shape.pattern.sub(_recorder(shape, hits), text)
+        text = shape.pattern.sub(_recorder(shape, hits, reject), text)
     return _close_partial_masks(text)
 
 
-def _recorder(shape: Shape, hits: list[ShapeHit]) -> Callable[[Match[str]], str]:
+def _recorder(
+    shape: Shape,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None" = None,
+) -> Callable[[Match[str]], str]:
     """The ``re.sub`` callback for one rule: record the hit, return the mask.
 
     A factory rather than a nested ``def`` in the loop above so that the closure is
     built in one place and the rule/``hits`` binding is explicit rather than captured
-    from a loop variable.
+    from a loop variable. ``reject`` carries the caller's confidence floor through to
+    the callback — with the MATCH that produced the value, since the floor can depend
+    on the matched name and separator — and a rejected match returns its own bytes.
     """
 
     def record(match: Match[str]) -> str:
-        return _mask_with_recorded_hit(shape, match, hits)
+        return _mask_with_recorded_hit(shape, match, hits, reject)
 
     return record
 
@@ -5388,7 +5966,12 @@ _MULTILINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label in _MULTILINE_
 _LINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label not in _MULTILINE_LABELS)
 
 
-def _apply_guarded(shape: Shape, text: str, hits: list[ShapeHit]) -> str:
+def _apply_guarded(
+    shape: Shape,
+    text: str,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None" = None,
+) -> str:
     """Run one guarded rule: the pattern proposes, the guard decides.
 
     The guard runs only where the pattern matched, so a rule whose condition
@@ -5420,6 +6003,13 @@ def _apply_guarded(shape: Shape, text: str, hits: list[ShapeHit]) -> str:
             search_from = match.start() + 1
             continue
         value = _hit_value(shape, match)
+        if value and reject is not None and reject(shape.label, value, match):
+            # Re-scan from ONE CHARACTER IN, exactly like a guard rejection below:
+            # the rejected span may still CONTAIN a genuine assignment (the cheap
+            # name pattern's greedy reach is the same hazard), and resuming past the
+            # whole match would swallow it.
+            search_from = match.start() + 1
+            continue
         if value:
             hits.append(_make_hit(shape, match, value))
         # Keep everything before the credential, mask the credential: an
@@ -5499,6 +6089,219 @@ def scrub_secrets_with_hits(
     the same rule having produced it.
     """
     return scrub_shapes_with_hits(scrub_values(text, values))
+
+
+#: Rules whose match is evidence of a credential BY ITS OWN SPELLING — a DSN's
+#: ``user:password@``, a ``Bearer`` token, a PEM block, a vendor prefix — with no
+#: name-driven guess involved. A hit from one of these keeps its mask in the
+#: ARGUMENT pass regardless of the confidence floor below: the rule already knows
+#: what it is looking at, and the floor exists only to stop guesses.
+_ARGUMENT_EVIDENCE_LABELS = frozenset(
+    {
+        "authorization-basic",
+        "authorization-basic-bare",
+        "authorization-bearer",
+        "authorization-bearer-bare",
+        "aws-access-key-id",
+        "client-inline-password",
+        "cookie-header",
+        "curl-user-credential",
+        "docker-config-auth",
+        "docker-login-password",
+        "dsn-password",
+        "dsn-password-plain",
+        "dsn-password-truncated",
+        "gcp-service-account-key",
+        "gcp-service-account-value",
+        "gcp-service-account-value-open",
+        "github-pat",
+        "github-token",
+        "google-api-key",
+        "google-oauth-token",
+        "jwt",
+        "netrc-password",
+        "npmrc-auth-token",
+        "openssl-pass-phrase",
+        "pem-private-key",
+        "sendgrid-key",
+        "slack-token",
+        "slack-webhook-url",
+        "stripe-key",
+        "vendor-prefixed-token",
+    }
+)
+
+
+def _carries_credential_evidence(value: str) -> bool:
+    """Whether a matched value at least LOOKS like a credential, not like a word.
+
+    The floor the ARGUMENT pass adds on top of the releases: a credential almost
+    always carries an uppercase letter, a digit or a symbol, or is long. A bare
+    lowercase word (``swordfish``, a flag value, a mode name) does not — and in
+    text that is CODE, masking one is a rewrite of the program.
+
+    Deliberately conservative in the failing direction: a real credential that is a
+    short lowercase word is not masked by this pass. It is still masked by the
+    exact-value pass once the session knows it, and by every spelling-evidence rule.
+    """
+    if len(value) >= 20:
+        return True
+    return any(char.isupper() or char.isdigit() or not char.isalnum() for char in value)
+
+
+#: The NAMES of the two groups both ``credential-assignment`` spellings capture:
+#: the assigned NAME and the SEPARATOR (with any quote before it). The table states
+#: the layout where the two rules are defined — name, separator, opening quote,
+#: value — and the hooks read it by NAME under this label, so a rule that reused the
+#: label with a different layout fails loudly at its first match (``IndexError`` on
+#: a group the match does not have) instead of reading the wrong bytes and silently
+#: releasing a credential (agent review R3-5).
+_ASSIGNMENT_NAME_GROUP = "name"
+_ASSIGNMENT_SEPARATOR_GROUP = "separator"
+
+
+def _is_typed_credential_assignment(label: str, match: Match[str]) -> bool:
+    """Whether this match TYPED a credential into the command rather than naming one.
+
+    The distinction the argument pass has to draw between a NAME and a CREDENTIAL
+    TYPED INTO A COMMAND, taken from the match the rule made rather than from the
+    value, because the value cannot carry it: a Secret name and a passphrase are
+    both a lowercase hyphen phrase on the right of a name-driven rule, and the two
+    must go opposite ways.
+
+    What decides it is the rule's own context:
+
+    * ``cli-credential-flag`` — the flag's guard ALREADY judged the argument
+      (:func:`_flag_value_guard` releases a store NAME, a ``NAME[=VAR]``
+      placeholder and usage-string syntax), so a hit is a credential typed after
+      the flag and only WHITESPACE binds it. Reading a separator here would say
+      "no operator" and hand the passphrase to the DNS release (agent review
+      R3-1: the three space-separated rows — mysql's ``--password``, psql's
+      ``--password`` and ``lop secret run --token`` — were published in the
+      retained copy where ``main`` masked all three, while the ``=`` spelling
+      stayed masked because its re-scan reaches an inner assignment). The
+      ``--secret`` store-NAME readings are untouched: the env-name spelling never
+      reaches this hook at all (the guard releases the value, so there is no hit),
+      and a kebab name is read as a reference by :func:`_flag_is_typed`;
+    * ``credential-assignment`` — the ASSIGNMENT OPERATOR plus the name beside it:
+      an operator carrying ``=`` (``=``, ``:=``) TYPES a value into the command — an
+      environment assignment, a CLI flag, a ``--from-literal=...`` — and under a
+      STRONG name (:func:`is_strong_credential_name`) that value is a credential and
+      stays masked; a ``:`` operator LABELS an entry (a dict field, a YAML key, the
+      ``secret:`` line the secret sink prints), which is a REFERENCE the agent has
+      to be able to read and re-run.
+
+    The flag forms arrive here by a RE-SCAN, not by a different rule:
+    ``--from-literal=password=<value>`` first matches with the name
+    ``--from-literal``, that rule's guard refuses it as a name with no credential
+    reading, and the scan resumes one character in on ``password=<value>`` — so the
+    name and separator read here are the INNER assignment's, which is the one that
+    types the credential.
+    """
+    if label == _CREDENTIAL_FLAG_LABEL:
+        return _flag_is_typed(match)
+    if label != _ASSIGNMENT_LABEL:
+        return False
+    name = match.group(_ASSIGNMENT_NAME_GROUP) or ""
+    separator = match.group(_ASSIGNMENT_SEPARATOR_GROUP) or ""
+    if _is_store_entry_flag(name):
+        # The QUOTED spelling of this rule is what matches the ``=`` form, and
+        # ``--secret`` on its own is a strong credential name — so without this the
+        # operator spelling of the argument :func:`_flag_is_typed` releases was
+        # masked and promoted here, one verdict per binder rather than per argument
+        # (agent review R4-1).
+        return False
+    return "=" in separator and is_strong_credential_name(name)
+
+
+def _reject_argument_shape_hit(label: str, value: str, match: Match[str]) -> bool:
+    """Whether a shape hit must be left BYTE-IDENTICAL in text that is CODE.
+
+    The argument pass's one judgement, applied through
+    :func:`scrub_shapes_with_hits`'s ``reject`` hook. It releases, in order:
+
+    1. a code keyword or an identifier-shaped name — a value the table read as a
+       credential only because a credential word sat beside it;
+    2. for a rule in :data:`_ARGUMENT_EVIDENCE_LABELS`, nothing else: its own
+       spelling is the evidence, so a JWT (which also parses as a dotted path), a
+       short DSN password or a lowercase vendor tail is still masked;
+    3. otherwise any value :func:`_value_is_not_a_credential` releases for itself
+       (an expression, a path, a type name, a word under a weak name);
+    4. a value spelled in the full DNS grammar — a name, not a credential — UNLESS
+       the MATCH shows a credential typed into the command
+       (:func:`_is_typed_credential_assignment`). A hyphen is STRUCTURE in a name,
+       not the credential alphabet, so ``secret: <object name>`` is left
+       byte-identical in arguments; without this the hyphen counted as evidence and
+       the command the agent was about to run was rewritten. The value's own shape
+       cannot make that call: the round that released the whole grammar also
+       released ``export DB_PASSWORD=``, ``mysql --password=`` and
+       ``--from-literal=password=`` — a real credential left in the retained
+       copy and in every replayed request, where the parent masked it (agent review
+       R2-2). Execution safety is no justification: the executed call keeps its own
+       object either way, so that release only put plaintext at rest;
+    5. otherwise, for a NAME-DRIVEN rule, a value that carries no credential
+       evidence — the bare lowercase word the brief names, which in a command is far
+       more often a mode, a branch or a flag value than a secret.
+
+    ACCEPTED RESIDUAL, of the same family as the one
+    :func:`_is_identifier_shaped_name` states: a DNS-shaped value in a ``:``
+    context is released even under a strong name, because a colon LABELS an entry
+    rather than binding one. That carrier is not only a file the agent edits — a
+    JSON/JSON-ish body typed into a command is in the same class, and it is the one
+    place a credential typed into a command is still kept verbatim:
+    ``curl -d '{"password": "<hyphen phrase>"}'`` retains its value in the copy
+    the transcript persists while the result pass masks the same text (agent
+    review R3-3). Narrowing that needs a JSON-aware rule: the ``:`` is genuinely
+    ambiguous between an entry's key and a body's field, and the value's spelling
+    does not separate them. The released value is still masked by the result pass
+    and by every spelling-evidence rule, and the exact-value pass contains it once
+    the session knows it.
+    """
+    if not value:
+        return False
+    if _is_code_keyword_value(value) or _is_identifier_shaped_name(value):
+        return True
+    if label in _ARGUMENT_EVIDENCE_LABELS:
+        return False
+    if _value_is_not_a_credential(value, name="", strong=True):
+        return True
+    # The WHOLE DNS grammar, not only the qualifier vocabulary the release in
+    # :func:`_is_identifier_shaped_name` uses: that vocabulary is about a MASK in a
+    # result, where a Secret name outside it may still be masked once. This pass
+    # rewrites the program the harness executes, so the narrower question — can this
+    # be a credential at all? — has to be answered for every name, and
+    # ``_carries_credential_evidence`` answers it wrong: every hyphen in a k8s
+    # Secret name reads as a credential symbol. The MATCH is what separates the two
+    # readings; see :func:`_is_typed_credential_assignment`.
+    if _is_dns_name(value):
+        return not _is_typed_credential_assignment(label, match)
+    return not _carries_credential_evidence(value)
+
+
+def scrub_shapes_for_arguments(text: str) -> str:
+    """The shape pass with a VALUE-level confidence floor, for text that is CODE.
+
+    WHY THIS EXISTS (session 6ccea512c372, 2026-10-21): tool-call ARGUMENTS are
+    executed. They are not prose and not tool output — they are the program the
+    agent wrote, and the retained copy of them is what the transcript persists and
+    what every later provider request replays. Running the tool-result pass over
+    them let one false positive (a Python keyword read as an assignment
+    value) rewrite the assistant's own code: the loop replayed the masked call and
+    the model then wrote NEW cells copying the marker, which died with
+    ``NameError: name 'redacted' is not defined``.
+
+    So the heuristic judgements that are acceptable on a RESULT are not acceptable
+    here: a keyword or a name-shaped value is left alone, a name-driven rule must
+    also show a credential alphabet, and only the spelling-evidence rules mask on
+    their own. What still masks is a credential TYPED INTO a command — a DSN, a
+    ``Bearer`` header, a PEM block, a vendor token, ``-p<secret>`` — because those
+    rules recognise the credential's spelling rather than guessing from a name.
+
+    The table is not duplicated: this runs :func:`scrub_shapes_with_hits` with the
+    rejection hook, and a rejected span is re-rendered from its own match bytes.
+    """
+    scrubbed, _ = scrub_shapes_with_hits(text, reject=_reject_argument_shape_hit)
+    return scrubbed
 
 
 # --- the exact-VALUE pass: WHICH SPELLINGS of a known value are masked ---------

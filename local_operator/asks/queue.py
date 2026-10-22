@@ -1401,14 +1401,21 @@ class AskQueue:
         self._settled(ask_id)
         return {"ok": True}
 
-    def dismiss(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """View-only removal of a timed-out ask — the LIVE arm.
+    def dismiss(
+        self, ask_id: str, *, by: str = "unknown", reason: str | None = None
+    ) -> dict[str, Any]:
+        """The operator puts an ask away — the LIVE arm.
 
-        The dismissal injects nothing and asks the model nothing; what it can still
-        OWE is the deadline notice the ask had not delivered (fork A, §14), and the
-        reconcile :meth:`_settled` schedules delivers that like any other row. The
-        refusal comes from :func:`asks.render.dismiss_refusal`, shared with the cold
-        door (``asks/dismiss.py``), so a surface cannot tell which one answered it.
+        A TIMED-OUT ask is view-only, as before: what it can still OWE is the
+        deadline notice it had not delivered (fork A, §14). An OPEN ask is
+        accepted only while this session is STOPPED (D6, design §15), and then
+        owes the agent an ``ask-response-<id>`` row that the reconcile
+        :meth:`_settled` schedules delivers like a decline's — without a turn,
+        because the stopped-work residue rule keeps it from clearing the stop.
+        The refusal comes from :func:`asks.render.dismiss_refusal`, shared with the
+        cold door (``asks/dismiss.py``), so a surface cannot tell which one
+        answered it. ``reason`` is the operator's word for why (``moot`` when
+        missing); an unknown one is refused before anything is written.
 
         A RELAY'S DISMISSAL IS LOCAL (#2673, R1-2): the dismissal is a view act on
         this session's card, so the row written here is the whole fact — the
@@ -1418,9 +1425,11 @@ class AskQueue:
         state it reads after this tap is the same ``dismissed`` row, not a
         silently re-opened card.
         """
+        if reason is not None and reason not in store.DISMISS_REASONS:
+            return {"ok": False, "error": render.DISMISS_BAD_REASON}
         now = self._now()
         record = self._find(ask_id, now)
-        refusal = render.dismiss_refusal(record)
+        refusal = render.dismiss_refusal(record, agent_running=self._agent_running())
         if refusal:
             return {"ok": False, "error": refusal}
         payload = {
@@ -1429,11 +1438,28 @@ class AskQueue:
             "ask_id": ask_id,
             "at": now,
             "by": {"surface": by},
+            "reason": reason or store.DISMISS_REASON_DEFAULT,
         }
         if not store.append_event(self.session_dir, payload):
             return {"ok": False, "error": "the dismissal could not be recorded."}
         self._settled(ask_id)
         return {"ok": True}
+
+    def _agent_running(self) -> bool:
+        """Whether agent work may be running on this queue's session (D6).
+
+        FAILS CLOSED: a session that cannot say (no ``ask_agent_running``) counts as
+        running, so an open ask is never dismissed behind a turn this queue cannot
+        see. ``Session.ask_agent_running`` holds the predicate and its sources.
+        """
+        probe = getattr(self._session, "ask_agent_running", None)
+        if not callable(probe):
+            return True
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 — an unreadable runtime is "running"
+            logger.debug("ask: could not read the runtime state", exc_info=True)
+            return True
 
     def withdraw(
         self,
@@ -1689,11 +1715,20 @@ class AskQueue:
             # ever told the model it had no answer. Its row is the same
             # ``ask-timeout-<id>`` the deadline would have written.
             owed_dismissed = status == store.STATUS_DISMISSED and bool(record.get("notice_owed"))
-            if status not in store.INJECTING_STATUSES and not owed_dismissed:
+            # D1 (design §15): a PRE-deadline dismissal owes the RESPONSE row, which
+            # is delivered exactly like a decline's.
+            owed_dismissed_response = status == store.STATUS_DISMISSED and bool(
+                record.get("response_owed")
+            )
+            if (
+                status not in store.INJECTING_STATUSES
+                and not owed_dismissed
+                and not owed_dismissed_response
+            ):
                 continue
             response_id = store.response_row_id(record["ask_id"])
             timeout_id = store.timeout_row_id(record["ask_id"])
-            want_response = status in (
+            want_response = owed_dismissed_response or status in (
                 store.STATUS_ANSWERED,
                 store.STATUS_DECLINED,
                 store.STATUS_LATE,
@@ -1964,10 +1999,14 @@ class AskQueue:
         if not ask_id:
             return message
         record = self._find(ask_id, self._now())
-        if record is None or record.get("status") not in (
-            store.STATUS_ANSWERED,
-            store.STATUS_DECLINED,
-            store.STATUS_LATE,
+        if record is None or not (
+            record.get("status")
+            in (
+                store.STATUS_ANSWERED,
+                store.STATUS_DECLINED,
+                store.STATUS_LATE,
+            )
+            or (record.get("status") == store.STATUS_DISMISSED and record.get("response_owed"))
         ):
             return message
         if self._is_bridge_ask_record(record) and not self._bridge_answer_is_proven(record):
@@ -2122,7 +2161,21 @@ class AskQueue:
                 "status": record["status"],
                 "questions": [dict(q) for q in (record.get("questions") or [])],
                 "answers": {k: list(v) for k, v in (record.get("answers") or {}).items()},
-                "at": record.get("answered_at") or record.get("at") or 0,
+                "at": record.get("answered_at")
+                or record.get("dismissed_at")
+                or record.get("at")
+                or 0,
+                # A dismissal row states who put the ask away and why, so the
+                # receipt (``harness.rows.ask_response_notice``) can say so; absent
+                # for every other status, which leaves those rows unchanged.
+                **(
+                    {
+                        "reason": record.get("dismissed_reason"),
+                        "by": dict(record.get("dismissed_by") or {}),
+                    }
+                    if record["status"] == store.STATUS_DISMISSED
+                    else {}
+                ),
                 # ``secret_lost`` is stated on the ROW as well as in the text: a
                 # surface renders the fact (the card must not say "in hand" for a
                 # credential the session no longer holds) and the model reads the

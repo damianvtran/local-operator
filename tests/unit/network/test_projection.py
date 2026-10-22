@@ -334,3 +334,27 @@ def test_a_peers_last_user_claim_is_number_or_absent_on_the_row(
     assert row.last_user_at == expected, f"{claim!r} parsed to {row.last_user_at!r}"
     emitted = row.to_row_json()
     assert emitted["last_user_at"] == expected
+
+
+def test_a_peer_rows_binding_is_carried_and_an_older_peer_is_no_claim() -> None:
+    """``binding`` crosses the boundary; its absence or garbage is "unknown".
+
+    A peer on a build that predates the key (0.84.5 and earlier, measured
+    against the live mesh 2026-10-21) sends no ``binding`` at all: that must
+    parse as no team rather than raise or invent one, and so must a block that
+    is not an object or a name that is not a string.
+    """
+    from local_operator.network.projection import PeerRow
+
+    def parse(extra: dict[str, Any]) -> PeerRow:
+        return PeerRow.from_json({"session_id": "a" * 12, **extra}, device_id="d_peer")
+
+    claimed = parse({"binding": {"team": "lopdev", "agent": None}})
+    assert (claimed.team, claimed.agent) == ("lopdev", "")
+    assert claimed.to_row_json()["binding"] == {"agent": None, "team": "lopdev"}
+    older = parse({})
+    assert (older.team, older.agent) == ("", "")
+    assert older.to_row_json()["binding"] == {"agent": None, "team": None}
+    for garbage in ("lopdev", ["lopdev"], {"team": 7, "agent": True}):
+        row = parse({"binding": garbage})
+        assert (row.team, row.agent) == ("", ""), garbage

@@ -247,7 +247,13 @@ _WALK_DEPTH_CAP = 2
 # through this test's own printed table on the rebased tree, whose upstream
 # baseline is the #2520 ask raise above (ask 1063, unmoved here).
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 1044,
+    # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
+    # fork exception on the ephemeral bullet ("a fork starts with a copy of
+    # this conversation's roles"), added because the guides and the two
+    # ``show`` messages now carry it. Measured through this test's own
+    # printed table; the ``team`` entry below moves by the same 12 for its
+    # twin sentence, and no other entry moved.
+    "agent": 1056,
     "ask": 1063,
     "ask_withdraw": 314,
     "bash": 295,
@@ -418,7 +424,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # because this doc does not read config. RE-MEASURED (LOH-9 S2): 779 ->
     # 1018, the scope rule and delete semantics; measured with the same printed
     # table, and the tier arm below still does not read config.
-    "team": 1018,
+    # RE-MEASURED (LOH-9 S3): 1018 -> 1030, the fork-copy clause; only this
+    # and the ``agent`` entry moved.
+    "team": 1030,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -448,7 +456,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the qualified tools/effort/delegate descriptions render on both arms.
 #: 833 -> 1073 (LOH-9 S2): the same scope ladder the canonical arm takes; the
 #: tier arm renders it identically, so `task` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1073, "task": 764}
+#: 1073 -> 1085 (LOH-9 S3): the one-clause fork exception, the same +12 as
+#: the canonical arm; `task` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1085, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
