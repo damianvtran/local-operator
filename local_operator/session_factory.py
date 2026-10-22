@@ -3928,7 +3928,15 @@ _STORE_MAINTENANCE_STAMP_SCHEMA = 1
 #: which the freshness check already catches through ``passes``; the version is
 #: the explicit signal, so an older build reading a newer stamp (or the reverse)
 #: retries once instead of reasoning about a half-known sequence.
-_STORE_MAINTENANCE_STAMP_VERSION = 2
+#:
+#: 3: the transcript-compression pass joined the sequence, after cleanup. A stamp
+#: written by a build that DOES compress therefore must not be reused by one
+#: whose ``passes`` list has no compression pass — and the reverse, where a
+#: build that compresses would skip a store a previous build already swept,
+#: would leave the new pass unrun until the stamp expired. The bump makes the
+#: first maintenance run after an upgrade walk the store once under the new
+#: sequence.
+_STORE_MAINTENANCE_STAMP_VERSION = 3
 _STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
 _STORE_MAINTENANCE_PASS_NAMES = (
     # FIRST, deliberately: the census diffs what the store held at the end of
@@ -3937,6 +3945,10 @@ _STORE_MAINTENANCE_PASS_NAMES = (
     # unaccounted disappearance the same sequence caused.
     "session store census",
     "session cleanup policy",
+    # AFTER cleanup, deliberately: a session this pass's cleanup removes makes a
+    # compression row it would have written pointless, and a transcript cleanup
+    # has just freed is not worth compressing.
+    "session transcript compression",
     "orphan process-group sweep",
     "session origin backfill",
     "session title backfill",
@@ -4110,7 +4122,7 @@ def _run_store_maintenance(
     *,
     stop_event: threading.Event | None = None,
 ) -> bool:
-    """Run the seven idempotent store passes under one daemon-owned lock.
+    """Run the eight idempotent store passes under one daemon-owned lock.
 
     Separate runtime processes can start more than the 0.75-second idle delay
     apart, so mutual exclusion alone does not suppress their duplicate walks.
@@ -4161,6 +4173,7 @@ def _run_store_maintenance(
         )
         from local_operator.session.census import run_store_census
         from local_operator.session.cleanup import cleanup_from_config
+        from local_operator.session.compression import compress_from_config
         from local_operator.tools.group_reaper import sweep_orphan_groups
 
         # NO pass here deletes a session directory on its own judgement. The
@@ -4181,6 +4194,19 @@ def _run_store_maintenance(
             (
                 "session cleanup policy",
                 lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
+            ),
+            (
+                "session transcript compression",
+                # RETURNS a result and never raises (``compress_from_config``
+                # catches its own failures), and stands down at its next
+                # directory when this process is leaving — the same shape as
+                # every other store-walking pass here.
+                lambda: compress_from_config(
+                    config_manager,
+                    config_dir,
+                    live_dir=live_dir,
+                    should_stop=stop.is_set,
+                ),
             ),
             ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
             (
@@ -4228,7 +4254,7 @@ def _run_store_maintenance(
                 _write_store_maintenance_stamp(config_dir, pass_names)
             except OSError:
                 # Fail closed: without a trustworthy completion record, do
-                # not let each later process repeat the seven store-wide walks.
+                # not let each later process repeat the eight store-wide walks.
                 logger.debug(
                     "store maintenance completion stamp write failed; skipping", exc_info=True
                 )
