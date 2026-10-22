@@ -515,7 +515,10 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
         # locally the TUI did leave.
         assert f"Could not move sess1: {message}.{tail}" in shown, shown
         assert "Nothing changed." not in shown, shown
-        if changed:
+        if changed or not tail:
+            # R3-1: when the expected tail is empty, the substring assert above is
+            # satisfied by the prefix alone, so the absence of the old tail is the
+            # half that actually proves it was dropped.
             assert "it did not move" not in shown, shown
 
 
@@ -1640,9 +1643,10 @@ async def test_a_reached_copy_failure_keeps_the_producers_sentence(
     """
     opened = _patch_the_peer(monkeypatch)
     producer = (
-        "cloud-node-1 stopped answering during the copy. device-b discarded its "
-        "partial copy; device-a still has the conversation, paused for this move. "
-        "On device-a, restart the relay (`lop network restart`), then run the move again."
+        "device-a stopped answering during the copy (no answer on its link). "
+        "device-b discarded its partial copy; device-a still has the conversation, "
+        "paused for this move. On device-a, restart the relay (`lop network restart`), "
+        "then run the move again."
     )
 
     def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
@@ -1670,7 +1674,144 @@ async def test_a_reached_copy_failure_keeps_the_producers_sentence(
         assert "did not answer" not in shown, shown
         assert "Nothing moved" not in shown, shown
         assert "it did not move" not in shown, shown
+        assert "nothing was changed" not in shown, shown
         assert opened == ["ux-session"], opened
+
+
+@pytest.mark.asyncio
+async def test_a_reached_copy_failure_that_cannot_reopen_keeps_the_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U11, the link-drop spelling: a failed reopen may not rewrite the state.
+
+    The reopen still runs and the link dies while opening. Before this branch the
+    fallback was the late-failed-recall one, which said the peer "did not answer /
+    Nothing moved" — hiding that the copy was discarded and the source is paused.
+    The producer's sentence stays; only the placement-neutral "could not reopen"
+    fact is appended.
+    """
+    opened = _patch_the_peer(monkeypatch)
+    producer = (
+        "device-a stopped answering during the copy (no answer on its link). "
+        "device-b discarded its partial copy; device-a still has the conversation, "
+        "paused for this move. On device-a, restart the relay (`lop network restart`), "
+        "then run the move again."
+    )
+
+    async def dropped_link(session_id: str, **kwargs: Any) -> Any:
+        opened.append(session_id)
+        raise ConnectionError("synthetic peer link dropped during reopen")
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": producer,
+            "session_id": session_id,
+            "phase_reached": "prepared",
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", dropped_link)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local")
+        for _ in range(80):
+            await pilot.pause()
+            if any("could not reopen" in notice for notice in _notices(app)):
+                break
+        move_notice = next(
+            notice for notice in _notices(app) if notice.startswith("Could not move ux-session:")
+        )
+        assert "paused for this move" in move_notice, move_notice
+        assert "restart the relay" in move_notice, move_notice
+        assert (
+            "This window could not reopen the conversation on pixel-8; it is still there."
+            in move_notice
+        ), move_notice
+        assert "did not answer" not in move_notice, move_notice
+        assert "Nothing moved" not in move_notice, move_notice
+        assert "Nothing changed" not in move_notice, move_notice
+        assert opened == ["ux-session"], opened
+
+
+@pytest.mark.asyncio
+async def test_a_reached_copy_failure_whose_listing_goes_stale_keeps_the_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U11, the listing spelling: the peer's row turns unreachable at reopen time.
+
+    The reopen is refused before it opens anything, so the fallback is the only
+    notice left. It must carry the producer's paused/restart sentence, not the
+    generic "did not answer / Nothing moved" wording.
+    """
+    producer = (
+        "device-a stopped answering during the copy (no answer on its link). "
+        "device-b discarded its partial copy; device-a still has the conversation, "
+        "paused for this move. On device-a, restart the relay (`lop network restart`), "
+        "then run the move again."
+    )
+    state = {"moved": False}
+
+    def row_and_silence(session_id: str, root: Any) -> tuple[Any, tuple[Any, ...]]:
+        if session_id != "ux-session":
+            return None, ()
+        return _row(session_id, remote=True, reachable=not state["moved"]), ()
+
+    opened: list[str] = []
+
+    async def fake_open(session_id: str, **kwargs: Any) -> Any:
+        opened.append(session_id)
+        return _OwnedRemote(session_id)
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        state["moved"] = True
+        return {
+            "ok": False,
+            "code": "unreachable",
+            "message": producer,
+            "session_id": session_id,
+            "phase_reached": "prepared",
+            "changed": False,
+        }
+
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_and_silence", row_and_silence
+    )
+    monkeypatch.setattr(
+        "local_operator.session.remote_open.remote_row_for",
+        lambda sid, root: (
+            _row(sid, remote=True, reachable=not state["moved"]) if sid == "ux-session" else None
+        ),
+    )
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", fake_open)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(_OwnedRemote()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move --to local")
+        for _ in range(80):
+            await pilot.pause()
+            if any("could not reopen" in notice for notice in _notices(app)):
+                break
+        move_notice = next(
+            notice for notice in _notices(app) if notice.startswith("Could not move ux-session:")
+        )
+        assert "paused for this move" in move_notice, move_notice
+        assert "restart the relay" in move_notice, move_notice
+        assert (
+            "This window could not reopen the conversation on pixel-8; it is still there."
+            in move_notice
+        ), move_notice
+        # THE PICK'S OWN "which is unreachable (it did not answer)" row is a
+        # different fact about the link; what may not appear is the MOVE notice
+        # using that as a replacement for the producer's state.
+        assert "did not answer" not in move_notice, move_notice
+        assert "Nothing moved" not in move_notice, move_notice
+        assert "Nothing changed" not in move_notice, move_notice
+        assert opened == [], opened
 
 
 @pytest.mark.asyncio

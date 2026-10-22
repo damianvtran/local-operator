@@ -100,9 +100,10 @@ def _lose_the_second_fetch(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, i
             if fetches["n"] == 2:
                 # NOT DELEGATED: the source stopped answering between chunks, after
                 # the transcript had been written into the staging directory.
-                raise mobility.Moved(
-                    "unreachable", "cloud-node-1 stopped answering during the copy"
-                )
+                # THE PRODUCTION CAUSE: the relay's own sentence for a peer that
+                # did not answer, so the composed notice is tested against what a
+                # real copy failure actually hands it (D1).
+                raise mobility.Moved("unreachable", mobility._unreachable(None))
         return real_ask(self, frame, timeout=timeout)
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", losing_copy_ask)
@@ -167,7 +168,8 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     dest = str(server_b._own_label())  # noqa: SLF001
     holder = str(server_a._own_label())  # noqa: SLF001
     assert message == (
-        f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
+        f"{holder} stopped answering during the copy (no answer on its link). "
+        f"{dest} discarded its "
         f"partial copy; {holder} still has the conversation, paused for this move. "
         f"On {holder}, restart the relay (`lop network restart`), then run the move "
         "again."
@@ -175,6 +177,7 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     assert "this device" not in message, message
     assert "nothing was lost" not in message, message
     assert "nothing was changed" not in message, message
+    assert "nothing has changed" not in message, message
     # THE DESTINATION SWEPT EVERYTHING IT STAGED AND RELEASED ITS OWN CLAIM, so a
     # retry starts clean.
     assert not staging.exists(), "the partial copy was left staged"
@@ -220,11 +223,14 @@ def test_a_keep_copy_failure_leaves_the_source_running(
     holder = str(server_a._own_label())  # noqa: SLF001
     message = str(failed["message"])
     assert message == (
-        f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
+        f"{holder} stopped answering during the copy (no answer on its link). "
+        f"{dest} discarded its "
         f"partial copy; {holder} still has the conversation and was not paused "
         "(a copy leaves it running). Run the copy again."
     ), message
     assert "restart" not in message, message
+    assert "nothing was changed" not in message, message
+    assert "nothing has changed" not in message, message
     # THE SOURCE ENGINE STILL RUNS: ``--keep`` never retires it, and no journal
     # entry was written for a copy (the launch guard reads that file).
     assert retired == [], retired
@@ -261,11 +267,14 @@ def test_the_copy_failure_sentence_disambiguates_identical_names(
     dest = f"{same_name} (this move's destination)"
     holder = f"{same_name} (the source)"
     assert message == (
-        f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
+        f"{holder} stopped answering during the copy (no answer on its link). "
+        f"{dest} discarded its "
         f"partial copy; {holder} still has the conversation, paused for this move. "
         f"On {holder}, restart the relay (`lop network restart`), then run the move "
         "again."
     ), message
+    assert "nothing was changed" not in message, message
+    assert "nothing has changed" not in message, message
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +359,7 @@ def test_a_retry_after_a_failed_copy_is_refused_until_the_source_relay_restarts(
     message = str(retried["message"])
     assert f"already in progress on {holder}" in message, message
     assert (
-        f"so nothing was changed. On {holder}, restart the relay "
+        f"so nothing was changed. The move is stuck; restart the relay on {holder} "
         "(`lop network restart`), then try the move again."
     ) in message, message
     assert "this device" not in message, message

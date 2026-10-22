@@ -1798,12 +1798,30 @@ def _destination_move(
             # which one still holds the only one.
             dest = f"{dest} (this move's destination)"
             holder = f"{holder} (the source)"
+        # THE CAUSE MAY NOT STACK A SECOND STATE CLAIM (D1). The production cause
+        # for a dead link is ``_unreachable(None)``'s "that device is unreachable
+        # (no answer on its link); nothing was changed" — appended above the rest,
+        # it says "nothing was changed" and then says the destination discarded a
+        # copy and the source is paused, which contradict each other in one
+        # sentence. The trailing clause is dropped, and for an unreachable peer the
+        # cause names the HOLDER instead of "that device" (which the destination
+        # reading it cannot resolve). Other codes keep the producer's own sentence,
+        # minus the same trailing clause.
+        cause = str(refusal.message)
+        for clause in ("; nothing was changed", "; nothing has changed"):
+            if cause.endswith(clause):
+                cause = cause[: -len(clause)]
+                break
+        if refusal.code == "unreachable":
+            cause = f"{holder} stopped answering during the copy (no answer on its link)."
+        else:
+            cause = f"{cause}."
         if keep:
             # A COPY LEAVES THE SOURCE RUNNING AND JOURNALS NOTHING (U8), so
             # "paused" and "restart" would be false: there is no handoff to
             # unpick, and the source must not be told to stop its conversation.
             sentence = (
-                f"{refusal.message}. {dest} discarded its partial copy; {holder} "
+                f"{cause} {dest} discarded its partial copy; {holder} "
                 "still has the conversation and was not paused (a copy leaves it "
                 "running). Run the copy again."
             )
@@ -1811,7 +1829,7 @@ def _destination_move(
             # U9: the restart is spelled with the DEVICE IT RUNS ON first, so a
             # reader does not run a local command expecting it to act remotely.
             sentence = (
-                f"{refusal.message}. {dest} discarded its partial copy; {holder} "
+                f"{cause} {dest} discarded its partial copy; {holder} "
                 "still has the conversation, paused for this move. On "
                 f"{holder}, restart the relay (`lop network restart`), then run "
                 "the move again."
@@ -3568,8 +3586,8 @@ def _source_prepare(
                 "message": (
                     "a handoff of that conversation is already in progress on "
                     f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    f"changed. On {holder}, restart the relay (`lop network restart`), "
-                    "then try the move again."
+                    f"changed. The move is stuck; restart the relay on {holder} "
+                    "(`lop network restart`), then try the move again."
                 ),
                 "session_id": session_id,
             }
