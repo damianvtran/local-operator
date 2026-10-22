@@ -535,9 +535,15 @@ def resolve_preview_timeout_seconds() -> float:
     Precedence: ``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS`` > the default. A parsed
     value below :data:`PREVIEW_TIMEOUT_FLOOR_SECONDS` is clamped up to it (see the floor's
     comment for why). A value that is not a positive finite number -- a typo like ``5m``,
-    an empty export -- falls back to the default rather than failing a paid command on an
-    environment variable; the effective budget is named in the timeout error, so a typo
-    surfaces there instead of silently changing nothing.
+    an empty export, ``0`` or a negative -- falls back to the default rather than failing a
+    paid command on an environment variable; the effective budget is named in the timeout
+    error, so a typo surfaces there instead of silently changing nothing.
+
+    WHY ``0`` IS NOT "NO TIMEOUT" HERE, unlike :func:`resolve_mcp_timeout_s`: an MCP
+    server is a local transport the operator can see, while a preview is a paid call to a
+    remote hub whose transform pauses the caller's slot. Unbounding that is not a setting
+    anyone means to choose; it is a typo that would hold a paid call open indefinitely.
+    The asymmetry is deliberate, not an oversight of the MCP precedent.
 
     Returns:
         float: How many seconds this preview may take.
@@ -1206,12 +1212,17 @@ class RadientClient:
             )
             response.raise_for_status()
             self._refuse_redirect(response)
-        except requests.exceptions.Timeout as e:
-            # Ahead of the generic arm below: a timeout has no response, so that arm
-            # can only answer with the fallback message, which tells the caller
-            # nothing about the one thing they can do.
-            raise preview_timeout_error(budget) from e
         except requests.exceptions.RequestException as e:
+            # A READ timeout means the hub was reached and did not answer inside the
+            # budget -- the case the knob exists for. A CONNECT timeout never got there
+            # (refused, unreachable, DNS), so the budget is not what ran out and the
+            # "raise it" advice would send the caller to a knob that cannot help; it keeps
+            # the generic message. ConnectTimeout subclasses Timeout, so it has to be
+            # excluded by name rather than by except-clause ordering.
+            if isinstance(e, requests.exceptions.Timeout) and not isinstance(
+                e, requests.exceptions.ConnectTimeout
+            ):
+                raise preview_timeout_error(budget) from e
             raise api_error_from_response(
                 e.response,
                 fallback_message=fallback_message,

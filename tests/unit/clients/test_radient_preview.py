@@ -164,6 +164,22 @@ def test_preview_timeout_env_typo_falls_back_to_the_default(
     assert resolve_preview_timeout_seconds() == PREVIEW_TIMEOUT_DEFAULT_SECONDS
 
 
+def test_preview_timeout_env_zero_and_negative_fall_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately unlike ``resolve_mcp_timeout_s``: 0 does NOT mean "no timeout".
+
+    The MCP resolver reads 0 as "off" because an MCP server is a local transport the
+    operator can see. A preview is a PAID call to a remote hub: unbounded, it would hold
+    the caller's slot for as long as the transform runs, which is not a setting anyone
+    chooses on purpose -- it is a typo that would never fail. The divergence is pinned so
+    the next reader does not "fix" it back into the MCP shape.
+    """
+    for raw in ("0", "-5"):
+        monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, raw)
+        assert resolve_preview_timeout_seconds() == PREVIEW_TIMEOUT_DEFAULT_SECONDS
+
+
 def test_preview_request_carries_the_overridden_budget(
     radient_client: RadientClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -192,6 +208,26 @@ def test_preview_timeout_error_names_the_setting_and_the_budget(
     assert "800" in message  # a concrete next value to raise it to
     assert "Could not preview" not in message
     assert exc_info.value.code == "preview_timeout"
+    assert exc_info.value.status_code is None
+
+
+def test_preview_connect_timeout_keeps_the_generic_message(
+    radient_client: RadientClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ConnectTimeout`` subclasses ``Timeout`` but never reached the hub.
+
+    The budget cannot be what ran out when the connection was never made, so telling the
+    caller to raise it would send them to a knob that cannot help them.
+    """
+    monkeypatch.setenv(PREVIEW_TIMEOUT_ENV, "400")
+    with patch("requests.request", side_effect=requests.exceptions.ConnectTimeout("offline")):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.preview_publish_team_document(
+                dict(_TEAM_DOCUMENT), tenant_id="org-a"
+            )
+
+    assert PREVIEW_TIMEOUT_ENV not in str(exc_info.value)
+    assert "Could not preview the team publication" in str(exc_info.value)
     assert exc_info.value.status_code is None
 
 
