@@ -200,7 +200,7 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
     store, owner = _enroll(tmp_path)
     calls: list[dict[str, Any]] = []
 
-    async def fake_events(owner_, *, config_dir, access, after=None, client=None):
+    async def fake_events(owner_, *, config_dir, access, after=None, wait=None, client=None):
         calls.append({"after": after})
         if len(calls) == 1:
             return None  # 204 → reissue
@@ -210,7 +210,9 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
     first = asyncio.run(
         loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
-    assert first["reissued"] is True and calls[0]["after"] is None
+    # A fresh enrolment's cursor is 0 and is SENT as 0 (live E2E F2): an
+    # omitted ``after`` is the hub's no-cursor arm and skips the first message.
+    assert first["reissued"] is True and calls[0]["after"] == 0
     # Simulate the durable cursor having advanced (as record_feed_batch would):
     with store_mod.Store(tmp_path)._connect() as conn:  # noqa: SLF001 — test introspection
         store_mod.Store(tmp_path)._init(conn)  # noqa: SLF001
@@ -952,3 +954,212 @@ def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkey
         "text": "payload-2",
     }
     assert calls["cold_errand"].custom_type == "team_bridge_message"
+
+
+# -- Live E2E findings (local-operator-ui #1314 QA): the connector as shipped ---
+# never delivered to an agent. Each case below failed on main before its fix.
+
+
+def test_first_poll_after_enrolment_sends_cursor_zero(tmp_path, monkeypatch) -> None:
+    """F2: a fresh enrolment's stored cursor is 0, and 0 is a POSITION.
+
+    Omitting it reads as "no cursor", which the hub answers with the resync
+    arm at the CURRENT head — so the first message ever delivered to a fresh
+    endpoint was skipped and never woke the agent.
+    """
+
+    store, owner = _enroll(tmp_path)
+    calls: list[Any] = []
+
+    async def fake_events(owner_, *, config_dir, access, after=None, wait=None, client=None):
+        calls.append({"after": after, "wait": wait})
+        return None
+
+    monkeypatch.setattr(pull_mod, "events", fake_events)
+    asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert calls[0]["after"] == 0 and calls[0]["after"] is not None
+    # F1: every connector read is the long poll, never a plain poll.
+    assert calls[0]["wait"] == loop_mod.EVENTS_WAIT_S
+
+
+def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch) -> None:
+    """F1: a hub that answers every read at once (resync arms, a busy feed, a
+    proxy that strips the park) must not turn the loop into a request storm.
+    Measured on main: 124 reads in under 2 s, then 429 rate_limited."""
+
+    store, owner = _enroll(tmp_path)
+    polls: list[float] = []
+    stop = asyncio.Event()
+
+    async def instant_iteration(owner_, **kwargs):
+        polls.append(time.monotonic())
+        # The fake ends the loop itself after a storm-sized count: the unfixed
+        # loop never yields to the event loop, so a timer-driven stop could
+        # never fire and the test would spin without bound.
+        if len(polls) >= 50:
+            stop.set()
+        return {"events": 0, "reissued": False, "resync": True, "handled": []}
+
+    async def access_provider():
+        return _access(owner)
+
+    monkeypatch.setattr(loop_mod, "run_iteration", instant_iteration)
+
+    async def drive() -> None:
+        task = asyncio.create_task(
+            loop_mod.run_forever(
+                owner,
+                config_dir=tmp_path,
+                auth_store=None,
+                access_provider=access_provider,
+                stop=stop,
+            )
+        )
+        await asyncio.sleep(1.5)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(drive())
+    assert 1 <= len(polls) <= 3, len(polls)
+
+
+def test_failure_delay_honours_retry_after_and_stays_bounded() -> None:
+    """F1: a 429 names its own wait; re-polling sooner only extends the
+    refusal. The server's value wins over a shorter local backoff, is never
+    shorter than the backoff, and is capped so a hostile header cannot park
+    the connector for hours."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    limited = BridgeRefusal("rate_limited", "slow down", http_status=429, retry_after_seconds=42)
+    assert loop_mod._failure_delay(limited, 1.0) == 42.0
+    assert loop_mod._failure_delay(limited, 60.0) == 60.0
+    huge = BridgeRefusal("rate_limited", "x", http_status=429, retry_after_seconds=10**9)
+    assert loop_mod._failure_delay(huge, 1.0) == loop_mod.RETRY_AFTER_MAX_S
+    assert loop_mod._failure_delay(RuntimeError("boom"), 4.0) == 4.0
+
+
+def test_screen_item_hands_screening_the_production_status_source(tmp_path, monkeypatch) -> None:
+    """F3: without a status source every screen holds ``policy_stale`` before
+    any model call. The connector must pass the module's OWN sealed fetcher
+    (the H1 client's status read over the owner's pinned row), not none."""
+
+    from local_operator.team_bridge import scheduler as scheduler_mod
+
+    store, owner = _enroll(tmp_path)
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def fake_default_status_fetcher(*, config_dir, owner, transport=None):
+        captured["factory"] = (config_dir, owner)
+        return sentinel
+
+    async def fake_cycle(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(scheduler_mod, "default_status_fetcher", fake_default_status_fetcher)
+    monkeypatch.setattr(scheduler_mod, "run_screening_cycle", fake_cycle)
+    asyncio.run(wake_mod.screen_item(owner, _item(), config_dir=tmp_path, auth_store=None))
+    assert captured["status_fetcher"] is sentinel
+    assert captured["factory"] == (tmp_path, owner)
+
+
+def test_connector_entry_point_builds_the_config_rooted_credential_store(
+    tmp_path, monkeypatch
+) -> None:
+    """F4: the entry point started with ``auth_store=None``, so the screener
+    found no provider key and held every message as ``provider_error``."""
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.team_bridge.connector import __main__ as main_mod
+
+    _enroll(tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def fake_run_forever(owner, *, config_dir, auth_store, access_provider, **kwargs):
+        captured["auth_store"] = auth_store
+        captured["config_dir"] = config_dir
+
+    monkeypatch.setattr(loop_mod, "run_forever", fake_run_forever)
+    assert main_mod.main(["--config-dir", str(tmp_path)]) == 0
+    auth_store = captured["auth_store"]
+    assert isinstance(auth_store, AuthStore)
+    # The SAME root as the enrollment: config_dir alone does not relocate the
+    # database, so the explicit db_path is what makes this the right store.
+    assert auth_store._db_path == tmp_path / "auth.db"  # noqa: SLF001 — the root is the contract
+
+
+def test_bare_conversation_hold_never_reaches_the_pair_spine(tmp_path, monkeypatch) -> None:
+    """F5: screening records a ``provider_error`` hold under the bare
+    ``bcmsg_`` id. The retry handed it to the PAIR spine, which asked the hub
+    for a pair message that does not exist and raised on every iteration —
+    BEFORE the poll, so the whole connector stalled. The conversation's own
+    encoded-ref row is the re-drive authority; the bare row is retired."""
+
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    store, owner = _enroll(tmp_path)
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+    ).validated()
+    store.persist_hold(owner, "bcmsg_abcdef01", "provider_error", retry_at=time.time() - 5)
+    store.persist_hold(owner, ref.encode(), "provider_error", retry_at=time.time() - 5)
+    pair_calls: list[str] = []
+    conversation_calls: list[str] = []
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        pair_calls.append(message_id)
+        from local_operator.team_bridge.client import BridgeRefusal
+
+        raise BridgeRefusal("not_found", "This message does not exist.", http_status=404)
+
+    async def conversation_spine(owner_, conversation_ref, **kwargs):
+        conversation_calls.append(conversation_ref.message_id)
+        return {"action": "delivered", "message_id": conversation_ref.message_id}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    monkeypatch.setattr(loop_mod, "handle_conversation_available", conversation_spine)
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    assert pair_calls == []
+    assert conversation_calls == ["bcmsg_abcdef01"]
+    assert store.screening_hold(owner, "bcmsg_abcdef01") is None
+    assert {o["message_id"]: o["action"] for o in result["outcomes"]}["bcmsg_abcdef01"] == (
+        "retired"
+    )
+
+
+def test_a_failing_redrive_never_escapes_the_retry_pass(tmp_path, monkeypatch) -> None:
+    """F5 (bound): one hold's re-drive raising must not abort the iteration
+    before its poll. A message the hub says is gone (404) is terminal and its
+    row is retired; any other failure is held again on the bounded backoff."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    store, owner = _enroll(tmp_path)
+    store.persist_hold(owner, "bmsg_gone", "provider_error", retry_at=time.time() - 5)
+    store.persist_hold(owner, "bmsg_flaky", "provider_error", retry_at=time.time() - 5)
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        if message_id == "bmsg_gone":
+            raise BridgeRefusal("not_found", "This message does not exist.", http_status=404)
+        raise RuntimeError("transport hiccup")
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    actions = {o["message_id"]: o["action"] for o in result["outcomes"]}
+    assert actions == {"bmsg_gone": "retired", "bmsg_flaky": "hold"}
+    assert store.screening_hold(owner, "bmsg_gone") is None
+    flaky = store.screening_hold(owner, "bmsg_flaky")
+    assert flaky is not None and flaky["retry_at"] > time.time()
+    loop_mod._RETRY_ATTEMPTS.clear()

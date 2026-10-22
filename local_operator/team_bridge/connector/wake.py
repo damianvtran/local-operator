@@ -371,12 +371,21 @@ async def screen_item(
 
     from local_operator.team_bridge import scheduler as _scheduler
 
+    # F3 (live E2E): the cycle treats a missing status source as NO authority
+    # and holds every screen ``policy_stale`` before any model call — correct
+    # fail-closed behaviour, but no production caller ever supplied one, so
+    # the connector could never screen at all. The source is the module's OWN
+    # sealed fetcher: the H1 client's status read over the owner's pinned
+    # OAuth row, re-verified before and after the await. It is built per call
+    # so it always binds THIS owner snapshot; nothing here can mint authority
+    # — the cycle still refuses anything but a sealed ``VerifiedStatus``.
     return await _scheduler.run_screening_cycle(
         config_dir=config_dir,
         owner=owner,
         items=[item],
         auth_store=auth_store,
         settings=settings,
+        status_fetcher=_scheduler.default_status_fetcher(config_dir=config_dir, owner=owner),
     )
 
 
