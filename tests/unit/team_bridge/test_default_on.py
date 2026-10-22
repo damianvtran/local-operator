@@ -153,17 +153,13 @@ async def test_v2_enrols_once_commits_the_v2_receipt_and_sends_no_consented_via(
     assert receipt is not None
     assert receipt == {"consent_version": CONSENT_VERSION_V2, "consent_ref": "bep_1"}
     # The receipt satisfies the accepted-set currency rule for the served v2
-    # (#2778's ``_consent_receipt_is_current`` when it is present on this base;
-    # its exact-match branch otherwise — the receipt IS the served version).
-    from local_operator.team_bridge import scheduler
+    # (scheduler._consent_receipt_is_current, #2778): with and without a set.
+    from local_operator.team_bridge.scheduler import _consent_receipt_is_current as current
 
-    current = getattr(scheduler, "_consent_receipt_is_current", None)
-    assert receipt["consent_version"] == CONSENT_VERSION_V2
-    if current is not None:
-        assert current(receipt["consent_version"], CONSENT_VERSION_V2, ())
-        assert current(
-            receipt["consent_version"], CONSENT_VERSION_V2, (CONSENT_VERSION_V1, CONSENT_VERSION_V2)
-        )
+    assert current(receipt["consent_version"], CONSENT_VERSION_V2, ())
+    assert current(
+        receipt["consent_version"], CONSENT_VERSION_V2, (CONSENT_VERSION_V1, CONSENT_VERSION_V2)
+    )
 
     local = _local(tmp_path)
     assert local.enabled is True and local.enabled_is_set
