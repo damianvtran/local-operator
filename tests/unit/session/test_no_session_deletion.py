@@ -949,6 +949,37 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shape is an lstat-confirmed non-directory, and the caller only plans "
         "files whose shape+size+age passed",
     ),
+    # -- transcript compression ----------------------------------------------
+    # The compression pass RENAMES nothing and REMOVES nothing but the two files
+    # it owns, and both call sites are one function each so the argument can be
+    # read off the line rather than reconstructed:
+    #
+    # * `_publish(tmp, destination)` is the ONLY os.replace in the module. Its
+    #   destination is always a regular file the module names itself: the
+    #   session's own `transcript.jsonl.<suffix>` archive, a cache
+    #   `.meta.json`, or `sessions/last-compression.json`. A session DIRECTORY is
+    #   never a destination and is never renamed; `os.replace` onto a directory
+    #   would fail anyway, which is the belt on the argument.
+    # * `_unlink_file(path)` is the ONLY os.unlink. It lstat()s first and refuses
+    #   anything that is not a regular file (so a directory cannot be passed in
+    #   by a future bug), and it has exactly four callers, all in this module:
+    #   the just-written `.tmp`, the original transcript AFTER the verified
+    #   archive is published and re-stat confirms it did not change, the archive
+    #   itself when that re-stat fails (rollback), and an archive after a
+    #   verified restore. A session directory is never unlinked anywhere.
+    (
+        "local_operator/session/compression.py::_publish",
+        "os.replace",
+        "os.replace(tmp FILE, destination FILE): transcript archive, cache meta or "
+        "sessions/last-compression.json; a session directory is never a destination.",
+    ),
+    (
+        "local_operator/session/compression.py::_unlink_file",
+        "os.unlink",
+        "Single os.unlink, lstat-guarded to regular files only: the pass's own .tmp, "
+        "the original transcript only after a verified archive exists, that archive on "
+        "rollback, and an archive after a verified restore. Never a session directory.",
+    ),
     (
         "local_operator/session/cleanup.py::_write_record",
         "os.replace",
@@ -3660,6 +3691,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
+        # tmp -> the session's own transcript archive / a cache meta FILE /
+        # sessions/last-compression.json; never a session directory (see the
+        # allow-list rows above for the full argument).
+        "local_operator/session/compression.py::_publish",
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
         # tmp -> .session-holds.json (the holds map, beside the log)
         "local_operator/session/cleanup.py::_write_holds",

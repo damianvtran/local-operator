@@ -500,8 +500,8 @@ def record_archive(config_dir: Path, session_id: str, *, source: Path, codec: st
         return False
     try:
         title_mtime = (
-            Path(config_dir) / "sessions" / session_id / TITLE_SIDECAR_NAME
-        ).stat().st_mtime
+            (Path(config_dir) / "sessions" / session_id / TITLE_SIDECAR_NAME).stat().st_mtime
+        )
     except OSError:
         title_mtime = 0
     updated = dict(cached)
