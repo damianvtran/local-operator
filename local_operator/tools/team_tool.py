@@ -381,7 +381,8 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             "team",
             f"no team named {identifier_text(context, repr(name))} in this conversation "
             "or your account (try op='list'). A team can be conversation-local, so one "
-            "created in another conversation is not visible here.",
+            "created in another conversation is not visible here; a fork of this "
+            "conversation starts with a copy of its teams.",
         )
     from local_operator.profile_scope import row_scope, scope_words
 

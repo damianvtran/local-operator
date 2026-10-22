@@ -2792,10 +2792,21 @@ async def create_session(body: CreateSession, request: Request):
             # does not hold this session. A create that named no target gets the peer's
             # ``null`` and reports ``None`` for both.
             peer_reply = detail if isinstance(detail, dict) else {}
+            # THE AGENT IS BOUND ONLY WHEN ITS INSTRUCTIONS WERE APPLIED (review
+            # round 1, R2 on #2754). The peer records an agent on the session's
+            # attachment, which its listing reads back, only when the identity is
+            # attachable. A legacy row is named in the reply with
+            # ``instructions_applied: false`` and never recorded. Mapping the
+            # name anyway drew a badge that the next listing poll took away.
+            peer_agent = peer_reply.get("agent") or {}
             created: dict[str, Any] = {
                 "session_id": str(peer_reply.get("session_id") or ""),
                 "binding": {
-                    "agent": ((peer_reply.get("agent") or {}) or {}).get("name"),
+                    "agent": (
+                        peer_agent.get("name")
+                        if isinstance(peer_agent, dict) and peer_agent.get("instructions_applied")
+                        else None
+                    ),
                     "team": ((peer_reply.get("team") or {}) or {}).get("name"),
                 },
                 # AN ABSENT ``admitted`` READS AS NOT ADMITTED: the claim it carries is

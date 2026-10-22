@@ -1170,3 +1170,26 @@ def test_a_cwd_basename_is_not_an_address_because_a_peer_row_carries_no_cwd() ->
     assert "cwd" not in SessionRow._fields
     row = _selectable_row("aaaa11112222", name="unrelated")
     assert select_peer_session("sessions-remote-0b39", [row]) == (None, ())
+
+
+def test_the_owners_team_binding_reaches_the_session_row_through_the_real_parse() -> None:
+    """``binding`` on the wire → ``PeerRow`` → ``SessionRow.team``/``agent``.
+
+    The desktop's remote row reads these two fields for its team badge
+    (operator report, 2026-10-21). An older peer sends no ``binding`` and must
+    produce empty fields — no claim — rather than a guessed team; a catalogue
+    double without the attributes is the same no claim.
+    """
+    facts = [_Facts("d_aa", "radiant-m4", reachable=True)]
+    teamed = PeerRow.from_json(
+        {"session_id": "s_1", "binding": {"team": "lopdev", "agent": None}},
+        device_id="d_aa",
+    )
+    older = PeerRow.from_json({"session_id": "s_2"}, device_id="d_aa")
+    rows = {
+        row.id: row
+        for row in peer_session_rows(catalog=_Catalog(facts, [teamed, older, _Row("s_3", "d_aa")]))
+    }
+    assert (rows["s_1"].team, rows["s_1"].agent) == ("lopdev", "")
+    assert (rows["s_2"].team, rows["s_2"].agent) == ("", "")
+    assert (rows["s_3"].team, rows["s_3"].agent) == ("", "")

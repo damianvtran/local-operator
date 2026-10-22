@@ -4393,6 +4393,18 @@ class Session:
         # Error text from the run just ended, journalled as a session incident
         # once persistence finishes (see _run_turn / journal_incident).
         self._pending_incident: str | None = None
+        #: ``provider/model`` of the model that actually produced that error, as
+        #: ``AgentEndEvent.failing_model`` carried it. Set beside
+        #: ``_pending_incident`` and cleared with it. Empty means UNKNOWN, and
+        #: the incident then keeps the old behaviour of naming the session's
+        #: selected model — which is right for every failure that the serving
+        #: model itself produced, and wrong only in the case this field exists
+        #: to fix.
+        self._pending_incident_model: str = ""
+        #: The selector the turn started from, when ``_pending_incident_model``
+        #: was reached by failover. Carried for the incident's own sentence; see
+        #: ``incidents.Incident.failover_from``.
+        self._pending_incident_failover_from: str = ""
         #: Journal notices (model switch / session incident) whose LIVE append
         #: arrived while a turn owned the message list. They are already on
         #: disk; only the live splice is parked, because appending one between
@@ -17029,6 +17041,13 @@ class Session:
                 redact_tool_result=(
                     self._redact_tool_result_text if self._variables is not None else None
                 ),
+                # Tool-call ARGUMENTS take a separate, higher-confidence pass: they
+                # are code the harness executes and the model reads back, so a
+                # name-driven guess must not rewrite them (session 6ccea512c372).
+                # Wired from the same store; None only when there is no store.
+                redact_tool_arguments=(
+                    self._redact_tool_arguments_text if self._variables is not None else None
+                ),
                 # Tool-call outcomes into the shared ledger, so /session can
                 # report this model's tool-call validity. Supplied as a closure
                 # for the same reason redact_tool_result is: the harness has no
@@ -17131,6 +17150,10 @@ class Session:
                             # model (this session or a resumed one) must see
                             # the failure, not just the UI.
                             self._pending_incident = event.error
+                            self._pending_incident_model = getattr(event, "failing_model", "") or ""
+                            self._pending_incident_failover_from = (
+                                getattr(event, "failover_from", "") or ""
+                            )
                         self._abort_requested = True
                         self._continuation_queue.clear()
                         self._held_end = None
@@ -17242,9 +17265,23 @@ class Session:
                 self._subagent_comms.notify_detail_persisted(self._job_id)
 
             pending_incident = self._pending_incident
+            pending_incident_model = self._pending_incident_model
+            pending_incident_from = self._pending_incident_failover_from
             self._pending_incident = None
+            self._pending_incident_model = ""
+            self._pending_incident_failover_from = ""
             if pending_incident:
-                await self.journal_incident(pending_incident)
+                # Split here rather than pass the pair down: ``journal_incident``
+                # speaks ``provider``/``model`` because that is what
+                # ``Incident.render`` prints, and an unknown selector must stay
+                # unknown (both empty) rather than become a half-filled pair.
+                failing_provider, _, failing_model_id = pending_incident_model.partition("/")
+                await self.journal_incident(
+                    pending_incident,
+                    provider=failing_provider,
+                    model=failing_model_id,
+                    failover_from=pending_incident_from,
+                )
 
             await self._refresh_context_metadata()
             await self._maybe_compact()
@@ -18229,6 +18266,17 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
+        # MEMORY ADMISSION (memory_guard.admission_check): a child session is
+        # resident work in THIS process — its transcript, its tool commands, its
+        # browser — and a small node OOM-killed its own mesh relay by adding such
+        # work one launch at a time. Refused with the sentence rather than queued:
+        # the delegating model can wait, finish other work, or do the slice itself,
+        # and a queue would hide the pressure from the one reader who can act on it.
+        from local_operator import memory_guard
+
+        admission = memory_guard.admission_check("a subagent")
+        if not admission.admitted:
+            raise RuntimeError(admission.reason)
         if model is not None and model != "inherit":
             from local_operator.harness.subagent import model_may_choose_tier
 
@@ -18657,7 +18705,16 @@ class Session:
         if parked:
             self._context.messages.extend(parked)
 
-    async def journal_incident(self, raw: str, *, token: str = "", rendered: str = "") -> None:
+    async def journal_incident(
+        self,
+        raw: str,
+        *,
+        token: str = "",
+        rendered: str = "",
+        provider: str = "",
+        model: str = "",
+        failover_from: str = "",
+    ) -> None:
         """Persist and surface WHY the session last failed.
 
         The failover cascade rotates credentials and models and its notices
@@ -18676,6 +18733,17 @@ class Session:
         ``incidents.CUT_OFF_CAUSES`` and must not be pushed back through the
         substring rules. ``token`` rides in ``details`` so the same orphaned
         run is narrated at most once (see ``_journal_cut_off_once``).
+
+        ``provider``/``model`` are WHICH MODEL PRODUCED ``raw``, and default to
+        the session's selected model — the old unconditional behaviour, correct
+        for every failure the serving model itself raised. They are passed
+        only by the pending-incident flush, from the attribution the failover
+        stamped on the error, and that is the whole fix for a refusal by a
+        FALLBACK being reported against the model the user selected: an
+        exhausted Anthropic quota handed the turn to OpenAI, OpenAI answered
+        with a ``cyber_policy`` content filter, and the incident named
+        Anthropic — a provider that had not been reached and had nothing to
+        fix.
 
         Holds ``_journal_lock`` across the persist-then-append pair so a
         notice fired immediately after cannot overtake it: this method awaits a
@@ -18715,7 +18783,22 @@ class Session:
 
         if self._disposed or not raw:
             return
-        text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        failing_provider = provider or self._model.provider
+        failing_model_id = model or self._model.model_id
+        # THE SELECTION, stated by the one object that owns it. The failover
+        # walk stamps ``failover_from`` when a hop IT made switched target; a
+        # route the session had already moved onto before the walk started is
+        # invisible to the driver, so the selection half would otherwise be
+        # missing from exactly the report that needs it. Empty when the two
+        # agree — head and sentence would then say the same model twice.
+        selected = f"{self._model.provider}/{self._model.model_id}"
+        failing = f"{failing_provider}/{failing_model_id}"
+        text = rendered or format_incident_message(
+            raw,
+            failing_provider,
+            failing_model_id,
+            failover_from or (selected if selected != failing else ""),
+        )
         if not rendered:
             # THE DESKTOP/SSE COPY of the Radient usage-limit remedy. The
             # incident text is what the desktop renders as its
@@ -18928,6 +19011,25 @@ class Session:
         # shows nothing after a restart. Mirrors the transient model-switch
         # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
+
+    def _redact_tool_arguments_text(self, text: str) -> str:
+        """``LoopConfig.redact_tool_arguments``. Mask, never register.
+
+        :meth:`VariableStore.redact_arguments` runs the exact-value pass and then
+        the shape pass with a value-level confidence floor. Nothing it matches is
+        promoted to a session redaction: arguments are CODE, the least trustworthy
+        place to decide a value is a credential, and registration is what turned one
+        false positive into a session-wide rewrite (session 6ccea512c372).
+
+        No report is filed either. The incident path for a shape hit is a TOOL
+        RESULT — that is where a credential the session never knew about actually
+        reaches the model — and the result pass reports it with the tool and label.
+        A hit here is masked for containment only.
+        """
+        # The caller wires this only when a store exists (see the LoopConfig site),
+        # so the empty case keeps the loop's fallback to ``redact_tool_result``.
+        assert self._variables is not None
+        return self._variables.redact_arguments(text)
 
     def _redact_tool_result_text(self, text: str) -> str:
         """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.

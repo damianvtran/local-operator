@@ -10071,3 +10071,23 @@ async def test_history_projects_out_binding_notice_spam_but_keeps_audit(tmp_path
             assert SESSION_BINDING_CUSTOM_TYPE in wire, "audit metadata is not a notice"
     assert transcript.path.read_bytes() == raw_before
     assert b"legacy credential notice spam" in raw_before, "diagnostics stay in the journal"
+
+
+@pytest.mark.asyncio
+async def test_a_local_row_answers_its_binding_once(draft_api) -> None:
+    """A local row names its team in ``binding`` and nowhere else.
+
+    Review round 1, R1 on #2754: ``SessionRow`` gained ``team``/``agent`` to
+    carry a PEER row's binding, and the local projection copies the row via
+    ``_asdict()``. Every local row then published ``"team": ""`` beside
+    ``"binding": {"team": "lopdev"}``, two answers to one question.
+    """
+    client, root = draft_api
+    _bound_session(root, "chat0000001", team="lopdev")
+
+    answer = await client.get("/v1/desktop/sessions?limit=3")
+
+    assert answer.status_code == 200, answer.text
+    (row,) = answer.json()["result"]["sessions"]
+    assert row["binding"] == {"agent": None, "team": "lopdev"}
+    assert "team" not in row and "agent" not in row, sorted(row)
