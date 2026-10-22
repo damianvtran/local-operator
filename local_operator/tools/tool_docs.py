@@ -150,6 +150,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="create/update",
                 blurb="Author or fix a role, or a specialist profile.",
             ),
+            ToolDocOp(
+                op="delete",
+                blurb=(
+                    "Remove a role/specialist created for THIS conversation; an "
+                    "account row is refused (delete it from the user surfaces)."
+                ),
+            ),
         ),
         notes=(
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
@@ -167,7 +174,45 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "and project briefs on top of; a role is launched with "
             "``task(agent='<name>')``.\n"
             "- When a role's guidance proves wrong, fix it with the `agent` "
-            "tool rather than patching one prompt."
+            "tool rather than patching one prompt.\n"
+            "- SCOPE, the reuse → ephemeral → durable ladder: first reuse a role "
+            "that already resolves (list/search; an account role is usable "
+            "everywhere). If nothing fits the task, create it WITH NO ``scope`` — "
+            "it then lives in THIS conversation only: usable for the rest of the "
+            "conversation (task, /agent, teams), invisible in every other one, and "
+            "gone with it; a fork starts with a copy of this conversation's roles. "
+            "A DURABLE profile (saved for every conversation) is the "
+            "user's decision: ``scope='global'`` needs their confirmation, and "
+            "this host may not be able to ask — the refusal names the desktop "
+            "Profiles editor, the TUI /agent form and `lop agents`, plus the retry "
+            "without ``scope``. Never choose durable just because a one-off would "
+            "also work. ``op='delete'`` cleans up a conversation role; it cannot "
+            "delete an account row."
+        ),
+    ),
+    # -- team ---------------------------------------------------------------
+    "team": ToolDocNotes(
+        ops=(
+            ToolDocOp(op="list", blurb="What teams exist."),
+            ToolDocOp(op="show", blurb="A team's roster, briefs and project."),
+            ToolDocOp(
+                op="create/update",
+                blurb="Author a roster, or change its members and briefs.",
+            ),
+        ),
+        notes=(
+            "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
+            "when one covers the work; otherwise create it WITH NO ``scope`` so it "
+            "lives in THIS conversation only (usable until the conversation ends, "
+            "invisible elsewhere, gone with it; a fork starts with a copy of this "
+            "conversation's teams). A team saved for every conversation "
+            "is the user's decision: ``scope='global'`` needs their confirmation, and "
+            "this host may not be able to ask — the refusal names the desktop Teams "
+            "editor, the TUI /team form and `lop teams`, plus the retry without "
+            "``scope``. `team_delete` removes a conversation team only; an account "
+            "team must be deleted from a user surface, which asks its own "
+            "confirmation. A conversation team may reference account roles: those "
+            "are not copied, and they resolve from the account in every conversation."
         ),
     ),
     # -- ask ----------------------------------------------------------------
@@ -941,6 +986,50 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "instructions. Prefer this over ad-hoc `gh pr view`/`glab mr "
             "view` when the question is about this session's work, review "
             "rounds or freshness; `guide://code-requests` has the full rules."
+        ),
+    ),
+    # -- tags (V2-4 agent write path) ---------------------------------------
+    # The wire description keeps the one rule a model must know before calling
+    # (names only; a misspelling is refused). The vocabulary, the caps and the
+    # receipt contract are read-once reference, so they live here.
+    "tags": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                op="list",
+                blurb="Categories with ids, names, display order and conversation counts.",
+            ),
+            ToolDocOp(
+                op="create",
+                blurb="One category; blank, reserved, oversized or duplicate names are refused.",
+                fields=("name",),
+            ),
+            ToolDocOp(
+                op="rename",
+                blurb="Rename one category by id; assignments keep the id.",
+                fields=("id", "name"),
+            ),
+            ToolDocOp(
+                op="assign",
+                blurb="Replace one session's categories with the named set; empty clears.",
+                fields=("session_id", "tags", "primary"),
+            ),
+        ),
+        notes=(
+            "`assign` takes category NAMES only, exact case-insensitive — never "
+            "ids. Ids appear in `list` for display and for `rename`. A name the "
+            "store does not contain is refused with the known vocabulary; it is "
+            "never auto-created. Create the category first (`create` is the only "
+            "creation path), then assign it.\n"
+            "Caps: at most 32 categories; names 1-24 characters, unique "
+            "case-insensitively, with `Untagged` reserved; at most 8 categories "
+            "per session. `primary` must be one of the assigned names (or "
+            "omitted, which keeps the current primary, else the first). An empty "
+            "`tags` list clears the session's assignments.\n"
+            "Delegated and hidden sessions are taggable; a remote/mesh session is "
+            "refused with the route's `409 session_is_remote` and the device that "
+            "holds it. Every successful `assign` receipt names the categories and the "
+            "session, so the tool ledger is the audit trail. Deleting a category is a sidebar "
+            "action, not a tool op."
         ),
     ),
 }

@@ -249,6 +249,9 @@ def enqueue(
     request_id: str,
     requested_by: str,
     engage_on_arrival: bool = False,
+    drop_session_roles: bool = False,
+    session_roles: int = 0,
+    session_roles_notice: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Create (or return the existing) queue record for ``session_id``.
 
@@ -272,6 +275,17 @@ def enqueue(
             "requested_by": requested_by,
             "mode": "move",
             "engage_on_arrival": bool(engage_on_arrival),
+            # THE ROLE-GATE'S OPT-OUT RIDES THE INTENT (agent review round 1, M3):
+            # the resume prepare runs on the SOURCE, long after this frame is
+            # gone, and without the stored flag the gate would refuse the move it
+            # was queued to perform.
+            "drop_session_roles": bool(drop_session_roles),
+            # THE SOURCE'S STASH PROMISE IS PART OF THE INTENT (round 3, MAJOR 2):
+            # the recalling device rebuilds its receipt from this record, and its
+            # own root holds no copy — so the count and the sentence have to ride
+            # the record, not be recomputed where the definitions do not exist.
+            "session_roles": int(session_roles),
+            "session_roles_notice": str(session_roles_notice),
             "phase": QUEUE_PHASE_QUEUED,
             "phases": [{"phase": QUEUE_PHASE_QUEUED, "at": time.time()}],
             "detail": "",
@@ -403,6 +417,16 @@ def payload(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "code": str(record.get("code") or ""),
         "request_id": str(record.get("request_id") or ""),
         "updated_at": float(record.get("updated_at") or 0.0),
+        # LOH-9 S2 (QA round 2, round 3 MAJOR 1): a queued DROP must be legible
+        # from the record — the flag decides what the resume does with the role
+        # definitions, and a reader that only saw ``phase`` could not tell a
+        # carry from a drop. The source STAMPS the count and the (future-tense)
+        # sentence when it writes the record, which is what lets a receipt built
+        # on the recalling device name the stash: that device holds neither the
+        # definitions nor this record.
+        "drop_session_roles": bool(record.get("drop_session_roles") or False),
+        "session_roles": int(record.get("session_roles") or 0),
+        "session_roles_notice": str(record.get("session_roles_notice") or ""),
     }
 
 
@@ -813,6 +837,9 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 # deliberately False — the queueing is DONE; this is the move.
                 "request_id": str(record.get("request_id") or ""),
                 "resume_queued": True,
+                # Stored when the move was queued; the prepare this invite starts
+                # is on the SOURCE, which cannot see the original request.
+                "drop_session_roles": bool(record.get("drop_session_roles") or False),
             }
         )
     except Exception as refusal:  # noqa: BLE001 — a Moved carries the sentence
@@ -893,9 +920,11 @@ def _watch_for_commit(server: "RelayServer", session_id: str) -> str:
 def note_committed(root: Path | str, session_id: str) -> None:
     """The source's commit observed it directly: fold the record to ``resumed``.
 
-    Called from ``mobility._source_commit`` right after the tombstone lands, so
-    the record reaches its terminal state without waiting for the driver's next
-    poll — and idempotently, because the driver's tombstone watch may win the
+    Called from ``mobility._after_source_commit`` on EVERY commit — after the
+    tombstone when it lands, and even when its write failed, because the rename
+    out of ``sessions/`` already proved the commit and a record left live here
+    is one the driver's tombstone-only watch would fail terminally (review round
+    3, R3-1). The fold is idempotent, because the driver's watch may win the
     race. Terminal is write-once; whoever is second is a no-op.
     """
     transition(root, session_id, QUEUE_PHASE_RESUMED, writer="relay")

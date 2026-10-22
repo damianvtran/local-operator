@@ -782,6 +782,18 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
       through and only the oversized BODY is shed. The viewer sees a
       well-sequenced delta whose payload says it was degraded.
 
+    NEVER DROP WITHOUT SAYING WHAT TO DO. Both stand-ins are also PAUSED
+    state: the owner has stopped being able to describe canonical state on
+    this stream, so a client that keeps painting the last delta is showing
+    a view that no longer follows the session. ``paused`` says so, and
+    ``action: "reload"`` (the notice only) names the one recovery that
+    exists — re-sync through ``frontend_sync`` and durable history. The
+    flag CLEARS CLIENT-SIDE on the next complete frame: a ``frontend_sync``
+    carries the whole snapshot, and the next ``frontend_update`` that is not
+    ``degraded`` carries a body this stream can apply again. No new frame op
+    is needed for the clear, which is why this stays an additive key on the
+    frames old readers already accept.
+
     Cost on the hot path: one ``json.dumps`` per frame, measured at ~48µs on a
     20 KB frame (about 41% of the send's own serialization). That is an
     ADDITIONAL serialization, not a reused one — the send does its own — and it
@@ -827,11 +839,25 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
                 "sequence": data.get("sequence"),
                 "degraded": True,
                 "degraded_reason": text,
+                # The rendering half of the same fact: a viewer that only
+                # paints what it can apply needs to know it is paused, not
+                # merely that one delta was dropped. Additive, so an older
+                # reader ignores it exactly as it ignores any extra key.
+                "paused": True,
             },
         }
     return {
         "op": op,
-        "data": {"type": "notice", "text": text, "kind": "warning"},
+        "data": {
+            "type": "notice",
+            "text": text,
+            "kind": "warning",
+            # A notice is passive; these two keys are what make it
+            # ACTIONABLE, and they are the event-frame half of the pair
+            # documented on ``FrontendUpdate.degraded``.
+            "paused": True,
+            "action": "reload",
+        },
     }
 
 
@@ -7573,6 +7599,14 @@ class RuntimeServer:
                     answers,
                     by=str(frame.get("by", "")),
                     **ask_kwargs,
+                )
+            elif op == "ask_dismiss" and frame.get("reason"):
+                # Forwarded only when sent, so an older owner handle whose
+                # ``ask_dismiss`` predates ``reason`` is still called as before.
+                outcome = method(
+                    str(frame.get("ask_id", "")),
+                    by=str(frame.get("by", "")),
+                    reason=str(frame["reason"]),
                 )
             else:
                 outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))

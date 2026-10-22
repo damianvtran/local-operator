@@ -1088,3 +1088,79 @@ def test_a_lone_malformed_tier_is_named_not_reported_missing(config_dir) -> None
     assert "auto|none|" in rejection
     assert "no tiers are configured" not in rejection
     assert "omit 'effort' to inherit" in rejection
+
+
+# ---------------------------------------------------------------------------
+# the inherit sentinel is a ROLE's pin, not a tier a delegating model may pick
+# ---------------------------------------------------------------------------
+
+
+def test_the_inherit_sentinel_is_in_neither_schema(config_dir, tmp_path) -> None:
+    """A delegating model must not be able to reach the sentinel.
+
+    The sentinel is a ROLE's absolute statement that it runs on the launching
+    session's model. A model that could pass it could pin a REVIEWER to the
+    parent's own model, which collapses an independent review into a
+    self-review — so the state is reachable only from a packaged seed or the
+    operator's own registry row, and the schema (where a model learns what it
+    may pass) must not carry it.
+
+    The word is not new to this codebase: a TIER's VALUE may be ``default``
+    (``subagents.models.hi: default`` means "that tier runs on the session's
+    model"), and that spelling is advertised in the tier's own description.
+    What must not be advertised is the sentinel as something to PASS.
+    """
+    write_tiers(config_dir, THREE)
+    schemas = _schemas(tmp_path)
+
+    task = schemas["task"]
+    single = _effort(task, "properties")
+    item = _effort(task, "$defs", "TaskItem", "properties")
+    assert single is not None and item is not None
+    assert "default" not in _enum(single)
+    assert "default" not in _enum(item)
+
+    agent = schemas["agent"]
+    pin = _effort(agent, "properties")
+    assert pin is not None
+    assert "default" not in _enum(pin)
+
+
+@pytest.mark.asyncio
+async def test_the_agent_tool_refuses_to_write_the_inherit_sentinel_as_a_pin(
+    config_dir, tmp_path
+) -> None:
+    """The one model-reachable writer of a role pin refuses the sentinel.
+
+    The generic "not a configured tier" refusal would have covered this too,
+    but it says "not configured at subagents.models.default" — a remedy for a
+    misconfiguration that does not exist, because the sentinel is not a tier.
+    The refusal names what the value IS and why it may not be written here.
+    """
+    write_tiers(config_dir, THREE)
+    result = await _call(
+        tmp_path,
+        "agent",
+        {
+            "op": "create",
+            "name": "reviewer",
+            "description": "Reviews a diff",
+            "instructions": "Review it.",
+            "effort": "default",
+        },
+    )
+    assert result.is_error
+    assert "not a tier you can pin" in result.text
+    # And the role was NOT written: the refusal happens before the registry
+    # row exists, so there is no half-created role left behind.
+    assert "installed" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_task_tool_refuses_the_inherit_sentinel_as_a_tier(config_dir, tmp_path) -> None:
+    """``effort='default'`` on ``task`` is a tier pick, and there is no such
+    tier: the sentinel names the session's model, not a tier of it."""
+    write_tiers(config_dir, THREE)
+    result = await _call(tmp_path, "task", {"label": "r", "prompt": "p", "effort": "default"})
+    assert result.is_error
+    assert "invalid arguments" in result.text

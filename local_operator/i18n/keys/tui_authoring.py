@@ -138,6 +138,10 @@ def saved(*, name: str) -> Msg:
     return Msg("tui.authoring.saved", {"name": name})
 
 
+def scope_conversation() -> Msg:
+    return Msg("tui.authoring.scope_conversation", {})
+
+
 def seed_not_installed() -> Msg:
     return Msg("tui.authoring.seed_not_installed", {})
 

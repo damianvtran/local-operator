@@ -1,0 +1,21 @@
+{
+  "relay.session.tags.action": "Теги…",
+  "relay.session.tags.sheet_title": "теги",
+  "relay.session.tags.loading": "загрузка…",
+  "relay.session.tags.empty": "категорий тегов пока нет",
+  "relay.session.tags.empty_hint": "создайте категорию в настольном приложении или в терминале",
+  "relay.session.tags.load_error": "Не удалось загрузить каталог тегов.",
+  "relay.session.tags.retry": "повторить",
+  "relay.session.tags.limit_hint": "Максимум тегов на беседу — {count}. Удалите один, чтобы добавить другой.",
+  "relay.session.tags.primary": "основной",
+  "relay.session.tags.make_primary": "сделать «{name}» основным тегом",
+  "relay.session.tags.more": "{count, plural, one {ещё # тег} few {ещё # тега} many {ещё # тегов} other {ещё # тега}}",
+  "relay.session.tags.missing": "нет в каталоге",
+  "relay.session.tags.saving": "сохранение…",
+  "relay.session.tags.save_error": "Не удалось сохранить теги",
+  "relay.session.tags.remove_all": "удалить все теги",
+  "relay.session.tags.remove_all_confirm": "удалить все теги?",
+  "relay.session.tags.cancel": "отмена",
+  "relay.session.tags.done": "готово",
+  "relay.session.tags.pin_and_tags_hint": "удерживайте строку, чтобы закрепить её или поставить тег"
+}

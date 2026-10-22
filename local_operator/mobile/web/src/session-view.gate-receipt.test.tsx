@@ -112,8 +112,9 @@ function projection(): SessionProjection {
 
 async function openSheet() {
 	render(<SessionScreen sessionId="s1" />);
-	await waitFor(() => expect(screen.getByLabelText("approvals in this session")).toBeTruthy());
-	fireEvent.click(screen.getByLabelText("approvals in this session"));
+	await waitFor(() => expect(screen.getByRole("button", { name: "session menu" })).toBeTruthy());
+	fireEvent.click(screen.getByRole("button", { name: "session menu" }));
+	fireEvent.click(await screen.findByRole("button", { name: /Approvals/ }));
 	await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 }
 
@@ -149,7 +150,8 @@ describe("the phone's gate sheet", () => {
 		await openSheet();
 		fireEvent.click(screen.getByText("run without asking (auto)"));
 		await waitFor(() => expect(screen.getByRole("status").textContent).toContain("now auto"));
-		fireEvent.click(screen.getByLabelText("approvals in this session"));
+		fireEvent.click(screen.getByRole("button", { name: "session menu" }));
+		fireEvent.click(await screen.findByRole("button", { name: /Approvals/ }));
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 		fireEvent.click(screen.getByText("keep asking (ask)"));
 		await waitFor(() => expect(screen.queryByRole("status")).toBeNull());

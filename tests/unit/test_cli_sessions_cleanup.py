@@ -459,11 +459,16 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
         json.loads(line)
         for line in (store / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
     ]
-    assert len(rows) == 1 and rows[0]["policy"] == "delegated_scratchpad"
-    assert rows[0]["session"] == "content-kid-03" and rows[0]["actor"] == "cli"
+    # The receipt pair: the planned row is written before the first removal,
+    # the completed row after it (review round 1 made the pad-level receipt
+    # fail closed). The CLI assertions below read the completed half.
+    assert [row["phase"] for row in rows] == ["planned", "completed"]
+    row = rows[-1]
+    assert row["policy"] == "delegated_scratchpad"
+    assert row["session"] == "content-kid-03" and row["actor"] == "cli"
     # The CLI is a MANUAL trigger, and its row points at a path-level manifest.
-    assert rows[0]["trigger"] == "manual" and rows[0]["paths"] == 1
-    manifest = json.loads(Path(rows[0]["manifest"]).read_text())
+    assert row["trigger"] == "manual" and row["paths"] == 1
+    manifest = json.loads(Path(row["manifest"]).read_text())
     assert manifest["actor"] == "cli" and manifest["trigger"] == "manual"
     assert manifest["session"] == "content-kid-03"
     assert manifest["completed"] == [

@@ -65,7 +65,7 @@ def registries(tmp_path: Path) -> tuple[AgentRegistry, TeamRegistry]:
     # The PACKAGED seed, not a hand-made role row: a seed carries a real
     # preamble, and a role with an empty one is the A2 "hollow" profile the
     # front end reports separately — not the shape this file is about.
-    installed = install_seed("scout", registry=agents)
+    installed = install_seed("scout", registry=agents, scope="global")
     assert installed is not None
     teams = TeamRegistry(tmp_path)
     teams.save_team(_team())

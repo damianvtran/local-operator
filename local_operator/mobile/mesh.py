@@ -81,7 +81,9 @@ REQUEST_ID_PATTERN = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{
 #: ``_MOVE_UNCONFIRMED_CODES``, from which the desktop's receipt journal takes
 #: the same record/release decision. A test pins the two sets equal
 #: (``test_mesh_relay``) so a change there cannot silently diverge this plane.
-MOVE_UNCONFIRMED_CODES = frozenset({"relay_unavailable", "deadline_exceeded", "peer_unreachable"})
+MOVE_UNCONFIRMED_CODES = frozenset(
+    {"relay_unavailable", "deadline_exceeded", "peer_unreachable", "unconfirmed"}
+)
 
 #: The body keys the transfer route accepts, mirroring the desktop's
 #: ``TransferSession`` (which forbids extras): a misspelt key on the plane's

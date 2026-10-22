@@ -100,6 +100,12 @@ def static_feature_flags() -> dict[str, Any]:
         # working surface because a newer one is missing.
         "skill_catalogue": 1,
         "profile_catalogue": 1,
+        # THE SCOPE FACT ON PROFILE/TEAM ROWS (LOH-9 S2). Its own key, by the rule
+        # stated below: nothing existing is withheld, and a renderer that reads it
+        # knows it may send ``session_id`` to a picker route and paint a badge for
+        # a conversation-scoped row. A client that predates it keeps the fields it
+        # already parsed.
+        "profile_scope": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
         # no network) plus check/apply/apply-all/retry. A renderer gates the
@@ -111,8 +117,23 @@ def static_feature_flags() -> dict[str, Any]:
         # `hub_updates`: a renderer gated on `hub_updates` keeps its existing
         # pending-only sidebar and never polls this, while a renderer that sees
         # `hub_links` may show the healthy inventory with a direct source-scoped
-        # toggle. The legacy `/hub/updates` projection stays compatible.
+        # toggle. The legacy `/hub/updates` projection keeps its SHAPE, but it
+        # now also lists rows with `kind: "skill"` (the operator's brief: a
+        # skill failure must be visible and retryable on the same channel as
+        # agents and teams). A consumer of that projection must tolerate the
+        # third kind; it was a deliberate contract change, not a silent one.
         "hub_links": 1,
+        # THE COMPLETE INITIAL SKILLS ADAPTER: public/org remote reads, the
+        # `org_skills.list`/`org_skill.get` credential proxy, local pull/install,
+        # and initial publication (dry-run preview receipt + confirm) with the
+        # baseline/policy link row it materializes. Its OWN key rather than a
+        # bump of `hub_links`: a renderer gated on `hub_links` keeps its working
+        # agents/teams inventory and never offers a Skills surface whose pull or
+        # publish half would 404 on this backend. The key is a promise about the
+        # WHOLE adapter, so it is advertised only while every route below exists;
+        # the pin in tests/unit/server/test_desktop_hub_skill_publish.py fails if
+        # one is removed without also removing this key.
+        "hub_skills": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
@@ -877,6 +898,17 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
+        # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
+        # rows above the `More` fold and the rows below it). ADDITIVE — an older
+        # renderer never calls either route — so it gates nothing for an old
+        # client; it is how a renderer learns the surface EXISTS before it
+        # offers drag handles or a row menu whose save would 404. Absent, the
+        # client MUST NOT offer customisation at all and draws the fixed default
+        # order: a drag the backend cannot persist is worse than no drag.
+        # `1` is the first contract revision; a future stored field is additive
+        # and does not bump it.
+        "sidebar_layout": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a

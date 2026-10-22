@@ -1033,7 +1033,7 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         for invite in payload.get("invites") or []:
             lines.append(
                 f"  invite {invite.get('invite_id')}  {invite.get('role')}  "
-                f"{invite.get('state')}"
+                f"{invite.get('listed_state') or invite.get('state')}"
             )
         return lines
     if action == "peers":
