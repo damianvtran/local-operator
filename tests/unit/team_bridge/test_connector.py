@@ -337,6 +337,9 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
     monkeypatch.setattr(wake_mod, "screen_item", fake_screen)
     monkeypatch.setattr(wake_mod, "ack_read", fake_ack)
     monkeypatch.setattr(wake_mod, "deliver_wake", fake_deliver)
+    # These cases model an ENGAGED designated session; F8's unused-session
+    # gate has its own cases below.
+    monkeypatch.setattr(wake_mod, "engagement_hold", lambda designation, config_dir: "")
     _enable_bridge(tmp_path)  # S-8a: the fence reads the DISK config
     return record, body
 
@@ -874,6 +877,7 @@ def test_cancel_during_retry_keeps_claim_releasable(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(pull_mod, "message", fake_message)
     monkeypatch.setattr(wake_mod, "fetch_item", fake_fetch)
+    monkeypatch.setattr(wake_mod, "engagement_hold", lambda designation, config_dir: "")
     monkeypatch.setattr(wake_mod, "screen_item", slow_screen)
     # The spine sits BEHIND the fence, so this case must enable the feature —
     # and it BOUNDS the wait: a refusal here used to hang the suite instead of
@@ -1162,4 +1166,161 @@ def test_a_failing_redrive_never_escapes_the_retry_pass(tmp_path, monkeypatch) -
     assert store.screening_hold(owner, "bmsg_gone") is None
     flaky = store.screening_hold(owner, "bmsg_flaky")
     assert flaky is not None and flaky["retry_at"] > time.time()
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
+# -- Live E2E F8: a designated chief of staff nobody has opened yet -------------
+
+
+def _f8_enroll(tmp_path: Path, consent_version: str, *, enabled: bool = True) -> OwnerSnapshot:
+    """A committed enrollment with the given ACCEPTED consent and a designated
+    session that has no transcript at all (never engaged)."""
+
+    store = Store(tmp_path)
+    store.commit_enrollment(
+        OWNER, OwnerReceipt(consent_version, "ref-1"), cos_session_id="sess_cos"
+    )
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": enabled}}}), encoding="utf-8"
+    )
+    return OWNER
+
+
+def _engage_transcript(tmp_path: Path, session_id: str = "sess_cos") -> None:
+    """Give the session one real user turn on disk (what the owner's first message writes)."""
+
+    from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
+
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    row = {"type": "message", "payload": {"kind": "message", "role": "user", "content": "hi"}}
+    (directory / TRANSCRIPT_FILENAME).write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "version,engaged,expected",
+    [
+        ("bridge_consent_v1", False, "open_chief_of_staff"),  # v1 + never engaged: hold
+        ("bridge_consent_v1", True, ""),  # v1 + engaged: the F1-F6 path
+        ("bridge_consent_v2", False, ""),  # v2 + never engaged: may engage
+        ("bridge_consent_v3", False, "open_chief_of_staff"),  # unknown: never inferred
+        ("bridge_consent_v10", False, "open_chief_of_staff"),  # not "v2 or later" by order
+    ],
+)
+def test_engagement_hold_is_gated_on_the_accepted_consent(
+    tmp_path, version, engaged, expected
+) -> None:
+    owner = _f8_enroll(tmp_path, version)
+    if engaged:
+        _engage_transcript(tmp_path)
+    assert Store(tmp_path).designated_session_for(owner) == "sess_cos"
+    assert wake_mod.engagement_hold("sess_cos", tmp_path) == expected
+
+
+def test_engagement_never_trusts_a_disabled_feature_or_another_session(tmp_path) -> None:
+    from local_operator.team_bridge.engagement import designated_session_may_be_engaged
+
+    _f8_enroll(tmp_path, "bridge_consent_v2")
+    assert designated_session_may_be_engaged("sess_cos", config_dir=tmp_path) is True
+    # Not the designated session: never an exception.
+    assert designated_session_may_be_engaged("sess_other", config_dir=tmp_path) is False
+    # No store at all (another machine root): refused, and no store is created.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert designated_session_may_be_engaged("sess_cos", config_dir=empty) is False
+    assert not (empty / "team_bridge").exists()
+    # Feature switched off on disk: refused.
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": False}}}), encoding="utf-8"
+    )
+    assert designated_session_may_be_engaged("sess_cos", config_dir=tmp_path) is False
+
+
+def test_v1_unengaged_conversation_message_holds_visibly_and_never_wakes(
+    tmp_path, monkeypatch
+) -> None:
+    """F8, v1: the card is held under the visible code before ANY spend — no
+    body fetch, no screen, no admit, no wake — and the loop keeps a bounded
+    retry row so it is delivered once the owner opens the session."""
+
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    calls: list[str] = []
+
+    async def must_not_run(*args, **kwargs):
+        calls.append("called")
+        raise AssertionError("no spend before the engagement gate")
+
+    monkeypatch.setattr(conversation_mod, "_wire_for", must_not_run)
+    monkeypatch.setattr(conversation_mod, "screen_item", must_not_run)
+    monkeypatch.setattr(conversation_mod, "deliver_wake", must_not_run)
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+        conversation_name="qa",
+        sender_label="Ada",
+        sender_kind="human",
+    ).validated()
+    out = asyncio.run(
+        conversation_mod.handle_conversation_available(
+            owner, ref, config_dir=tmp_path, auth_store=None, access=_access(owner)
+        )
+    )
+    assert out == {"action": "hold", "message_id": "bcmsg_abcdef01", "code": "open_chief_of_staff"}
+    assert calls == []
+    # Through the loop: a durable, future-dated retry row under the encoded ref.
+    loop_mod._persist_hold_backoff(Store(tmp_path), owner, ref.encode(), out["code"])
+    row = Store(tmp_path).screening_hold(owner, ref.encode())
+    assert row is not None and row["hold_code"] == "open_chief_of_staff"
+    assert row["retry_at"] > time.time()
+    # The owner's surface shows the specific reason, not ``unknown_hold``.
+    from local_operator.team_bridge.read_context import _screening_state
+
+    assert _screening_state(row)["hold_code"] == "open_chief_of_staff"
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
+def test_open_chief_of_staff_hold_is_counted_for_the_owner_surface(tmp_path) -> None:
+    """F8: the held count the desktop status read shows the owner (code + count only)."""
+
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+    ).validated()
+    assert store.hold_count_readonly(owner, "open_chief_of_staff") == 0
+    store.persist_hold(owner, ref.encode(), "open_chief_of_staff", retry_at=time.time() + 60)
+    # A bare-id duplicate is never double-counted.
+    store.persist_hold(owner, "bcmsg_abcdef01", "open_chief_of_staff", retry_at=time.time() + 60)
+    assert store.hold_count_readonly(owner, "open_chief_of_staff") == 1
+
+
+def test_a_rehold_for_a_new_reason_replaces_the_visible_code(tmp_path, monkeypatch) -> None:
+    """F8: once the owner opens the session, a later hold for another reason
+    must replace ``open_chief_of_staff`` — the visible code may not keep asking
+    them to do what they already did."""
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    store.persist_hold(owner, "bmsg_x", "open_chief_of_staff", retry_at=time.time() - 5)
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        return {"action": "hold", "message_id": message_id, "code": "policy_stale"}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    row = store.screening_hold(owner, "bmsg_x")
+    assert row is not None and row["hold_code"] == "policy_stale" and row["retry_at"] > time.time()
     loop_mod._RETRY_ATTEMPTS.clear()

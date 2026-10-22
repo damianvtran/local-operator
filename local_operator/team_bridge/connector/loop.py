@@ -236,8 +236,16 @@ async def retry_due_holds(
         elif action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+            new_code = str(outcome.get("code") or "")[:64]
             try:
-                store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+                advanced = store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+                if advanced and new_code and new_code != row["hold_code"]:
+                    # The row's code is what the owner sees (F8): a message
+                    # first held ``open_chief_of_staff`` and then held for a
+                    # NEW reason once the owner opened the session must not
+                    # keep telling them to open it. Still conditional on the
+                    # row existing (``advanced``), so nothing is resurrected.
+                    store.persist_hold(owner, message_id, new_code, retry_at=_time.time() + gap)
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)

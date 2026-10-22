@@ -114,6 +114,34 @@ def _producer_fence(store: Any, owner: Any, access: Any, settings: Any) -> str:
     return ""
 
 
+def engagement_hold(designation: str, config_dir: Path) -> str:
+    """``""`` when a card may reach ``designation`` now, else the hold code.
+
+    WHY (live E2E F8): a designated chief of staff nobody has opened has no
+    user turn, and the session runtime refuses a peer row there unless the
+    member's ACCEPTED consent discloses that a message may engage it
+    (``team_bridge.engagement``). Asking HERE, before the body fetch, the
+    screen and the admit, means a v1 member's message is held visibly as
+    :data:`HOLD_OPEN_CHIEF_OF_STAFF` — no model spend, no admission, no
+    wake — and re-driven on the loop's bounded backoff until the owner opens
+    the session once. The receiving runtime re-checks the same rule; this is
+    the early answer, not the authority. Lazy imports: the connector's
+    module scope must not load ``mobile.peer_send`` (the import pin).
+    """
+
+    from local_operator.mobile.peer_send import session_has_durable_history
+    from local_operator.team_bridge.engagement import (
+        HOLD_OPEN_CHIEF_OF_STAFF,
+        designated_session_may_be_engaged,
+    )
+
+    if session_has_durable_history(designation, root=Path(config_dir)):
+        return ""
+    if designated_session_may_be_engaged(designation, config_dir=config_dir):
+        return ""
+    return HOLD_OPEN_CHIEF_OF_STAFF
+
+
 def _display_fields(item: Mapping[str, Any]) -> dict[str, str] | None:
     """The ONE normalized bounded display field set (S-9), from the item.
 
@@ -572,6 +600,11 @@ async def handle_message_available(
     if fence_code:
         return {"action": "hold", "message_id": message_id, "code": fence_code}
     try:
+        # F8: a never-used designated session the accepted consent does not
+        # let a message engage holds visibly here, before any spend.
+        engage_code = engagement_hold(designation, config_dir)
+        if engage_code:
+            return {"action": "hold", "message_id": message_id, "code": engage_code}
         from local_operator.team_bridge import pull as _pull
 
         ref = await _pull.message(owner, message_id, config_dir=config_dir, access=access)

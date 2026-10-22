@@ -108,6 +108,11 @@ HOLD_CODES = (
     "retry_later",
     "write_once_conflict",
     "schema_damaged",
+    # Not a screening outcome: the connector's wait for the owner to open a
+    # never-used chief-of-staff session whose accepted consent does not allow a
+    # card to engage it (team_bridge.engagement). Listed so the owner's surface
+    # renders the specific reason rather than ``unknown_hold``.
+    "open_chief_of_staff",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
