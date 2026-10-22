@@ -10,12 +10,14 @@ stay byte-identical to the consent hold (#2712), v2 enrols exactly once.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 import httpx
 import pytest
 
+from local_operator import config_watch
 from local_operator.team_bridge import availability
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
@@ -41,8 +43,15 @@ V1_TEXT = "served v1 consent text"
 def _env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
     availability.clear()
+    # The discipline reads the local gates through the per-directory config
+    # watcher, whose change fingerprint can match across tests: a passing test's
+    # ``tmp_path`` is deleted and its name (and inode) reused by the next
+    # parameter, which would then see the PREVIOUS row's marker/key. That made a
+    # zero-write gate row pass for the wrong reason, so start each test cold.
+    config_watch._reset_for_tests()
     yield
     availability.clear()
+    config_watch._reset_for_tests()
 
 
 class Hub:
@@ -187,6 +196,11 @@ GATES = [
     pytest.param(
         dict(version=CONSENT_VERSION_V1, accepted=[CONSENT_VERSION_V1]), {}, id="served-v1"
     ),
+    pytest.param(
+        dict(version=CONSENT_VERSION_V1, accepted=[CONSENT_VERSION_V1, CONSENT_VERSION_V2]),
+        {},
+        id="served-v1-accepting-v1-and-v2",
+    ),
     pytest.param(dict(accepted=None), {}, id="no-accepted-set"),
     pytest.param(dict(accepted=[CONSENT_VERSION_V1]), {}, id="v2-not-in-accepted"),
     pytest.param(dict(accepted=[]), {}, id="empty-accepted-set"),
@@ -199,6 +213,9 @@ GATES = [
     pytest.param(dict(endpoint=_default_on_endpoint("disabled")), {}, id="endpoint-disabled"),
     pytest.param({}, dict(enabled=False), id="explicit-local-off"),
     pytest.param({}, dict(marker=True), id="account-marker-present"),
+    # The status answer was read for acc_other but the signed-in account is
+    # acc_1: the write must not be pinned to an account the answer is not for.
+    pytest.param({}, dict(answer_account="acc_other"), id="answer-account-mismatch"),
 ]
 
 
@@ -213,8 +230,19 @@ async def test_each_gate_failing_alone_performs_zero_writes(
 
         record_default_enrollment(tmp_path, "acc_1")
     hub = Hub(**hub_kwargs)
+    discipline = _discipline(hub, tmp_path)
+    if "answer_account" in local_kwargs:
+        real_payload_check = discipline._payload_check
 
-    await _discipline(hub, tmp_path).check(Boundary.APP_START)
+        def _foreign_answer(*args: Any, **kwargs: Any):
+            return replace(
+                real_payload_check(*args, **kwargs),
+                account_id=local_kwargs["answer_account"],
+            )
+
+        discipline._payload_check = _foreign_answer  # type: ignore[method-assign]
+
+    await discipline.check(Boundary.APP_START)
 
     assert hub.writes == []
     assert Store(tmp_path).committed_owner_count() == 0
@@ -449,6 +477,16 @@ async def test_turn_off_is_sticky_across_restart_refresh_and_resignin(tmp_path: 
     assert local.enabled is False and local.enabled_is_set
     assert local.default_enrollment == {"acc_1": "done"}
 
+    # The marker layer, pinned after a REAL Turn off: delete the explicit key
+    # (as a hand edit would) and a fresh discipline must still not enrol.
+    _remove_enabled_key(tmp_path)
+    assert not _local(tmp_path).enabled_is_set
+    hub.endpoint = None
+    before_marker_only = len(hub.writes)
+    await _discipline(hub, tmp_path).check(Boundary.APP_START)
+    assert len(hub.writes) == before_marker_only
+    _set_local(tmp_path, enabled=False)
+
     # Restart-like: a FRESH discipline, status refresh, and a re-sign-in as the
     # same account; and even a hub that (wrongly) reports no endpoint again.
     hub.endpoint = None
@@ -492,3 +530,138 @@ async def test_enroll_default_on_body_never_carries_consented_via(tmp_path: Path
     import inspect
 
     assert "consented_via" not in inspect.signature(client.enroll_default_on).parameters
+
+
+def _remove_enabled_key(root: Path) -> None:
+    """Delete ``team_bridge.enabled`` from the real document, keeping siblings."""
+    from local_operator.config import ConfigManager
+
+    manager = ConfigManager(root)
+    section = dict(manager.get_config_value("team_bridge", {}) or {})
+    section.pop("enabled", None)
+    manager.set_config_value("team_bridge", section)
+
+
+# -- M1: an explicit OFF landing DURING the enrolment round trip wins ----------
+
+
+def _async_hub(hub: Hub, during_enroll: Callable[[], Any]):
+    """Wrap ``hub`` so ``during_enroll`` runs after the hub accepted the POST and
+    before the client sees the answer: the exact window the review found."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        response = hub(request)
+        if request.method == "POST" and request.url.path.endswith("/messaging/enrollment"):
+            await during_enroll()
+        return response
+
+    return handler
+
+
+def _discipline_over(handler: Any, root: Path) -> StatusDiscipline:
+    return StatusDiscipline(
+        root,
+        base_url="https://hub.example/v1",
+        transport=httpx.MockTransport(handler),
+        store=FakeStore(rows=[FakeRow(1, data={"access": "tok", "account_id": "acc_1"})]),
+    )
+
+
+async def test_an_explicit_off_landing_during_the_post_is_not_overwritten(tmp_path: Path):
+    hub = Hub()
+
+    async def settings_edit() -> None:
+        _set_local(tmp_path, enabled=False)
+
+    discipline = _discipline_over(_async_hub(hub, settings_edit), tmp_path)
+    await discipline.check(Boundary.APP_START)
+
+    local = _local(tmp_path)
+    assert local.enabled is False and local.enabled_is_set  # never flipped to true
+    # No owner or receipt: explicit false always wins, so nothing was committed.
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_a_turn_off_landing_between_the_post_and_the_writes_wins(tmp_path: Path):
+    hub = Hub()
+
+    async def turn_off() -> None:
+        client = tb_client.TeamBridgeClient(
+            tmp_path,
+            base_url="https://hub.example/v1",
+            transport=httpx.MockTransport(hub),
+            store=FakeStore(rows=[FakeRow(1, data={"access": "tok", "account_id": "acc_1"})]),
+        )
+        await client.put_settings(state="disabled", tenant_id="tnt_1", expected_account_id="acc_1")
+
+    discipline = _discipline_over(_async_hub(hub, turn_off), tmp_path)
+    await discipline.check(Boundary.APP_START)
+
+    puts = [r for r in hub.writes if r.method == "PUT"]
+    assert len(puts) == 1 and json.loads(puts[0].content)["state"] == "disabled"
+    local = _local(tmp_path)
+    assert local.enabled is False and local.enabled_is_set
+    assert local.default_enrollment == {"acc_1": "done"}  # the Turn-off marker
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_the_post_enrol_write_never_overwrites_an_explicit_value(tmp_path: Path):
+    """Even past the commit veto, the ``enabled`` write is conditional on absence."""
+    from local_operator.team_bridge.settings import record_local_enabled_if_unset
+
+    assert record_local_enabled_if_unset(tmp_path) is True
+    assert _local(tmp_path).enabled is True
+    _set_local(tmp_path, enabled=False)
+    assert record_local_enabled_if_unset(tmp_path) is False
+    assert _local(tmp_path).enabled is False
+
+
+async def test_an_off_landing_after_the_owner_commit_is_not_overwritten_with_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The residual window: past the veto, the ``enabled`` write is still conditional.
+
+    The veto and the commit have no await between them, so the only OFF that can
+    still land is one after the commit. It keeps its ``false`` (the committed
+    owner then sits behind the explicit-OFF fences every consumer reads, exactly
+    as after any explicit disable) instead of being flipped to ``true``.
+    """
+    real = tb_client.record_default_enrollment
+
+    def record_then_turn_off(config_dir: Path, account_id: str) -> None:
+        real(config_dir, account_id)
+        _set_local(config_dir, enabled=False)
+
+    monkeypatch.setattr(tb_client, "record_default_enrollment", record_then_turn_off)
+    await _discipline(Hub(), tmp_path).check(Boundary.APP_START)
+
+    local = _local(tmp_path)
+    assert local.enabled is False and local.enabled_is_set
+
+
+async def test_turn_off_writes_its_own_marker_without_help_from_the_enrol_path(tmp_path: Path):
+    """Pin ``_apply_local_opt_out``'s marker on its own.
+
+    The default enrolment also writes the marker, so a test that enrols first
+    cannot tell the two writers apart. Here the endpoint pre-exists (enabled by
+    hand elsewhere, no marker), the member turns it off, the explicit key is then
+    removed and the endpoint is gone again: only the Turn-off marker stands
+    between that account and a re-enrolment.
+    """
+    hub = Hub(endpoint=_default_on_endpoint("active", "settings"))
+    client = tb_client.TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        transport=httpx.MockTransport(hub),
+        store=FakeStore(rows=[FakeRow(1, data={"access": "tok", "account_id": "acc_1"})]),
+    )
+    await client.put_settings(state="disabled", tenant_id="tnt_1", expected_account_id="acc_1")
+    assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
+
+    _remove_enabled_key(tmp_path)
+    assert not _local(tmp_path).enabled_is_set
+    hub.endpoint = None
+    before = len(hub.writes)
+    await _discipline(hub, tmp_path).check(Boundary.APP_START)
+    assert len(hub.writes) == before
+    assert _enrolment_writes(hub) == []

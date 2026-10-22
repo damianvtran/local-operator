@@ -54,7 +54,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: :meth:`TeamBridgeSettings.enabled_given`, used by the status discipline (the
 #: only automatic enrolment) and the status route's ``local.enabled``. The
 #: automatic enrolment then WRITES ``team_bridge.enabled = true`` once the owner
-#: and receipt are committed (:func:`record_local_enabled`), which is what makes
+#: and receipt are committed (:func:`record_local_enabled_if_unset`), which is what makes
 #: the offline consumers above agree; an absent key therefore never starts any
 #: send/receive/wake work by itself — it only means "eligible to be enrolled".
 DEFAULT_TEAM_BRIDGE_ENABLED = False
@@ -292,16 +292,41 @@ def _store_internal(config_dir: "Path", path: tuple[str, ...], value: Any) -> No
 def record_local_enabled(config_dir: "Path", value: bool) -> None:
     """Persist an EXPLICIT ``team_bridge.enabled`` from the runtime.
 
-    Two callers, both after the server already answered: the automatic
-    enrolment (``True``, so the offline consumers that cannot see the served
-    consent agree the owner it just committed may run) and the one-click
-    turn-off (``False``, the sticky local opt-out every fence and the enrolment
-    gate read). Best-effort by contract at the call sites.
+    The one-click turn-off (``False``, the sticky local opt-out every fence and
+    the enrolment gate read) writes it after the server answered. The automatic
+    enrolment does NOT use this for ``True``: it must never overwrite an
+    explicit value, see :func:`record_local_enabled_if_unset`. Best-effort by
+    contract at the call sites.
     """
 
     if not isinstance(value, bool):
         raise ValueError("value must be a bool")
     _store_internal(config_dir, ENABLED_PATH, value)
+
+
+def record_local_enabled_if_unset(config_dir: "Path") -> bool:
+    """Write ``team_bridge.enabled = true`` ONLY while the key is still absent.
+
+    WHY NOT :func:`record_local_enabled`. The automatic enrolment decides to
+    write after an awaited hub round trip; an explicit value (``false`` from a
+    settings edit or the one-click Turn off, or an explicit ``true``) may have
+    landed in that window, and "explicit false always wins" means the default
+    must never overwrite it. The check and the write share ONE config write lock
+    (reentrant with the leaf write), so no writer can slip in between them.
+    Returns whether it wrote. Best-effort at the call site, like its sibling.
+    """
+
+    from local_operator import settings_io
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+    from local_operator.config_writer import config_write_lock
+
+    with config_write_lock(Path(config_dir)):
+        settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
+        manager = ConfigManager(config_dir)
+        if TeamBridgeSettings.from_config(manager).enabled_is_set:
+            return False
+        settings_io._store(manager, ENABLED_PATH, True)
+        return True
 
 
 def record_onboarding_seen(config_dir: "Path") -> None:

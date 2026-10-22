@@ -66,7 +66,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
 import httpx
 
@@ -87,6 +87,7 @@ from local_operator.team_bridge.settings import (
     TeamBridgeSettings,
     record_default_enrollment,
     record_local_enabled,
+    record_local_enabled_if_unset,
 )
 
 logger = logging.getLogger(__name__)
@@ -1379,6 +1380,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str,
         expected_account_id: str,
+        may_commit_local: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """``POST /messaging/enrollment``: the hub's default-on enrolment.
 
@@ -1405,6 +1407,18 @@ class TeamBridgeClient:
         consent record this one never saw. Errors (404/405 from an older hub, a
         409 ``consent_version_unknown``, transport failures) propagate as
         :class:`BridgeRefusal`; the caller decides they are silent.
+
+        ``may_commit_local`` is the caller's LAST-MOMENT veto (review round 1,
+        M1). The caller's gates were read before this method's awaited round
+        trips (the head read and the POST), so an explicit local OFF (a settings
+        edit, another surface) can land in that window. Asked synchronously
+        right before the commit, with no await between the answer and the
+        commit, a ``False`` leaves the owner and receipt UNCOMMITTED: "explicit
+        false always wins" is cheaper to keep by never committing than by
+        un-committing (a committed owner is the authority every fence trusts,
+        and the store has no retire-on-race path). The hub endpoint the POST
+        created stays; with no owner there is no device behind it, and the
+        member's next Turn off (or the unchanged explicit OFF) governs.
         """
 
         body: dict[str, Any] = {"consent_version": CONSENT_VERSION_V2, "tenant_id": tenant_id}
@@ -1418,6 +1432,7 @@ class TeamBridgeClient:
             isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
             and consent.get("version") == CONSENT_VERSION_V2
+            and (may_commit_local is None or may_commit_local())
         ):
             await self._commit_explicit_enable(
                 state="active",
@@ -2887,9 +2902,25 @@ class StatusDiscipline:
         if attempt in self._default_enroll_attempted:
             return check
         self._default_enroll_attempted.add(attempt)
+        account_id = access.account_id
+
+        def _local_still_open() -> bool:
+            # The gates above were read BEFORE the awaited head read + POST; an
+            # explicit OFF or a Turn off (which writes the marker) may have
+            # landed since. Re-read right before the owner commit. Unreadable
+            # means "cannot tell": no commit.
+            now = _local_settings_snapshot(config_dir)
+            return (
+                now is not None
+                and not (now.enabled_is_set and not now.enabled)
+                and now.default_enrollment.get(account_id) != DEFAULT_ENROLLMENT_DONE
+            )
+
         try:
             result = await self._client.enroll_default_on(
-                tenant_id=tenant_id, expected_account_id=access.account_id
+                tenant_id=tenant_id,
+                expected_account_id=account_id,
+                may_commit_local=_local_still_open,
             )
         except (BridgeRefusal, BridgeSignInRequired, ValueError):
             # An older hub (404/405), 409 consent_version_unknown, a transport
@@ -2915,7 +2946,9 @@ class StatusDiscipline:
 
             owner = Store(config_dir).active_owner()
             if owner is not None and owner.account_id == access.account_id:
-                record_local_enabled(config_dir, True)
+                # Never over an explicit value: a Turn off / settings edit that
+                # landed after the commit above keeps its ``false``.
+                record_local_enabled_if_unset(config_dir)
         except Exception:  # noqa: BLE001 - no local authority beats a loud failure
             pass
         # Adopt the post-enrolment answer: returning B after enrolling would
