@@ -59,6 +59,7 @@ from local_operator.harness.types import (
     CustomMessage,
     Message,
     TextContent,
+    drop_blank_text_blocks,
 )
 from local_operator.session.attachments import AttachmentStore
 
@@ -493,6 +494,7 @@ def encode_message_payload(
     # Also cover direct journal producers/alternate provider payloads that did
     # not pass through the loop's retained-copy seam. Never mutate execution.
     message = retained_message(message)
+    message = _without_blank_user_text(message)
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
     _stamp_audio_discriminants(message, payload)
     _externalize_attachments(payload, attachments)
@@ -507,6 +509,26 @@ def encode_message_payload(
         if redundant:
             call.pop("raw_arguments")
     return payload
+
+
+def _without_blank_user_text(message: Message | CustomMessage) -> Message | CustomMessage:
+    """A user ``message`` with its removable blank text blocks dropped.
+
+    Applied in the encoder so NO producer can persist an empty text block
+    (``{}`` on disk; #2460 was one producer, ``Message.user``, and fixing the
+    constructor alone leaves every hand-built ``Message(role="user", ...)``
+    able to write it again). User rows only: assistant and tool rows have
+    their own emptiness rules at the wire (``_is_empty_assistant``,
+    ``EMPTY_TOOL_RESULT_TEXT``), and a pruned tool row's text is a notice.
+    Returns the same object when nothing changes, so an unaffected row is
+    byte-identical and keeps its compaction-cache identity.
+    """
+    if not isinstance(message, Message) or message.role != "user":
+        return message
+    content = drop_blank_text_blocks(message.content)
+    if len(content) == len(message.content):
+        return message
+    return message.model_copy(update={"content": content})
 
 
 #: Key a content block carries when its media lives in the attachment store
@@ -4335,7 +4357,13 @@ def _entry_to_message(
     try:
         if kind == CUSTOM_KIND_CUSTOM:
             return CustomMessage.model_validate(payload)
-        return Message.model_validate(payload)
+        # Healed on the way IN as well as kept off the disk on the way out:
+        # rows written before the encoder guard (any build up to 0.73.2 stored
+        # an image-only send as ``[{}, {attachment...}]``) are still on disk,
+        # and this is the transcript's one row decoder — replay and the by-id
+        # readers all call it — so repairing here heals the row for every
+        # consumer of the transcript, not one wire serializer at a time.
+        return _without_blank_user_text(Message.model_validate(payload))
     except Exception:
         logger.warning("dropping unparseable transcript message entry %s", entry.id)
         return None
