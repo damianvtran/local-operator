@@ -907,6 +907,24 @@ jobs:
       # ~18 minutes, and the 30s repeat still gets several more prints before
       # the 26-minute ceiling.
       LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"
+      # THE SIX SERIAL CONTROLS — one list, read by every step below and by
+      # `tests/unit/test_ci_hygiene.py`. They hold REAL threads, a real child
+      # process in its own session and real loopback sockets, and flaked when
+      # scheduled among ~1,700 files under `-n auto` on a shared runner (store
+      # walk: the walker finished before the observer ran; status verb: a
+      # legitimate admit-time pass published into a cache the cell assumed
+      # empty). They are deselected from EVERY shard's xdist run and run once,
+      # serially (`-n0`), in a follow-up step of shard 0 only. Coverage is the
+      # union of both, so nothing is skipped; each case runs exactly once.
+      # `--deselect` is a PREFIX match on the node id, so the hygiene test also
+      # proves no other test name begins with any of these.
+      SERIAL_CONTROLS: |
+        tests/unit/test_session_factory.py::test_a_leaving_runtime_stops_the_store_walk_at_a_directory
+        tests/unit/test_session_factory.py::test_cell_a_control_the_old_observer_setup_fails_its_precondition
+        tests/unit/test_session_factory.py::test_cell_a_control_a_consumer_that_ignores_a_set_stop_runs_the_walk_to_the_end
+        tests/unit/network/test_membership_convergence.py::test_the_status_verb_asks_over_the_control_socket_for_a_fresh_pass
+        tests/unit/network/test_membership_convergence.py::test_status_verb_control_a_dropped_refresh_field_is_rejected_for_not_asking
+        tests/unit/network/test_membership_convergence.py::test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pass
     steps:
       - uses: actions/checkout@v7
 
@@ -945,10 +963,78 @@ jobs:
             --shard ${{ matrix.shard }} --total 5 --out shard_tests.txt
 
       - name: Run test shard with coverage
+        id: shard_pytest
+        # The six serial controls are deselected here (see SERIAL_CONTROLS above).
+        # The `.coverage` rename is NOT done here any more: shard 0 appends the
+        # serial run's data to this file first, so the rename moved to the
+        # finalisation step below, after every pytest step of this job.
         run: |
-          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report= \
+          pytest $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
+            --cov --cov-fail-under=0 --cov-report= \
             --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
-          mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+      - name: Prove the serial controls were deselected from this shard
+        id: serial_absent
+        # Every shard, including those whose file list never held the two files:
+        # an XML that names one of the six means the deselect failed and a case
+        # is about to run twice (or under xdist, which is what is being avoided).
+        # `always()` so a failing ordinary run still reports it; a missing or empty
+        # XML is BLOCKED (exit 2), never a pass.
+        if: always() && steps.shard_pytest.outcome != 'skipped'
+        run: |
+          python scripts/check_serial_controls.py absent \
+            --junit junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml \
+            --ids "$SERIAL_CONTROLS"
+
+      - name: Run the serial controls once (shard 0)
+        id: serial_controls
+        # DISPATCH REQUIRES SUCCESS, not merely "not cancelled": the implicit
+        # `success()` means setup, the ordinary shard run AND the absence proof all
+        # passed. An unrelated failure on this shard therefore leaves the serial
+        # proof BLOCKED rather than running the cases against a broken tree, and
+        # no `continue-on-error` masks anything. Only shard 0 runs them: one
+        # execution per python leg (a PR is the 3.12 leg only; `main` also runs 3.13).
+        #
+        # THE BOUND. `timeout-minutes: 7` is a declared, UNMEASURED ceiling (the
+        # six cases build a 60-directory synthetic store three times and two relay
+        # pairs), not a speed claim: shard 0's budget is the heaviest shard's
+        # modelled wall plus this full 420 s, asserted by test_ci_hygiene. Inside
+        # it, `run_bounded` puts pytest in its own process group and escalates
+        # SIGTERM -> SIGKILL on the bound (--timeout 400 --grace 10 fits under the
+        # 420 s step). The store-walk child is in a NEW SESSION by design and is
+        # outside that group, so it carries its own parent-death guard (it exits
+        # within a second of pytest disappearing); a step timeout therefore leaves
+        # no native child behind. `--memory-mb 0`: no inherited budget on a runner,
+        # and the auto budget refuses to start when it cannot be measured.
+        #
+        # COVERAGE: the exact source of the ordinary run, appended to its data.
+        # A bare `--cov` would reset the selection; `--cov-fail-under=0` and the
+        # empty report keep the gate where it already is (the combine job).
+        if: matrix.shard == 0
+        timeout-minutes: 7
+        run: |
+          python scripts/run_bounded.py --timeout 400 --grace 10 --memory-mb 0 -- \
+            python -m pytest $SERIAL_CONTROLS -n0 -q \
+            --cov=local_operator --cov-append --cov-fail-under=0 --cov-report= \
+            --junit-xml=junit-serial-controls-${{ matrix.python-version }}-0.xml
+
+      - name: Prove the serial controls ran once, with their receipts
+        id: serial_proof
+        # `always()` for the same reason as the upload below: a serial step that
+        # FAILED (or hit its bound) still wrote what it wrote, and a missing XML
+        # must read BLOCKED here rather than vanish. Skipped when the serial step
+        # was never attempted (every shard but 0, or a broken ordinary run).
+        if: always() && steps.serial_controls.outcome != 'skipped'
+        run: |
+          python scripts/check_serial_controls.py present \
+            --junit junit-serial-controls-${{ matrix.python-version }}-0.xml \
+            --ids "$SERIAL_CONTROLS"
+
+      - name: Finalise shard coverage data
+        # AFTER the serial step: the rename that used to end the ordinary run.
+        # Default `success()`, as before: a failed shard uploads no coverage and
+        # the combine job is skipped, exactly as when pytest alone failed.
+        run: mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
 
       - name: Upload junit timings
         # WHY THE SUITE PAYS FOR A JUNIT FILE EVERY RUN: this is the only
@@ -995,6 +1081,7 @@ jobs:
           # never upload arbitrary test scratch or an entire working tree.
           path: |
             junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+            junit-serial-controls-${{ matrix.python-version }}-0.xml
             test-artifacts/tui-proof/**/*.svg
             test-artifacts/tui-proof/**/*.geometry.json
             test-artifacts/tui-proof/manifest.json
