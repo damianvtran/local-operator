@@ -347,6 +347,11 @@ def test_image_envelope_renders_v3_and_sends_images_in_one_dispatch(tmp_path) ->
     assert "Images: 1 (1: image/png 40x30)" in prompt
     assert "Line one lists the images" in prompt  # the v3-only sentence
     assert images == [(data, "image/png")]
+    # R1-07: the outcome names the template that ACTUALLY screened (v3),
+    # while the stored receipt stays on the served policy's template.
+    assert out.rendered_version == "bridge-screen-v3"
+    assert out.rendered_template_sha256 == SCREENING_TEMPLATE_V3_SHA256
+    assert out.receipt is not None and out.receipt.prompt_version == "bridge-screen-v1"
     # Nothing image-shaped persists in the native store.
     db = (tmp_path / "team_bridge").glob("**/*")
     for path in db:
@@ -784,3 +789,320 @@ async def test_history_after_reject_has_no_images(monkeypatch, tmp_path) -> None
     result = await _history(hub, monkeypatch)
     assert not any(isinstance(b, ImageContent) for b in result.content)
     assert hub.fetches == []
+
+
+# --------------------------------------------------------------------------
+# review round 1
+# --------------------------------------------------------------------------
+
+
+def _prior_receipt(monkeypatch, verdict: str, body: str) -> None:
+    """The local verdict a first pass wrote (production: ``finish_screening``).
+
+    The connector rig's screen is a fake that writes no receipt, so the
+    durable row a real first pass leaves behind is supplied here.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    row = {"verdict": verdict, "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
+    monkeypatch.setattr(Store, "receipt_for_message", lambda self, owner, mid: row)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_image_admit_delivers_the_card_without_rescreening(
+    monkeypatch, tmp_path
+) -> None:
+    """R1-01: the wake fails once AFTER a successful image admit, then retries.
+
+    Before the fix every retry re-ran ``purpose=screen``, which the hub closes
+    after a verdict (D1): three holds, zero cards. Now the hub's admission is
+    proven with a context probe and the card goes out with no screen fetch.
+    """
+
+    hub = Hub([_png(), _png((0, 0, 255))])
+    owner, ref, screened, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    calls = {"n": 0}
+    real_deliver = conversation_mod.deliver_wake
+
+    async def flaky(*a: Any, **k: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("session closed mid-wake")
+        return await real_deliver(*a, **k)
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", flaky)
+    first = await _deliver(owner, ref, tmp_path, hub)
+    assert first["action"] == "hold" and len(hub.admits) == 1 and cards == []
+    _prior_receipt(monkeypatch, "allow", hub.body)
+    hub.fetches.clear()
+    outcomes = [await _deliver(owner, ref, tmp_path, hub) for _ in range(3)]
+    assert outcomes[0]["action"] == "delivered"
+    assert outcomes[0]["recovered"] == "images_admitted"
+    assert len(cards) == 3 and "attachments: 2 image(s)" in cards[0]
+    assert all(purpose != "screen" for _, purpose in hub.fetches)
+    assert len(hub.admits) == 1  # never re-admitted, never re-screened
+    assert len(screened) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_with_no_local_receipt_trusts_only_the_hub_admission(
+    monkeypatch, tmp_path
+) -> None:
+    hub = Hub([_png()])
+    owner, ref, _s, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    # The hub admitted the images (e.g. our admit committed, the reply was
+    # lost, and the local store was reset since).
+    hub.admission = {"verdict": "allow", "attachments_hash": hub.attachments_hash}
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out["action"] == "delivered" and out["recovered"] == "images_admitted"
+    assert [p for _, p in hub.fetches] == ["screen", "context"]
+    # A hub REJECT with no local receipt: nothing to trust -> hold, no card.
+    hub2 = Hub([_png()])
+    owner2, ref2, _s2, cards2 = _connector_rig(monkeypatch, tmp_path / "b", hub2, verdict="deliver")
+    hub2.admission = {"verdict": "reject"}
+    out2 = await _deliver(owner2, ref2, tmp_path / "b", hub2)
+    assert out2 == {
+        "action": "hold",
+        "message_id": MID,
+        "code": "attachments_admission_unknown",
+    }
+
+
+@pytest.mark.asyncio
+async def test_retry_after_reject_delivers_the_unadmitted_card(monkeypatch, tmp_path) -> None:
+    hub = Hub([_png()])
+    owner, ref, _s, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="bounce")
+    hub.admission = {"verdict": "reject"}
+    _prior_receipt(monkeypatch, "reject", hub.body)
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out["action"] == "delivered_unadmitted" and out["code"] == "screening_bounce"
+    assert len(cards) == 1 and hub.admits == []
+
+
+@pytest.mark.asyncio
+async def test_screened_template_is_reported_beside_the_policy_receipt(
+    monkeypatch, tmp_path
+) -> None:
+    """R1-07: the outcome names the template that actually rendered (v3)."""
+
+    hub = Hub([_png()])
+    owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+
+    async def v3_screen(owner: Any, item: Any, **kwargs: Any) -> Any:
+        return ScreenResult(
+            "deliver",
+            receipt=_receipt("allow", hub.body),
+            attachments_hash=item["attachments"].attachments_hash,
+            rendered_version=SCREENING_VERSION_V3,
+            rendered_template_sha256=SCREENING_TEMPLATE_V3_SHA256,
+        )
+
+    monkeypatch.setattr(conversation_mod, "screen_item", v3_screen)
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert out["screened_template"] == SCREENING_VERSION_V3
+    assert out["screened_template_sha256"] == SCREENING_TEMPLATE_V3_SHA256
+
+
+# ----- R1-02: thread replies ----------------------------------------------
+
+
+class ThreadWire(ToolWire):
+    async def conversation_replies(self, cid, root_id, **k: Any) -> dict[str, Any]:
+        page = self.hub.history()["messages"][0]
+        reply = {**page, "thread_root_id": "bcmsg_root0001"}
+        root = {"id": "bcmsg_root0001", "seq": 0, "sender": {"display_label": "Bo"}, "body": "?"}
+        return {"root": root, "replies": [reply], "has_more": False}
+
+
+async def _thread(hub: Hub, monkeypatch):
+    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
+    monkeypatch.setattr(conversation_mod, "_screener_sees_images", lambda _d: True)
+    runtime = _tool_runtime(hub)
+    runtime.client = cast(TeamBridgeClient, ThreadWire(hub))
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    args = {"op": "channel_thread", "channel_id": CID, "thread_root_id": "bcmsg_root0001"}
+    return await tool.execute("call_t", args, None, None, ToolContext())
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_images_reach_the_agent_through_channel_thread(
+    monkeypatch, tmp_path
+) -> None:
+    hub = Hub([_png()])
+    owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    await _deliver(owner, ref, tmp_path, hub)
+    hub.fetches.clear()
+    result = await _thread(hub, monkeypatch)
+    images = [b for b in result.content if isinstance(b, ImageContent)]
+    assert len(images) == 1 and base64.b64decode(images[0].data) == hub.images[0]
+    captions = [b.text for b in result.content if isinstance(b, TextContent)]
+    assert any(
+        c.startswith(BRIDGE_UNTRUSTED_CLAUSE) and "Images from message" in c for c in captions
+    )
+    assert hub.fetches == [(hub.descriptors[0]["id"], "context")]
+    assert "_images" not in json.dumps(result.details, default=str)
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_withheld_marker_after_text_only_admit(monkeypatch, tmp_path) -> None:
+    hub = Hub([_png()])
+    owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver", vision=False)
+    await _deliver(owner, ref, tmp_path, hub)
+    monkeypatch.setattr(conversation_mod, "_screener_sees_images", lambda _d: False)
+    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
+    runtime = _tool_runtime(hub)
+    runtime.client = cast(TeamBridgeClient, ThreadWire(hub))
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    args = {"op": "channel_thread", "channel_id": CID, "thread_root_id": "bcmsg_root0001"}
+    result = await tool.execute("call_t", args, None, None, ToolContext())
+    assert not any(isinstance(b, ImageContent) for b in result.content)
+    assert any(
+        "[1 image attachment withheld: screening model has no vision]" in getattr(b, "text", "")
+        for b in result.content
+    )
+
+
+def test_card_for_a_thread_reply_points_at_channel_thread() -> None:
+    from local_operator.team_bridge.connector.conversation import (
+        ConversationCardMetadata,
+        build_conversation_card,
+    )
+
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_label="#qa",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=False,
+            message_id=MID,
+            conversation_seq=3,
+            thread_root_id="bcmsg_root0001",
+            attachments=1,
+        )
+    )
+    assert "view: bridge channel_thread with this thread_root_id" in card
+    assert "channel_history returns the admitted images" not in card
+
+
+# ----- R1-03 / R1-06 --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_byte_read_asks_for_identity_and_survives_a_gzip_proxy() -> None:
+    import gzip
+
+    data = _png()
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding"))
+        if request.url.path.endswith("-missing"):
+            body = gzip.compress(
+                json.dumps({"code": "attachment_not_found", "error": "nf"}).encode()
+            )
+            return httpx.Response(
+                404,
+                content=body,
+                headers={"content-encoding": "gzip", "content-type": "application/json"},
+            )
+        return httpx.Response(
+            200,
+            content=gzip.compress(data),
+            headers={"content-encoding": "gzip", "content-type": "image/png"},
+        )
+
+    client = _make_client(handler)
+    got, mime = await client.fetch_attachment(CID, MID, AID)
+    assert got == data and mime == "image/png"
+    assert seen == ["identity"]
+    missing = "batt_00000000-0000-0000-0000-missing"
+    with pytest.raises(BridgeRefusal) as refused:
+        await client.fetch_attachment(CID, MID, missing)
+    assert refused.value.code == "attachment_not_found" and refused.value.http_status == 404
+
+
+def test_status_attachments_block_is_normalized_or_dropped() -> None:
+    from local_operator.server.routes.desktop_team_bridge import (
+        _status_with_attachments,
+    )
+
+    raw = {
+        "api_version": "1",
+        "attachments": {
+            "enabled": True,
+            "mime_types": ["image/png", "image/svg+xml"],
+            "max_count": 4,
+        },
+    }
+    out = _status_with_attachments(raw, attachments_capability)
+    assert out["attachments"] == {"enabled": True, "mime_types": ["image/png"], "max_count": 4}
+    assert raw["attachments"]["mime_types"] == ["image/png", "image/svg+xml"]  # cache untouched
+    off = _status_with_attachments({"attachments": {"enabled": False}}, attachments_capability)
+    assert "attachments" not in off
+    assert _status_with_attachments({"api_version": "1"}, attachments_capability) == {
+        "api_version": "1"
+    }
+
+
+@pytest.mark.asyncio
+async def test_text_only_session_model_strips_announces_and_marks_bridge_images(
+    monkeypatch, tmp_path
+) -> None:
+    """R1-05: D5's session half on the NEW tool-result blocks.
+
+    A real ``Session`` on a ``supports_images=False`` spec runs the real
+    ``bridge`` tool; ``channel_history`` returns caption + ImageContent. The
+    next provider request must carry no image, the harness's omission notice
+    in its place, the caption (so the agent still knows an image exists), and
+    one NoticeEvent announcing why.
+    """
+
+    from local_operator.harness.types import (
+        ModelSpec,
+        NoticeEvent,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from local_operator.session.session import IMAGE_OMITTED_TEXT_ONLY_NOTICE
+    from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
+
+    hub = Hub([_png()])
+    owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    await _deliver(owner, ref, tmp_path, hub)
+    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
+    tool = build_bridge_tool(ToolContext(bridge_runtime=_tool_runtime(hub)))
+    assert tool is not None
+    args = json.dumps({"op": "channel_history", "channel_id": CID})
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="bridge", argument_delta=args),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    blind = ModelSpec(
+        provider="test", model_id="Blind", context_window=100_000, supports_images=False
+    )
+    session = make_session(tmp_path / "sess", stream, tools=[tool], model=blind)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    await session.prompt("what is in the latest #design image?")
+    second = stream.requests[-1]
+    blocks = [b for m in second.messages for b in m.content]
+    assert not any(isinstance(b, ImageContent) for b in blocks)
+    texts = [b.text for b in blocks if isinstance(b, TextContent)]
+    assert IMAGE_OMITTED_TEXT_ONLY_NOTICE in texts
+    assert any("Images from message" in t and BRIDGE_UNTRUSTED_CLAUSE in t for t in texts)
+    await wait_for(lambda: any(isinstance(e, NoticeEvent) for e in events))
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1 and "does not accept images" in notices[0].text
+    await session.dispose()
