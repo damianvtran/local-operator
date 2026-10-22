@@ -964,6 +964,39 @@ async def test_an_explicit_enable_commits_the_native_receipt(tmp_path: Path):
     }
 
 
+async def test_an_explicit_enable_seeds_the_feed_cursor_at_the_hub_head(tmp_path: Path):
+    """Review R1-2: right after committing, ONE no-cursor events read learns the
+    hub's head, and the never-polled store starts there — a previously used
+    endpoint is not replayed; a brand-new one (head 0) keeps cursor 0 (F2)."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/messaging/events"):
+            return _ok({"events": [], "cursor": 412})
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        consent_version="bridge_consent_v1",
+        consented_via="settings",
+        endpoint=None,
+        expected_account_id="acc_1",
+    )
+
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    events = [r for r in seen if r.url.path.endswith("/messaging/events")]
+    assert len(events) == 1 and "after" not in events[0].url.params
+    assert store.sync_state(owner)["feed_seq"] == 412
+
+
 async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
     """Turning off is not consent: a pause leaves the store empty."""
 

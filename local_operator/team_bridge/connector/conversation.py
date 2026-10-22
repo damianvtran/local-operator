@@ -373,7 +373,7 @@ async def handle_conversation_available(
         # F8: a never-used designated chief of staff whose ACCEPTED consent does
         # not disclose engagement holds visibly before any body fetch, screen or
         # admit; the loop re-drives it on the bounded backoff until the owner
-        # opens the session once (see ``engagement_hold``).
+        # sends the session a message (see ``engagement_hold``).
         engage_code = engagement_hold(designation, config_dir)
         if engage_code:
             return {"action": "hold", "message_id": message_id, "code": engage_code}

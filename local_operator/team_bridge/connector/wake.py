@@ -117,14 +117,15 @@ def _producer_fence(store: Any, owner: Any, access: Any, settings: Any) -> str:
 def engagement_hold(designation: str, config_dir: Path) -> str:
     """``""`` when a card may reach ``designation`` now, else the hold code.
 
-    WHY (live E2E F8): a designated chief of staff nobody has opened has no
-    user turn, and the session runtime refuses a peer row there unless the
-    member's ACCEPTED consent discloses that a message may engage it
-    (``team_bridge.engagement``). Asking HERE, before the body fetch, the
-    screen and the admit, means a v1 member's message is held visibly as
-    :data:`HOLD_OPEN_CHIEF_OF_STAFF` — no model spend, no admission, no
-    wake — and re-driven on the loop's bounded backoff until the owner opens
-    the session once. The receiving runtime re-checks the same rule; this is
+    WHY (live E2E F8): a designated chief of staff its owner has never sent
+    a message has no user turn, and the session runtime refuses a peer row
+    there unless the member's ACCEPTED consent discloses that a message may
+    engage it (``team_bridge.engagement``). Asking HERE, before the body
+    fetch, the screen and the admit, means a v1 member's message is held
+    visibly as :data:`HOLD_OPEN_CHIEF_OF_STAFF` — no model spend, no
+    admission, no wake — and re-driven on the loop's bounded backoff until
+    the owner SENDS the session a message (a user turn on disk; opening it
+    writes none). The receiving runtime re-checks the same rule; this is
     the early answer, not the authority. Lazy imports: the connector's
     module scope must not load ``mobile.peer_send`` (the import pin).
     """

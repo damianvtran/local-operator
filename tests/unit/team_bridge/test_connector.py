@@ -35,6 +35,7 @@ from local_operator.team_bridge.types import (
     InboxCursor,
     OwnerSnapshot,
     ScreeningReceipt,
+    feed_seq,
 )
 
 
@@ -988,10 +989,14 @@ def test_first_poll_after_enrolment_sends_cursor_zero(tmp_path, monkeypatch) -> 
     assert calls[0]["wait"] == loop_mod.EVENTS_WAIT_S
 
 
-def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("reissued", [False, True], ids=["instant-200", "instant-204"])
+def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch, reissued) -> None:
     """F1: a hub that answers every read at once (resync arms, a busy feed, a
     proxy that strips the park) must not turn the loop into a request storm.
-    Measured on main: 124 reads in under 2 s, then 429 rate_limited."""
+    Measured on main: 124 reads in under 2 s, then 429 rate_limited. The 204
+    arm is review R1-1: a proxy stripping ``wait`` makes every caught-up poll
+    an INSTANT 204, which the bare 0.2 s reissue delay let through at
+    ~300/min against the hub's 120/min."""
 
     store, owner = _enroll(tmp_path)
     polls: list[float] = []
@@ -1004,7 +1009,7 @@ def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch) -
         # never fire and the test would spin without bound.
         if len(polls) >= 50:
             stop.set()
-        return {"events": 0, "reissued": False, "resync": True, "handled": []}
+        return {"events": 0, "reissued": reissued, "resync": not reissued, "handled": []}
 
     async def access_provider():
         return _access(owner)
@@ -1121,7 +1126,7 @@ def test_bare_conversation_hold_never_reaches_the_pair_spine(tmp_path, monkeypat
         pair_calls.append(message_id)
         from local_operator.team_bridge.client import BridgeRefusal
 
-        raise BridgeRefusal("not_found", "This message does not exist.", http_status=404)
+        raise BridgeRefusal("message_not_found", "This message does not exist.", http_status=404)
 
     async def conversation_spine(owner_, conversation_ref, **kwargs):
         conversation_calls.append(conversation_ref.message_id)
@@ -1153,7 +1158,9 @@ def test_a_failing_redrive_never_escapes_the_retry_pass(tmp_path, monkeypatch) -
 
     async def pair_spine(owner_, message_id, **kwargs):
         if message_id == "bmsg_gone":
-            raise BridgeRefusal("not_found", "This message does not exist.", http_status=404)
+            raise BridgeRefusal(
+                "message_not_found", "This message does not exist.", http_status=404
+            )
         raise RuntimeError("transport hiccup")
 
     monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
@@ -1169,13 +1176,14 @@ def test_a_failing_redrive_never_escapes_the_retry_pass(tmp_path, monkeypatch) -
     loop_mod._RETRY_ATTEMPTS.clear()
 
 
-# -- Live E2E F8: a designated chief of staff nobody has opened yet -------------
+# -- Live E2E F8: a designated chief of staff its owner has never messaged ------
 
 
 def _f8_enroll(tmp_path: Path, consent_version: str, *, enabled: bool = True) -> OwnerSnapshot:
     """A committed enrollment with the given ACCEPTED consent and a designated
     session that has no transcript at all (never engaged)."""
 
+    tmp_path.mkdir(parents=True, exist_ok=True)
     store = Store(tmp_path)
     store.commit_enrollment(
         OWNER, OwnerReceipt(consent_version, "ref-1"), cos_session_id="sess_cos"
@@ -1241,7 +1249,7 @@ def test_v1_unengaged_conversation_message_holds_visibly_and_never_wakes(
 ) -> None:
     """F8, v1: the card is held under the visible code before ANY spend — no
     body fetch, no screen, no admit, no wake — and the loop keeps a bounded
-    retry row so it is delivered once the owner opens the session."""
+    retry row so it is delivered once the owner sends the session a message."""
 
     from local_operator.team_bridge.connector import conversation as conversation_mod
     from local_operator.team_bridge.types import ConversationFeedRef
@@ -1305,7 +1313,7 @@ def test_open_chief_of_staff_hold_is_counted_for_the_owner_surface(tmp_path) -> 
 
 
 def test_a_rehold_for_a_new_reason_replaces_the_visible_code(tmp_path, monkeypatch) -> None:
-    """F8: once the owner opens the session, a later hold for another reason
+    """F8: once the owner messages the session, a later hold for another reason
     must replace ``open_chief_of_staff`` — the visible code may not keep asking
     them to do what they already did."""
 
@@ -1324,3 +1332,39 @@ def test_a_rehold_for_a_new_reason_replaces_the_visible_code(tmp_path, monkeypat
     row = store.screening_hold(owner, "bmsg_x")
     assert row is not None and row["hold_code"] == "policy_stale" and row["retry_at"] > time.time()
     loop_mod._RETRY_ATTEMPTS.clear()
+
+
+def test_seed_starts_a_used_endpoint_at_head_and_a_fresh_one_at_zero(tmp_path) -> None:
+    """Review R1-2 without reopening F2. The seed is the hub's head when THIS
+    machine commits: a brand-new endpoint's head is 0 (its first message, seq 1,
+    still arrives); a previously used endpoint's head is N (no 7-day replay).
+    The seed never moves a cursor a poll already advanced."""
+
+    fresh = _f8_enroll(tmp_path / "fresh", "bridge_consent_v1")
+    store = Store(tmp_path / "fresh")
+    assert store.seed_feed_cursor(fresh, feed_seq(0)) is True
+    assert store.sync_state(fresh)["feed_seq"] == 0  # F2: after=0 still sent
+
+    used_root = tmp_path / "used"
+    used = _f8_enroll(used_root, "bridge_consent_v1")
+    used_store = Store(used_root)
+    assert used_store.seed_feed_cursor(used, feed_seq(412)) is True
+    assert used_store.sync_state(used)["feed_seq"] == 412
+
+    # A poll already advanced the cursor: a late seed is refused.
+    polled_root = tmp_path / "polled"
+    polled = _f8_enroll(polled_root, "bridge_consent_v1")
+    polled_store = Store(polled_root)
+    polled_store.record_feed_batch(polled, feed_seq(3), ["ref-a"], resync_required=False)
+    assert polled_store.seed_feed_cursor(polled, feed_seq(900)) is False
+    assert polled_store.sync_state(polled)["feed_seq"] == 3
+
+
+def test_pair_holds_count_in_the_owner_surface(tmp_path) -> None:
+    """Review R1-3: a PAIR message is held under its bare pair id, and must
+    count toward ``delivery_hold`` like a conversation hold does."""
+
+    owner = _f8_enroll(tmp_path, "bridge_consent_v1")
+    store = Store(tmp_path)
+    store.persist_hold(owner, "bmsg_pair01", "open_chief_of_staff", retry_at=time.time() + 60)
+    assert store.hold_count_readonly(owner, "open_chief_of_staff") == 1

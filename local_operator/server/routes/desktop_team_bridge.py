@@ -578,8 +578,8 @@ async def status(
         ),
         "error": _refusal_detail(check.error) if check.error is not None else None,
         #: Messages this machine is HOLDING for the owner (F8). Code + count
-        #: only, never ids or content; the renderer owns the sentence ("Open
-        #: your chief of staff once to receive Team Bridge messages"). ``None``
+        #: only, never ids or content; the renderer owns the sentence ("Send
+        #: your chief of staff a message once to receive them", #1325). ``None``
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
         "delivery_hold": _delivery_hold(config_manager),
@@ -588,13 +588,14 @@ async def status(
 
 
 def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:
-    """The owner-visible F8 hold: cards waiting for the chief of staff to be opened.
+    """The owner-visible F8 hold: cards waiting for the owner to message their chief of staff.
 
     WHY: a member whose ACCEPTED consent is ``bridge_consent_v1`` never agreed
     that a message may engage a session they have not used, so a card to a
     never-opened designated session is held (``open_chief_of_staff``) rather
     than engaging it. That hold must not be silent — the owner has to learn
-    that one action (opening the session once) releases it. Read-only, local,
+    that one action — sending the session a message — releases it (opening
+    it does not: release needs a user turn on disk). Read-only, local,
     no network; any store failure reads as "nothing to show".
     """
 

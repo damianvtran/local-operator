@@ -1294,7 +1294,7 @@ class TeamBridgeClient:
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         result = await self._send("PUT", "/messaging/settings", body=body, access=access)
-        self._commit_explicit_enable(
+        await self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
             consent_version=consent_version,
@@ -1303,7 +1303,7 @@ class TeamBridgeClient:
         )
         return result
 
-    def _commit_explicit_enable(
+    async def _commit_explicit_enable(
         self,
         *,
         state: str,
@@ -1355,7 +1355,7 @@ class TeamBridgeClient:
                 commit_settings_enrollment,
             )
 
-            commit_settings_enrollment(
+            committed = commit_settings_enrollment(
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,
@@ -1366,6 +1366,39 @@ class TeamBridgeClient:
                 cos_session_id=(local.session or None) if local is not None else None,
             )
         except Exception:  # noqa: BLE001 - the server-side enable already succeeded
+            return
+        if committed:
+            await self._seed_feed_cursor(tenant_id=tenant_id, access=access)
+
+    async def _seed_feed_cursor(self, *, tenant_id: str, access: OAuthAccess) -> None:
+        """Start this machine's feed cursor at the hub's head (review R1-2).
+
+        A no-cursor ``/messaging/events`` read is the hub's own "where is now"
+        answer (a resync arm carrying the CURRENT cursor, no events). Seeded
+        right after THIS machine commits the enrolment, it separates the two
+        cases F2 conflated: a brand-new endpoint's head is 0, so its first
+        message still arrives; a previously used endpoint (another machine, a
+        reinstall, a wiped store) starts at its head instead of replaying up
+        to 7 days of retained feed as fresh wakes. Best-effort: on any failure
+        the cursor stays 0, the pre-R1-2 behaviour (a replay, never a loss).
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+            from local_operator.team_bridge.types import feed_seq as _feed_seq
+
+            result = await self.events(tenant_id=tenant_id, access=access)
+            cursor = result.get("cursor") if isinstance(result, Mapping) else None
+            if cursor is None:
+                return
+            store = Store(config_dir)
+            owner = store.active_owner()
+            if owner is not None:
+                store.seed_feed_cursor(owner, _feed_seq(cursor))
+        except Exception:  # noqa: BLE001 - a seed failure keeps the safe default (replay)
             return
 
     async def allowlist(self, *, tenant_id: str | None = None) -> dict[str, Any]:
