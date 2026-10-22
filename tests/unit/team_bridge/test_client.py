@@ -990,3 +990,54 @@ async def test_a_resume_without_a_consent_echo_commits_nothing(tmp_path: Path):
     from local_operator.team_bridge.store import Store
 
     assert Store(tmp_path).committed_owner_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# events long-poll (live E2E finding F1)
+# ---------------------------------------------------------------------------
+
+
+async def test_events_sends_the_long_poll_wait_and_outlives_the_park():
+    """F1: without ``wait`` the hub answers at once, so the loop hot-spun into
+    429s (124 calls in < 2 s against a real hub). The park must reach the wire,
+    and the read timeout must outlive it, or every quiet poll would end as a
+    client-side timeout instead of the server's 204."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    client = _make_client(handler)
+    assert await client.events(tenant_id="tnt_1", after=0, wait=25) is None
+    params = seen[0].url.params
+    assert params["wait"] == "25"
+    # F2 on the wire: cursor 0 is a real position, never "no cursor".
+    assert params["after"] == "0"
+    timeout = seen[0].extensions["timeout"]
+    assert timeout["read"] > 25
+
+
+async def test_events_without_wait_keeps_the_plain_poll_shape():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    client = _make_client(handler)
+    await client.events(tenant_id="tnt_1")
+    assert "wait" not in seen[0].url.params and "after" not in seen[0].url.params
+
+
+async def test_events_429_carries_the_retry_after_header():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"error": "slow down", "code": "rate_limited"}, headers={"Retry-After": "42"}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(BridgeRefusal) as refusal:
+        await client.events(tenant_id="tnt_1", after=3, wait=25)
+    assert refusal.value.http_status == 429 and refusal.value.retry_after_seconds == 42

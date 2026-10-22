@@ -513,6 +513,11 @@ class AcceptedTexts:
 #: round trip, and a hung read must not hold a desktop route open.
 REQUEST_TIMEOUT_S = 30.0
 
+#: Read-timeout headroom over an events long-poll's ``wait``: the hub parks
+#: for up to ``wait`` seconds and answers on a ~1 s shared-DB poll, so the
+#: client must outlast the park by more than that plus transit.
+EVENTS_PARK_MARGIN_S = 15.0
+
 #: The most of an ERROR body this client will read. Error bodies are small and
 #: content-free; the bound exists so a misbehaving proxy cannot hand us a
 #: caller-sized buffer on the failure path.
@@ -913,6 +918,7 @@ class TeamBridgeClient:
         *,
         params: Mapping[str, Any] | None,
         body: Mapping[str, Any] | None,
+        timeout: float = REQUEST_TIMEOUT_S,
     ) -> httpx.Response:
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
@@ -920,7 +926,7 @@ class TeamBridgeClient:
         # lifetime — an injected-socket seam lands with it, deliberately not
         # half-built here (the architect's finding 5; tracked on the PR).
         async with httpx.AsyncClient(
-            timeout=REQUEST_TIMEOUT_S,
+            timeout=timeout,
             transport=self._transport,
             follow_redirects=False,
         ) as http:
@@ -1151,6 +1157,7 @@ class TeamBridgeClient:
         tenant_id: str,
         after: int | None = None,
         access: OAuthAccess | None = None,
+        wait: int | None = None,
     ) -> dict[str, Any] | None:
         """The §6.7 delivery substrate: ONE read; ``None`` = the 204 timeout.
 
@@ -1160,19 +1167,48 @@ class TeamBridgeClient:
         refresh-once discipline is mirrored here so the one special case does
         not lose it. Long-poll lifetime, reconnects and schedules are H4's;
         this is a one-shot primitive.
+
+        ``wait`` is the server-side PARK in seconds (the hub clamps it to 30).
+        WHY IT EXISTS: without it the hub answers a caught-up cursor at once,
+        and a loop that re-polls on every answer becomes a request storm — the
+        live E2E on local-operator-ui #1314 measured 124 reads in under 2 s and
+        then 429 ``rate_limited`` for 42 s. The read timeout is stretched past
+        the park (plus margin for the hub's ~1 s shared-DB poll and transit),
+        because a parked request outliving ``REQUEST_TIMEOUT_S`` would surface
+        as a client timeout instead of the server's ordinary 204. ``None``
+        keeps the plain-poll shape for one-shot callers.
+
+        ``after`` is sent whenever it is not ``None`` — INCLUDING 0. Cursor 0
+        is a real position (a fresh endpoint's), and an absent ``after`` is
+        the hub's "no cursor" arm, which answers a resync at the CURRENT head
+        and so skips the first message ever delivered.
         """
 
         pinned = access or await self.current_access()
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if after is not None:
             params["after"] = int(after)
+        timeout = REQUEST_TIMEOUT_S
+        if wait is not None:
+            params["wait"] = int(wait)
+            timeout = max(REQUEST_TIMEOUT_S, float(wait) + EVENTS_PARK_MARGIN_S)
         response = await self._dispatch(
-            "GET", "/messaging/events", pinned.access_token, params=params, body=None
+            "GET",
+            "/messaging/events",
+            pinned.access_token,
+            params=params,
+            body=None,
+            timeout=timeout,
         )
         if response.status_code == 401:
             refreshed = await self._refreshed_access(pinned)
             response = await self._dispatch(
-                "GET", "/messaging/events", refreshed.access_token, params=params, body=None
+                "GET",
+                "/messaging/events",
+                refreshed.access_token,
+                params=params,
+                body=None,
+                timeout=timeout,
             )
             if response.status_code == 401:
                 raise BridgeSignInRequired(SIGN_IN_SENTENCE)
