@@ -382,40 +382,138 @@ def test_access_log_redaction_leaves_other_paths_and_odd_records_alone() -> None
     assert routes._ACCESS_LOG_REDACTION.filter(odd) and odd.getMessage() == "plain"
 
 
-def test_real_uvicorn_access_line_is_templated(proxy, caplog) -> None:
-    """The real access logger path: uvicorn serves the attachment fetch and the
-    record it writes (captured at the logger) has no ids."""
+def test_e2e_access_log_of_real_upload_fetch_delete_has_no_ids_or_hashes(
+    tmp_path, monkeypatch
+) -> None:
+    """NEGATIVE end to end (QA #1314 Q2): the PRODUCTION app, served by uvicorn
+    with its DEFAULT logging config (the dictConfig ``lop serve`` gets), runs a
+    real authenticated upload -> fetch -> delete against a loopback hub. The
+    access log the runtime actually writes is captured from a handler on the
+    ``uvicorn.access`` logger.
 
-    import socket
-    import threading
-    import time
+    Controls make it non-vacuous: every request returned its success status,
+    each of the three appears in the captured log with its templated path, and
+    the hub's reply really did carry an id and a sha256 the log could have
+    leaked.
+    """
 
-    import uvicorn
+    import re as _re
 
-    from local_operator.server.app import app
+    RIG_DESKTOP_KEY = "e2e-log-desktop-key"  # noqa: N806 — a test literal, not a credential
 
-    caplog.set_level(logging.INFO, logger="uvicorn.access")
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_config=None))
-    thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
+    from local_operator.server.app import app as production_app
+
+    hub_seen: list[str] = []
+    sha_served: list[str] = []
+
+    class Hub(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def _reply(self, code: int, payload: bytes, content_type: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def dispatch(self) -> None:
+            raw = self.rfile.read(int(self.headers.get("content-length", 0)))
+            hub_seen.append(f"{self.command} {self.path.split('?')[0]}")
+            if self.command == "POST":
+                digest = hashlib.sha256(raw).hexdigest()
+                sha_served.append(digest)
+                attachment = {
+                    "id": AID,
+                    "mime": "image/png",
+                    "size": len(raw),
+                    "width": 12,
+                    "height": 9,
+                    "sha256": digest,
+                    "state": "staged",
+                    "expires_at": "2030-04-08T12:00:00Z",
+                }
+                body = json.dumps({"msg": "ok", "result": {"attachment": attachment}}).encode()
+                return self._reply(201, body, "application/json")
+            if self.command == "DELETE":
+                self.send_response(204)
+                self.end_headers()
+                return None
+            return self._reply(200, PNG, "image/png")
+
+        do_GET = do_POST = do_DELETE = dispatch
+
+    hub = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    hub_thread = threading.Thread(target=hub.serve_forever, daemon=True)
+    hub_thread.start()
+    store = FakeStore()
+    real_client = bridge.TeamBridgeClient
+    monkeypatch.setattr(bridge, "org_oauth_destination_allowed", lambda _base: True)
+    monkeypatch.setattr(
+        bridge,
+        "TeamBridgeClient",
+        lambda config_dir: real_client(
+            config_dir, base_url=f"http://127.0.0.1:{hub.server_port}/v1", store=store
+        ),
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", RIG_DESKTOP_KEY)
+    production_app.dependency_overrides[get_config_manager] = lambda: SimpleNamespace(
+        config_dir=tmp_path
+    )
+    # Default log_config: uvicorn runs its own dictConfig here, exactly as the
+    # launcher's ``uvicorn.Config(app, host=..., port=...)`` does.
+    config = uvicorn.Config(production_app, lifespan="off")
+    captured = io.StringIO()
+    handler = logging.StreamHandler(captured)
+    access = logging.getLogger("uvicorn.access")
+    access.addHandler(handler)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
     thread.start()
+    statuses: list[int] = []
+    upload_reply = ""
     try:
-        deadline = time.monotonic() + 20
-        while not server.started and time.monotonic() < deadline:
-            time.sleep(0.05)
-        url = (
-            f"http://127.0.0.1:{port}/v1/desktop/team-bridge/conversations/{CID}"
-            f"/messages/{MID}/attachments/{AID}"
-        )
-        httpx.get(url, timeout=10)  # status is irrelevant: every request is logged
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.started
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{port}",
+            headers={"authorization": f"Bearer {RIG_DESKTOP_KEY}"},
+        ) as client:
+            up = client.post(f"{BASE}/attachments?tenant_id=org-a", content=PNG)
+            upload_reply = up.text
+            statuses.append(up.status_code)
+            got = client.get(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a")
+            statuses.append(got.status_code)
+            statuses.append(client.delete(f"{BASE}/attachments/{AID}?tenant_id=org-a").status_code)
     finally:
         server.should_exit = True
         thread.join(10)
-    lines = [r.getMessage() for r in caplog.records if r.name == "uvicorn.access"]
-    assert lines, "uvicorn wrote no access record"
-    assert any(":messageid/attachments/:attachmentid" in line for line in lines)
-    for line in lines:
-        for prefix in ("batt_", "bcmsg_", "bcv_"):
-            assert prefix not in line
+        listener.close()
+        hub.shutdown()
+        hub.server_close()
+        hub_thread.join(10)
+        access.removeHandler(handler)
+        production_app.dependency_overrides.pop(get_config_manager, None)
+    log = captured.getvalue()
+
+    # Controls: the real path ran, and there was something to leak.
+    assert statuses == [201, 200, 204]
+    assert len(hub_seen) == 3 and AID in upload_reply and sha_served[0] in upload_reply
+    prefix = "/v1/desktop/team-bridge/conversations/:conversationid"
+    for line in (
+        f'"POST {prefix}/attachments?tenant_id=org-a HTTP/1.1" 201',
+        f'"GET {prefix}/messages/:messageid/attachments/:attachmentid?tenant_id=org-a '
+        'HTTP/1.1" 200',
+        f'"DELETE {prefix}/attachments/:attachmentid?tenant_id=org-a HTTP/1.1" 204',
+    ):
+        assert line in log, f"request not logged as templated: {line}"
+
+    # The negative: no ids, no sha256-shaped hex.
+    for needle in ("batt_", "bcmsg_", "bcv_", AID, MID, CID):
+        assert needle not in log
+    assert _re.search(r"[0-9a-f]{64}", log) is None
