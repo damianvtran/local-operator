@@ -22,6 +22,7 @@ adopted.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -61,17 +62,26 @@ def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) 
     silently did nothing.
 
     A re-ask is safe for exactly the reason the code names: ``unreachable`` is
-    the family's no-change refusal, so the product is back where it started.
-    That claim is ASSERTED below rather than trusted — a first attempt that
-    reported nothing changed while it had already adopted a copy or tombstoned
-    the source is the mirror image of a success that changes nothing, and this is
-    where it would surface instead of being papered over by the second ask.
+    the family's no-change refusal, so the product's PLACEMENT is back where it
+    started. That claim is ASSERTED below rather than trusted — a first attempt
+    that reported nothing changed while it had already adopted a copy or
+    tombstoned the source is the mirror image of a success that changes nothing,
+    and this is where it would surface instead of being papered over by the
+    second ask.
+
+    ONE SUB-CASE IS NOT HEALED, and it is named here so the sentence above is not
+    read as "the re-ask covers everything": when the invite WAS delivered and
+    only its ack was lost, the destination has already written its ``prepared``
+    entry (and may have started its pull), and the source's own in-flight guard
+    refuses the second ask. That is the right outcome — a real half-state, said
+    loudly — and the cell still fails on it rather than pretending.
 
     The silent link is closed first because ``RelayServer._link_for`` hands an op
-    any link that is ``alive``, and a half-open socket stays alive until
-    ``LINK_IDLE_S`` (120 s) — longer than the move's 90 s deadline. Closing it is
-    the relay's own remedy for that state, done here explicitly so the test does
-    not have to sit through the idle timeout, and the next ask dials fresh.
+    any link that is both ``alive`` and not ``closing``, and a half-open socket
+    is both until ``LINK_IDLE_S`` (120 s) — longer than the move's 90 s deadline.
+    Such a link is never re-dialled, because it looks usable. Closing it is the
+    relay's own remedy for that state, done here explicitly so the test does not
+    have to sit through the idle timeout, and the next ask dials fresh.
 
     A genuinely broken transport still fails this cell: the second ask returns
     ``unreachable`` too, and the caller asserts on it.
@@ -79,6 +89,17 @@ def _handed_over(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch) 
     result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     if result.get("ok") is True or result.get("code") != "unreachable":
         return result
+    # SAID OUT LOUD, not absorbed. The retry is what a user does with a
+    # no-change refusal, but a cell that silently retries turns a rising rate
+    # of alive-silent links into a slower shard and nothing else — and that is
+    # exactly the defect this cell went red for (CI 39838493282). A warning
+    # keeps it visible without changing a single assertion.
+    warnings.warn(
+        "the hand-away answered unreachable and was re-asked once on a fresh link "
+        f"({result.get('message')}) — the mesh link went silent, see CI 39838493282",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     assert not (server_b.root / "sessions" / SESSION).exists(), (
         "the move answered 'unreachable … nothing was changed' and the destination "
         "adopted a copy anyway — the failure report is a lie, which is the shape this "
