@@ -269,10 +269,7 @@ def _project_skill(
 ) -> ProjectionResult:
     """The two outbound stages over a skill manifest (C then M), no-op compared on M."""
 
-    if any(
-        "bundle" in side
-        for side in (captured_local, accepted, current_local, remote_latest)
-    ):
+    if any("bundle" in side for side in (captured_local, accepted, current_local, remote_latest)):
         # FORM DISPATCH before any document merge: a bundle refuses the text
         # engine by construction, so routing it there would report
         # ``merge-refused`` for every legitimate republish.

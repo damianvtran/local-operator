@@ -765,6 +765,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     skills_parser = subparsers.add_parser(
         "skills",
         help="Publish, pull and synchronize hub skills (documents and bundles)",
+        description=(
+            "Bundle skills may not contain executables (any execute bit is refused), "
+            "and installing one never runs code."
+        ),
         parents=[parent_parser],
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
@@ -783,8 +787,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     skills_publish.add_argument(
         "--bundle",
         action="store_true",
-        help="Publish as a bundle (a directory tree with binary files); requires "
-        "the hub's skill-bundles capability and no preview pin",
+        help="Publish as a bundle: a directory whose SKILL.md needs relative binary "
+        "or asset files (plain text skills stay documents)",
     )
     skills_publish.add_argument("--alias", default=None, help="The published name")
     skills_publish.add_argument(
@@ -852,7 +856,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--check", action="store_true", help="Report what would change, writing nothing"
     )
     skills_sync.add_argument(
-        "--yes", action="store_true", help="Apply without prompting (required off a terminal)"
+        "--yes",
+        action="store_true",
+        help="Accepted for script symmetry; sync never prompts (use --check to preview)",
     )
     skills_sync.add_argument("--json", action="store_true")
 
@@ -11803,6 +11809,125 @@ def skills_command(args: argparse.Namespace, base_dir: Path) -> int:
     return 2
 
 
+#: Bundle refusals as "what happened: what to do" (D6). Keyed by the LinkError
+#: code, so every skills arm words the same refusal the same way.
+_SKILL_REFUSAL_TEXT: dict[str, tuple[str, str]] = {
+    "bundle-invalid": (
+        "the bundle archive is not safe to install",
+        "fix the source files (no executables, symlinks or hidden paths) and publish again",
+    ),
+    "bundle-hash-mismatch": (
+        "the downloaded archive does not match the published hash",
+        "pull again; if it repeats, ask the publisher to republish",
+    ),
+    "bundle-too-large": (
+        "the bundle exceeds the carrier's size bound",
+        "trim the archive and republish",
+    ),
+    "bundle-confirmation-required": (
+        "this bundle needs its publisher and archive hash confirmed",
+        "re-run with --confirm-publisher ID --confirm-hash HASH, or --yes after reading "
+        "the facts",
+    ),
+    "bundle-confirmation-mismatch": (
+        "what you confirmed no longer matches the hub row",
+        "re-run the pull to read the current facts",
+    ),
+    "bundle-publisher-changed": (
+        "the hub row now names a different publisher",
+        "pull again explicitly to accept the change",
+    ),
+    "bundle-publisher-unnamed": (
+        "the hub did not name the publisher of this bundle",
+        "ask the publisher to republish so the revision names an account, then pull again",
+    ),
+    "bundle-local-changes": (
+        "the local bundle changed since it was checked",
+        "run `lop skills sync` or `lop skills push` again",
+    ),
+    "bundle-conflict": (
+        "the local bundle and the hub both changed",
+        "keep a copy, then pull again, or reconcile and push",
+    ),
+    "bundle-alias-rename-unsupported": (
+        "a bundle is installed under its published name",
+        "drop --alias and pull again",
+    ),
+    "bundle-form-changed": (
+        "the skill changed form between document and bundle",
+        "unpull the link and pull it again",
+    ),
+    "bundle-unsupported-server": (
+        "the hub does not support bundles yet",
+        "update the hub, or pull a document skill",
+    ),
+}
+
+
+def _safe(value: Any, *, limit: int = 200) -> str:
+    """Untrusted (remote-derived) text made safe for ONE terminal line.
+
+    Publisher names, ids and file paths come from the hub: a ``"\x1b[2K\r"``
+    there would overwrite the very line the operator is approving (D1). The
+    shared ANSI sanitizer strips the whole control sequence, visible-escapes
+    Cf/bidi characters, collapses whitespace and bounds the length.
+    """
+
+    from local_operator.ansi import sanitize_prompt_line
+
+    return sanitize_prompt_line(str(value), limit=limit)
+
+
+def _skills_refusal(error: Any) -> str:
+    """A named bundle refusal as a sentence with a next action (D6)."""
+
+    code = str(getattr(error, "code", "") or "")
+    mapped = _SKILL_REFUSAL_TEXT.get(code)
+    if mapped is not None:
+        what, action = mapped
+        return f"{what}: {action} [{code}]"
+    return _safe(str(error))
+
+
+def _scope_label(visibility: str) -> str:
+    """The scope as the operator says it (D4: an org row is never "public")."""
+
+    return "organization" if visibility == "org" else "public"
+
+
+def _bundle_lines(
+    bundle: Mapping[str, Any],
+    *,
+    publisher: Mapping[str, Any] | None,
+    indent: str = "  ",
+) -> list[str]:
+    """The human facts of one bundle (D3/D7): sizes, both hashes, file summary."""
+
+    lines = [
+        f"{indent}{int(bundle.get('file_count') or 0)} files, "
+        f"{int(bundle.get('size') or 0)} bytes packed / "
+        f"{int(bundle.get('uncompressed_size') or 0)} bytes unpacked",
+        f"{indent}archive sha256: {_safe(bundle.get('hash'))}",
+        f"{indent}tree hash: {_safe(bundle.get('tree_hash'))}",
+    ]
+    files = bundle.get("files")
+    if isinstance(files, list) and files:
+        names = [
+            _safe(row.get("path") if isinstance(row, Mapping) else row, limit=120) for row in files
+        ]
+        summary = f"{indent}files: " + ", ".join(names)
+        more = int(bundle.get("files_more") or 0)
+        if more:
+            summary += f" (… and {more} more)"
+        lines.append(summary)
+    if publisher:
+        label = _safe(publisher.get("id"))
+        if publisher.get("name"):
+            label += f" ({_safe(publisher.get('name'))})"
+        lines.append(f"{indent}publisher: {label}")
+    return lines
+
+
 def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
     """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
 
@@ -11843,16 +11968,21 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
             form=form,
         )
     except LinkError as error:
-        print(f"error: {error}")
+        print(f"error: {_skills_refusal(error)}")
         return 1
     if not getattr(args, "json", False):
-        print(f"{form} publication of {args.name!r} as {alias!r} " f"({visibility})")
+        print(
+            f"{form} publication of {_safe(args.name)!r} as {_safe(alias)!r} "
+            f"({_scope_label(visibility)})"
+        )
         if form == "bundle":
-            facts = preview.get("bundle") or {}
             print(
-                f"  {facts.get('file_count')} files, {facts.get('size')} bytes "
-                f"(tree {str(facts.get('tree_hash'))[:12]}...)"
+                "\n".join(
+                    _bundle_lines(preview.get("bundle") or {}, publisher=preview.get("publisher"))
+                )
             )
+            for note in preview.get("notes") or []:
+                print(f"  note: {_safe(note, limit=400)}")
         if preview.get("reason"):
             print(f"  cannot publish: {preview['reason']}")
     if preview.get("reason"):
@@ -11881,13 +12011,16 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
             form=form,
         )
     except LinkError as error:
-        print(f"error: {error}")
+        print(f"error: {_skills_refusal(error)}")
         return 1
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2))
         return 0
     link = result.get("link") or {}
-    print(f"published {link.get('name') or alias} ({form}) as {link.get('hub_id') or '?'}")
+    print(
+        f"published {_safe(link.get('name') or alias)} ({form}) as "
+        f"{_safe(link.get('hub_id') or '?')}"
+    )
     return 0
 
 
@@ -11919,25 +12052,35 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             dry_run=True,
         )
     except LinkError as error:
-        print(f"error: {error}")
+        print(f"error: {_skills_refusal(error)}")
         return 1
     bundle = preview.get("bundle")
     publisher = preview.get("publisher")
-    if not getattr(args, "json", False):
-        name = (bundle or {}).get("name") or args.hub_id
-        print(f"install {name!r} ({'bundle' if bundle else 'document'}) from {visibility}")
-        if bundle:
-            facts = bundle.get("bundle") or {}
-            print(
-                f"  {facts.get('file_count')} files, {facts.get('size')} bytes, "
-                f"sha256 {facts.get('hash')}"
-            )
-            named = (publisher or {}).get("id", "(unnamed)")
-            shown = (publisher or {}).get("name")
-            print(f"  publisher {named}" + (f" ({shown})" if shown else ""))
-    confirmed = False
     confirm_publisher = getattr(args, "confirm_publisher", None)
     confirm_hash = getattr(args, "confirm_hash", None)
+    if not getattr(args, "json", False):
+        name = (bundle or {}).get("name") or args.hub_id
+        print(
+            f"install {_safe(name)!r} ({'bundle' if bundle else 'document'}) from "
+            f"{_scope_label(visibility)}"
+        )
+        if bundle:
+            print("\n".join(_bundle_lines(bundle.get("bundle") or {}, publisher=publisher)))
+            for note in bundle.get("notes") or []:
+                print(f"  note: {_safe(note, limit=400)}")
+    if (
+        bundle
+        and getattr(args, "json", False)
+        and not getattr(args, "yes", False)
+        and not (confirm_publisher and confirm_hash)
+    ):
+        # A QUERY, NOT AN ERROR (D2): a non-interactive caller reads the facts
+        # and re-runs with the confirmation; nothing was installed.
+        payload = dict(preview)
+        payload["confirmation_required"] = True
+        print(_json.dumps(payload, indent=2))
+        return 0
+    confirmed = False
     if bundle is None:
         # A DOCUMENT pull carries no bundle confirmation; its link consent is the
         # ordinary subscribe policy.
@@ -11956,8 +12099,8 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
         confirmed = True
     else:
         print(
-            "error: a public bundle install needs the publisher confirmation: pass "
-            "--confirm-publisher ID --confirm-hash HASH, or --yes"
+            f"error: a {_scope_label(visibility)} bundle install needs the publisher "
+            "confirmation: pass --confirm-publisher ID --confirm-hash HASH, or --yes"
         )
         return 1
     try:
@@ -11974,13 +12117,13 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             confirm_bundle_hash=confirm_hash,
         )
     except LinkError as error:
-        print(f"error: {error}")
+        print(f"error: {_skills_refusal(error)}")
         return 1
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2))
         return 0
     link = result.get("link") or {}
-    print(f"installed {link.get('name') or args.hub_id}")
+    print(f"installed {_safe(link.get('name') or args.hub_id)}")
     return 0
 
 
@@ -11999,8 +12142,8 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     import json as _json
 
     from local_operator.hub_sync import provenance as prov
-    from local_operator.hub_sync.adapters import publish_document
     from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.adapters import publish_document
     from local_operator.hub_sync.budget import OperationBudget
     from local_operator.hub_sync.outbox import Outbox
     from local_operator.hub_sync.push import push_item
@@ -12070,9 +12213,7 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             print("error: pass --yes to push (no terminal to confirm on)")
             return 1
         form = "bundle" if is_bundle else "document"
-        answer = input(
-            f"Republish {check.name!r} ({form}) at {expected}? [y/N] "
-        ).strip().lower()
+        answer = input(f"Republish {check.name!r} ({form}) at {expected}? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("cancelled")
             return 1
@@ -12100,11 +12241,8 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             document_builder=lambda fields: publish_document(
                 "skill", ctx.config_dir, check.local_id, fields
             ),
-            bundle_attested=not is_bundle
-            or svc._capability_bundle(ctx.store().load(), identity),
-            bundle_upload=(
-                svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None
-            ),
+            bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
+            bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
         )
     )
     svc.record_push_outcome(ctx, check, outcome)
@@ -12119,9 +12257,19 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
     else:
-        detail = f" {outcome.reason}" if outcome.reason else ""
-        print(f"{check.name}: {outcome.state}{detail}")
+        detail = ""
+        if outcome.reason:
+            detail = f" — {_skills_refusal(_reason_error(outcome.reason))}"
+        print(f"{_safe(check.name)}: {outcome.state}{detail}")
     return 0 if outcome.state in ("pushed", "no-op") else 1
+
+
+def _reason_error(code: str) -> Any:
+    """A named push refusal as the LinkError the shared wording helper expects."""
+
+    from local_operator.hub_sync.identity import LinkError
+
+    return LinkError(code, code)
 
 
 def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
@@ -12177,7 +12325,8 @@ def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
         form = "bundle" if str(link.get("form") or "") == "bundle" else "document"
         pull = (link.get("pull") or {}) if isinstance(link.get("pull"), dict) else {}
         print(
-            f"{link.get('name')} [{form}] {link.get('visibility') or '?'} "
+            f"{_safe(link.get('name'))} [{form}] "
+            f"{_scope_label(str(link.get('visibility') or 'public'))} "
             f"state={pull.get('state') or 'unknown'}"
         )
     return 0

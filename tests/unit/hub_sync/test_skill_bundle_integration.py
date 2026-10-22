@@ -17,6 +17,7 @@ import os
 import stat
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,7 +36,18 @@ from local_operator.hub_sync.skill_document import (
     skill_manifest_from_json,
     skill_manifest_from_remote,
 )
-from local_operator.hub_sync.skill_storage import ManagedSkillStorage, managed_skill_read
+from local_operator.hub_sync.skill_storage import (
+    ManagedSkillStorage,
+    managed_skill_read,
+)
+
+
+def _phase(journal: Any, operation: str) -> str:
+    """The journal entry's phase, ASSERTED present: every call here wrote one."""
+
+    record = journal.read(operation)
+    assert record is not None
+    return record.phase
 
 
 def _identity(local_id: str = "immutable-local", hub_id: str = "remote-bundle-1") -> LinkIdentity:
@@ -80,7 +92,7 @@ def _payload(
     *,
     before: str | None,
     after: str | None,
-) -> dict:
+) -> dict[str, Any]:
     """The bundle adapter's journal payload (design §5 step 1)."""
 
     return {
@@ -127,7 +139,7 @@ def test_apply_installs_the_tree_and_finalizes_the_baseline(tmp_path: Path) -> N
     assert stored is not None
     assert stored.fields == manifest.to_json()
     assert stored.fingerprint == manifest.bundle.tree_hash
-    assert storage.journal.read(transaction.operation_id).phase == "complete"
+    assert _phase(storage.journal, transaction.operation_id) == "complete"
     skills, _backups = _roots(root)
     assert not (skills / f".stage-{transaction.operation_id}").exists()
 
@@ -284,7 +296,7 @@ def test_recovery_restores_the_backup_when_the_second_rename_never_happened(
     destination = storage.path(manifest.name)
     assert tree_hash_of(destination) == manifest.fingerprint
     assert not (storage.root / f".stage-{operation}").exists()
-    assert storage.journal.read(operation).phase == "aborted"
+    assert _phase(storage.journal, operation) == "aborted"
 
 
 def test_recovery_finalizes_when_the_new_tree_is_already_in_place(tmp_path: Path) -> None:
@@ -316,7 +328,7 @@ def test_recovery_finalizes_when_the_new_tree_is_already_in_place(tmp_path: Path
     assert tree_hash_of(destination) == newer.fingerprint
     stored = prov.read_baseline(root, "skill", identity.local_id)
     assert stored is not None and stored.fields == newer.to_json()
-    assert storage.journal.read(operation).phase == "complete"
+    assert _phase(storage.journal, operation) == "complete"
 
 
 def test_recovery_blocks_rather_than_overwriting_an_unexpected_destination(
@@ -347,6 +359,7 @@ def test_recovery_blocks_rather_than_overwriting_an_unexpected_destination(
 
     assert tree_hash_of(storage.path(manifest.name)) == third_hash
     record = storage.journal.read(operation)
+    assert record is not None
     assert record.phase == "blocked" and record.error_class == "local-concurrent-edit"
 
 
@@ -372,12 +385,12 @@ def test_document_recovery_ignores_bundle_transactions_and_the_reader_recovers_b
 
     # The document adapter must not settle a transaction it cannot interpret.
     ManagedSkillStorage(root).recover()
-    assert storage.journal.read(operation).phase == "prepared"
+    assert _phase(storage.journal, operation) == "prepared"
 
     with managed_skill_read(root):
         pass
 
-    assert storage.journal.read(operation).phase == "aborted"
+    assert _phase(storage.journal, operation) == "aborted"
     assert tree_hash_of(storage.path(manifest.name)) == manifest.fingerprint
 
 
@@ -410,7 +423,7 @@ def test_a_recorder_transaction_of_the_other_adapter_is_not_touched(tmp_path: Pa
 
     storage.recover()
 
-    assert storage.journal.read(transaction.operation_id).phase == "prepared"
+    assert _phase(storage.journal, transaction.operation_id) == "prepared"
 
 
 def test_adapter_snapshot_reads_a_bundle_link_by_tree_hash(tmp_path: Path) -> None:

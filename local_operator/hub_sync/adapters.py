@@ -238,7 +238,9 @@ class SkillAdapter(_SharedIdentity):
         local_id = str(row)
         record = prov.read_baseline(config_dir, "skill", local_id)
         if record is not None and "bundle" in record.fields:
-            from local_operator.hub_sync.skill_bundle_storage import ManagedBundleStorage
+            from local_operator.hub_sync.skill_bundle_storage import (
+                ManagedBundleStorage,
+            )
 
             bundle = ManagedBundleStorage(config_dir).snapshot(local_id)
             fields = bundle.manifest.to_json()

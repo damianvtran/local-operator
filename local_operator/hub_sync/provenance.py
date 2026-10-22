@@ -313,6 +313,12 @@ class BaselineRecord:
     #: has no managed directory. Only an explicit write may move it, and only
     #: the managed-skill writer (install/apply) may move it back to ``present``.
     content_state: ContentState = "present"
+    #: The publisher a PUBLIC bundle install was confirmed against (design §6.2).
+    #: ``publisher_id`` is the binding value (a display name is user-controlled),
+    #: ``publisher_name`` is display-only and ``archive_hash`` the exact bytes
+    #: confirmed. A later update whose row names another publisher REFUSES rather
+    #: than silently replacing content under a consent given to someone else.
+    bundle_confirmation: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
@@ -336,6 +342,11 @@ class BaselineRecord:
             "legacy_subscribe_hint": self.legacy_subscribe_hint,
             "scope_known": self.scope_known,
             "content_state": self.content_state,
+            "bundle_confirmation": (
+                deepcopy(dict(self.bundle_confirmation))
+                if self.bundle_confirmation is not None
+                else None
+            ),
         }
 
 
@@ -584,6 +595,31 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
     content_state = raw.get("content_state", "present")
     if content_state not in ("present", "absent"):
         return None
+    bundle_confirmation = None
+    raw_confirmation = raw.get("bundle_confirmation")
+    if raw_confirmation is not None:
+        # A persisted pin is a SECURITY input: only a well-formed one is trusted,
+        # and an unreadable one is ignored (the update then has no pin to check,
+        # which is the older-record behaviour rather than a forged match).
+        if not isinstance(raw_confirmation, dict):
+            return None
+        publisher_id = raw_confirmation.get("publisher_id")
+        archive_hash = raw_confirmation.get("archive_hash")
+        publisher_name = raw_confirmation.get("publisher_name", "")
+        if (
+            not isinstance(publisher_id, str)
+            or not publisher_id.strip()
+            or not isinstance(publisher_name, str)
+            or not isinstance(archive_hash, str)
+            or len(archive_hash) != 64
+            or any(c not in "0123456789abcdef" for c in archive_hash)
+        ):
+            return None
+        bundle_confirmation = {
+            "publisher_id": publisher_id.strip(),
+            "publisher_name": publisher_name,
+            "archive_hash": archive_hash,
+        }
     return BaselineRecord(
         kind=kind,
         local_id=local_id,
@@ -602,6 +638,7 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
         legacy_subscribe_hint=hint,
         scope_known=scope_known,
         content_state=content_state,
+        bundle_confirmation=bundle_confirmation,
     )
 
 
