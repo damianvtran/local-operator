@@ -35067,7 +35067,7 @@ class OperatorApp(App[None]):
                     f" You are back on {session_id}; this move may already have gone "
                     "through, so check before asking again."
                 )
-            elif left:
+            elif left and not reached:
                 # THE USER WAS MOVED OFF THE SESSION TO GET HERE. Saying
                 # "Nothing changed" would be a lie about a screen the user can
                 # see, and the caller would be left on a fresh local session with
@@ -35075,19 +35075,32 @@ class OperatorApp(App[None]):
                 # names the way back this method then takes. Order matters in the
                 # sentence: the refusal, then the truth about the local state.
                 tail = f" You are back on {session_id} — it did not move."
+            elif left:
+                # A PHASE WAS REACHED (U7): the producer's sentence already names
+                # the state and the one action (the copy paused, which relay to
+                # restart), so this tail would repeat or contradict it. The reopen
+                # still runs below; only the claim about the screen is dropped.
+                tail = ""
             elif changed:
                 tail = ""
             else:
                 tail = " Nothing changed."
             message = str(result.get("message") or "the move was refused")
             text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
-            if left and code == "unreachable" and not changed and home:
+            if left and code == "unreachable" and not changed and home and not reached:
                 # THE LATE FAILED RECALL, in the design's own words (UX round 1,
                 # U2): the pre-check saw the peer, then it stopped answering. The
                 # ``tail`` above would say "You are back on …" as a second
                 # sentence; this one names the device, its silence and where the
                 # composer still points in one breath, which is the fact the user
                 # needs after the reopen puts them back in it.
+                #
+                # GATED ON ``not reached`` (U7): once the move reached a phase the
+                # producer knows more than this fallback does — for a copy failure
+                # it says the copy was discarded, the source still holds the
+                # conversation paused, and which relay to restart — and replacing
+                # that with "did not answer / Nothing moved" both hides the remedy
+                # and asserts the source never got involved.
                 text = (
                     f"Could not move {session_id}: {home} did not answer. Nothing moved; "
                     f"you are still in the conversation on {home}."

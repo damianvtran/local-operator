@@ -22,7 +22,9 @@ Each cell pins one half of the repair:
   clears the prepared entry before a retry prepares
   (``test_a_retry_after_a_failed_copy_...``);
 * a prepared entry for another destination refuses the same way
-  (``test_a_prepared_handoff_for_another_destination_...``).
+  (``test_a_prepared_handoff_for_another_destination_...``);
+* a ``--keep`` failure says the copy was discarded without claiming the source
+  paused (U8), and identical device names get role qualifiers (m1).
 
 The rig is ``test_mobility``'s two real relays, driven the way the CLI drives them,
 for the same reason that module gives: a second implementation of the move would not
@@ -38,6 +40,7 @@ import pytest
 from local_operator.network import mobility, sync
 from local_operator.session.placement import (
     HANDOFF_PHASE_HANDING_OFF,
+    HANDOFF_PHASE_PREPARED,
     read_handoff_journal,
     write_handoff_entry,
 )
@@ -111,8 +114,9 @@ def _lose_the_second_fetch(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, i
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("phase", [HANDOFF_PHASE_PREPARED, HANDOFF_PHASE_HANDING_OFF])
 def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
-    pair: Devices, monkeypatch: pytest.MonkeyPatch
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
     """The live defect, driven through the real transport.
 
@@ -121,10 +125,12 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     is a partial copy being rolled back, not a failure before any byte moved. The
     first ``net_sync`` (the plan) and the first file's chunks are the real calls.
 
-    A destination handoff entry is planted FIRST, at the phase the destination
-    writes after the copy (R1-2): the live instance's entry is skipped by reconcile,
-    so it survives to the rollback, and the rollback has to clear it rather than
-    leave a claim on an id nobody committed.
+    A destination handoff entry is planted FIRST, at BOTH phases the destination
+    can hold while a copy is in flight (R1-2, m2): ``prepared`` is what the invite
+    route pre-writes before any byte moves, ``handing-off`` is the post-copy shape.
+    The live instance's entry is skipped by reconcile, so it survives to the
+    rollback, and the rollback has to clear it rather than leave a claim on an id
+    nobody committed.
     """
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin")
@@ -136,11 +142,12 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
         SESSION,
         {
             "role": "destination",
-            "phase": HANDOFF_PHASE_HANDING_OFF,
+            "phase": phase,
             "from_device": server_a.identity.device_id,
             "instance_id": str(server_b.instance_id),
         },
     )
+    assert read_handoff_journal(server_b.root)[SESSION]["phase"] == phase
 
     fetches, _ = _lose_the_second_fetch(monkeypatch)
 
@@ -162,7 +169,7 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     assert message == (
         f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
         f"partial copy; {holder} still has the conversation, paused for this move. "
-        f"Restart the relay on {holder} (`lop network restart`), then run the move "
+        f"On {holder}, restart the relay (`lop network restart`), then run the move "
         "again."
     ), message
     assert "this device" not in message, message
@@ -180,6 +187,85 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     source_entry = read_handoff_journal(server_a.root)[SESSION]
     assert source_entry["role"] == "source", source_entry
     assert source_entry["phase"] == "prepared", source_entry
+
+
+def test_a_keep_copy_failure_leaves_the_source_running(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U8: a copy leaves the source running and journals nothing.
+
+    So a copy failure may not claim the source "paused" or send the reader to
+    restart a relay that has nothing to unpick — the remedy is just to copy again.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    retired: list[str] = []
+    real_retire = mobility._retire_local_runtime
+
+    def watching_retire(root: Any, session_id: str, *, deadline_s: float = 0) -> Any:
+        retired.append(session_id)
+        return real_retire(root, session_id, deadline_s=deadline_s)
+
+    monkeypatch.setattr(mobility, "_retire_local_runtime", watching_retire)
+    fetches, _ = _lose_the_second_fetch(monkeypatch)
+
+    failed = _move(server_b, SESSION, keep=True, monkeypatch=monkeypatch)
+
+    assert fetches["n"] == 2, fetches
+    assert failed["ok"] is False and failed["code"] == "unreachable", failed
+    assert failed["changed"] is False, failed
+    dest = str(server_b._own_label())  # noqa: SLF001
+    holder = str(server_a._own_label())  # noqa: SLF001
+    message = str(failed["message"])
+    assert message == (
+        f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
+        f"partial copy; {holder} still has the conversation and was not paused "
+        "(a copy leaves it running). Run the copy again."
+    ), message
+    assert "restart" not in message, message
+    # THE SOURCE ENGINE STILL RUNS: ``--keep`` never retires it, and no journal
+    # entry was written for a copy (the launch guard reads that file).
+    assert retired == [], retired
+    assert read_handoff_journal(server_a.root) == {}
+    assert source.is_dir()
+    assert _transcript(server_a.root, SESSION) == before
+
+
+def test_the_copy_failure_sentence_disambiguates_identical_names(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1: member names are not unique, so a shared name gets a role qualifier.
+
+    Both ends carry the same label in this cell; without the qualifier the sentence
+    reads as one device talking about itself, which is the state U6 exists to stop.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    real_resolve = mobility.resolve_remote_owner
+    same_name = str(server_b._own_label())  # noqa: SLF001
+
+    def resolving_to_the_same_name(server: Any, session_id: str) -> tuple[str, str]:
+        device_id, _name = real_resolve(server, session_id)
+        return device_id, same_name
+
+    monkeypatch.setattr(mobility, "resolve_remote_owner", resolving_to_the_same_name)
+    _fetches, _ = _lose_the_second_fetch(monkeypatch)
+
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert failed["ok"] is False and failed["code"] == "unreachable", failed
+    message = str(failed["message"])
+    dest = f"{same_name} (this move's destination)"
+    holder = f"{same_name} (the source)"
+    assert message == (
+        f"cloud-node-1 stopped answering during the copy. {dest} discarded its "
+        f"partial copy; {holder} still has the conversation, paused for this move. "
+        f"On {holder}, restart the relay (`lop network restart`), then run the move "
+        "again."
+    ), message
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +349,12 @@ def test_a_retry_after_a_failed_copy_is_refused_until_the_source_relay_restarts(
     holder = str(server_a._own_label())  # noqa: SLF001
     message = str(retried["message"])
     assert f"already in progress on {holder}" in message, message
+    assert (
+        f"so nothing was changed. On {holder}, restart the relay "
+        "(`lop network restart`), then try the move again."
+    ) in message, message
     assert "this device" not in message, message
-    assert "lop network restart" in message, message
+    assert "other device" not in message, message
     assert source.is_dir()
     assert _transcript(server_a.root, SESSION) == before
     assert read_handoff_journal(server_a.root)[SESSION]["phase"] == "prepared"
