@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -114,10 +115,10 @@ def _err(status: int, code: str, *, details: dict[str, Any] | None = None) -> ht
 
 
 def _make_client(
-    handler, *, store: Any = None, credential_id: int | None = None
+    handler, *, store: Any = None, credential_id: int | None = None, config_dir: Path | None = None
 ) -> TeamBridgeClient:
     return TeamBridgeClient(
-        None,
+        config_dir,
         base_url="https://hub.example/v1",
         store=store or FakeStore(),
         transport=httpx.MockTransport(handler),
@@ -924,3 +925,219 @@ async def test_conversations_passes_discoverable_rows_through_untouched():
 
     assert result["conversations"] == [row]
     assert result["next_cursor"] == "bcur_2"
+
+
+# ---------------------------------------------------------------------------
+# the explicit settings write is the only native-enrollment path (consent hold)
+# ---------------------------------------------------------------------------
+
+
+async def test_an_explicit_enable_commits_the_native_receipt(tmp_path: Path):
+    """A user's own ACTIVE settings PUT commits the owner + consent receipt.
+
+    #2712's status-read enrollment is gone; this is the path that keeps an
+    explicit enable able to receive.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        consent_version="bridge_consent_v1",
+        consented_via="settings",
+        endpoint=None,
+        expected_account_id="acc_1",
+    )
+
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert (owner.account_id, owner.tenant_id, owner.endpoint_id) == ("acc_1", "tnt_1", "bep_1")
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v1",
+        "consent_ref": "bep_1",
+    }
+
+
+def _enable_kwargs() -> dict[str, Any]:
+    return {
+        "state": "active",
+        "tenant_id": "tnt_1",
+        "consent_version": "bridge_consent_v1",
+        "consented_via": "settings",
+        "endpoint": None,
+        "expected_account_id": "acc_1",
+    }
+
+
+def _seeded(tmp_path: Path) -> int:
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    return int(store.sync_state(owner)["feed_seq"])
+
+
+async def test_an_explicit_enable_seeds_the_feed_cursor_at_the_hub_head(tmp_path: Path):
+    """Review R1-2/R2-1: ONE no-cursor events read, BEFORE the PUT, learns a used
+    endpoint's head, and the never-polled store starts there — no 7-day replay."""
+
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        order.append(request.url.path.rsplit("/", 1)[-1])
+        if request.url.path.endswith("/messaging/events"):
+            assert "after" not in request.url.params
+            return _ok({"events": [], "cursor": 412})
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(**_enable_kwargs())
+
+    assert order == ["events", "settings"]
+    assert _seeded(tmp_path) == 412
+
+
+async def test_a_message_sent_between_the_enable_and_the_seed_is_never_skipped(tmp_path: Path):
+    """Review R2-1: the hub's head advances between the enable write and any later
+    read (a message lands). The seed must be the position at or BEFORE the PUT, so
+    that message's seq stays above the cursor and is delivered."""
+
+    head = {"seq": 7}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/events"):
+            return _ok({"events": [], "cursor": head["seq"]})
+        # The enable is accepted, and a message lands for this endpoint at once.
+        head["seq"] += 1
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(**_enable_kwargs())
+
+    assert head["seq"] == 8
+    assert _seeded(tmp_path) == 7  # after=7 → the seq-8 message is delivered
+
+
+async def test_a_brand_new_endpoint_keeps_cursor_zero(tmp_path: Path):
+    """F2-safe: a first enable has no endpoint yet, so the pre-read is refused
+    and the first message (seq 1) is still delivered from cursor 0."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/events"):
+            return _err(403, "bridge_not_available")
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(**_enable_kwargs())
+    assert _seeded(tmp_path) == 0
+
+
+async def test_a_slow_head_read_never_holds_the_enable(tmp_path: Path, monkeypatch):
+    """Review R2-2: the head read is bounded; past the bound the enable returns
+    and the cursor stays 0 (the F2-safe path)."""
+
+    import asyncio as _asyncio
+
+    from local_operator.team_bridge import client as client_mod
+
+    monkeypatch.setattr(client_mod, "SEED_HEAD_TIMEOUT_S", 0.05)
+
+    async def slow_events(**kwargs):
+        await _asyncio.sleep(5)
+        return {"events": [], "cursor": 999}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    monkeypatch.setattr(client, "events", slow_events)
+    started = _asyncio.get_running_loop().time()
+    await client.put_settings(**_enable_kwargs())
+    assert _asyncio.get_running_loop().time() - started < 2
+    assert _seeded(tmp_path) == 0
+
+
+async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
+    """Turning off is not consent: a pause leaves the store empty."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "paused"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="paused", endpoint={"state": "active"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_a_resume_without_a_consent_echo_commits_nothing(tmp_path: Path):
+    """Only the CONSENTED active write enrolls; a bare resume is not an opt-in."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="active", endpoint={"state": "paused"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# events long-poll (live E2E finding F1)
+# ---------------------------------------------------------------------------
+
+
+async def test_events_sends_the_long_poll_wait_and_outlives_the_park():
+    """F1: without ``wait`` the hub answers at once, so the loop hot-spun into
+    429s (124 calls in < 2 s against a real hub). The park must reach the wire,
+    and the read timeout must outlive it, or every quiet poll would end as a
+    client-side timeout instead of the server's 204."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    client = _make_client(handler)
+    assert await client.events(tenant_id="tnt_1", after=0, wait=25) is None
+    params = seen[0].url.params
+    assert params["wait"] == "25"
+    # F2 on the wire: cursor 0 is a real position, never "no cursor".
+    assert params["after"] == "0"
+    timeout = seen[0].extensions["timeout"]
+    assert timeout["read"] > 25
+
+
+async def test_events_without_wait_keeps_the_plain_poll_shape():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    client = _make_client(handler)
+    await client.events(tenant_id="tnt_1")
+    assert "wait" not in seen[0].url.params and "after" not in seen[0].url.params
+
+
+async def test_events_429_carries_the_retry_after_header():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"error": "slow down", "code": "rate_limited"}, headers={"Retry-After": "42"}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(BridgeRefusal) as refusal:
+        await client.events(tenant_id="tnt_1", after=3, wait=25)
+    assert refusal.value.http_status == 429 and refusal.value.retry_after_seconds == 42

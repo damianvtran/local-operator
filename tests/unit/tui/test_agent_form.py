@@ -63,6 +63,7 @@ async def test_validation_duplicate_noop_and_revision(tmp_path, monkeypatch):
         session.agent_registry,
         AgentParams(op="create", name="writer", instructions="Write."),
         creating=True,
+        scope="global",
     )
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
@@ -87,6 +88,7 @@ async def test_validation_duplicate_noop_and_revision(tmp_path, monkeypatch):
             session.agent_registry,
             AgentParams(op="update", name="writer", label="Elsewhere"),
             creating=False,
+            scope="global",
         )
         page.controls["label"].value = "My edit"
         await pilot.press("ctrl+s")
@@ -156,6 +158,7 @@ async def test_reserved_and_escaped_names_and_autocomplete(tmp_path, monkeypatch
             session.agent_registry,
             AgentParams(op="create", name=name, instructions="Help."),
             creating=True,
+            scope="global",
         )
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
@@ -225,6 +228,7 @@ async def test_noop_never_calls_writer_and_clear_refusals(tmp_path, monkeypatch)
         session.agent_registry,
         AgentParams(op="create", name="writer", description="For drafts", instructions="Write."),
         creating=True,
+        scope="global",
     )
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
@@ -378,6 +382,7 @@ async def test_removed_tier_noop_and_label_edit_preserve_historical_pin(tmp_path
         session.agent_registry,
         AgentParams(op="create", name="historic", instructions="Help.", effort="hi"),
         creating=True,
+        scope="global",
     )
     config.set_config_value("subagents", {"models": {}, "model_choice": "operator"})
     async with app.run_test(size=(60, 24)) as pilot:
@@ -444,6 +449,7 @@ async def test_attach_receipt_suggests_an_invokable_escaped_name(tmp_path, monke
         session.agent_registry,
         AgentParams(op="create", name=name, instructions="Help."),
         creating=True,
+        scope="global",
     )
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)

@@ -135,3 +135,39 @@ async def test_env_switch_truthiness_matches_the_house_convention(
     for truthy in ("1", "true", "yes", "on"):
         monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", truthy)
         assert state.env_disabled() is True
+
+
+def test_a_failed_create_records_a_failed_create_receipt(tmp_path: Path) -> None:
+    from local_operator.aida import bootstrap
+
+    session_id = "aida11112222"
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "created_at.json").write_text("{}", encoding="utf-8")
+
+    bootstrap._discard_failed_create(tmp_path, session_id)
+
+    assert not directory.exists()
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sessions" / ".cleanup-log.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["policy"] == "failed-create"
+    assert rows[0]["session"] == session_id
+    assert rows[0]["actor"] == "aida"
+    assert rows[0]["bytes"] > 0
+
+
+def test_a_failed_create_keeps_a_directory_that_gained_a_transcript(tmp_path: Path) -> None:
+    from local_operator.aida import bootstrap
+
+    session_id = "aida33334444"
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("a real turn\n", encoding="utf-8")
+
+    bootstrap._discard_failed_create(tmp_path, session_id)
+
+    assert (directory / "transcript.jsonl").exists()
+    assert not (tmp_path / "sessions" / ".cleanup-log.jsonl").exists()

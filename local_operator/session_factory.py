@@ -3924,9 +3924,18 @@ _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS = 1.0
 _STORE_MAINTENANCE_LOCK_NAME = ".store-maintenance.lock"
 _STORE_MAINTENANCE_STAMP_NAME = ".store-maintenance.json"
 _STORE_MAINTENANCE_STAMP_SCHEMA = 1
-_STORE_MAINTENANCE_STAMP_VERSION = 1
+#: Bumped for the session-store census pass: the pass set and its order changed,
+#: which the freshness check already catches through ``passes``; the version is
+#: the explicit signal, so an older build reading a newer stamp (or the reverse)
+#: retries once instead of reasoning about a half-known sequence.
+_STORE_MAINTENANCE_STAMP_VERSION = 2
 _STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
 _STORE_MAINTENANCE_PASS_NAMES = (
+    # FIRST, deliberately: the census diffs what the store held at the end of
+    # the PREVIOUS pass against the disk, so a cleanup pass in this one shows up
+    # as a recorded removal in the census that follows it — not as an
+    # unaccounted disappearance the same sequence caused.
+    "session store census",
     "session cleanup policy",
     "orphan process-group sweep",
     "session origin backfill",
@@ -4101,7 +4110,7 @@ def _run_store_maintenance(
     *,
     stop_event: threading.Event | None = None,
 ) -> bool:
-    """Run the six idempotent store passes under one daemon-owned lock.
+    """Run the seven idempotent store passes under one daemon-owned lock.
 
     Separate runtime processes can start more than the 0.75-second idle delay
     apart, so mutual exclusion alone does not suppress their duplicate walks.
@@ -4109,7 +4118,7 @@ def _run_store_maintenance(
     and orphan-group reaping may consequently wait up to 60 seconds after a
     completed sweep. A crash or any failed pass writes no fresh stamp, so the
     next launch retries — and so does a pass that STOOD DOWN mid-walk because
-    this process is leaving: the four store-walking passes check the stop once
+    this process is leaving: the five store-walking passes check the stop once
     per directory and RETURN their partial count rather than raising, so what
     refuses the stamp is the guard on the sequence below
     (``all_passes_succeeded and not stop.is_set()``). That is the same event
@@ -4150,6 +4159,7 @@ def _run_store_maintenance(
             backfill_session_origins,
             backfill_session_titles,
         )
+        from local_operator.session.census import run_store_census
         from local_operator.session.cleanup import cleanup_from_config
         from local_operator.tools.group_reaper import sweep_orphan_groups
 
@@ -4158,6 +4168,16 @@ def _run_store_maintenance(
         # the group reaper acts only on a provably dead owner. The lock serializes
         # those store-wide decisions with other runtime processes.
         passes: list[tuple[str, Callable[[], Any]]] = [
+            (
+                "session store census",
+                # Read-only over the store; appends only unaccounted-* rows and
+                # its own census file. FIRST in the sequence so this pass's own
+                # cleanup is accounted for by the NEXT census rather than
+                # reported by this one — and it runs whatever the cleanup
+                # switch says, because it is the record of what retention did,
+                # not a retention feature.
+                lambda: run_store_census(config_dir, should_stop=stop.is_set),
+            ),
             (
                 "session cleanup policy",
                 lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
@@ -4208,7 +4228,7 @@ def _run_store_maintenance(
                 _write_store_maintenance_stamp(config_dir, pass_names)
             except OSError:
                 # Fail closed: without a trustworthy completion record, do
-                # not let each later process repeat the six store-wide walks.
+                # not let each later process repeat the seven store-wide walks.
                 logger.debug(
                     "store maintenance completion stamp write failed; skipping", exc_info=True
                 )
@@ -4719,10 +4739,11 @@ async def _prepare(
         web_search_settings=config_manager.get_config_value("web_search", None),
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
-    tools = create_tools(tool_context)
     # The classification roster's ``tool`` kind is deliberately NOT populated
-    # here: this context carries none of the session-owned ``createIf`` gates,
-    # so a snapshot would miss ``sessions``/``task``/``wait``/``jobs``/``hub``
+    # here: this context carries none of the session-owned ``createIf`` gates
+    # (``bridge_runtime`` is the exception — it is installed above because the
+    # tool table is built from this context), so a snapshot would miss
+    # ``sessions``/``task``/``wait``/``jobs``/``hub``
     # (agent review round 1, PR #1863). ``Session.set_knowledge_hooks``
     # refreshes the roster from the session's FINAL inventory instead.
 
@@ -4743,6 +4764,30 @@ async def _prepare(
         transcript_dir,
         defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
     )
+    # H5d: the bridge runtime must be resolved BEFORE the tool table is built,
+    # because `build_bridge_tool` is createIf — it returns None unless
+    # ``tool_context.bridge_runtime`` is PRESENT — so building the table first
+    # drops the `bridge` tool from every session that has a bridge. Before this
+    # fix the resolution sat ~150 lines below this point: enrollment was
+    # committed, the runtime was attached to the Session, the executor would
+    # have worked, and the model had no tool to call. Nothing outside observed
+    # the gap.
+    #
+    # The resolution needs the transcript (the designation is the session
+    # directory name), which is why it lives here and not beside the
+    # ToolContext it feeds. A session that cannot use the bridge pays no schema:
+    # a gate miss leaves the field None and the createIf behaves as before.
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    # One value, both roles: the table assembled below inspects this context for
+    # PRESENCE, and the Session executes against the same runtime. Two
+    # resolutions here would be two answers waiting to disagree.
+    tool_context.bridge_runtime = bridge_runtime
+    tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
     # placement document plus an identity — deliberately NOT on
@@ -4883,21 +4928,11 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
-    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
-    # account-bound designated session. The decision is the HOST's, taken at
-    # the ONE construction seam, and a gate miss adds NO key at all (the
-    # ordinary kwargs dict cannot drift from what existing callers built).
-    # The helper is import-light and NETWORK-FREE: it reads local
-    # enrollment/settings/availability state and constructs the runtime — no
-    # fetch, no spawn; the client stays cheap until its first request.
-    # Subagent children are built elsewhere and never receive it (see the
-    # parameter's comment on ``Session``).
-    from local_operator.team_bridge.host import bridge_runtime_for_session
-
-    bridge_runtime = bridge_runtime_for_session(
-        config_manager=config_manager,
-        session_id=transcript.directory.name,
-    )
+    # H5 (Team Bridge): the runtime resolved above is the same object the tool
+    # table was built against. It is still attached ONLY to the persisted,
+    # account-bound designated session — and subagent children are built
+    # elsewhere and never receive it (see the parameter's comment on
+    # ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
@@ -5714,6 +5749,16 @@ def attach_credential_binding(
     sink = getattr(auth_store, "set_serve_sink", None)
     if callable(sink):
         sink(recorder.observe_serve)
+    get_credential = getattr(auth_store, "get_credential", None)
+    install_account = getattr(recorder, "set_account_resolver", None)
+    if callable(get_credential) and callable(install_account):
+        # A LOCAL serve's stable identity is read off the row it served (a
+        # mesh copy's origin marker), so a sync re-copy that replaces the row
+        # does not read as an account switch. One in-process row read, and only
+        # when a binding row is being built.
+        from local_operator.session.credential_binding import mesh_copy_account
+
+        install_account(lambda credential_id: mesh_copy_account(get_credential(credential_id)))
     reader = getattr(auth_store, "set_binding_reader", None)
     if callable(reader):
         reader(recorder.recall_for)

@@ -142,6 +142,15 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # session exactly as the marker does — and on a destination where no such
     # run exists the reader refuses it (``signal_receipt.covers_run``).
     "runtime-signal.json",
+    # THE RUNTIME'S OWN EXIT RECORD (``journal.EXIT_RECORD_NAME``): the durable
+    # "when did it stop, why, and did anybody ask" of the last departure. It is
+    # evidence ABOUT a past run like the two rows above it, and it must travel
+    # for the same reason: a moved session whose listing lost it would read as
+    # "no record attests to a stop" — the same shape as a SIGKILL — on the
+    # destination, silently rewriting the session's history. Read on the
+    # destination the run key still names the departed process, so it is never
+    # mistaken for the new owner's own exit.
+    "runtime-exit.json",
     "inbox.jsonl",
     # Scoped portable memory is additional to net_memory's incremental ALL-scope
     # sync. A move must carry it even when memory replication is disabled.
@@ -332,7 +341,8 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # would leave roles behind silently; the S2 PR carries that gate.
     "roles": (
         "session-scoped role definitions are not carried by a mesh move in v1; "
-        "S2 stays read-only for this tree until S3's refusal/notice lands with or before it"
+        "``_source_prepare`` refuses such a move by default and names the roles, "
+        "and ``--drop-session-roles`` is the explicit opt-out (LOH-9 S2)"
     ),
     # The tail anchor (``session.tail_anchor``): a hint about the SOURCE's own
     # journal bytes — an inode number and the offset of the end of its last
@@ -347,12 +357,28 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # as the owner of its copy, which is how a viewer refuses to open a session
     # that is not running there.
     ".session.pid": "the source process's liveness marker",
+    # The latest run's identity (``journal.RUN_RECORD_NAME``): what the listing
+    # compares an exit record against to tell "the last run exited here" from "a
+    # later run died". It names a pid on THIS device, so a copy would either be
+    # deleted by a clean exit that never happened here or make the destination's
+    # history read unknown; the destination writes its own at the next boot.
+    "runtime-run.json": (
+        "this device's latest-run marker; the destination writes its own at the next boot"
+    ),
     # Written by the destination itself, because ``home_device`` has to name the
     # NEW owner. Copying it would leave the moved session stamped as this
     # device's.
     "mesh.json": "the ownership stamp, rewritten by whoever adopts the copy",
     # Describes a replica, means nothing inside a session.
     REPLICA_CURSOR_NAME: "the replica cursor, which is about this device's copy",
+    # The DESKTOP sidebar's destination layout (``server.sidebar_layout``): which
+    # destinations this device's column shows above its ``More`` fold. A device
+    # preference, not session content -- the design stores it on the backend so
+    # it survives an app update on THIS device ("one value per device"), and a
+    # copy would impose the source window's arrangement on a machine whose
+    # window is a different size and whose capabilities may differ. It lives at
+    # the config root, beside the sessions tree rather than in one.
+    "sidebar-layout.json": "a device-scoped desktop preference: the source window's sidebar order",
     # The definitions index (``network.definitions.INDEX_NAME``): the agent and team
     # rows this device mirrors to a peer, written BESIDE the sessions tree
     # (``<config>/network/definitions.json``) rather than into a session. It is not an

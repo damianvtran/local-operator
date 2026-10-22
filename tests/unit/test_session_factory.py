@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -4767,6 +4768,7 @@ def _patch_store_maintenance_passes(
 ) -> None:
     """Replace store-wide callbacks with ordered, resumable test probes."""
     from local_operator.analytics import backfill as analytics_backfill
+    from local_operator.session import census as census_mod
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.tools import group_reaper
 
@@ -4781,6 +4783,7 @@ def _patch_store_maintenance_passes(
 
         return callback
 
+    monkeypatch.setattr(census_mod, "run_store_census", record("census"))
     monkeypatch.setattr(cleanup_mod, "cleanup_from_config", record("cleanup"))
     monkeypatch.setattr(group_reaper, "sweep_orphan_groups", record("groups"))
     monkeypatch.setattr(resume_mod, "backfill_session_origins", record("origins"))
@@ -4936,6 +4939,7 @@ def test_store_maintenance_thread_retries_after_lock_owner_exits(
     assert not worker.is_alive(), "worker did not stop when asked"
     assert attempts == 4, "worker abandoned lock retries after its initial contention"
     assert calls == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5093,7 +5097,7 @@ def test_store_maintenance_malformed_stamp_is_retried(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None
     )
 
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
         session_factory._STORE_MAINTENANCE_STAMP_VERSION
     )
@@ -5160,6 +5164,7 @@ def test_store_maintenance_failed_pass_retries_without_completion_stamp(
     )
     assert calls[: len(first_run)] == first_run
     assert calls[len(first_run) :] == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5330,7 +5335,13 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
     )
     assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
-    assert calls == ["cleanup", "groups", "origins", "titles"], "a pass ran after the stop"
+    assert calls == [
+        "census",
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+    ], "a pass ran after the stop"
 
     # No stamp means the next run re-derives the worklist rather than trusting
     # a completion record — the resume cost is bounded by the sentinels the
@@ -5340,6 +5351,7 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None
     )
     assert calls == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5411,32 +5423,167 @@ async def test_the_stop_request_reaches_the_dispatched_walk(tmp_path: Path, monk
         session_factory.reset_store_maintenance_for_tests()
 
 
-def test_a_leaving_runtime_stops_the_store_walk_at_a_directory(tmp_path: Path) -> None:
-    """Cell A: a real departure stops a real walk between two directories.
+#: The walker is parked inside the scan of the FOURTH directory, so exactly three
+#: are answered when the departure lands. Three is "some work done, most left": it
+#: keeps ``0 < before < count`` true by construction rather than by timing.
+_WALK_HELD_AT = 4
 
-    The shape being pinned (the path itself was closed by the daemon-thread
-    move): the four store-walking passes check the departure event once per
-    directory, so a runtime that has decided to leave pays ONE directory's work
-    — not the 3-7 minutes a pass of this store costs — and a partial sweep
-    publishes no completion stamp, which is what makes the next boot re-derive
-    its worklist instead of trusting a claim the walk did not earn.
 
-    A real child, a synthetic store (never the operator's), the production
-    dispatch, and the production departure seam (``_commit_to_leaving``) — the
-    assertions are all COUNTS read off the child's own report, so nothing here
-    depends on how long any of it took; the subprocess timeout is the only
-    clock, and it is a backstop.
+def _assert_store_walk_stood_down(report: dict[str, Any], *, count: int) -> None:
+    """The one oracle for the store-walk child's report, shared by cell and controls.
+
+    Every message names WHICH guard fired, because the controls below assert on
+    it: a control that failed for any other reason (a child that never started,
+    a hold that timed out) would pass for the wrong cause.
     """
-    count, lines = 60, 800
-    result_path = tmp_path / "cell-a.json"
+    held = _WALK_HELD_AT - 1
+    assert report["session_dirs"] == count, "the synthetic store lost a session directory"
+    assert report["worker_settled"] is True, "the maintenance worker thread outlived the child"
+    assert report["hold_timed_out"] is False, "the hold was never released"
+    # PRECONDITION: the observer saw the title pass part-way. A walk that is
+    # already complete when the observer looks cannot show a departure stopping
+    # anything, whatever the later counts say.
+    assert 0 < report["before_titles"] < count, (
+        f"precondition: the observer saw {report['before_titles']} of {count} directories "
+        "answered, so the walk was already complete before the departure"
+    )
+    assert report["before_titles"] == held, report
+    # The REAL departure set the REAL stop event while the walker was still held;
+    # a walk that ended on its own would never have set it.
+    assert report["stop_set_at_hold"] is True, "the departure did not set the stop before release"
+    assert report["after_origins"] == count, "the origin pass should have finished before it"
+    # AFTER-WORK GUARD: the held directory finishes (it was already inside the
+    # scan) and the next directory's boundary check sees the stop, so exactly one
+    # more directory is answered. A consumer that ignores a set stop reaches
+    # ``count`` here.
+    assert report["after_titles"] == report["before_titles"] + 1, (
+        f"after-work guard: {report['after_titles']} directories answered after the "
+        f"departure, expected {report['before_titles'] + 1} — the walk ran past the stop"
+    )
+    assert report["stamp"] is False
+    assert report["done_set"] is True
+    assert "titles" in report["passes"], report
+    assert "analytics-names" not in report["passes"], "a pass ran after the stop"
+    # The runner handed EVERY swept pass a callable predicate, not a captured
+    # boolean and not nothing — the wiring, asserted inside a real walk.
+    assert report["predicate_wired"] == {"origins": True, "titles": True}, report["predicate_wired"]
+    # Resumable, not lucky: the next run pays exactly for the directories the
+    # partial walk never answered, and it finishes the store.
+    assert report["scan_calls_run2"] == count - report["after_titles"], report
+    assert report["after2_titles"] == count and report["after2_origins"] == count
+    assert report["reader_failures"] == []
+    assert report["tmp_sidecars"] == []
+
+
+def _first_line(error: BaseException, limit: int = 300) -> str:
+    """The first line of an assertion's message: the guard's own sentence, bounded.
+
+    ``assert cond, message`` renders as ``message`` then pytest's expression dump, so
+    the first line is the text the oracle chose to say and nothing else.
+    """
+    lines = str(error).splitlines() or [""]
+    return lines[0][:limit]
+
+
+def _walk_modules() -> dict[str, dict[str, str]]:
+    """Realpath and sha256 of the three production modules the walk is made of.
+
+    The child reports the same three for ITS imports and the case compares them to
+    THIS process's own: an editable install, a stray second tree on ``PYTHONPATH`` or
+    a stale ``cwd`` would otherwise let the child exercise code the parent never
+    imported (the two-tree coupling behind an earlier 46-failure incident). The
+    commit sha an environment variable carries is metadata and proves nothing about
+    the bytes that ran.
+    """
+    from local_operator.session.runtime import process as process_mod
+
+    found: dict[str, dict[str, str]] = {}
+    for label, module in (
+        ("resume", resume_mod),
+        ("session_factory", session_factory),
+        ("process", process_mod),
+    ):
+        path = Path(str(module.__file__)).resolve()
+        found[label] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    return found
+
+
+def _judge_store_walk(
+    report: dict[str, Any],
+    record_property: Callable[[str, object], None],
+    *,
+    expect: str | None,
+    count: int = 60,
+) -> None:
+    """Run the oracle and record WHICH guard spoke, so the artifact shows the reason.
+
+    ``expect`` is ``None`` for the shipped cell (the oracle must pass) or the text the
+    failing guard must open with for a control: a control that failed for any other
+    reason fails here instead of passing for the wrong cause.
+    """
+    if expect is None:
+        try:
+            _assert_store_walk_stood_down(report, count=count)
+        except AssertionError as error:
+            record_property("walk_oracle", "failed: " + _first_line(error))
+            raise
+        record_property("walk_oracle", "passed")
+        return
+    with pytest.raises(AssertionError) as caught:
+        _assert_store_walk_stood_down(report, count=count)
+    record_property("walk_oracle", _first_line(caught.value))
+    assert expect in _first_line(caught.value, 1000), (
+        f"the oracle failed, but not on the guard this control is about ({expect!r}): "
+        f"{_first_line(caught.value, 1000)}"
+    )
+
+
+def _run_store_walk_child(
+    tmp_path: Path,
+    mode: str,
+    record_property: Callable[[str, object], None],
+    *,
+    count: int = 60,
+    lines: int = 800,
+) -> dict[str, Any]:
+    """Run the real store walk in a real child; return its report after identity checks.
+
+    WHY A CHILD, AND WHY THE HOLD LIVES IN IT: the walk is a daemon thread
+    dispatched by the production ``_start_store_maintenance``, and the departure
+    is the production ``_commit_to_leaving``. The previous version polled the
+    answered-directory count and departed when it saw one, which observes the walk
+    but never holds it: on a slow runner the walker finished all 60 directories
+    before the observer ran (CI run 39783288112 job 119840150674:
+    ``before_titles == 60``). The child now holds the REAL walker inside its real
+    per-directory scan (``counting_scan`` at the ``_WALK_HELD_AT``-th directory),
+    so "departure lands mid-walk" no longer depends on how fast either thread ran.
+
+    ``mode``:
+
+    * ``positive`` — hold the walker, depart, release: the shipped cell.
+    * ``old_setup`` — the previous setup made deterministic: the OBSERVER is held
+      until the walker has finished, so it sees a complete walk. The oracle must
+      fail its precondition guard.
+    * ``ignore_stop`` — hold, depart (the REAL stop event IS set), but hand the
+      walking passes a predicate that never reports stop. The walk then runs to
+      ``count`` and the oracle must fail its AFTER-WORK guard — not merely
+      "the stop was never set", which a producer that skips the stop would also
+      show.
+
+    The child is its own session leader so the parent can reap the whole group,
+    and the parent records PID/PGID/executable/source file into the junit XML
+    (``record_property``) so CI artifacts show WHICH process and WHICH tree ran.
+    """
+    result_path = tmp_path / f"cell-a-{mode}.json"
     script = r"""
-import asyncio, json, sys, time
+import asyncio, hashlib, json, os, sys, threading, time
 from pathlib import Path
 from types import SimpleNamespace
 
 root = Path(sys.argv[1])
 result_path = Path(sys.argv[2])
 count, lines = int(sys.argv[3]), int(sys.argv[4])
+mode, held_at = sys.argv[5], int(sys.argv[6])
 
 from local_operator import resume
 from local_operator import session_factory as sf
@@ -5444,6 +5591,23 @@ from local_operator.analytics import backfill
 from local_operator.session import cleanup
 from local_operator.session.runtime import process
 from local_operator.tools import group_reaper
+
+# ORPHAN GUARD. If the pytest process that started this child dies without running
+# its cleanup (a CI step timeout delivers SIGTERM/SIGKILL to the runner's process
+# tree, and this child is deliberately in a NEW session so the parent can reap its
+# group), the child must not outlive it. A parent's death re-parents the child, so a
+# changed parent pid is the signal; the poll is a liveness check, not a test clock.
+_parent = os.getppid()
+def _orphan_guard():
+    while True:
+        time.sleep(1)
+        if os.getppid() != _parent:
+            os._exit(70)
+threading.Thread(target=_orphan_guard, name="orphan-guard", daemon=True).start()
+
+def module_identity(module):
+    path = Path(module.__file__).resolve()
+    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 # A synthetic store: user sessions with a real opening, then filler so the FULL
 # title scan (the expensive step) is a real read rather than a formality.
@@ -5462,10 +5626,16 @@ for index in range(count):
     (directory / resume.TRANSCRIPT_NAME).write_text(
         json.dumps(opening) + "\n" + filler, encoding="utf-8")
 
-# The two passes that do not walk the store succeed instantly, so a missing
-# completion stamp can only be the stop's doing.
+# cleanup and the orphan-group sweep are stubbed to succeed instantly, so a missing
+# completion stamp can only be the stop's doing. The store census is NOT stubbed: it
+# is a real pass that walks `sessions/` and leaves `sessions/.session-census.json`, a
+# FILE beside the session directories. Every loop over the store below therefore
+# handles actual directories only (`session_dirs`), and the count is asserted
+# against `count` so the filter cannot hide a missing directory.
 cleanup.cleanup_from_config = lambda *_a, **_k: None
 group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+
+producer_done = threading.Event()
 
 # Every pass announces itself, and the walking ones stay REAL. Each walking call
 # records whether it was handed a callable predicate, so the wiring the runner
@@ -5476,7 +5646,16 @@ def logged(label, function):
     def callback(*args, **kwargs):
         passes.append(label)
         predicate_wired[label] = callable(kwargs.get("should_stop"))
-        return function(*args, **kwargs)
+        if mode == "ignore_stop" and "should_stop" in kwargs:
+            # The consumer under test ignores the stop; the REAL stop event is
+            # still set by the departure, so a failure here is about the walk
+            # running past a set stop and nothing else.
+            kwargs["should_stop"] = lambda: False
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if label == "titles":
+                producer_done.set()
     return callback
 resume.backfill_session_origins = logged("origins", resume.backfill_session_origins)
 resume.backfill_session_titles = logged("titles", resume.backfill_session_titles)
@@ -5487,18 +5666,34 @@ backfill.backfill_analytics_session_daily = logged(
 
 # The instrument for "how much work does the NEXT run pay": the full transcript
 # read is what a resume costs, and it is only taken for a directory the sweep
-# has not answered yet.
+# has not answered yet. It is ALSO the hold: the walker thread stops here, inside
+# the real per-directory scan, once, after ``held_at - 1`` directories are
+# answered. ONE-SHOT, because the recovery pass below runs on the loop thread and
+# would deadlock on a second hold. A hold that is never released raises in the
+# walker instead of falling through to a pass.
 scans = []
+reached = threading.Event()
+release = threading.Event()
+hold = {"armed": mode in ("positive", "ignore_stop"), "timed_out": False}
 real_scan = resume._scan_all_titles
 def counting_scan(transcript):
     scans.append(str(transcript))
+    if hold["armed"] and len(scans) == held_at:
+        hold["armed"] = False
+        reached.set()
+        if not release.wait(60):
+            hold["timed_out"] = True
+            raise RuntimeError("the hold was never released")
     return real_scan(transcript)
 resume._scan_all_titles = counting_scan
+
+def session_dirs():
+    return sorted(d for d in sessions.iterdir() if d.is_dir())
 
 def answered(which):
     names = ((resume.ORIGIN_NAME, resume.ORIGIN_SCAN_SENTINEL_NAME) if which == "origins"
              else (resume.TITLE_SIDECAR_NAME, resume.TITLE_SCAN_SENTINEL_NAME))
-    return sum(1 for d in sessions.iterdir() if any((d / name).exists() for name in names))
+    return sum(1 for d in session_dirs() if any((d / name).exists() for name in names))
 
 class Handle:
     _disposing = False
@@ -5513,47 +5708,80 @@ class Runtime:
     async def announce_retiring(self, label, *, to="", draining=False, leaving=""):
         self.announcements.append(label)
 
+report = {
+    "mode": mode,
+    "child": {
+        "pid": os.getpid(),
+        "pgid": os.getpgrp() if hasattr(os, "getpgrp") else None,
+        "executable": sys.executable,
+        "modules": {
+            "resume": module_identity(resume),
+            "session_factory": module_identity(sf),
+            "process": module_identity(process),
+        },
+        "github_sha": os.environ.get("GITHUB_SHA"),
+    },
+}
+
 async def main():
     sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
     sf._start_store_maintenance(SimpleNamespace(), root, None)
-    # Wait for the TITLE pass to be under way (the origin walk runs first, so
-    # this means it finished), then commit to leaving: the stop lands MID-WALK,
-    # which is the case the defect is about.
-    deadline = time.monotonic() + 90
-    while answered("titles") < 1 and time.monotonic() < deadline:
-        await asyncio.sleep(0.001)
-    started = answered("titles")
-    if started < 1:
-        raise RuntimeError("the title walk never started")
+    worker = sf._STORE_MAINTENANCE_THREAD
+    stop_event = sf._STORE_MAINTENANCE_STOP
+    if worker is None or stop_event is None:
+        raise RuntimeError("the maintenance worker was never dispatched")
+    try:
+        # What the observer waits for is the whole point of the cell: the walker
+        # parked INSIDE the title walk (positive), or — the old setup made
+        # deterministic — the walker FINISHED (old_setup).
+        gate = producer_done if mode == "old_setup" else reached
+        if not await asyncio.to_thread(gate.wait, 90):
+            raise RuntimeError("the walker never reached its gate (" + mode + ")")
+        started = answered("titles")
+        handle, runtime = Handle(), Runtime()
+        drain = await process._commit_to_leaving(
+            handle, runtime, asyncio.Event(),
+            label="gen 2", reason="the build on disk changed",
+            detail="generation 20260924T000000Z-deadbeef", loaded="gen 1")
+        if drain is None:
+            raise RuntimeError("the departure did not commit")
+        report["before_titles"] = started
+    finally:
+        # Read BEFORE the release: a stop that is only set after the walker was
+        # let go proves nothing about what stopped it.
+        report["stop_set_at_hold"] = stop_event.is_set()
+        # ALWAYS release, then wait for the worker thread ITSELF to be gone — on
+        # a failure too — so no walker outlives this child. The stop is also set
+        # here, AFTER it was recorded, purely so the delegated-sweep loop the
+        # worker enters once the launch pass ends returns instead of outliving
+        # a departure that never committed.
+        release.set()
+        stop_event.set()
+        await asyncio.to_thread(worker.join, 60)
+        report["worker_settled"] = not worker.is_alive()
+        report["hold_timed_out"] = hold["timed_out"]
+    if not report["worker_settled"]:
+        raise RuntimeError("the maintenance worker did not settle")
 
-    handle, runtime = Handle(), Runtime()
-    drain = await process._commit_to_leaving(
-        handle, runtime, asyncio.Event(),
-        label="gen 2", reason="the build on disk changed",
-        detail="generation 20260924T000000Z-deadbeef", loaded="gen 1")
-    if drain is None:
-        raise RuntimeError("the departure did not commit")
-
-    await sf.await_store_maintenance_for_tests()
-    report = {
+    hold["armed"] = False
+    report.update({
         "count": count,
-        "before_titles": started,
         "after_titles": answered("titles"),
         "after_origins": answered("origins"),
-        "stop_set": bool(sf._STORE_MAINTENANCE_STOP and sf._STORE_MAINTENANCE_STOP.is_set()),
         "done_set": bool(sf._STORE_MAINTENANCE_DONE and sf._STORE_MAINTENANCE_DONE.is_set()),
         "stamp": (root / sf._STORE_MAINTENANCE_STAMP_NAME).exists(),
         "passes": list(passes),
         "predicate_wired": dict(predicate_wired),
         "scan_calls_run1": len(scans),
-        "tmp_sidecars": sorted(p.name for d in sessions.iterdir() for p in d.glob("*.tmp")),
+        "session_dirs": len(session_dirs()),
+        "tmp_sidecars": sorted(p.name for d in session_dirs() for p in d.glob("*.tmp")),
         "reader_failures": [],
-    }
+    })
 
     # Every directory must still answer its readers, and the store must be
     # resumable: the next run's full-scan count is the directories this walk
     # never answered.
-    for directory in sessions.iterdir():
+    for directory in session_dirs():
         try:
             resume.session_origin(directory)
             resume.stored_session_title(directory)
@@ -5567,48 +5795,196 @@ async def main():
     report["scan_calls_run2"] = len(scans)
     report["after2_titles"] = answered("titles")
     report["after2_origins"] = answered("origins")
-    result_path.write_text(json.dumps(report), encoding="utf-8")
 
-with asyncio.Runner() as runner:
-    runner.run(main())
+try:
+    with asyncio.Runner() as runner:
+        runner.run(main())
+except BaseException as error:
+    # The partial report is the evidence for WHERE it stopped; the parent fails
+    # on the non-zero exit and prints it.
+    report["error"] = repr(error)
+    raise
+finally:
+    result_path.write_text(json.dumps(report), encoding="utf-8")
 """
     env = os.environ.copy()
     env.pop("XPC_FLAGS", None)
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), str(result_path), str(count), str(lines)],
-        cwd=Path(__file__).parents[2],
+    repo_root = Path(__file__).parents[2]
+    argv = [
+        sys.executable,
+        "-c",
+        script,
+        str(tmp_path),
+        str(result_path),
+        str(count),
+        str(lines),
+        mode,
+        str(_WALK_HELD_AT),
+    ]
+    child = subprocess.Popen(
+        argv,
+        cwd=repo_root,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=180,
-        check=False,
+        start_new_session=True,
     )
-    assert result.returncode == 0, result.stderr
-    report = json.loads(result_path.read_text(encoding="utf-8"))
+    # RECORDED BEFORE ANYTHING CAN FAIL, so a timeout or a crash still leaves the
+    # identity of the process this case started in the artifact. The child leads its
+    # own group (``start_new_session``), so its pgid IS its pid; asking the kernel
+    # would race a child that already exited (``scripts/run_bounded.py`` measured it).
+    record_property("walk_mode", mode)
+    record_property("walk_parent_pid", os.getpid())
+    record_property("walk_child_pid", child.pid)
+    record_property(
+        "walk_child_pgid",
+        child.pid if hasattr(os, "killpg") else "unavailable: no process groups here",
+    )
 
-    # The sweep observed the stop: it left with the event set, part-way through
-    # the walk, and the worker returned so its done event is set.
-    assert report["stop_set"] is True
-    assert report["done_set"] is True
-    assert 0 < report["before_titles"] < count
-    assert report["after_origins"] == count, "the origin pass should have finished before it"
-    assert report["after_titles"] < count, "the walk finished instead of standing down"
-    # DIRECTORY granularity: the overshoot past the last observed directory is a
-    # handful, not the rest of the pass.
-    assert report["after_titles"] - report["before_titles"] <= 15, report
-    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
-    assert report["stamp"] is False
-    assert "titles" in report["passes"], report
-    assert "analytics-names" not in report["passes"], "a pass ran after the stop"
-    # The runner handed EVERY swept pass a callable predicate, not a captured
-    # boolean and not nothing — the wiring, asserted inside a real walk.
-    assert report["predicate_wired"] == {"origins": True, "titles": True}, report["predicate_wired"]
-    # Resumable, not lucky: the next run pays exactly for the directories the
-    # partial walk never answered, and it finishes the store.
-    assert report["scan_calls_run2"] == count - report["after_titles"], report
-    assert report["after2_titles"] == count and report["after2_origins"] == count
-    assert report["reader_failures"] == []
-    assert report["tmp_sidecars"] == []
+    def _reap() -> None:
+        # Only ever this child's OWN new group, and only while the child is still
+        # running: once it has been waited for, the pid is the kernel's to reuse and
+        # a group signal could land on an unrelated process.
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(child.pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+        else:
+            child.kill()
+
+    reap = "not-reached"
+    stdout = stderr = ""
+    report: dict[str, Any] | None = None
+    try:
+        try:
+            stdout, stderr = child.communicate(timeout=180)
+            reap = "exited"
+        except subprocess.TimeoutExpired:
+            reap = "timeout-killed"
+            _reap()
+            try:
+                stdout, stderr = child.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                reap = "timeout-killed-unconfirmed"
+            pytest.fail(f"the store-walk child ({mode}) timed out\n{stderr}")
+    finally:
+        # EVERY exit path ends with the child gone or the failure to get it gone
+        # on record — an assertion in this frame, a KeyboardInterrupt, a timeout.
+        if child.poll() is None:
+            reap += ">killed-in-finally"
+            _reap()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                reap += ">unconfirmed"
+        record_property("walk_reap", reap)
+        record_property(
+            "walk_child_returncode",
+            child.returncode if child.returncode is not None else "unavailable: not reaped",
+        )
+        if result_path.exists():
+            try:
+                report = json.loads(result_path.read_text(encoding="utf-8"))
+            except ValueError:
+                report = None
+        record_property(
+            "walk_report",
+            (
+                json.dumps(report, sort_keys=True)
+                if report is not None
+                else "unavailable: the child wrote no readable report"
+            ),
+        )
+    assert child.returncode == 0, f"{stdout}\n{stderr}"
+    assert report is not None, "the child exited cleanly but wrote no report"
+
+    # SOURCE IDENTITY, from the child itself: the process that ran the walk is the
+    # one this test started, from the interpreter and the BYTES of the production
+    # modules this test process imported — not a second tree that happens to be
+    # importable. A mismatch is a harness failure, never evidence about the product.
+    identity = report["child"]
+    parent_modules = _walk_modules()
+    record_property(
+        "walk_source_identity",
+        json.dumps(
+            {
+                "parent": parent_modules,
+                "child": identity["modules"],
+                "executable": identity["executable"],
+                "github_sha": identity["github_sha"],
+            },
+            sort_keys=True,
+        ),
+    )
+    assert identity["pid"] == child.pid
+    if identity["pgid"] is not None:
+        assert identity["pgid"] == child.pid, "the child is not its own group leader"
+    assert os.path.realpath(identity["executable"]) == os.path.realpath(sys.executable)
+    assert identity["modules"] == parent_modules, (
+        "source identity: the child imported different module files or bytes than the "
+        f"test process\nchild={identity['modules']}\nparent={parent_modules}"
+    )
+    return report
+
+
+def test_a_leaving_runtime_stops_the_store_walk_at_a_directory(
+    tmp_path: Path, record_property: Callable[[str, object], None]
+) -> None:
+    """Cell A: a real departure stops a real walk between two directories.
+
+    The shape being pinned (the path itself was closed by the daemon-thread
+    move): the four store-walking passes check the departure event once per
+    directory, so a runtime that has decided to leave pays ONE directory's work
+    — not the 3-7 minutes a pass of this store costs — and a partial sweep
+    publishes no completion stamp, which is what makes the next boot re-derive
+    its worklist instead of trusting a claim the walk did not earn.
+
+    A real child, a synthetic store (never the operator's), the production
+    dispatch, and the production departure seam (``_commit_to_leaving``). The
+    walker is HELD inside its real scan at the fourth directory, so the departure
+    provably lands mid-walk: the assertions are COUNTS read off the child's own
+    report (three answered before, four after) and nothing depends on how fast
+    any thread ran. The subprocess timeout is only a backstop.
+    """
+    report = _run_store_walk_child(tmp_path, "positive", record_property)
+    _judge_store_walk(report, record_property, expect=None)
+
+
+def test_cell_a_control_the_old_observer_setup_fails_its_precondition(
+    tmp_path: Path, record_property: Callable[[str, object], None]
+) -> None:
+    """Control: an observer that looks after the walk finished is rejected, by name.
+
+    This is the previous setup made deterministic (the observer waits for the
+    walker's completion rather than racing it), and it must trip the PRECONDITION
+    guard with the walk complete (``60 of 60``) — proving the strict
+    ``0 < before < count`` bound is doing its job and that the shipped cell does
+    not pass by a setup that could not tell a departure from a finished walk.
+    """
+    report = _run_store_walk_child(tmp_path, "old_setup", record_property)
+    _judge_store_walk(report, record_property, expect="precondition: the observer saw 60 of 60")
+
+
+def test_cell_a_control_a_consumer_that_ignores_a_set_stop_runs_the_walk_to_the_end(
+    tmp_path: Path, record_property: Callable[[str, object], None]
+) -> None:
+    """Control: with the stop TRUE but ignored, the oracle fails its AFTER-WORK guard.
+
+    The real departure sets the real stop event before the hold is released
+    (asserted in the report), the walking passes are handed a predicate that never
+    reports it, and the walk reaches every directory. The oracle must fail on the
+    after-work count — not on "the stop was never set", which is what a producer
+    that skipped the stop would show, and is a different defect.
+    """
+    report = _run_store_walk_child(tmp_path, "ignore_stop", record_property)
+    # The stop WAS set by the real departure before the hold was released and the
+    # walk still reached every directory: the failure below is the consumer's, not a
+    # producer that never signalled (that defect trips the stop-set guard instead).
+    assert report["stop_set_at_hold"] is True
+    assert report["after_titles"] == 60
+    _judge_store_walk(report, record_property, expect="after-work guard: 60 directories answered")
 
 
 @pytest.mark.asyncio

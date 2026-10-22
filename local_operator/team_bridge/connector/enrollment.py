@@ -9,20 +9,21 @@ generic ``{enabled, session}`` preference has NO path into that record
 
 * :func:`commit_consent_and_designation` — called ONLY after the real
   captured-owner consent flow succeeded, with the receipt that flow produced.
-* :func:`commit_default_enrollment` — called ONLY after the opt-out default's
-  authenticated settings PUT answered 200 with an ACTIVE endpoint. The server's
-  recorded consent is the source; served/cached text alone never reaches it.
-  This is what makes the default-on state able to receive (owner + receipt),
-  while a missing ``team_bridge.session`` stays badge-only per RFC §13.6.
+* :func:`commit_settings_enrollment` — called ONLY by the client after a
+  USER's explicit ``PUT /messaging/settings`` answered 200 with an ACTIVE
+  endpoint and the consent echo that machine sent. That user action is the
+  source; served/cached text alone never reaches it, and a status read never
+  calls it (consent hold: #2712's auto-enrollment is disabled).
 
 Neither invents a consent: the first needs the captured-owner receipt, the
-second needs the server's successful write. Neither writes a designation
-without a user choice.
+second needs the server's successful write to the user's own enable. Neither
+writes a designation without a user choice.
 
 The settings keys ``team_bridge.session``/``team_bridge.enabled`` stay SURFACE
-write-through: an onboarding/settings surface calls this function as part of
-the consent commit; a bare preference edit away from the consent flow does
-not, and therefore cannot wake anything.
+write-through: the onboarding consent surface calls
+:func:`commit_consent_and_designation` as part of its consent commit; a bare
+preference edit away from the consent flow does not, and therefore cannot wake
+anything.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ def commit_consent_and_designation(
     Store(config_dir).commit_enrollment(owner, receipt, cos_session_id=cos_session_id or None)
 
 
-def commit_default_enrollment(
+def commit_settings_enrollment(
     *,
     config_dir: Path,
     credential_id: int,
@@ -69,15 +70,19 @@ def commit_default_enrollment(
     canonical_base_url: str,
     cos_session_id: str | None,
 ) -> bool:
-    """Commit the NATIVE receipt for the opt-out default's consent write.
+    """Commit the NATIVE receipt for a user's explicit settings enable.
 
     WHY THIS IS A REAL CONSENT STEP, NOT A DERIVED ONE. The caller runs it only
-    after the server PROVES an ACTIVE endpoint with recorded consent: either
-    this machine's authenticated settings PUT returned one, or a fresh status
-    answer reports the endpoint another surface enabled. The served consent TEXT
-    is never the source and never reaches this function. The v1 server exposes
-    no opaque receipt id, so the endpoint resource id (the record the consent is
-    attached to) is the non-secret ``consent_ref``; the version is the server's.
+    after the USER's own authenticated settings PUT returned an ACTIVE endpoint
+    with the consent echo this machine sent. The served consent TEXT is never
+    the source and never reaches this function. The v1 server exposes no opaque
+    receipt id, so the endpoint resource id (the record the consent is attached
+    to) is the non-secret ``consent_ref``; the version is the server's.
+
+    WHY NOT ON A STATUS READ. A fresh answer that says the endpoint is active is
+    not proof that THIS user chose it: another surface or an older build may
+    have enabled it. The consent hold (#2712) therefore forbids the status
+    discipline from reaching this function; only the explicit write may.
 
     WHY THE REFUSALS. A machine already holding a committed owner returns
     ``False`` instead of replacing it: the store's one-owner model gives no safe
@@ -94,7 +99,7 @@ def commit_default_enrollment(
 
     store = Store(config_dir)
     # NOT ``active_owner() is not None``: None means zero OR ambiguous, and an
-    # ambiguous store must never receive a third row from an automatic path.
+    # ambiguous store must never receive a third row from any write path.
     if store.committed_owner_count() != 0:
         return False
     owner = OwnerSnapshot(
@@ -121,7 +126,7 @@ def designation(owner: Any, *, config_dir: Path) -> str | None:
 
 __all__ = [
     "commit_consent_and_designation",
-    "commit_default_enrollment",
+    "commit_settings_enrollment",
     "designation",
     "StoreRefused",
 ]

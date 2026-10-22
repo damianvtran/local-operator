@@ -78,6 +78,35 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the content layer's own class prose (merged-clean clone / stale output past the window)",
     ),
+    # The operator's own hold/release reasons, typed on THIS device and stored
+    # in ``sessions/.session-holds.json`` (the release also lands in the
+    # cleanup log). Nothing here arrives over a relay, and nothing is rendered
+    # for a peer: these are the human's words about their own store, declared
+    # by field name for the same reason as the prune vocabulary above.
+    ("local_operator/cli.py", "sessions_hold_command", "reason"): (
+        3,
+        "the operator's own hold reason: blank check, hold record, and echo",
+    ),
+    ("local_operator/cli.py", "sessions_unhold_command", "reason"): (
+        2,
+        "the operator's own release reason: blank check and the logged hold-release row",
+    ),
+    ("local_operator/cli.py", "sessions_holds_command", "reason"): (
+        1,
+        "the operator's own stored hold reason, printed in this device's listing",
+    ),
+    # The ``ask_dismiss`` ``reason`` (design ``ask-nonblocking.md`` §15): a closed
+    # operator token, ``answered_in_chat`` | ``moot``, validated against that set in
+    # ``mobile/types.py`` and forwarded to the engine, where it picks the agent-facing
+    # copy. It is never rendered to a person as a reason and carries no peer prose.
+    ("local_operator/mobile/daemon.py", "build_app", "reason"): (
+        2,
+        "ask_dismiss closed-set operator token (cold + dial arms), never rendered",
+    ),
+    ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
+        1,
+        "ask_dismiss closed-set operator token forwarded to the session, never rendered",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # The hub-links CLI is a HUB surface, not a mesh one, and these tokens come
@@ -163,6 +192,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/relay.py", "refresh_unit_if_stale", "reason"): (
         1,
         "the wrapper's machine reason, compared to pick the failure clause — never printed",
+    ),
+    # The install's supervision-conflict warning (2026-10-21, cloud-node-1): the
+    # ``detail`` read is ``foreign_supervision``'s own composed SENTENCE ("a system
+    # unit (<path>) also runs the relay; …"), never a wire token, joined with its
+    # remedy into one ``steps`` line.
+    ("local_operator/network/relay.py", "_install_systemd", "detail"): (
+        1,
+        "foreign_supervision's composed sentence, not a machine token",
     ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
@@ -258,8 +295,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # them as machine tokens and the human line only counts them. No peer prose
     # can reach this read.
     ("local_operator/network/cli.py", "_cmd_mcp_credentials", "reason"): (
+        2,
+        "this device's own grant-skip code (a --json machine token) plus the "
+        "credential-status pass's locally composed, value-free sentence",
+    ),
+    # The three readers of that credential-status sentence. It is authored HERE,
+    # by ``mcp.credential_status`` — "sign in again on <owner>", "not yet synced —
+    # run ..." — bounded at composition and carrying names only. None of these is
+    # a peer's prose and no value can reach them.
+    ("local_operator/mcp/manager.py", "McpManager.credential_reason", "reason"): (
         1,
-        "this device's own grant-skip code, carried in --json as a machine token",
+        "the local credential-status sentence, composed on this device",
+    ),
+    ("local_operator/mcp/manager.py", "McpManager._credential_hint", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
+    ),
+    ("local_operator/network/cli.py", "_render_mcp_credential_row", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
     ),
     # ``_dedupe_skip_rows`` reads the same local code only to form the dedupe
     # identity: compared, never rendered.
@@ -279,6 +333,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "LinkTransport.ask",
         "detail",
     ): (1, "the ack's own payload key, not a rendered reason"),
+    # ``hand_off_session_dir``'s ``HandOffOutcome.reason``: a cause THIS device
+    # composed (``session/cleanup.py``'s guard sentence, the receipt failure, the
+    # rename's ``OSError``), put in the refusal sentence so the person who asked for
+    # the move can act on it (QA round 1, Q-4). No peer writes it and nothing
+    # crosses the wire.
+    (
+        "local_operator/network/mobility.py",
+        "_source_commit",
+        "reason",
+    ): (1, "this device's own handoff cause, printed in its own refusal"),
     # The refusing device's code and sentence, handed to ``refusal_from_pairing``, whose
     # code-to-sentence map is what a person reads (Q-R3-3).
     ("local_operator/network/cli.py", "_finish_pairing", "detail"): (

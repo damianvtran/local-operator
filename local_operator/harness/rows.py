@@ -528,6 +528,23 @@ def is_ask_gate_divert_row(row: Any) -> bool:
     return is_ask_gate_divert_details(provider_payload.get("details"))
 
 
+def is_binding_notice_row(row: Any) -> bool:
+    """Credential-change notices are diagnostics, not desktop conversation rows.
+
+    Filter at the backend so older desktop reducers cannot paint legacy floods
+    as ``<wire type>: <text>``. This is display projection only: the original
+    journal and the separate binding audit metadata stay intact and accessible.
+    Both message/custom envelopes occur in historical journals.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+
+    payload = row.get("payload") if isinstance(row, Mapping) else None
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    )
+
+
 def visible_transcript_rows(rows: list[Any]) -> list[Any]:
     """Drop the rows a human transcript must never serve.
 
@@ -554,6 +571,8 @@ def visible_transcript_rows(rows: list[Any]) -> list[Any]:
     """
     out: list[Any] = []
     for row in rows:
+        if is_binding_notice_row(row):
+            continue
         payload = row.get("payload") if isinstance(row, Mapping) else None
         if isinstance(payload, Mapping) and is_hidden_wake_delivery(payload):
             continue
@@ -935,6 +954,11 @@ def gate_waited_text(details: Mapping[str, Any] | None) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+#: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
+#: the relay stamps for the phone's tap (an empty ``by`` on the wire).
+_DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
+
+
 def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_response`` row: ``(text, kind)``.
 
@@ -956,6 +980,19 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
         return (f"Ask {ask_id} declined — the agent was told", "info")
     if status == "late":
         return (f"Answered late — the agent was told (ask {ask_id})", "warning")
+    if status == "dismissed":
+        # The audit receipt of an operator dismissal (design §15): who, through
+        # which surface, and why. Without this branch the row would fall through
+        # to "Answered — delivering", which is false for a dismissal.
+        by = details.get("by")
+        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
+        surface = _DISMISS_SURFACE_WORDS.get(surface, surface)
+        # One source for the labels: the response text and this receipt must not drift.
+        from local_operator.asks.render import DISMISS_REASON_LABELS
+
+        reason = DISMISS_REASON_LABELS.get(str(details.get("reason") or ""), "no longer needed")
+        via = f" ({surface})" if surface else ""
+        return (f"Dismissed by you{via} — {reason} (ask {ask_id})", "info")
     return (f"Answered — delivering (ask {ask_id})", "info")
 
 

@@ -35,27 +35,71 @@ HOW THE BINARY-IMAGE NAME IS CHANGED WITHOUT A DEPENDENCY
 Execute the interpreter through a path whose basename is the name we want.
 Measured constraints, all of them the hard way:
 
-- A **symlink** does NOT work: the kernel resolves it and takes ``p_comm``
-  from the target, so the process is still ``python3.12``. A **hardlink**
-  does work — it is a second name for the same inode, and the kernel has no
-  target to resolve.
-- ``cp`` of the interpreter does NOT work: the copy dies with
-  ``dyld: Library not loaded: @rpath/libpython3.X.dylib``. The interpreter's
-  only ``LC_RPATH`` is ``@executable_path/../lib``, so a copy placed anywhere
-  else cannot find its runtime library. (The hardlink has the same problem;
-  the symlink below is the fix.)
-- **A ``<venv>/lib/libpython3.X.dylib`` symlink beside the hardlink is
-  MANDATORY.** The hardlink lives in ``<venv>/bin``, so ``@executable_path/..``
-  resolves to the venv, and dyld looks for ``<venv>/lib/libpython3.X.dylib``,
-  which a venv does not have. Measured without it: **0 successes, 40/40 aborts**
-  (``Abort trap: 6``). With it: 60/60 successes.
+- A **symlink at ``<venv>/bin/Local Operator``** works, provided it points at an
+  image whose OWN basename is the brand. The kernel resolves the symlink and
+  takes ``p_comm`` from the image it finally loads, so the image — not the link
+  — has to be named ``Local Operator``. A link straight at ``python3.12`` still
+  reports ``python3.12``.
+- **A per-venv hardlink also works** — a second name for the interpreter's
+  inode, with no target for the kernel to resolve — and it is the FALLBACK rung
+  (see the ladder below). It is a second path per venv and per generation, which
+  is exactly what macOS's TCC rows key on, and it shares the interpreter's
+  inode, which is the blast radius this module now avoids by default.
+- **A copy of the interpreter needs its ``lib`` beside it.** The interpreter's
+  only ``LC_RPATH`` is ``@executable_path/../lib``, so an image placed in
+  ``<dir>/bin`` cannot find ``libpython3.X.dylib`` or the standard library
+  unless ``<dir>/lib`` resolves to the interpreter's own ``lib``. Measured
+  without it: ``dyld: Library not loaded`` standing in for execution, and — as
+  CPython looks for its stdlib the same way — ``No module named 'encodings'``.
 
-  **THE WARM-CACHE TRAP.** A *first* run without the symlink can spuriously
-  SUCCEED, because dyld reuses a warm launch closure from the identical inode's
-  earlier legitimate launch. Reproduced in this module's own bring-up: run 1
-  printed ``ok`` and runs 2-5 aborted. So a single manual smoke test "passes"
-  and production then fails 100%. If you change this shape, loop your smoke
-  test at least 20 times.
+  **THE WARM-CACHE TRAP.** A *first* run without the library beside it can
+  spuriously SUCCEED, because dyld reuses a warm launch closure from the
+  identical inode's earlier legitimate launch. Reproduced in this module's own
+  bring-up: run 1 printed ``ok`` and runs 2-5 aborted. So a single manual smoke
+  test "passes" and production then fails 100%. If you change this shape, loop
+  your smoke test at least 20 times.
+
+ONE STABLE IMAGE PER PYTHON BUILD (the macOS privacy identity)
+--------------------------------------------------------------
+macOS gate-keeps some resources per EXECUTABLE IMAGE PATH: an ad-hoc-signed
+binary is remembered by the path it was executed from plus its cdhash, so a
+second path is a second client and a second prompt. Measured on the operator's
+machine after a handful of updates: nine rows in App Management and Files &
+Folders — one per generation, plus the worktree venvs — because the branded
+hardlink lived at ``<venv>/bin/Local Operator`` and every new venv was a new
+path.
+
+The plant therefore builds ONE image per Python build and every venv links to
+it::
+
+    ~/.local/share/lop/runtime/<build-key>/bin/Local Operator   # APFS clone
+    ~/.local/share/lop/runtime/<build-key>/lib      -> <real>/../lib
+    ~/.local/share/lop/runtime/<build-key>/include  -> <real>/../include
+    <venv>/bin/Local Operator                       -> that image
+
+``<build-key>`` is ``<real.parent.parent.name>-<sha256(realpath, size,
+mtime_ns)[:10]>``: a new Python build is a new key, and a replaced interpreter
+cannot be mistaken for the one already published. Published directories are
+IMMUTABLE UNLESS CORRUPT and are never garbage-collected — a running process
+may still be executing one, and a key that is still on disk is one prompt that
+will not happen again. The one exception is a published directory whose image
+fails the integrity check (:func:`_healthy_image`): nothing can be executing an
+image that cannot start, so it is replaced under the same key.
+
+The image is a CLONE (``clonefile``, falling back to ``shutil.copy2``), not a
+hardlink: its own inode, ``nlink == 1``, same bytes and mtime. That removes the
+shared-inode blast radius below and makes it the first file of ours that could
+be re-signed without modifying uv's interpreter.
+
+Measured on this machine, 25 of 25 launches through the venv symlink
+(re-measured 2026-10-19, uv 3.12.14): ``proc_pidpath`` reports the runtime image
+path (and ``SecCodeCopyPath`` agreed in the original 25-launch run),
+``sys.prefix`` is still the venv, and ``ucomm`` is the brand. That triple is the
+whole point — macOS sees one stable client, Python still sees its own venv.
+
+The ``lib`` symlink is REQUIRED, not decoration: CPython locates its stdlib
+relative to the real image directory, and without it the clone dies with
+``No module named 'encodings'`` before any of our code runs.
 
 WHY THE ``lop`` SHEBANG IS NOT REWRITTEN
 ----------------------------------------
@@ -79,56 +123,78 @@ backend on every machine, including ones where the link is perfectly healthy.
 
 NEVER ``chmod``/``chown`` THE PLANTED LINK
 ------------------------------------------
-A hardlink is not a copy: it is a second NAME for the interpreter's inode, and
-permissions live on the inode. ``chmod`` on ``<venv>/bin/Local Operator``
-therefore changes the mode of the **shared uv interpreter that every venv on
-this machine resolves to** — reproduced during bring-up, where a ``chmod 000``
-on the link broke an unrelated worktree's ``local-operator`` console script with
-``bad interpreter: Permission denied``. Nothing in this module writes modes, and
-nothing added to it should. Unlinking is safe (it only drops one name).
+On the runtime rung the venv link is a SYMLINK to a clone we own, so a mode
+write on it would land on the clone — this module still never does one, because
+that image is shared by every venv on the machine and a mode is the one thing
+that would make a healthy image unexecutable everywhere.
 
-A TEMP NAME IS THE LINK'S INODE TOO, so the same rule covers WRITING THROUGH one:
-the plant's ``.<brand>.<pid>.<thread>.tmp`` is a second name for whatever the
-``os.replace`` is about to install, and before that replace it is a second name
-for the interpreter the link already resolves to. Measured 2026-09-18, the hard
-way: a write through a LEAKED temp truncated a uv-managed, machine-wide
-interpreter — ``~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12``
+The hardlink rung is worse, and it is why the rule is absolute: a hardlink is
+not a copy, it is a second NAME for the interpreter's inode, and permissions
+live on the inode. ``chmod`` on ``<venv>/bin/Local Operator`` therefore changes
+the mode of the **shared uv interpreter that every venv on this machine
+resolves to** — reproduced during bring-up, where a ``chmod 000`` on the link
+broke an unrelated worktree's ``local-operator`` console script with ``bad
+interpreter: Permission denied``. Unlinking is safe (it only drops one name).
+
+A TEMP NAME IS THE LINK'S INODE TOO, so the same rule covers WRITING THROUGH
+one: the hardlink plant's ``.<brand>.<pid>.<thread>.tmp`` is a second name for
+whatever the ``os.replace`` is about to install, and before that replace it is
+a second name for the interpreter the link already resolves to. Measured
+2026-09-18, the hard way: a write through a LEAKED temp truncated a uv-managed,
+machine-wide interpreter —
+``~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12``
 — to a 12-byte text file reachable under 23 different names, breaking every 3.12
-venv on the host until ``uv`` re-materialised it. "Unlinking is safe" holds for a
-temp precisely because it only drops one name.
+venv on the host until ``uv`` re-materialised it. "Unlinking is safe" holds for
+a temp precisely because it only drops one name. The runtime plant's temp is a
+DIRECTORY it created itself, beside the image, so a write into it cannot reach
+the interpreter at all — which is one more reason the default rung moved.
 
 STALENESS
 ---------
-The hardlink pins an **inode**, not a version. When ``uv tool install --force``
-replaces the interpreter, the planted link keeps pointing at the OLD inode —
-uv preserves unknown files in ``bin/`` but does not refresh them — and the
-process would silently run a stale interpreter with a fresh site-packages.
-:func:`ensure_branded_interpreter` therefore re-checks three facts at every
-startup (a handful of stats plus one symlink resolution — measured ~180 µs
-here, against a startup already north of a second) and re-plants when any
-fails. The
-inode is ground truth; there is deliberately **no version-stamp file**, because
-a stamp is a second source of truth that can itself go stale.
+On the runtime rung the link is checked by IDENTITY against the build it should
+name: a symlink to the runtime image for THIS interpreter, that image
+executable, and its stdlib resolvable through the ``lib`` beside it. Anything
+else is replanted. The interpreter's ``(realpath, size, mtime_ns)`` are what
+the build key is made of, so a ``uv tool install --force`` that replaces the
+interpreter names a DIFFERENT key, the link is repointed at that image, and the
+published one is left alone. The source is ground truth; there is deliberately
+**no version-stamp file**, because a stamp is a second source of truth that can
+itself go stale.
+
+The hardlink rung keeps the older, inode-shaped rule because its failures are
+inode-shaped: when ``uv tool install --force`` replaces the interpreter, that
+link keeps pointing at the OLD inode — uv preserves unknown files in ``bin/``
+but does not refresh them — and the process would silently run a stale
+interpreter with a fresh site-packages.
 
 AND A FOURTH ROT IS NOT OURS BUT IS MEASURED: the link is not always the
-interpreter's inode any more. On the operator's machine an EDR replaced it in
+image we planted. On the operator's machine an EDR replaced it in
 five worktree venvs with a 49968-byte, mode-``-rw-------`` file owned by its
 own agent user (``_sentinel``), so the path named a file we can neither exec
 nor read. "Present but not executable by us" is therefore stale as well, and
-a spawn site that would have been handed such an image takes rung 2 instead of
-failing at ``execve``.
+a spawn site that would have been handed such an image takes the unbranded rung
+instead of failing at ``execve``.
 
 EVERY FUNCTION HERE IS NO-RAISE BY CONTRACT, in the style of ``proc.py``. This
 is decoration on a process listing: no failure of it may ever stop a session
-from starting. The fallback ladder is hardlink+symlink → the unbranded
+from starting. The ladder is runtime image → hardlink+pin → the unbranded
 interpreter → exactly today's behaviour, and every rung is a silent no-op on
 failure.
 
 THE LADDER, AND WHERE EACH RUNG IS IMPLEMENTED
 ----------------------------------------------
 - **Rung 1 — the image AND the argv row.** ``ensure_branded_interpreter()``
-  plants the hardlink; :func:`spawn_identity` hands a spawn site the label for
-  ``argv[0]`` and the link for ``executable=``.
+  plants the runtime image and links this venv to it;
+  :func:`spawn_identity` hands a spawn site the label for ``argv[0]`` and the
+  link for ``executable=``.
+- **Rung 1b — the per-venv hardlink and its dylib pin.** Taken when the
+  runtime image cannot be planted (a read-only or full stable root) or when the
+  interpreter's own ``lib`` cannot back an image. A non-APFS volume is NOT one
+  of those: the clone falls back to a ``shutil.copy2`` byte copy and the
+  runtime rung still holds. It is one release of insurance, kept because a
+  cosmetic failure must not cost the name everywhere. It MUST NOT replace a
+  healthy runtime symlink: a sandboxed child with a read-only runtime root must
+  not undo what the parent planted.
 - **Rung 2 — the interpreter, unlabelled.** With no link,
   :func:`spawn_identity` returns ``(sys.executable, None)``: ``argv[0]`` stays
   the interpreter path and NO label is applied, so the row is ``python3.x``,
@@ -177,6 +243,12 @@ import logging
 import os
 import sys
 from pathlib import Path
+
+# The install layout's stable directory, spelled once for both this module and
+# ``update`` — which reaches it through ``~`` and this module through the
+# passwd home (see :func:`runtime_root`). ``install_defaults`` is deliberately
+# stdlib-only so importing it costs this startup path nothing.
+from local_operator.install_defaults import STABLE_ROOT_RELATIVE
 
 logger = logging.getLogger(__name__)
 
@@ -394,20 +466,269 @@ def _libpython_name_for(real: Path) -> str | None:
     return None
 
 
-def _real_interpreter() -> Path | None:
-    """``sys.executable`` with symlinks resolved, or None when unusable.
+def _venv_home(prefix: Path) -> Path | None:
+    """The base ``bin`` a venv's ``pyvenv.cfg`` names, or ``None``.
 
-    The hardlink must be made against the REAL file: ``os.link`` on a symlink
-    follows it anyway, but resolving here is what lets the staleness check
-    compare inodes against a stable target.
+    ``executable =`` is honoured first because it is the exact binary the venv
+    was created from (uv writes it on some platforms); ``home =`` is what every
+    uv/macOS venv carries and is the directory the interpreter name is resolved
+    in. Neither is trusted blindly — the caller stats the result.
     """
-    executable = sys.executable
-    if not executable:
-        return None
     try:
-        return Path(os.path.realpath(executable))
+        text = (prefix / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    home: str | None = None
+    executable: str | None = None
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        name = key.strip().lower()
+        if name == "home":
+            home = value.strip()
+        elif name == "executable":
+            executable = value.strip()
+    if executable:
+        return Path(executable).parent
+    return Path(home) if home else None
+
+
+def real_interpreter() -> Path | None:
+    """The base interpreter this venv was built from, symlinks resolved.
+
+    NOT ``realpath(sys.executable)``, and that is not a detail: once a process
+    runs through the branded symlink, ``realpath(sys.executable)`` IS the
+    runtime image, and planting from it would clone the clone forever. The
+    venv's own ``pyvenv.cfg`` names the build it was created from, and that is
+    the build whose image every venv of it should share.
+
+    Falls back to the executable path when there is no venv or no readable
+    ``pyvenv.cfg`` (a source checkout's interpreter, a bare ``python -c``).
+    ``None`` when there is nothing usable to answer with, and when the answer
+    would be a published image that no valid ``source`` marker maps back (see
+    :func:`_build_or_none`).
+    """
+    try:
+        if _is_venv():
+            home = _venv_home(Path(sys.prefix))
+            if home is not None:
+                executing = os.path.basename(sys.executable or "")
+                names: list[str] = []
+                if executing and executing != BRAND:
+                    names.append(executing)
+                names.append(f"python{sys.version_info.major}.{sys.version_info.minor}")
+                names.extend(("python3", "python"))
+                for name in names:
+                    candidate = home / name
+                    if not candidate.is_file():
+                        continue
+                    resolved = Path(os.path.realpath(candidate))
+                    if resolved.is_file():
+                        return _build_or_none(resolved)
+        executable = sys.executable
+        if not executable:
+            return None
+        return _build_or_none(Path(os.path.realpath(executable)))
+    except Exception:  # noqa: BLE001 — a probe, and the caller has a fallback
+        return None
+
+
+def _build_or_none(resolved: Path) -> Path | None:
+    """The build ``resolved`` stands for, or ``None`` when it is an unmapped clone.
+
+    A published image maps back through its ``source`` marker. One that does
+    not — marker missing, unreadable or refused by :func:`_source_for_image` —
+    is still a CLONE, and answering it would make the next plant publish a
+    clone of it under a second key: a second macOS privacy row for one Python
+    build. ``None`` there means "no plant", which costs this venv the brand and
+    nothing else.
+    """
+    source = _source_for_image(resolved)
+    if source is not None:
+        return source
+    root = runtime_root()
+    if root is not None:
+        try:
+            if _under(Path(os.path.realpath(root)), resolved):
+                return None
+        except OSError:
+            return None
+    return resolved
+
+
+def _real_interpreter() -> Path | None:
+    """The private seam :func:`real_interpreter` used to be; kept for callers."""
+    return real_interpreter()
+
+
+def _real_interpreter_for(interpreter: str | os.PathLike[str]) -> Path | None:
+    """The base interpreter a DIFFERENT venv's ``bin/python3`` was built from.
+
+    Same reasoning as :func:`real_interpreter`, one tree over: the path the
+    caller holds is a symlink into that venv's base install, and resolving it
+    with ``realpath`` is right there because the tree is not executing through
+    a branded symlink.
+    """
+    try:
+        target = Path(interpreter)
+        home = _venv_home(target.parent.parent)
+        if home is not None:
+            name = os.path.basename(target)
+            if name != BRAND:
+                candidate = home / name
+                if candidate.is_file():
+                    resolved = Path(os.path.realpath(candidate))
+                    if resolved.is_file():
+                        return _build_or_none(resolved)
+        return _build_or_none(Path(os.path.realpath(target)))
+    except Exception:  # noqa: BLE001 — a probe, and the caller has a fallback
+        return None
+
+
+#: File inside a published runtime directory naming the interpreter it was
+#: cloned from. See :func:`_source_for_image`.
+_SOURCE_MARKER = "source"
+
+
+def _under(root: Path, path: Path) -> bool:
+    """True when ``path`` is ``root`` or lies beneath it; both already resolved."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _source_for_image(path: Path) -> Path | None:
+    """The interpreter a published runtime image was cloned from, or ``None``.
+
+    Asked only about a path that is already a real file. A published image is
+    not an installation: it has no ``pyvenv.cfg`` of its own and its ``lib`` is
+    a symlink into the build, so a venv created ON TOP of it (``<venv>/bin/Local
+    Operator -m venv X``) names the IMAGE as both ``home`` and ``executable``.
+    Resolving that venv therefore answers the clone, and planting from that
+    answer publishes a clone OF a clone under a second build key — a second
+    macOS privacy row for the same Python build. Mapping the answer back
+    through the marker is what keeps :func:`real_interpreter` answering about a
+    build.
+
+    THE MARKER IS ONLY TRUSTED ON A PUBLISHED IMAGE, and the target is only
+    trusted when it is an executable Python OUTSIDE the publish tree. Read
+    unconditionally, ``<path>/../../source`` exists in trees nothing here wrote
+    (a pyenv or framework install, a checkout), and a stray file there was taken
+    as the answer — a marker naming ``/bin/ls`` made this function return
+    ``/bin/ls``, and the next plant would have published a clone of it. The
+    marker is a sidecar of THIS layout, so it is honoured only where that layout
+    put it (``<runtime_root>/<key>/bin/<BRAND>``), only when it points back out
+    of the tree (a target inside it is another clone, the loop this exists to
+    stop), and only when the target names a Python build — the family
+    :func:`real_interpreter` draws its answer from, so a target that does not is
+    not something a plant here could have written.
+
+    An image published before markers existed, or one whose recorded source has
+    since been removed, answers ``None``; the caller then keeps what it
+    resolved, exactly as before.
+    """
+    root = runtime_root()
+    if root is None:
+        return None
+    try:
+        image = Path(os.path.realpath(path))
+        published = Path(os.path.realpath(root))
+    except OSError:
+        return None
+    if image.name != BRAND or not _under(published, image.parent.parent):
+        return None
+    try:
+        recorded = Path((image.parent.parent / _SOURCE_MARKER).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        if not recorded.is_file() or not os.access(recorded, os.X_OK):
+            return None
+        recorded = Path(os.path.realpath(recorded))
+    except OSError:
+        return None
+    if _under(published, recorded):
+        return None
+    if not (recorded.name.startswith("python") and len(recorded.name) > len("python")):
+        return None
+    return recorded
+
+
+def _write_source_marker(published: Path, real: Path) -> None:
+    """Record, beside a staging image, which interpreter it was cloned from.
+
+    Written into the STAGING tree so the publish stays one ``rename``. A
+    failure here is not fatal — the image is still a working interpreter, it
+    just cannot vouch for the build it came from.
+    """
+    try:
+        (published / _SOURCE_MARKER).write_text(f"{os.path.realpath(real)}\n", encoding="utf-8")
+    except OSError:
+        logger.debug("could not record an image's source", exc_info=True)
+
+
+def runtime_root() -> Path | None:
+    """Where the per-build runtime images live: ``<stable root>/runtime``, or None.
+
+    RESOLVED AGAINST THE PASSWD HOME, NOT ``$HOME``. ``agent/sdk.py`` sets
+    ``HOME`` to an agent home for SDK children, so a root derived from the
+    environment would plant a second image — a second macOS privacy client —
+    for every such child, which is the exact duplication this layout exists to
+    remove. The passwd entry is the home that does not move under a process's
+    feet, and it is where ``lop`` itself was installed.
+
+    ``LOCAL_OPERATOR_RUNTIME_ROOT`` relocates it outright, for the same reason
+    ``LOCAL_OPERATOR_CONFIG_DIR`` exists: a test or a sandbox must keep a run
+    out of the operator's real ``~/.local/share/lop``, and the value has to
+    cross a ``subprocess`` boundary — the plant happens in the parent, but a
+    child re-checks the link it was executed through.
+    """
+    override = os.environ.get("LOCAL_OPERATOR_RUNTIME_ROOT")
+    if override:
+        return Path(override)
+    try:
+        import pwd
+
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # noqa: BLE001 — no passwd entry is not a startup failure
+        # None, NOT a ``~``-shaped placeholder. ``Path("~/")`` is never expanded,
+        # so the next ``mkdir(parents=True)`` created a literal ``./~/`` directory
+        # in the CURRENT working directory (reproduced) — a plant into the
+        # operator's checkout under a name nothing would ever clean up. With no
+        # absolute home there is nowhere legitimate to publish, so this says so
+        # and the caller takes rung 2.
+        return None
+    if not home.is_absolute():
+        return None
+    return home / STABLE_ROOT_RELATIVE / "runtime"
+
+
+def _build_key(real: Path) -> str:
+    """``<python-build-name>-<digest>``: the identity of ONE interpreter build.
+
+    Both halves are load-bearing. The name is what a reader sees in ``ls``
+    (``cpython-3.12.14-macos-aarch64-none``), and the digest is over the
+    RESOLVED path, size and mtime, so an interpreter re-installed at the same
+    path under the same version publishes a NEW image instead of reusing one
+    whose bytes no longer match. ``[:10]`` is 40 bits: a collision would need
+    two builds colliding in a directory that already identifies the build.
+    """
+    import hashlib
+
+    stat = real.stat()
+    material = f"{os.path.realpath(real)}\0{stat.st_size}\0{stat.st_mtime_ns}"
+    return f"{real.parent.parent.name}-{hashlib.sha256(material.encode()).hexdigest()[:10]}"
+
+
+def runtime_image(real: Path) -> Path | None:
+    """The stable image path for ``real``, whether or not it is planted yet."""
+    root = runtime_root()
+    if root is None:
+        return None
+    return root / _build_key(real) / "bin" / BRAND
 
 
 def _is_framework_build(real: Path) -> bool:
@@ -429,13 +750,14 @@ def _is_framework_build(real: Path) -> bool:
 
 
 def branded_link_path() -> Path | None:
-    """Where the branded hardlink lives, or None when this environment is out.
+    """Where this venv's branded link lives, or None when this environment is out.
 
-    ``<sys.prefix>/bin/Local Operator`` — beside the venv's own ``python``, so
-    dyld's ``@executable_path/../lib`` resolves into the venv where the
-    companion symlink is planted. Returns None (no plant, no re-exec, today's
-    behaviour) when the platform is not macOS or the interpreter is not a
-    brandable venv interpreter.
+    ``<sys.prefix>/bin/Local Operator`` — beside the venv's own ``python``, so a
+    process executed through it still finds this venv's ``pyvenv.cfg``. It is
+    normally a symlink to the runtime image for this build; on the fallback
+    rung it is a per-venv hardlink with its libpython pin in ``<venv>/lib``.
+    Returns None (no plant, no re-exec, today's behaviour) when the platform is
+    not macOS or the interpreter is not a brandable venv interpreter.
     """
     if sys.platform != "darwin":
         return None
@@ -452,97 +774,140 @@ def branded_link_path() -> Path | None:
         return None
 
 
-def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
+def _stdlib_through(image: Path) -> bool:
+    """Does the stdlib resolve through the ``lib`` beside ``image``?
+
+    CPython locates ``encodings`` — the first module it imports — relative to
+    the DIRECTORY of the image it runs. The runtime image therefore needs
+    ``<image dir>/../lib/python3.X/encodings/__init__.py`` to exist, and the
+    ``lib`` symlink the plant publishes is what makes that true. Measured
+    without it: ``No module named 'encodings'`` on every launch, before any of
+    our code runs.
+    """
+    try:
+        lib = image.parent.parent / "lib"
+        return any(
+            (entry / "encodings" / "__init__.py").is_file() for entry in lib.glob("python3*")
+        )
+    except OSError:
+        return False
+
+
+#: The first four bytes of every image this module can exec: thin Mach-O
+#: (32/64-bit, either byte order) and fat/universal (32/64-bit offsets).
+_MACHO_MAGICS = frozenset(
+    bytes.fromhex(magic)
+    for magic in (
+        "feedface",
+        "cefaedfe",
+        "feedfacf",
+        "cffaedfe",
+        "cafebabe",
+        "cafebabf",
+    )
+)
+
+#: How far an image's mtime may sit from its source's and still be the same
+#: copy. ``clonefile`` keeps the nanoseconds, but the ``shutil.copy2`` fallback
+#: lands on whatever the target volume stores: measured on an HFS+ volume, the
+#: copy's mtime came back truncated to the second (114,922,487 ns short). An
+#: exact comparison would call every copy-fallback image corrupt and republish
+#: it on every start. An in-place overwrite stamps "now", which is days from
+#: the interpreter's install time, so the slack costs no detection.
+_MTIME_SLACK_NS = 2_000_000_000
+
+
+def _intact_copy(resolved: Path, real: Path | None) -> bool:
+    """``resolved`` still holds an executable image, and ``real``'s when known.
+
+    Two stats and a 4-byte read, because ``X_OK`` plus a resolvable stdlib is
+    not the whole question an image has to answer. A TRUNCATED clone passes
+    both and dies at ``execve`` with ``[Errno 8] Exec format error``
+    (reproduced by ``truncate(12)``); so does one overwritten IN PLACE at the
+    same size (reproduced by zeroing the first 64 bytes). One image is shared
+    by every venv of its build, so either state disables the brand for all of
+    them. Size and mtime catch an overwrite (a clone keeps its source's mtime,
+    and a write stamps a new one); the Mach-O magic catches one whose size and
+    mtime were put back, such as an equal-length script.
+    """
+    if real is not None:
+        image_stat = resolved.stat()
+        real_stat = real.stat()
+        if image_stat.st_size != real_stat.st_size:
+            return False
+        if abs(image_stat.st_mtime_ns - real_stat.st_mtime_ns) >= _MTIME_SLACK_NS:
+            return False
+    with open(resolved, "rb") as handle:
+        return handle.read(4) in _MACHO_MAGICS
+
+
+def _healthy_image(image: Path, real: Path | None = None) -> bool:
+    """``image`` is a file we can exec whose bytes and stdlib are intact.
+
+    Follows symlinks. ``real`` is the interpreter the image must be a copy of;
+    when it is known, its size and mtime are compared as well as the image's
+    magic — see :func:`_intact_copy` for the failures each one catches.
+    """
+    try:
+        resolved = Path(os.path.realpath(image))
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            return False
+        if not _intact_copy(resolved, real):
+            return False
+        return _stdlib_through(resolved)
+    except OSError:
+        return False
+
+
+def _needs_replant(link: Path, real: Path, image: Path | None) -> bool:
     """Whether the planted shape is missing or stale. Stats plus one resolve.
 
-    Cost, measured rather than asserted: two ``stat`` calls on the link and the
-    interpreter, one ``exists`` on the symlink, and one ``resolve()`` pair for
-    the dylib-identity check below. ``resolve()`` ``lstat``s every path
-    component, so the exact syscall count scales with how deep the venv sits
-    and is not worth pinning to a number here — the total is a couple of
-    hundred microseconds either way (~180 µs for the whole steady-state
-    ``ensure_branded_interpreter``, against a >1 s startup).
+    Identity, not freshness. The expected image path is a FUNCTION of the
+    interpreter's own (path, size, mtime), so a symlink naming it is correct by
+    construction and anything else is stale: a legacy hardlink, a link aimed at
+    a previous build, an EDR's replacement file. The steady state costs a
+    couple of ``lstat``s and one ``readlink`` — the whole
+    ``ensure_branded_interpreter`` steady state measured ~180 µs against a
+    startup north of a second.
 
     Refresh when ANY of:
 
-    (a) the link's inode differs from the real interpreter's — ``uv tool
-        install --force`` replaced the interpreter and PRESERVED our planted
-        file without refreshing it, so the link now names an old inode: a
-        stale interpreter under fresh site-packages;
-    (b) ``st_nlink < 2`` — something replaced the hardlink with a copy (an
-        archive restore, an rsync without ``-H``), which is the ``@rpath``
-        failure again and is no longer the same inode as the interpreter;
-    (c) the companion libpython symlink is missing, dangling, or points at
-        something other than THIS interpreter's dylib — the measured
-        100%-abort mode, plus the subtler case where an interpreter upgrade
-        leaves a live symlink aimed at the previous install's library;
+    (a) the path is not a symlink at all — a missing link, or the per-venv
+        hardlink this layout replaces;
+    (b) it names a different image — ``uv tool install --force`` replaced the
+        interpreter, so the build key moved;
+    (c) the image is not executable by us, its stdlib does not resolve through
+        the ``lib`` beside it, or its bytes are no longer the interpreter it
+        was cloned from (size, mtime or Mach-O magic, see
+        :func:`_intact_copy`). Each shape dies at ``execve`` or at ``No module
+        named 'encodings'``, and the last one is a truncated or overwritten
+        clone: ``X_OK`` and a resolvable stdlib both pass, then the kernel
+        answers ``[Errno 8] Exec format error``;
     (d) the file at the link path is present but WE CANNOT EXECUTE IT. Not
         hypothetical, and not necessarily ours: an EDR on the operator's
         machine replaced the planted link in five worktree venvs with a
         49968-byte mode-0600 file owned by its own agent user, so the path
-        named an image that would fail at ``execve`` while every inode/ABI
-        trigger above was satisfied by whatever it replaced (measured
-        2026-09-19). Asking "can we exec it" rather than reading mode bits is
-        deliberate: the answer depends on owner, group and the effective uid
-        together, which is exactly the question ``subprocess`` will ask.
+        named an image that would fail at ``execve`` while every other trigger
+        was satisfied by whatever it replaced (measured 2026-09-19).
 
-    The inode is ground truth, so no version-stamp file is written; a stamp
-    would be a second source of truth that can itself go stale while the inode
-    it describes has already been replaced.
+    The interpreter's bytes are ground truth, through the key, so no
+    version-stamp file is written; a stamp is a second source of truth that can
+    itself go stale while the image it describes has already been replaced.
+    ``real`` is the interpreter the image must be a copy of; it supplies the
+    size and mtime in (c), and the key that names the expected image is derived
+    from it upstream.
     """
     try:
-        link_stat = link.stat()  # follows nothing meaningful: a hardlink IS the file
+        if not link.is_symlink():
+            return True  # (a)
+        if image is None or os.readlink(link) != str(image):
+            return True  # (b)
+        return not _healthy_image(link, real)  # (c) and (d)
     except OSError:
         return True
-    try:
-        real_stat = real.stat()
-    except OSError:
-        # The interpreter we are running vanished mid-check. Nothing sane to
-        # plant against; leave what is there rather than deleting a link that
-        # may still work.
-        return False
-    if (link_stat.st_dev, link_stat.st_ino) != (real_stat.st_dev, real_stat.st_ino):
-        return True  # (a)
-    if link_stat.st_nlink < 2:
-        return True  # (b)
-    # (d) A separate check from the inode comparison above, and deliberately
-    # not a mode-bit read: an EDR-owned reproduction on this machine had a
-    # DIFFERENT inode (so (a) fires too), but a copy that happens to preserve
-    # the inode is not required for the question to matter — what must never
-    # reach `subprocess` is an image we cannot execute. Wrapped because the
-    # contract here is no-raise, and `access` is not total on every path shape.
-    try:
-        if not os.access(link, os.X_OK):
-            return True
-    except OSError:
-        return True
-    if libpython is not None:
-        # `exists` follows the symlink, so a dangling one is already False.
-        # Inside the try because it is NOT total: an unreadable parent
-        # directory makes it raise `PermissionError` (reproduced), and this
-        # function's contract is that it never raises. Treated as "replant",
-        # which is the safe direction — a libpython we cannot even stat is not
-        # one we should assume is correct.
-        try:
-            live = libpython.exists()
-        except OSError:
-            return True
-        if not live:
-            return True  # (c) missing or dangling
-        # A LIVE symlink is not automatically a CORRECT one. After an
-        # interpreter upgrade the old link still resolves — to the previous
-        # install's dylib — and loading a mismatched libpython beside a fresh
-        # interpreter is exactly the crash this whole shape exists to avoid.
-        # Compared by resolved path against the running interpreter's own lib.
-        try:
-            if libpython.resolve() != (real.parent.parent / "lib" / libpython.name).resolve():
-                return True  # (c) live but pointing at the wrong library
-        except OSError:
-            return True
-    return False
 
 
-def _executable_image(link: Path | None) -> Path | None:
+def _executable_image(link: Path | None, real: Path | None = None) -> Path | None:
     """``link`` when it is an image we can actually EXEC, else ``None``.
 
     The last gate before a path is handed to ``subprocess`` as ``executable=``,
@@ -552,11 +917,39 @@ def _executable_image(link: Path | None) -> Path | None:
     dies with ``Permission denied`` at the child's expense. ``None`` is the
     honest answer — it means rung 2, which still runs the requested
     interpreter, just without a name.
+
+    A path INSIDE A VENV gets one extra question — does the stdlib resolve
+    through the ``lib`` beside the image — because CPython derives the stdlib
+    from the directory of the executable it ends up running, and a broken
+    ``lib`` fails with ``No module named 'encodings'`` before any of our code
+    runs. Which shape is asked is decided by what the path IS, not by whether
+    the venv has a ``pyvenv.cfg``:
+
+    * a SYMLINK always asks. Every ``<venv>/bin/Local Operator`` this module
+      plants is a symlink to the runtime image, whose directory (``<key>/bin``)
+      is where CPython looks — measured: a venv link to an image whose ``lib``
+      dangles returns from here and then dies with ``No module named
+      'encodings'``, rc=1;
+    * an in-venv HARDLINK does not. It IS the venv's interpreter, so CPython
+      finds the venv's own ``pyvenv.cfg`` beside it and takes the stdlib from
+      its base install; requiring a second ``lib`` under ``<venv>`` would
+      refuse a shape that starts.
+
+    Every shape also gets the integrity question (:func:`_intact_copy`): the
+    Mach-O magic always, and size and mtime against ``real`` when it is known.
     """
     if link is None:
         return None
     try:
-        return link if os.access(link, os.X_OK) else None
+        if not os.access(link, os.X_OK):
+            return None
+        target = Path(os.path.realpath(link))
+        if link.is_symlink() or not (link.parent.parent / "pyvenv.cfg").is_file():
+            if not _stdlib_through(target):
+                return None
+        if not _intact_copy(target, real):
+            return None
+        return link
     except OSError:  # pragma: no cover — access answers False for a bad path
         return None
 
@@ -782,53 +1175,388 @@ def _plant_libpython(link: Path, real: Path, name: str) -> bool:
         return False
 
 
+def _clone_or_copy(source: Path, target: Path) -> None:
+    """Make ``target`` an APFS clone of ``source``, else a byte copy.
+
+    ``clonefile`` shares blocks instead of copying them and preserves mode and
+    times, which is what makes one image per Python build cost no extra blocks
+    on APFS: the image is logically the interpreter's whole size (18,041,888
+    bytes for the uv 3.12.14 build this was measured on) and costs no measured
+    extra allocation while the source still exists, because every block is
+    shared. On a volume without clones ``shutil.copy2`` below pays that size
+    once per build key — still one copy per BUILD rather than one per venv,
+    which is the property that matters. It is called through libc
+    rather than ``os.clonefile`` because this ships on interpreters from 3.12,
+    where that binding does not exist. Any failure — a non-APFS volume, a full
+    disk, an unusual filesystem — falls through to ``shutil.copy2``, which
+    preserves the same attributes.
+    """
+    import shutil
+
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            clonefile = libc.clonefile
+            clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+            clonefile.restype = ctypes.c_int
+            if clonefile(os.fsencode(source), os.fsencode(target), 0) == 0:
+                return
+        except Exception:  # noqa: BLE001 — any failure falls through to the copy
+            pass
+    shutil.copy2(source, target)
+
+
+#: The two private names a runtime plant puts beside a build key: its staging
+#: tree, and a corrupt published tree it moved aside before replacing it.
+_PLANT_SCRATCH_INFIXES = (".tmp.", ".dead.")
+
+
+def _has_plant_scratch(root: Path) -> bool:
+    return any(any(root.glob(f"*{infix}*")) for infix in _PLANT_SCRATCH_INFIXES)
+
+
+def _sweep_orphan_plants(root: Path) -> None:
+    """Remove ``<key>.tmp|dead.<pid>.<thread>`` trees a killed plant left behind.
+
+    The runtime plant's staging name is a DIRECTORY beside the image, so a
+    planter killed between ``mkdir`` and ``rename`` leaks a tree; one killed
+    between moving a corrupt tree aside and removing it leaks that. The liveness
+    question is the one :func:`_sweep_orphan_temps` asks — ``procstate``, never
+    ``os.kill``, and a zombie counts as dead — and the direction is fail-closed:
+    a pid the probe cannot answer for keeps its tree, and a tree that cannot be
+    removed is left alone. Housekeeping, so every failure here is silent.
+    """
+    import shutil
+
+    try:
+        from local_operator import procstate
+
+        for infix in _PLANT_SCRATCH_INFIXES:
+            for entry in root.glob(f"*{infix}*"):
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                _, _, tail = entry.name.rpartition(infix)
+                pid_text = tail.split(".", 1)[0]
+                if not pid_text.isdigit():
+                    continue
+                pid = int(pid_text)
+                if procstate.pid_alive(pid) and not procstate.zombie_states([pid]).get(pid, False):
+                    continue
+                shutil.rmtree(entry, ignore_errors=True)
+    except Exception:  # noqa: BLE001 — housekeeping must never cost a startup
+        return
+
+
+def _plant_runtime(real: Path, root: Path | None) -> Path | None:
+    """Publish the one runtime image for ``real`` under ``root``, or ``None``.
+
+    Built under a PRIVATE staging directory and published with a single
+    ``os.rename``, so a concurrent planter (several worktrees starting at once)
+    sees either no directory or a complete one. Published directories are
+    IMMUTABLE UNLESS CORRUPT and are never collected: a running process may
+    still be executing one, and one that stays on disk is one macOS privacy
+    prompt that will not happen again. A published directory whose image fails
+    the integrity check (:func:`_healthy_image`) is replaced under the same
+    key. A loser of the rename race removes its own staging tree and uses the
+    winner's image.
+
+    The two refusals are about the SOURCE, not this process: an interpreter
+    whose own tree has no stdlib cannot back an image (the clone would die with
+    ``No module named 'encodings'``), and one whose dylib cannot be found would
+    die in dyld. Either way the hardlink rung is the honest answer, so this
+    returns ``None`` rather than publishing an image that aborts.
+    """
+    import shutil
+
+    try:
+        if root is None:
+            return None
+        key = _build_key(real)
+        image = root / key / "bin" / BRAND
+        if _healthy_image(image, real):
+            return image
+        if not _stdlib_through(real):
+            return None
+        base = real.parent.parent
+        name = _libpython_name_for(real)
+        if name is not None and not (base / "lib" / name).is_file():
+            return None
+        root.mkdir(parents=True, exist_ok=True)
+        # Ask before sweeping: a sweep forks a process (``procstate`` runs
+        # ``ps`` for its zombie probe) and this runs inside a spawn path. With
+        # no staging directory there is nothing to reclaim, and the common
+        # fresh plant must not pay for a probe of the machine.
+        if _has_plant_scratch(root):
+            _sweep_orphan_plants(root)
+        staging = root / f"{key}.tmp.{os.getpid()}.{_temp_thread_token()}"
+        try:
+            (staging / "bin").mkdir(parents=True)
+            _clone_or_copy(real, staging / "bin" / BRAND)
+            _write_source_marker(staging, real)
+            # The stdlib and the dylib are both resolved relative to the IMAGE
+            # directory, so both must resolve back into the interpreter's own
+            # tree. ``include`` is only needed by a build that ships headers.
+            os.symlink(base / "lib", staging / "lib")
+            if (base / "include").is_dir():
+                os.symlink(base / "include", staging / "include")
+        except OSError:
+            # A FAILED BUILD IS NOT A PUBLISHED IMAGE. This block used to fall
+            # through to the corrupt-directory branch below, which ``rename``d a
+            # staging tree holding an empty ``bin/`` (or a half-written clone,
+            # on ENOSPC) onto the build key. Nothing could ever call it healthy,
+            # but it published a key a reader can see and sent the next planter
+            # down the corrupt-repair path for a directory that never held an
+            # image. Remove it and answer rung 2.
+            shutil.rmtree(staging, ignore_errors=True)
+            return image if _healthy_image(image, real) else None
+        try:
+            os.rename(staging, root / key)
+        except OSError:
+            if _healthy_image(image, real):
+                # A concurrent planter published it first, and it is good.
+                shutil.rmtree(staging, ignore_errors=True)
+                return image
+            # The published directory is CORRUPT (a truncated or replaced
+            # image), not a race winner. Published directories are immutable
+            # unless corrupt: an image that does not execute cannot have a live
+            # process behind it, so it is ours to replace instead of downgrading
+            # every venv of this build to the fallback for the life of the
+            # machine.
+            return _replace_corrupt(root, key, staging, image, real)
+        return _settled_image(image, real)
+    except Exception:  # noqa: BLE001 — rung 2 exists for exactly this
+        logger.debug("runtime image unavailable", exc_info=True)
+        return None
+
+
+def _replace_corrupt(root: Path, key: str, staging: Path, image: Path, real: Path) -> Path | None:
+    """Swap a corrupt published ``<root>/<key>`` for ``staging``; the image or ``None``.
+
+    ``os.rename`` cannot replace a non-empty directory, so the dead tree has to
+    leave first — and it leaves by RENAME, to a private ``<key>.dead.<pid>.
+    <thread>``, never by an in-place ``rmtree``. Deleting in place left the key
+    missing for as long as the delete ran, and concurrent planters that looked
+    in that window answered ``None``: measured, 139 of 240 planters (8 at a time
+    on a truncated image), each one a venv dropped to the hardlink rung. The
+    aside rename is atomic, so the key is missing only between two renames.
+
+    The health question is asked again right before the move, because a
+    concurrent planter may have published a good tree since this one looked. A
+    planter that still moves aside a tree which turns out HEALTHY puts it back
+    rather than deleting a fresh image, and in that short gap another planter
+    can look at an empty key — so every answer here goes through
+    :func:`_settled_image`, which yields briefly before calling the key dead.
+    """
+    import shutil
+
+    published = root / key
+    if _healthy_image(image, real):
+        shutil.rmtree(staging, ignore_errors=True)
+        return image
+    aside = root / f"{key}.dead.{os.getpid()}.{_temp_thread_token()}"
+    try:
+        os.rename(published, aside)
+    except OSError:
+        pass  # another planter moved it first, or it is already gone
+    else:
+        if _healthy_image(aside / "bin" / BRAND, real):
+            try:
+                os.rename(aside, published)
+            except OSError:
+                pass  # someone published in the gap; theirs stands
+        shutil.rmtree(aside, ignore_errors=True)
+    try:
+        os.rename(staging, published)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+    return _settled_image(image, real)
+
+
+#: How long a planter on the repair path waits for a concurrent swap to land
+#: before it calls the key dead: ten yields of 20 ms. Only the corrupt-image
+#: path pays it; the steady state never reaches this function.
+_SETTLE_TRIES = 10
+_SETTLE_PAUSE_S = 0.02
+
+
+def _settled_image(image: Path, real: Path) -> Path | None:
+    """``image`` once it is healthy, or ``None`` if it stays unhealthy briefly.
+
+    A concurrent repair holds the key empty (or a healthy tree aside) for the
+    span of two renames. Reading the key once in that span answered ``None`` —
+    one venv dropped to the hardlink rung for nothing — so the answer is
+    re-read a bounded number of times first.
+    """
+    import time
+
+    for _ in range(_SETTLE_TRIES):
+        if _healthy_image(image, real):
+            return image
+        time.sleep(_SETTLE_PAUSE_S)
+    return image if _healthy_image(image, real) else None
+
+
+def _link_to(link: Path, image: Path) -> bool:
+    """Point ``link`` at ``image`` (temp symlink + ``os.replace``), or False.
+
+    ``os.replace`` is atomic, so a concurrent reader sees the old link or the
+    new one and never nothing. A LEGACY HARDLINK at the same path is replaced
+    here, which is how a machine that already has the per-venv shape migrates
+    without an install step. A link that already names the image is left
+    untouched: this runs at every startup, and churning it for nothing is a
+    write an editor or a backup notices.
+    """
+    try:
+        if link.is_symlink() and os.readlink(link) == str(image):
+            return True
+        # A killed planter's temp is the same shape this is about to create, and
+        # the sweep only forks its probe when one exists.
+        _sweep_orphan_temps(link.parent, BRAND)
+        staging = link.parent / f".{BRAND}.{os.getpid()}.{_temp_thread_token()}.tmp"
+        try:
+            os.symlink(image, staging)
+            os.replace(staging, link)
+        finally:
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+        return True
+    except OSError:
+        return False
+
+
+def _is_runtime_link(link: Path, real: Path | None = None) -> bool:
+    """Is ``link`` already a symlink to a healthy image under the runtime root?
+
+    The question the hardlink rung asks before touching anything, and it is
+    what stops a sandboxed child from undoing its parent: a child whose runtime
+    root is read-only cannot plant, and it must not downgrade a shape that
+    already works to one that costs a new path per venv.
+
+    "Healthy" includes "the same bytes as ``real``" when the caller knows the
+    interpreter (see :func:`_healthy_image`).
+    """
+    try:
+        if not link.is_symlink():
+            return False
+        target = Path(os.path.realpath(link))
+        if not target.is_file():
+            return False
+        root = runtime_root()
+        if root is None or Path(os.path.realpath(root)) not in target.parents:
+            return False
+        return _healthy_image(target, real)
+    except OSError:
+        return False
+
+
+def _stale_hardlink(link: Path, real: Path, libpython: Path | None) -> bool:
+    """Whether the FALLBACK hardlink shape is missing or stale.
+
+    The inode rule the runtime rung replaced, kept because the fallback's
+    failure modes are inode-shaped: (a) the link names a different inode —
+    ``uv tool install --force`` replaced the interpreter and preserved the
+    planted file; (b) ``st_nlink < 2`` — something turned it into a copy; (c)
+    the companion libpython symlink is missing, dangling, or aimed at another
+    install's library (the measured 100%-abort mode); (d) the file is present
+    but not executable by us, which is the EDR shape measured 2026-09-19.
+    Never raises.
+    """
+    try:
+        link_stat = link.stat()  # follows nothing meaningful: a hardlink IS the file
+    except OSError:
+        return True
+    try:
+        real_stat = real.stat()
+    except OSError:
+        # The interpreter vanished mid-check. Nothing sane to plant against;
+        # leave what is there rather than deleting a link that may still work.
+        return False
+    if (link_stat.st_dev, link_stat.st_ino) != (real_stat.st_dev, real_stat.st_ino):
+        return True
+    if link_stat.st_nlink < 2:
+        return True
+    try:
+        if not os.access(link, os.X_OK):
+            return True
+    except OSError:
+        return True
+    if libpython is not None:
+        # ``exists`` follows the symlink, so a dangling one is already False.
+        # Inside the try because it is NOT total: an unreadable parent
+        # directory makes it raise ``PermissionError`` (reproduced).
+        try:
+            if not libpython.exists():
+                return True
+            if libpython.resolve() != (real.parent.parent / "lib" / libpython.name).resolve():
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def _plant_branded_image(link: Path, real: Path, name: str | None) -> Path | None:
-    """The injected plant: refresh the shape beside ``real`` if stale.
+    """Refresh the brand beside ``real``, preferring the stable runtime image.
 
     Factored out of :func:`ensure_branded_interpreter` so the SAME logic can
     plant beside an interpreter that is not this process's — the two spawn
     sites that must run another tree's build (see
     :func:`spawn_identity_for_interpreter`). Everything it needs is an explicit
     argument: ``link`` is where the branded name must appear, ``real`` is the
-    interpreter it must be a second name FOR, and ``name`` is the dylib (from
-    ``sysconfig`` for this venv, from the target's own file name otherwise).
+    interpreter it must name, and ``name`` is the dylib (from ``sysconfig`` for
+    this venv, from the target's own ``lib`` otherwise).
 
-    Returns the usable link, or ``None``: when no dylib can be identified, when
-    either plant fails (``EXDEV``, ``EPERM``, a read-only prefix — all
-    supported outcomes), and when the link that is there is not executable by
-    us. ``None`` is rung 2 for every caller, never an error to report.
+    THE LADDER, and the order is the contract:
+
+    1. the runtime image, and a symlink to it — one path per Python build, so
+       macOS sees one privacy client instead of one per venv and per update;
+    2. the per-venv hardlink and its dylib pin, ONLY when the runtime rung
+       could not be taken and the path is not ALREADY a healthy runtime link.
+       That second condition is what keeps a sandboxed child, whose runtime
+       root is read-only, from undoing the link its parent planted;
+    3. ``None`` — rung 2 for the caller, which still runs the requested
+       interpreter, just without a name.
+
+    Returns the usable link or ``None``. Never raises.
     """
-    # NO IDENTIFIABLE DYLIB MEANS NO IMAGE AT ALL — not "keep the one that is
-    # already there". The refusal has to come BEFORE the staleness early return,
-    # because with ``name is None`` trigger (c) cannot run at all: a link that
-    # is the interpreter's inode, executable and ``nlink >= 2`` would otherwise
-    # be handed out with its companion dylib missing or unidentifiable, and
-    # dyld aborts at load — the measured 100%-abort mode, and the one failure no
-    # ``os.access`` check can see (review round 1, R-4).
-    #
-    # THE COUNTER-ARGUMENT, recorded rather than left implicit: a STATIC build
-    # legitimately has no dylib, so a hardlink of one might execute with no
-    # companion pin at all. It is refused anyway, because "this interpreter needs
-    # no dylib" and "a dylib we could not identify" are indistinguishable from
-    # here, and a name is worth less than a launch: every interpreter this
-    # ships on is uv's dynamic Mach-O build whose only ``LC_RPATH`` is
-    # ``@executable_path/../lib`` (see the module docstring's abort measurement).
-    if name is None:
+    try:
+        # The steady state: a symlink naming the image for THIS build, and an
+        # image that can start. No writes, no directory scan.
+        if not _needs_replant(link, real, runtime_image(real)):
+            return _executable_image(link, real)
+        image = _plant_runtime(real, runtime_root())
+        if image is not None:
+            if _link_to(link, image):
+                return _executable_image(link, real)
+        if _is_runtime_link(link, real):
+            return _executable_image(link, real)
+        if name is None:
+            # A hardlink with no companion dylib aborts at load (the measured
+            # 100%-abort mode), and "no dylib" is indistinguishable from "a
+            # dylib we could not identify", so the fallback is refused rather
+            # than planted blind.
+            return None
+        libpython = link.parent.parent / "lib" / name
+        if not _stale_hardlink(link, real, libpython):
+            return _executable_image(link, real)
+        # BOTH plant directories. A killed plant can leak a temp in `bin/`
+        # (named for the brand) or in `lib/` (named for the dylib), and sweeping
+        # only the first left lib temps accumulating forever. Only on the
+        # replant path, so the common startup stays a stat probe with no
+        # directory scan.
+        _sweep_orphan_temps(link.parent, BRAND)
+        _sweep_orphan_temps(link.parent.parent / "lib", name)
+        if not _plant_libpython(link, real, name):
+            return None
+        if not _plant_hardlink(link, real):
+            return None
+        return _executable_image(link, real)
+    except Exception:  # noqa: BLE001 — a name is decoration, never a failure
+        logger.debug("branded image unavailable", exc_info=True)
         return None
-    libpython = link.parent.parent / "lib" / name
-    if not _needs_replant(link, real, libpython):
-        return _executable_image(link)
-    # BOTH plant directories. A killed plant can leak a temp in `bin/`
-    # (named for the brand) or in `lib/` (named for the dylib), and sweeping
-    # only the first left lib temps accumulating forever. Only on the replant
-    # path, so the common startup stays a stat probe with no directory scan.
-    _sweep_orphan_temps(link.parent, BRAND)
-    _sweep_orphan_temps(link.parent.parent / "lib", name)
-    if not _plant_libpython(link, real, name):
-        return None
-    if not _plant_hardlink(link, real):
-        return None
-    return _executable_image(link)
 
 
 def ensure_branded_interpreter() -> Path | None:
@@ -837,10 +1565,11 @@ def ensure_branded_interpreter() -> Path | None:
     Cheap enough for every startup: the common case is the staleness probe
     above (~180 µs measured, against a startup already over a second) and no
     writes. Only a first run in a fresh venv, or a genuine staleness trigger,
-    does any filesystem work — and a hardlink plus a symlink cost zero bytes of
-    data, which is what makes this safe for the many concurrent worktrees on a
-    development machine (each plants into its OWN venv; they never contend for
-    one path).
+    does any filesystem work — and publishing the runtime image costs one
+    clone plus two symlinks per PYTHON BUILD, not per venv, which is what
+    makes this safe for the many concurrent worktrees on a development machine
+    (they converge on one image and never contend for one path beyond the
+    rename that publishes it).
 
     None means "no branded image" — an unsupported platform, a non-venv
     interpreter, a framework build, a cross-device prefix, a read-only install.
@@ -1169,7 +1898,9 @@ def spawn_identity_for_interpreter(
         link = _branded_link_beside(target)
         if link is None:
             return target, None
-        real = Path(os.path.realpath(target))
+        real = _real_interpreter_for(target)
+        if real is None:
+            return target, None
         image = _plant_branded_image(link, real, _libpython_name_for(real))
         if image is None:
             return target, None

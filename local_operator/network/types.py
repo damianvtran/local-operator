@@ -493,6 +493,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
     # boundary as the three leg-1 verbs, a different direction of travel.
     "credential_revoke",
+    # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
+    # same boundary rule — this device's own relay is told to pull one copy from
+    # its owner now, and the link it needs lives in that process.
+    "credential_sync_pull",
     # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
     # peer, or one named peer, and bring its user-scope MCP servers up to date.
     # A local op for the same reason ``definitions_sync`` is one — this device's
@@ -1394,6 +1398,15 @@ class MemberRecord:
     added_via: str = "invite"
     endpoints: list[str] = field(default_factory=list)
     last_seen_at: float | None = None
+    #: The ``host:port`` this device last saw the member's link ARRIVE from, with
+    #: the member's own declared listen port substituted for the ephemeral source
+    #: port. A FALLBACK dial candidate only, never a declaration: when every
+    #: declared endpoint has gone stale (an EC2 stop/start moved the public IP and
+    #: the row can only heal on a completed handshake), the address the member
+    #: actually reached us from is the best evidence of where it is now
+    #: (2026-10-21, cloud-node-1). Local to this device: not relayed in member
+    #: lists as an endpoint, and absent on rows from older builds.
+    observed_endpoint: str = ""
     last_seen_instance: str = ""
     #: How many times a second live process has claimed this device id outside
     #: the restart grace window — the copied-key detector's evidence.
@@ -1708,6 +1721,17 @@ class InviteRecord:
 
     def is_fresh(self, now: float) -> bool:
         return now < self.expires_at
+
+    def listed_state(self, now: float) -> str:
+        """``state`` as a listing should print it: a dead ``minted`` row says ``expired``.
+
+        ``state`` is the single-use ledger and never moves on expiry (nothing
+        redeemed or consumed the token), so a listing that printed it verbatim
+        called a token that redemption already refuses (``not is_fresh``)
+        ``minted`` — 24 of them on one record, 2026-10-21. Display-only: the
+        stored state, and every decision made on it, is unchanged.
+        """
+        return "expired" if self.state == "minted" and not self.is_fresh(now) else self.state
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

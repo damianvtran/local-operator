@@ -226,7 +226,10 @@ def test_the_ask_schema_and_default_tool_names_do_not_move() -> None:
     context = _context(enqueue=_recording_enqueue()[0], gate=RecordingGate(None))
     schema = _tools(context)["ask"].parameters
     properties = schema.get("properties", {})
-    assert set(properties) == {"i", "questions", "timeout"}
+    # ``relay`` joined in #2520: the pointer alternative to ``questions``, and the
+    # ledger entries (``MEASURED_TOKENS`` and the bench ceiling) were re-measured
+    # with it. The GATE still adds nothing — that is what this cell pins.
+    assert set(properties) == {"i", "questions", "timeout", "relay"}
 
     from local_operator.tools.registry import DEFAULT_TOOL_NAMES
 

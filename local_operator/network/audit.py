@@ -202,6 +202,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # revoke batch the owner's lender performed — the scheduled window-end DELETE,
         # the operator's immediate revoke, and the retry after a failed call.
         "credential.revoke",
+        # A member removal pruned every placement row the removed device held
+        # (mesh-mcp-credentials.md §4): key NAMES only, plus whether the prune
+        # itself failed (a removal must proceed regardless, so the failure has to
+        # be visible somewhere).
+        "credential.revoke_all",
         # THE SYNC ENGINE (mesh-consent-provisioning.md §5): a copy served,
         # refused or applied is the same delegation life the grant rows record,
         # one lifecycle further on. `gen` names the per-key generation the row
@@ -424,6 +429,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "declared_device",
             "expected_device",
             "unidentified",
+            # How many identical refusals the relay folded into this row since the
+            # last one it wrote (``network.redial.RefusalCoalescer``). Absent = 0.
+            "repeats",
         }
     ),
     "authorisation_refused": frozenset({"op", "capability", "phase", "link_epoch"}),
@@ -500,6 +508,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.revoke": frozenset(
         {"credential_key", "act", "sub", "cause", "revoked", "deferred"}
     ),
+    # The member-removal prune: `keys` is the list of placement keys stripped of
+    # the removed device (names, never values), and `failed`/`reason` record a
+    # prune that could not run without blocking the removal itself.
+    "credential.revoke_all": frozenset({"keys", "failed", "reason"}),
     # The copy path's rows (mesh-consent-provisioning.md §5): what the owner
     # SERVED (`credential.copy`), why it refused to serve (`copy_refused`, with
     # the machine reason — the digest pin's mismatch is the one that matters),

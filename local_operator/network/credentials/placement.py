@@ -951,6 +951,51 @@ def merge_from_peer(
     return changed
 
 
+def revoke_device_everywhere(
+    network_id: str, device: str, *, root: Path | None = None, by: str = ""
+) -> list[str]:
+    """Remove ``device`` from EVERY placement row it appears in. Returns the keys.
+
+    THE MEMBER-REMOVAL PRUNE (design §4). ``remove_member`` already tombstones the
+    row and rotates the epoch, which ends authority at the next handshake — but
+    the placement document is a separate file and would otherwise keep naming the
+    removed device as a holder, so every status surface would keep offering a copy
+    that a removed device can no longer take. The prune is best-effort: a failure
+    here must never block the removal (the caller reports it), which is why the
+    write happens under the SAME lock discipline as every other placement write
+    rather than in a bespoke path.
+
+    AN ENTRY OWNED BY ``device`` IS DELETED ENTIRELY, not just stripped: its
+    owner is gone from the network, so leaving the row would keep a share alive
+    that nobody can serve. Everything else is a holder-list edit, and an entry that
+    did not name the device is left byte-identical (no ``doc_rev`` bump, so no
+    merge churn).
+
+    ``by`` rides the audit row the caller writes; it is not used in the edit.
+    """
+    root = _config_root(root)
+    path = placement_path(network_id, root)
+    if not device or not path.exists():
+        return []
+    changed: list[str] = []
+    with _document_lock(path, root=root):
+        document = PlacementDocument.load(network_id, root, self_device=by)
+        for key, entry in sorted(document.entries.items()):
+            if str(entry.owner_device) == device:
+                del document.entries[key]
+                changed.append(key)
+                continue
+            rows = [row for row in entry.holders if row.device != device]
+            if len(rows) == len(entry.holders):
+                continue
+            entry.holders = rows
+            entry.doc_rev += 1
+            changed.append(key)
+        if changed:
+            document.save()
+    return changed
+
+
 def grant_key_set(
     document: PlacementDocument,
     *,
