@@ -69,7 +69,10 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN, CONVERSATION_ID_PATTERN
+from local_operator.team_bridge.types import (
+    ATTACHMENT_ID_PATTERN,
+    CONVERSATION_ID_PATTERN,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -1130,7 +1133,11 @@ class ScheduledUpdateIn(_Strict):
         if self.send_at is not None:
             _validate_schedule_time(self.send_at)
         _validate_attachment_ids(self.attachment_ids)
-        if self.body == "" and "attachment_ids" in self.model_fields_set and not self.attachment_ids:
+        if (
+            self.body == ""
+            and "attachment_ids" in self.model_fields_set
+            and not self.attachment_ids
+        ):
             raise ValueError("a schedule edit cannot clear both body and images")
         return self
 
