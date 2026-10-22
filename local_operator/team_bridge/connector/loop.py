@@ -217,9 +217,10 @@ async def retry_due_holds(
         except BridgeRefusal as refusal:
             # BOUND (F5): one row's re-drive must never abort the pass — an
             # escape here skips the poll for every later iteration. A message
-            # the hub says is gone is terminal: retire the row instead of
-            # re-asking forever. Anything else is held on the same backoff.
-            if refusal.http_status == 404 or refusal.code == "not_found":
+            # the hub says is gone (404; the hub's code is ``message_not_found``)
+            # is terminal: retire the row instead of re-asking forever.
+            # Anything else is held on the same backoff.
+            if refusal.http_status == 404:
                 try:
                     store.delete_hold(owner, message_id)
                 except StoreRefused:
@@ -242,8 +243,8 @@ async def retry_due_holds(
                 if advanced and new_code and new_code != row["hold_code"]:
                     # The row's code is what the owner sees (F8): a message
                     # first held ``open_chief_of_staff`` and then held for a
-                    # NEW reason once the owner opened the session must not
-                    # keep telling them to open it. Still conditional on the
+                    # NEW reason once the owner messaged the session must not
+                    # keep telling them to message it. Still conditional on the
                     # row existing (``advanced``), so nothing is resurrected.
                     store.persist_hold(owner, message_id, new_code, retry_at=_time.time() + gap)
             except StoreRefused:
@@ -413,15 +414,18 @@ async def run_forever(
                 settings=settings,
             )
             backoff = BACKOFF_BASE_S
+            # F1 (live E2E): an answer used to re-poll IMMEDIATELY. Against a
+            # real hub that answered at once (resync arms, a caught-up cursor
+            # without ``wait``) it never yielded — 124 reads in under 2 s, then
+            # 429s. The long poll paces the ordinary case; this floor paces a
+            # hub that answers without parking, and it applies to a 204 as
+            # well as a 200 (review R1-1): a proxy that strips ``wait`` turns
+            # every caught-up poll into an INSTANT 204, which at the bare
+            # reissue delay was ~300 polls/min against the hub's 120/min.
+            floor = MIN_ITERATION_S - (_time.monotonic() - started)
             if summary.get("reissued"):
-                await _pause(stop, REISSUE_DELAY_S)
-            else:
-                # F1 (live E2E): a 200 used to re-poll IMMEDIATELY. Against a
-                # real hub that answered at once (resync arms, a caught-up
-                # cursor without ``wait``) it never yielded — 124 reads in
-                # under 2 s, then 429s. The long poll paces the ordinary case;
-                # this floor paces a hub that answers without parking.
-                await _pause(stop, MIN_ITERATION_S - (_time.monotonic() - started))
+                floor = max(REISSUE_DELAY_S, floor)
+            await _pause(stop, floor)
         except asyncio.CancelledError:
             raise
         except Exception as failure:

@@ -5,7 +5,7 @@ WHY THIS MODULE EXISTS (live E2E F8, local-operator-ui #1314). The peer gate in
 never run a user turn, so a row can never become the opening row of a
 conversation its owner did not start. That rule is right for ``lop send``. It also
 meant a member's designated chief of staff — designated in settings but never
-opened — could never receive a Team Bridge card: every delivery failed
+sent a message by its owner — could never receive a Team Bridge card: every delivery failed
 ``conversation_failed`` and retried forever.
 
 The bridge may cross that gate for ONE session only, and only when the member
@@ -23,8 +23,11 @@ CONSTRAINTS, each load-bearing:
   deliberate edit here, next to the disclosure it relies on.
 - Unknown, missing, unreadable, fenced or v1 → NO engagement. The caller holds
   the message with :data:`HOLD_OPEN_CHIEF_OF_STAFF` (visible to the owner,
-  retried on the bounded backoff, never dropped) until the owner opens the
-  session once, after which the ordinary engaged path delivers it.
+  retried on the bounded backoff, never dropped) until the owner SENDS their
+  chief of staff a message, after which the ordinary engaged path delivers it.
+  Opening or selecting the session is NOT enough: release is
+  ``durable_conversation_path`` — a real user conversation turn on disk — and
+  neither opening a session nor its hidden greeting writes one.
 - What crosses the gate is unchanged: the same ``team_bridge_message`` card,
   the same untrusted framing, delivered on the mailbox path. It is not a user
   turn and it carries no instruction of its own.
@@ -43,8 +46,11 @@ from pathlib import Path
 ENGAGING_CONSENT_VERSIONS: frozenset[str] = frozenset({"bridge_consent_v2"})
 
 #: The hold code a card waits under while the accepted consent does not allow
-#: engagement. Machine token; the owner-facing sentence is rendered by the UI
-#: from this code (read_context passes it through HOLD_CODES).
+#: engagement. A machine token, frozen on the wire (local-operator-ui #1325
+#: matches it): it names the place the owner must act, and the action that
+#: releases it is SENDING the chief of staff a message (one user turn on disk),
+#: not merely opening it. The owner-facing sentence is the UI's ("Send your
+#: chief of staff a message once to receive them").
 HOLD_OPEN_CHIEF_OF_STAFF = "open_chief_of_staff"
 
 

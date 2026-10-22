@@ -1629,10 +1629,11 @@ class Store:
         """How many messages for this live owner wait under ``hold_code`` (read-only).
 
         A COUNT, never ids or content: the desktop status read uses it to tell
-        the owner that Team Bridge messages are waiting for them to open their
-        chief of staff (F8). Only the loop's encoded-ref rows are counted —
-        the screener's bare-id duplicates are retired by the loop — so one
-        message counts once. Fenced, absent or damaged reads answer 0.
+        the owner that Team Bridge messages are waiting for them to send their
+        chief of staff a message (F8). Conversation (encoded-ref) and pair (bare pair id)
+        holds both count; the screener's bare ``bcmsg_`` duplicates are
+        excluded, so one message counts once. Fenced, absent or damaged reads
+        answer 0.
         """
 
         with self._connect_readonly() as conn:
@@ -1640,9 +1641,14 @@ class Store:
                 return 0
             if self._live_generation(conn, owner) != owner.enrollment_generation:
                 return 0
+            # Conversation holds live under their encoded ref; PAIR holds under
+            # the bare pair message id (review R1-3). The only rows excluded are
+            # the screener's bare ``bcmsg_`` duplicates of a conversation hold,
+            # which the loop retires — counting them would double one message.
             row = conn.execute(
                 "SELECT COUNT(*) AS n FROM screening_holds "
-                "WHERE owner_key = ? AND hold_code = ? AND message_id LIKE 'message_available:%'",
+                "WHERE owner_key = ? AND hold_code = ? AND message_id NOT LIKE 'bcmsg\\_%' "
+                "ESCAPE '\\'",
                 (_owner_key(owner), hold_code),
             ).fetchone()
             return int(row["n"]) if row is not None else 0
@@ -2019,6 +2025,45 @@ class Store:
                     "UPDATE sync SET feed_seq = ? WHERE owner_key = ?",
                     (int(cursor), _owner_key(owner)),
                 )
+
+    def seed_feed_cursor(self, owner: OwnerSnapshot, cursor: FeedSeq) -> bool:
+        """Start a NEVER-POLLED store at the hub's current feed head (review R1-2).
+
+        WHY. F2 sends the stored cursor as-is, 0 included, so a fresh endpoint's
+        first message is never skipped. But an endpoint is one per (tenant,
+        account) and survives disable, so a second machine, a reinstall or a
+        wiped store against an endpoint that was ALREADY used also starts at 0
+        — and would replay the hub's whole retained feed (up to 7 days),
+        screening and waking every message again.
+
+        HOW THE TWO CASES ARE TOLD APART: by asking the hub at the moment THIS
+        machine commits the enrolment (``TeamBridgeClient._seed_feed_cursor``,
+        a no-cursor read that the hub answers with its CURRENT head). A
+        brand-new endpoint's head is 0, so the seed is 0 and its first message
+        (seq 1) is delivered — F2 holds. A re-used endpoint's head is N, so
+        this machine starts at N: what arrived before it enrolled is in the
+        inbox (the hub's source of truth), not replayed as wakes.
+
+        Applied ONLY while the row is still the untouched commit default
+        (``feed_seq = 0``, no refs recorded): it never lowers or moves a cursor
+        a poll has already advanced. Returns whether it applied.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            key = _owner_key(owner)
+            if conn.execute(
+                "SELECT 1 FROM feed_refs WHERE owner_key = ? LIMIT 1", (key,)
+            ).fetchone():
+                return False
+            updated = conn.execute(
+                "UPDATE sync SET feed_seq = ? WHERE owner_key = ? AND feed_seq = 0 "
+                "AND pending_resync = 0",
+                (int(cursor), key),
+            ).rowcount
+            return bool(updated)
 
     def finish_resync(self, owner: OwnerSnapshot, snapshot_checkpoint: InboxCursor) -> None:
         """Complete ONLY when a walk actually reached a terminal page.
