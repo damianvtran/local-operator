@@ -487,8 +487,10 @@ class AttachmentContent(BaseModel):
     width: int | None = None
     height: int | None = None
     duration_s: float | None = None
-    #: A short human handle for labels and file-actions ("flux-dev-01.png").
-    #: Never a filesystem path: an artifact is not a file on the user's disk.
+    #: A short human handle for labels and file-actions, derived from the
+    #: REQUEST that produced the bytes (the prompt or an agent-supplied
+    #: filename stem) — never from a model id, and never a filesystem path:
+    #: an artifact is not a file on the user's disk.
     name: str | None = None
 
 

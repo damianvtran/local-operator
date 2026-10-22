@@ -91,6 +91,22 @@ The harness asks for approval before spending (write tier in the default
 "ask" mode). In unattended modes there is no prompt — treat `generate_video`
 as a paid call wherever it appears.
 
+## Naming the result
+
+`filename` sets the video's display name — the Library row and the
+session-file entry — from a short lowercase hyphenated stem, no extension:
+
+```json
+{"prompt":"A kite over cliffs at sunrise","filename":"kite-over-cliffs"}
+```
+
+Omitted, the stem derives from the prompt. The extension always follows the
+returned bytes (`video/webm` → `.webm`), never the stem. A stem is a label, not
+a path: separators and `..` are sanitised away, and the file materialises under
+the session's `scratchpad/generated/`; two different videos with one name never
+overwrite — the second gets a short digest suffix. A job record written before
+`filename` existed still names its asset from its prompt.
+
 ## Collecting the result — `video_status`
 
 - The completion is delivered automatically: a notice row in the transcript

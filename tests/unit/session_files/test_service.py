@@ -21,6 +21,7 @@ from ._fixtures import (
     CHILD,
     GRANDCHILD,
     SESSION,
+    append_journal,
     assistant,
     call,
     generate_image_rows,
@@ -580,6 +581,43 @@ def test_materialise_is_idempotent_and_never_overwrites_a_different_file(world: 
         Path(first["path"]).read_bytes() == b"the user edited this"
     ), "the user's file is never overwritten"
     assert "-" in Path(third["path"]).stem
+
+
+def test_two_different_digests_with_one_display_name_both_materialise(world: World) -> None:
+    """The destination dedupes on BYTES, not on the (request-derived) name.
+
+    Two distinct generations can legitimately be described identically — the
+    naming helper deliberately does not make names unique. The session's file
+    store is where that is resolved: identical bytes reuse the file, different
+    bytes under one display name get a digest suffix, and neither overwrites.
+    """
+    name = "red-fox-in-snow.png"
+    first_digest = world.artifact(seed=1, name=name)
+    write_journal(
+        world.session_dir,
+        generate_image_rows(1, 5.0, first_digest, name=name, with_artifacts=True),
+    )
+    second_digest = world.artifact(seed=2, name=name)
+    append_journal(
+        world.session_dir,
+        generate_image_rows(2, 6.0, second_digest, name=name, with_artifacts=True),
+    )
+
+    first = service.materialise(
+        world.config, world.family(), _artifact_id(world, first_digest), home=str(world.tmp)
+    )
+    second = service.materialise(
+        world.config, world.family(), _artifact_id(world, second_digest), home=str(world.tmp)
+    )
+
+    first_path, second_path = Path(first["path"]), Path(second["path"])
+    generated = (world.session_dir / "scratchpad" / "generated").resolve()
+    assert first_path.parent == second_path.parent == generated
+    assert first_path.name == name
+    assert second_path.name == f"red-fox-in-snow-{second_digest[:8]}.png"
+    assert first_path.read_bytes() != second_path.read_bytes()
+    assert hashlib.sha256(first_path.read_bytes()).hexdigest()[:32] == first_digest
+    assert hashlib.sha256(second_path.read_bytes()).hexdigest()[:32] == second_digest
 
 
 @pytest.mark.parametrize(
