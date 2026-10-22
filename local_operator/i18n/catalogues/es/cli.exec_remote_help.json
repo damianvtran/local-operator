@@ -1,0 +1,13 @@
+{
+  "cli.exec_remote_help.budget_usd": "Tope de gasto para esta ejecución en dólares estadounidenses (predeterminado: el que fija el servidor)",
+  "cli.exec_remote_help.cancel": "Cancelar una ejecución remota y salir",
+  "cli.exec_remote_help.detach": "Imprimir el ID de la ejecución y la clave de idempotencia, y salir sin seguirla",
+  "cli.exec_remote_help.idempotency_key": "Clave de idempotencia que reutilizar en vez de crear una nueva, para que reintentar una ejecución ya enviada no la ejecute dos veces",
+  "cli.exec_remote_help.max_hours": "Horas que la ejecución remota puede durar antes de que el servidor la detenga (predeterminado: 2; el servidor limita el máximo)",
+  "cli.exec_remote_help.network": "Red por la que enviar la ejecución, por nombre o ID. Obligatorio si este dispositivo está en más de una red",
+  "cli.exec_remote_help.remote": "Ejecutar esta tarea en el cómputo remoto Radient (nivel 1: ejecuciones breves) en lugar de esta máquina",
+  "cli.exec_remote_help.repo": "URL de Git que extrae la ejecución remota. Obligatorio con --remote: los archivos locales nunca se suben",
+  "cli.exec_remote_help.sha": "Commit que extraer en --repo. Obligatorio con --remote",
+  "cli.exec_remote_help.size": "Tamaño de cómputo de la ejecución remota: s, m o l (predeterminado: m)",
+  "cli.exec_remote_help.status": "Imprimir una ejecución remota como JSON y salir"
+}
