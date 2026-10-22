@@ -30,3 +30,18 @@ from __future__ import annotations
 #: because the previous generation is exactly the one a just-flipped fleet is
 #: still reading from.
 DEFAULT_KEEP_GENERATIONS = 2
+
+#: The install layout's one stable directory, HOME-RELATIVE and without the
+#: ``~``. Two readers need it and they must not drift:
+#:
+#: * :mod:`local_operator.update` expands it with ``~``, which is deliberate
+#:   there — an isolated test or a sandbox redirects ``HOME`` and the layout
+#:   moves with it;
+#: * :mod:`local_operator.procname` resolves it against the PASSWD home instead
+#:   (``pwd.getpwuid``), because SDK children get ``HOME`` rewritten to an
+#:   agent home and a stable identity that follows that would plant a second
+#:   image per child.
+#:
+#: Spelled once so the two cannot disagree about WHERE the layout lives while
+#: disagreeing about how to reach it.
+STABLE_ROOT_RELATIVE = ".local/share/lop"
