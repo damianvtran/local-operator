@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from collections.abc import Callable
@@ -241,5 +242,75 @@ def test_passing_measurement_evidence_is_junit_serializable(
         assert result["noise_floor_ms"] == 7
         assert result["wall_cpu_descheduling_ratio"] == 1.06
         assert result["callbacks"]["worst_cpu_windows"][0]["callbacks"]["count"] == 1
+    finally:
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_textual_timer_step_names_the_timer_callback_and_creation_site() -> None:
+    """A ``Timer._run_timer`` step must say WHICH timer ran.
+
+    The S2 witness could only report ``Timer._run_timer`` for a 667 ms step,
+    which is a task-step name shared by every Textual timer: it cannot
+    distinguish a repaint from a poll or a one-shot. The timer's own identity
+    (its interval name, the bound callback and the product frame that armed it)
+    is captured by the two timer patches, so the next occurrence is actionable
+    without another profiling round.
+    """
+    from textual.app import App
+
+    class TimerApp(App[None]):
+        def on_mount(self) -> None:
+            self.set_interval(0.01, self.tick)
+
+        def tick(self) -> None:
+            pass
+
+    loop = asyncio.get_running_loop()
+    details: list[str] = []
+    with CallbackSpans(loop) as spans:
+        async with TimerApp().run_test() as pilot:
+            for _ in range(30):
+                await pilot.pause(0.01)
+                for span in spans.take_window().top_cpu:
+                    if span.detail:
+                        details.append(span.detail)
+    assert details, "no timer step carried attribution"
+    assert any(
+        "TimerApp.tick @" in detail and "test_loop_callback_spans.py" in detail
+        for detail in details
+    ), details[:5]
+
+
+def test_collection_starting_inside_a_callback_is_attributed_to_that_callback() -> None:
+    """Own work and a triggered collection are different facts, both recorded.
+
+    The S2 witness could only say one Timer step took 667 ms. Whether that was
+    the callback's work or a collection it happened to trigger decides the fix,
+    so the collection is measured with its generation and the callback name,
+    never inferred from the total.
+    """
+    loop = asyncio.new_event_loop()
+    clocks = Clocks()
+    try:
+        with CallbackSpans(
+            loop, cpu_clock=lambda: clocks.cpu, wall_clock=lambda: clocks.wall
+        ) as spans:
+
+            def allocating() -> None:
+                clocks.advance(0.001, 0.001)
+                gc.collect(0)
+                clocks.advance(0.004, 0.004)
+
+            run_handle(loop, allocating)
+            window = spans.take_window()
+        assert window.gc, "a collection inside a tracked callback was not recorded"
+        assert window.gc[0].name == "gc.gen0"
+        assert window.gc[0].detail.endswith(".allocating")
+        # The fake clock advances only on demand, so the collection itself
+        # measures 0 ms here; the assertion is that it was RECORDED against the
+        # right callback, not that the stub produced a real pause.
+        assert window.gc[0].cpu_ms == pytest.approx(0)
+        assert window.top_cpu[0].cpu_ms == pytest.approx(5)
     finally:
         loop.close()
