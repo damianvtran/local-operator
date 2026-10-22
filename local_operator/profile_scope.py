@@ -296,7 +296,12 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
-    if reason == "declined":
+    if reason == "declined" and intent.operation == "promote":
+        opening = (
+            f"the user declined to copy this {intent.kind} into their account, so "
+            "nothing in their account was changed."
+        )
+    elif reason == "declined":
         opening = (
             f"the user declined to save this {intent.kind} for every conversation, so "
             "nothing in their account was changed."

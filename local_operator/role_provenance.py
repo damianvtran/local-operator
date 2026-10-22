@@ -40,7 +40,6 @@ import json
 import os
 import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -185,10 +184,11 @@ def append_promotions(config_dir: str | Path, records: Iterable[Mapping[str, Any
     prepared = [_record(record) for record in records]
     if not prepared:
         return []
-    for record in prepared:
-        # An id is the DEFINITION's, so a receipt can join this row to the store;
-        # absence would make the index unusable for the one question it answers.
-        uuid.UUID(record["id"])
+    # ``_record`` already refused an empty id. It deliberately does NOT require a
+    # UUID: an agent/team id is any safe path segment (``validate_agent_id``), so
+    # a row mirrored from an older peer or imported from an archive can legitimately
+    # carry another shape, and refusing it here would fail a promotion AFTER its
+    # rows were written.
     root = Path(config_dir)
     target = provenance_path(root)
     with _Locked(root):

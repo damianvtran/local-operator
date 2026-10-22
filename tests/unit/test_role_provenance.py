@@ -68,6 +68,18 @@ def test_the_row_carries_only_the_declared_fields(tmp_path: Path) -> None:
         append_promotions(tmp_path, [missing])
 
 
+def test_a_non_uuid_definition_id_is_recorded(tmp_path: Path) -> None:
+    """An id is any safe path segment (``validate_agent_id``), not a UUID.
+
+    A row mirrored from an older peer or imported from an archive can carry one,
+    and refusing it here would fail a promotion AFTER its rows were written.
+    """
+
+    append_promotions(tmp_path, [_record(id="imported-role-2")])
+
+    assert read_promotions(tmp_path)[0]["id"] == "imported-role-2"
+
+
 def test_an_empty_batch_writes_nothing(tmp_path: Path) -> None:
     assert append_promotions(tmp_path, []) == []
     assert not provenance_path(tmp_path).exists()

@@ -2294,3 +2294,24 @@ async def test_a_tool_promote_needs_a_conversation_store(tmp_path) -> None:
 
     assert "no conversation store" in result.text
     assert plain.get_agent_by_name("one") is None
+
+
+@pytest.mark.asyncio
+async def test_a_declined_promote_changes_nothing_and_says_so(registry) -> None:
+    """A host producer that answers "no" is a refusal with its own wording.
+
+    With no producer installed the seam is *absent* ("no way to ask"); a producer
+    that declines is a DIFFERENT fact, and the sentence must not invite a retry
+    of the same question.
+    """
+
+    async def decline(_intent):
+        return None
+
+    context = _context(agent_registry=registry, authorize_durable_write=decline)
+    await call(context, op="create", name="one", instructions="Do one thing.")
+
+    result = await execute_agent("tc", {"op": "promote", "name": "one"}, None, None, context)
+
+    assert "declined to copy this agent into their account" in result.text
+    assert registry.global_registry.get_agent_by_name("one") is None
