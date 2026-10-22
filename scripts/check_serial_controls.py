@@ -67,6 +67,7 @@ REQUIRED_PROPERTIES: dict[str, tuple[str, ...]] = {
     ),
     "test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pass": (
         "status_old_empty_table",
+        "status_old_empty_receipts",
         "status_oracle",
     ),
 }
@@ -175,7 +176,9 @@ def check_present(cases: list[ET.Element], pairs: list[tuple[str, str]]) -> tupl
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    # `python -OO` strips docstrings, so the module's `__doc__` is None there; the
+    # description must not be the thing that turns `--help` into a traceback.
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("mode", choices=("absent", "present"))
     parser.add_argument("--junit", required=True, type=Path)
     parser.add_argument("--ids", required=True, help="whitespace-separated pytest node ids")
